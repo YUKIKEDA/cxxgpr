@@ -51,6 +51,36 @@ cxxgpr_add_test(core.build_info
     LIBRARIES nlohmann_json::nlohmann_json
 )
 
+cxxgpr_add_test(core.error
+    SOURCES core/error_test.cpp
+    LABELS unit
+)
+
+cxxgpr_add_test(core.interval
+    SOURCES core/interval_test.cpp
+    LABELS unit negative
+)
+
+cxxgpr_add_test(core.likelihood
+    SOURCES core/likelihood_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(core.checked
+    SOURCES core/checked_test.cpp
+    LABELS unit negative
+)
+
+cxxgpr_add_test(core.views
+    SOURCES core/views_test.cpp
+    LABELS unit property
+)
+
+cxxgpr_add_test(core.rng
+    SOURCES core/rng_test.cpp
+    LABELS unit property
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

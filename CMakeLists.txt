@@ -39,6 +39,11 @@ add_custom_target(cxxgpr_git_revision
 # Public headers under include/cxxgpr/ stay free of Eigen, nlohmann/json, and OpenMP.
 add_library(cxxgpr STATIC
     src/core/build_info.cpp
+    src/core/checked.cpp
+    src/core/error.cpp
+    src/core/interval.cpp
+    src/core/likelihood.cpp
+    src/core/rng.cpp
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
 add_dependencies(cxxgpr cxxgpr_git_revision)

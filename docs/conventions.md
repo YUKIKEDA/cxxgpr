@@ -31,17 +31,17 @@
 
 | モジュール | 責任 | 導入パッケージ |
 |---|---|---|
-| `core` | `BuildInfo`、`GprError`、`Interval`、checked 寸法、`Xoshiro256++`、`MatrixRef`/`MatrixMut`、`std::expected` 補助 | M0-2（`BuildInfo`）、M1-1 |
+| `core` | `BuildInfo`、`GprError`、`Interval`、`BoundedParam`、`GaussianLikelihood`、checked 寸法、`Xoshiro256++`、`MatrixRef`/`MatrixMut`、`std::expected` 補助 | M0-2（`BuildInfo`）、M1-1 |
 | `precision` | `DoublePrecision`、`SinglePrecision`、`MixedPrecision`、反復改良制御定数・エンジン | M1-2 |
 | `linalg` | Eigen LLT（`uplo=Lower`）、三角求解、`JitterPolicy` 再試行ループ、OpenMP 決定的補助 | M1-3 |
 | `transform` | `Identity`/`Standardize`/`MinMax`/`Pipeline`/`ColumnwiseInput`・目的変数逆変換・カスタム I/F | M1-4 |
 | `kernel` | 10 組込みカーネル葉、`KernelSpec`→`CompiledKernel`、`KernelTerm<T>`、`DistanceKernel`、`KernelExp` | M2-A 〜 M2-E |
 | `workspace` | `WorkspaceCore`、`FitBuffers`、`QueryWorkspace`、`HessianScratch`、`LeafCache`、`CholeskyBuffer` | M2-E 〜 M3-B |
 | `optimizer` | `Objective` 階層、`Lbfgs`・`NelderMead`・`TrustRegion`・`FastSimulatedAnnealing`・`Fixed`・logit 変換・リスタート | M4-A |
-| `gpr` | `GaussianLikelihood`、`Gpr`、`FittedGpr`、`GprObjective`、LOO・共分散・標本抽出・`predict_into` | M3-C、M4-B |
+| `gpr` | `Gpr`、`FittedGpr`、`GprObjective`、LOO・共分散・標本抽出・`predict_into` | M3-C、M4-B |
 | `persist` | `save`/`save_with_factor`、`LoadedGpr`/`LoadedDistanceGpr`、`config.json`/`model.safetensors`、`mmap`、`PersistRegistry` | M4-C |
 
-現在はリポジトリ基盤整備中であり、M0-2 で `core`（`build_info`）とビルド・QA 基盤を作成する。
+M0 でリポジトリ基盤とビルド・QA 基盤を構築し、M1 以降で順次各モジュールを実装する。
 
 ## 命名
 
