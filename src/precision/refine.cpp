@@ -57,7 +57,8 @@ std::expected<double, GprError>
 promoted_residual_into(MatrixRef<float> a_f32, std::span<const double> alpha,
                        std::span<const double> y, std::span<double> residual,
                        std::span<double> row_abs_scratch, std::span<double> sum_scratch) {
-    if (y.empty() || a_f32.is_empty() || a_f32.data() == nullptr) {
+    if (y.empty() || alpha.empty() || residual.empty() || a_f32.is_empty() ||
+        a_f32.data() == nullptr) {
         return std::unexpected(GprError::empty_input());
     }
     const std::size_t n = y.size();
@@ -100,7 +101,8 @@ std::expected<double, GprError> promoted_residual(MatrixRef<float> a_f32,
                                                   std::span<const double> alpha,
                                                   std::span<const double> y,
                                                   std::span<double> residual) {
-    if (y.empty()) {
+    if (y.empty() || alpha.empty() || residual.empty() || a_f32.is_empty() ||
+        a_f32.data() == nullptr) {
         return std::unexpected(GprError::empty_input());
     }
     const std::size_t n = y.size();
@@ -166,8 +168,9 @@ refine_in_place(RefineSystem& system, std::span<double> w, std::span<double> res
         }
 
         if (prev_r_inf.has_value()) {
-            const double ratio = (*prev_r_inf > 0.0) ? (r_inf / *prev_r_inf) : 0.0;
-            if (!std::isfinite(ratio) || ratio > refinement_stagnation_ratio) {
+            const bool non_finite = !std::isfinite(r_inf) || !std::isfinite(*prev_r_inf);
+            const double ratio = (!non_finite && (*prev_r_inf > 0.0)) ? (r_inf / *prev_r_inf) : 0.0;
+            if (non_finite || !std::isfinite(ratio) || ratio > refinement_stagnation_ratio) {
                 ++streak;
                 if (streak >= refinement_stagnation_steps) {
                     if (auto fb = system.fallback(w); !fb) {
@@ -201,7 +204,7 @@ refine_in_place(RefineSystem& system, std::span<double> w, std::span<double> res
 }
 
 std::expected<std::vector<double>, GprError> refine(RefineSystem& system, std::vector<double> w) {
-    if (w.empty()) {
+    if (w.empty() || system.rhs().empty()) {
         return std::unexpected(GprError::empty_input());
     }
     std::vector<double> residual_scratch(w.size(), 0.0);

@@ -115,6 +115,24 @@ TEST(PrecisionPolicyTest, CopyStorageToRefinePreservesValuesAndChecksLengthsZero
     const auto err = cxxgpr::copy_storage_to_refine<cxxgpr::DoublePrecision>(src_f64, short_dst);
     ASSERT_FALSE(err.has_value());
     EXPECT_EQ(err.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+
+    // EmptyInput takes precedence over LengthMismatch when either or both spans are empty.
+    const std::span<const double> empty_src{};
+    const std::span<double> empty_dst{};
+    const auto empty_src_err =
+        cxxgpr::copy_storage_to_refine<cxxgpr::DoublePrecision>(empty_src, short_dst);
+    ASSERT_FALSE(empty_src_err.has_value());
+    EXPECT_EQ(empty_src_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const auto empty_dst_err =
+        cxxgpr::copy_storage_to_refine<cxxgpr::DoublePrecision>(src_f64, empty_dst);
+    ASSERT_FALSE(empty_dst_err.has_value());
+    EXPECT_EQ(empty_dst_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const auto both_empty_err =
+        cxxgpr::copy_storage_to_refine<cxxgpr::DoublePrecision>(empty_src, empty_dst);
+    ASSERT_FALSE(both_empty_err.has_value());
+    EXPECT_EQ(both_empty_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
 }
 
 TEST(PrecisionPolicyTest, ComputeStorageMeansAccumulatesInDoubleAndHandlesStridesZeroAlloc) {
@@ -182,6 +200,30 @@ TEST(PrecisionPolicyTest, ComputeStorageMeansRejectsInvalidShapesAndNullBuffer) 
         cxxgpr::compute_storage_means<cxxgpr::MixedPrecision<>>(null_k, ok_alpha, ok_out);
     ASSERT_FALSE(null_err.has_value());
     EXPECT_EQ(null_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    // DES-02 precedence: EmptyInput precedes LengthMismatch on compound violations.
+    const auto null_and_mismatch =
+        cxxgpr::compute_storage_means<cxxgpr::MixedPrecision<>>(null_k, bad_alpha, ok_out);
+    ASSERT_FALSE(null_and_mismatch.has_value());
+    EXPECT_EQ(null_and_mismatch.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const cxxgpr::MatrixRef<float> zero_rows_k{data.data(), 0U, 2U};
+    const auto zero_rows_err =
+        cxxgpr::compute_storage_means<cxxgpr::MixedPrecision<>>(zero_rows_k, bad_alpha, ok_out);
+    ASSERT_FALSE(zero_rows_err.has_value());
+    EXPECT_EQ(zero_rows_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const std::span<const double> empty_alpha{};
+    const auto empty_alpha_err =
+        cxxgpr::compute_storage_means<cxxgpr::MixedPrecision<>>(k_f32, empty_alpha, bad_out);
+    ASSERT_FALSE(empty_alpha_err.has_value());
+    EXPECT_EQ(empty_alpha_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const std::span<double> empty_out{};
+    const auto empty_out_err =
+        cxxgpr::compute_storage_means<cxxgpr::MixedPrecision<>>(k_f32, bad_alpha, empty_out);
+    ASSERT_FALSE(empty_out_err.has_value());
+    EXPECT_EQ(empty_out_err.error().code(), cxxgpr::GprErrorCode::EmptyInput);
 }
 
 } // namespace

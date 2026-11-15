@@ -461,9 +461,18 @@ TEST(PrecisionRefineTest, PromotedResidualRejectsInvalidShapesAndUndersizedScrat
     ASSERT_FALSE(empty_a.has_value());
     EXPECT_EQ(empty_a.error().code(), cxxgpr::GprErrorCode::EmptyInput);
 
+    // DES-02 precedence: empty alpha or residual yields EmptyInput even with shape mismatches.
     const std::array<float, 6> a2x3{1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F};
-    const auto shape_err = cxxgpr::promoted_residual_into(
-        cxxgpr::MatrixRef<float>{a2x3.data(), 2U, 3U}, v2, v2, s2, s2, s2);
+    const cxxgpr::MatrixRef<float> rect_2x3{a2x3.data(), 2U, 3U};
+    const auto empty_alpha = cxxgpr::promoted_residual_into(rect_2x3, {}, v2, s2, s1, s2);
+    ASSERT_FALSE(empty_alpha.has_value());
+    EXPECT_EQ(empty_alpha.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const auto empty_resid = cxxgpr::promoted_residual_into(rect_2x3, v2, v2, {}, s1, s2);
+    ASSERT_FALSE(empty_resid.has_value());
+    EXPECT_EQ(empty_resid.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    const auto shape_err = cxxgpr::promoted_residual_into(rect_2x3, v2, v2, s2, s2, s2);
     ASSERT_FALSE(shape_err.has_value());
     EXPECT_EQ(shape_err.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
 
@@ -664,6 +673,27 @@ TEST(PrecisionRefineTest, EarlyConvergenceStagnationRecoveryAndMaxIterationsBeha
         EXPECT_EQ(sys.residual_calls, 10U);
         EXPECT_EQ(sys.correct_calls, 10U);
         EXPECT_EQ(sys.fallback_calls, 1U);
+    }
+
+    // Two consecutive NaN residual norms trigger Stagnated fallback instead of resetting streak
+    // via `(NaN > 0.0) == false -> ratio = 0.0`.
+    {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        // step 0: r=1.0 -> prev_r_inf = 1.0
+        // step 1: r=NaN -> non_finite -> streak = 1, prev_r_inf = NaN
+        // step 2: r=NaN -> non_finite -> streak = 2 -> fallback
+        ScriptedRefineSystem sys{{10.0, 0.0, 0.0}, {2.0}, {1.0, nan, nan, 1.0}};
+        std::vector<double> w{1.0, 2.0, 3.0};
+        std::vector<double> resid(3, 0.0);
+        const auto summary = cxxgpr::refine_in_place(sys, w, resid);
+        ASSERT_TRUE(summary.has_value());
+        EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Stagnated);
+        EXPECT_TRUE(summary->used_fallback());
+        EXPECT_EQ(summary->iterations, 2U);
+        EXPECT_EQ(sys.residual_calls, 3U);
+        EXPECT_EQ(sys.correct_calls, 2U);
+        EXPECT_EQ(sys.fallback_calls, 1U);
+        EXPECT_EQ(w, (std::vector<double>{42.0, -7.0, 3.0}));
     }
 }
 

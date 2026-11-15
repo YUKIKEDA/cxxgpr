@@ -170,6 +170,9 @@ template <PrecisionPolicyConcept P>
 [[nodiscard]] inline std::expected<void, GprError>
 copy_storage_to_refine(std::span<const typename P::Storage> src,
                        std::span<typename P::Refine> dst) {
+    if (src.empty() || dst.empty()) {
+        return std::unexpected(GprError::empty_input());
+    }
     if (auto ok = require_count(dst.size(), src.size(), "refine_alpha"); !ok) {
         return std::unexpected(std::move(ok).error());
     }
@@ -186,14 +189,14 @@ template <PrecisionPolicyConcept P>
 compute_storage_means(MatrixRef<typename P::Storage> k_storage,
                       std::span<const typename P::Refine> alpha,
                       std::span<typename P::Refine> out) {
+    if (k_storage.is_empty() || k_storage.data() == nullptr || alpha.empty() || out.empty()) {
+        return std::unexpected(GprError::empty_input());
+    }
     if (auto ok = require_count(alpha.size(), k_storage.rows(), "alpha"); !ok) {
         return std::unexpected(std::move(ok).error());
     }
     if (auto ok = require_count(out.size(), k_storage.cols(), "out"); !ok) {
         return std::unexpected(std::move(ok).error());
-    }
-    if (!k_storage.is_empty() && k_storage.data() == nullptr) {
-        return std::unexpected(GprError::empty_input());
     }
 
     using Refine = typename P::Refine;
