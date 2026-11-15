@@ -44,6 +44,10 @@ add_library(cxxgpr STATIC
     src/core/interval.cpp
     src/core/likelihood.cpp
     src/core/rng.cpp
+    src/linalg/cholesky.cpp
+    src/linalg/dense.cpp
+    src/linalg/jitter.cpp
+    src/linalg/parallel.cpp
     src/precision/refine.cpp
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)

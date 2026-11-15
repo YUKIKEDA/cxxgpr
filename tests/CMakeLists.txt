@@ -91,6 +91,26 @@ cxxgpr_add_test(precision.refine
     LABELS unit property negative
 )
 
+cxxgpr_add_test(linalg.jitter
+    SOURCES linalg/jitter_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(linalg.dense
+    SOURCES linalg/dense_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(linalg.cholesky
+    SOURCES linalg/cholesky_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(linalg.parallel
+    SOURCES linalg/parallel_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
