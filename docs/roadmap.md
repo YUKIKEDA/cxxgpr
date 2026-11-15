@@ -52,7 +52,7 @@ flowchart LR
 | M1-1 | Feat | コア基盤：`GprError`・`Interval`・`GaussianLikelihood`・checked 寸法・`Xoshiro256++`・ビュー型 | #6 | Done |
 | M1-2 | Feat | 精度基盤：`DoublePrecision` / `SinglePrecision` / `MixedPrecision` と反復改良エンジン | #8 | Done |
 | M1-3 | Feat | 線形代数基盤：Eigen LLT（`uplo=Lower`）、三角求解、適応的 Jitter、補償・OpenMP 補助 | - | Todo |
-| M1-4 | Feat | 前処理基盤：`Identity`・`Standardize`・`MinMax`・`Pipeline`・`ColumnwiseInput`・カスタム I/F | - | Todo |
+| M1-4 | Feat | 前処理基盤：`Identity`・`Standardize`・`MinMax`・`Pipeline`・`ColumnwiseInput`・カスタム I/F | #11 | Done |
 
 ## M2：カーネル・距離供給・拡張点
 

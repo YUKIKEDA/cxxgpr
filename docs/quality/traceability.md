@@ -5,19 +5,19 @@
 | ID | 項目 | 正本位置 | テスト | 検証記録 |
 |---|---|---|---|---|
 | `REQ-01` | Exact GPR スコープ | [design.md#L11](../design.md#L11) | — | — |
-| `REQ-02` | C++23 非例外・値返却 API | [design.md#L12](../design.md#L12) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp` | — |
-| `REQ-03` | 列優先入力と入力検査順序 | [design.md#L13](../design.md#L13) | `tests/core/checked_test.cpp` | — |
+| `REQ-02` | C++23 非例外・値返却 API | [design.md#L12](../design.md#L12) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
+| `REQ-03` | 列優先入力と入力検査順序 | [design.md#L13](../design.md#L13) | `tests/core/checked_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp` | — |
 | `REQ-04` | カーネル体系と合成 | [design.md#L14](../design.md#L14) | — | — |
 | `REQ-05` | 供給二乗距離 | [design.md#L15](../design.md#L15) | — | — |
 | `REQ-06` | ノイズと Jitter の分離 | [design.md#L16](../design.md#L16) | `tests/core/likelihood_test.cpp` | — |
 | `REQ-07` | 3 種精度ポリシーと IR | [design.md#L17](../design.md#L17) | `tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp` | — |
 | `REQ-08` | MLL・微分・LOO | [design.md#L18](../design.md#L18) | — | — |
 | `REQ-09` | 自前最適化器群 | [design.md#L19](../design.md#L19) | — | — |
-| `REQ-10` | 前処理パイプライン | [design.md#L20](../design.md#L20) | — | — |
-| `REQ-11` | ゼロ確保・決定的並列・境界 | [design.md#L21](../design.md#L21) | `tests/core/build_info_test.cpp`<br>`tests/core/error_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/core/rng_test.cpp`<br>`tests/core/views_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp` | — |
+| `REQ-10` | 前処理パイプライン | [design.md#L20](../design.md#L20) | `tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
+| `REQ-11` | ゼロ確保・決定的並列・境界 | [design.md#L21](../design.md#L21) | `tests/core/build_info_test.cpp`<br>`tests/core/error_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/core/rng_test.cpp`<br>`tests/core/views_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
 | `REQ-12` | 永続化・乱数・独立検証 | [design.md#L22](../design.md#L22) | `tests/core/rng_test.cpp` | — |
-| `DES-01` | 型設計・生成契約・公開境界 | [design.md#L28](../design.md#L28) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/core/views_test.cpp`<br>`tests/precision/policy_test.cpp` | — |
-| `DES-02` | エラー型 `GprError` と入力検査契約 | [design.md#L42](../design.md#L42) | `tests/core/checked_test.cpp`<br>`tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp` | — |
+| `DES-01` | 型設計・生成契約・公開境界 | [design.md#L28](../design.md#L28) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/core/views_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
+| `DES-02` | エラー型 `GprError` と入力検査契約 | [design.md#L42](../design.md#L42) | `tests/core/checked_test.cpp`<br>`tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
 | `DES-03` | 線形代数バックエンド（Eigen + OpenMP） | [design.md#L77](../design.md#L77) | `tests/core/build_info_test.cpp` | — |
 | `DES-04` | 観測ノイズ `GaussianLikelihood` と `JitterPolicy` | [design.md#L86](../design.md#L86) | `tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp` | — |
 | `DES-05` | 精度ポリシーと混合精度反復改良（IR） | [design.md#L98](../design.md#L98) | `tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp` | — |
@@ -33,7 +33,7 @@
 | `DES-15` | `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先 | [design.md#L252](../design.md#L252) | — | — |
 | `DES-16` | 推論 API・共分散・標本抽出・LOO | [design.md#L257](../design.md#L257) | `tests/core/views_test.cpp` | — |
 | `DES-17` | ワークスペース構造とライフサイクル | [design.md#L273](../design.md#L273) | — | — |
-| `DES-18` | 前処理クラス階層（`cxxgpr::transform`） | [design.md#L291](../design.md#L291) | — | — |
+| `DES-18` | 前処理クラス階層（`cxxgpr::transform`） | [design.md#L291](../design.md#L291) | `tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
 | `DES-19` | 自前最適化器群（`cxxgpr::optimizer`） | [design.md#L298](../design.md#L298) | — | — |
 | `DES-20` | 決定的乱数（`Xoshiro256++`）とスレッド不変 OpenMP 並列 | [design.md#L311](../design.md#L311) | `tests/core/rng_test.cpp` | — |
 | `FMT-01` | ディレクトリ構成とバージョン契約 | [persist-format.md#L7](../persist-format.md#L7) | — | — |
