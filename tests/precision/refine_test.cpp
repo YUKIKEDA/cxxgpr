@@ -248,10 +248,10 @@ private:
         return cxxgpr::inf_norm(row_abs_);
     }
 
-    std::size_t n_;
-    double inv_two_ell2_;
-    double diag_offset_;
-    Mode mode_;
+    std::size_t n_ = 0U;
+    double inv_two_ell2_ = 0.0;
+    double diag_offset_ = 0.0;
+    Mode mode_ = Mode::PromoteExactF32;
     std::vector<double> pts_;
     std::vector<double> y_;
     std::vector<float> a_f32_;
