@@ -122,7 +122,7 @@ public:
 
     /// Returns a contiguous read-only span over column col_idx.
     [[nodiscard]] constexpr std::span<const T> col(std::size_t col_idx) const noexcept {
-        if (data_ == nullptr || rows_ == 0) {
+        if (data_ == nullptr || rows_ == 0 || col_idx >= cols_) {
             return {};
         }
         return {data_ + col_idx * col_stride_, rows_};
@@ -196,7 +196,7 @@ public:
 
     /// Returns a contiguous mutable span over column col_idx.
     [[nodiscard]] constexpr std::span<T> col(std::size_t col_idx) const noexcept {
-        if (data_ == nullptr || rows_ == 0) {
+        if (data_ == nullptr || rows_ == 0 || col_idx >= cols_) {
             return {};
         }
         return {data_ + col_idx * col_stride_, rows_};

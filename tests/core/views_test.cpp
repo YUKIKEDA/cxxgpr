@@ -49,6 +49,20 @@ TEST(ViewsTest, ColumnMajorIndexingAndStridedSubmatrixWorkCorrectly) {
     const cxxgpr::MatrixRef<double> empty_view;
     EXPECT_TRUE(empty_view.is_empty());
     EXPECT_TRUE(empty_view.col(0).empty());
+
+    // Non-null data with zero columns or out-of-range col_idx must return an empty span safely.
+    const cxxgpr::MatrixRef<double> zero_cols_ref(storage.data(), 3U, 0U);
+    EXPECT_TRUE(zero_cols_ref.is_empty());
+    EXPECT_TRUE(zero_cols_ref.col(0).empty());
+
+    const cxxgpr::MatrixMut<double> zero_cols_mut(storage.data(), 3U, 0U);
+    EXPECT_TRUE(zero_cols_mut.is_empty());
+    EXPECT_TRUE(zero_cols_mut.col(0).empty());
+
+    EXPECT_TRUE(mat.as_ref().col(2).empty());
+    EXPECT_TRUE(mat.as_ref().col(10).empty());
+    EXPECT_TRUE(mat.col(2).empty());
+    EXPECT_TRUE(mat.col(10).empty());
 }
 
 TEST(ViewsTest, PredictionTypesAndClosedEnumsUseSpecifiedDefaults) {

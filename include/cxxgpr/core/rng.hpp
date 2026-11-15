@@ -40,7 +40,7 @@ public:
     /// Returns a double uniformly distributed in [0, 1) from the top 53 bits.
     [[nodiscard]] double unit() noexcept;
 
-    /// Returns an integer in [0, max), or 0 when max <= 1.
+    /// Returns an integer uniformly distributed in the closed interval [0, max].
     [[nodiscard]] std::size_t up_to(std::size_t max) noexcept;
 
     /// Returns a double clamped strictly inside (0, 1) away from exact 0 and 1 endpoints.

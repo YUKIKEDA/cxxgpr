@@ -236,4 +236,11 @@ GprError GprError::with_slot_if_unset(std::size_t slot_place) const {
     return invalid_distance(slot_place, distance_dim_, distance_pair_, distance_reason_);
 }
 
+GprError GprError::with_dim_if_unset(std::size_t dim_place) const {
+    if (code_ != GprErrorCode::InvalidDistance || distance_dim_.has_value()) {
+        return *this;
+    }
+    return invalid_distance(distance_slot_, dim_place, distance_pair_, distance_reason_);
+}
+
 } // namespace cxxgpr

@@ -110,25 +110,27 @@ TEST(ErrorTest, StructuredPayloadAccessorsMatchConstructedValues) {
 
 TEST(ErrorTest, DistanceSlotAndWithSlotIfUnsetBehaveConsistently) {
     const auto bare = cxxgpr::GprError::invalid_distance(
-        std::nullopt, 2, std::pair<std::size_t, std::size_t>{3, 0}, "-1 is negative");
-    EXPECT_EQ(bare.message(), "invalid squared distance in dimension 2 at (3, 0): -1 is negative");
+        std::nullopt, std::nullopt, std::pair<std::size_t, std::size_t>{3, 0}, "-1 is negative");
+    EXPECT_EQ(bare.message(), "invalid squared distance at (3, 0): -1 is negative");
     EXPECT_FALSE(bare.distance_slot().has_value());
-    EXPECT_EQ(bare.distance_dim(), 2U);
+    EXPECT_FALSE(bare.distance_dim().has_value());
     EXPECT_EQ(bare.distance_pair(), (std::pair<std::size_t, std::size_t>{3, 0}));
+    EXPECT_EQ(bare.distance_reason(), std::optional<std::string_view>{"-1 is negative"});
 
-    const auto slotted = bare.with_slot_if_unset(1);
+    const auto slotted =
+        bare.with_dim_if_unset(2).with_slot_if_unset(1).with_slot_if_unset(4).with_dim_if_unset(5);
     EXPECT_EQ(slotted.distance_slot(), 1U);
     EXPECT_EQ(slotted.distance_dim(), 2U);
     EXPECT_EQ(slotted.distance_pair(), (std::pair<std::size_t, std::size_t>{3, 0}));
+    EXPECT_EQ(slotted.distance_reason(), std::optional<std::string_view>{"-1 is negative"});
     EXPECT_EQ(slotted.message(),
               "invalid squared distance in slot 1, dimension 2 at (3, 0): -1 is negative");
 
-    // Existing slot must not be overwritten.
-    EXPECT_EQ(slotted.with_slot_if_unset(4), slotted);
-
-    // Non-InvalidDistance errors must be preserved unchanged.
+    // Non-InvalidDistance errors have no distance_reason and ignore with_*_if_unset.
     const auto empty = cxxgpr::GprError::empty_input();
+    EXPECT_FALSE(empty.distance_reason().has_value());
     EXPECT_EQ(empty.with_slot_if_unset(0), empty);
+    EXPECT_EQ(empty.with_dim_if_unset(0), empty);
 
     const auto dup_slot = cxxgpr::GprError::distance_slot(cxxgpr::SlotErrorKind::Duplicate, 0);
     EXPECT_EQ(dup_slot.slot_error_kind(), cxxgpr::SlotErrorKind::Duplicate);

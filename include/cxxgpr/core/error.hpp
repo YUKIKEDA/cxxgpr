@@ -226,6 +226,14 @@ public:
         return distance_pair_;
     }
 
+    /// Returns the cause description for InvalidDistance, if applicable.
+    [[nodiscard]] std::optional<std::string_view> distance_reason() const noexcept {
+        if (code_ != GprErrorCode::InvalidDistance) {
+            return std::nullopt;
+        }
+        return std::string_view{distance_reason_};
+    }
+
     /// Returns the slot error subtype for DistanceSlot, if applicable.
     [[nodiscard]] std::optional<SlotErrorKind> slot_error_kind() const noexcept {
         return slot_error_kind_;
@@ -249,6 +257,10 @@ public:
     /// Names the distance slot on an InvalidDistance error if not already set; otherwise returns
     /// *this.
     [[nodiscard]] GprError with_slot_if_unset(std::size_t slot_place) const;
+
+    /// Names the ARD dimension on an InvalidDistance error if not already set; otherwise returns
+    /// *this.
+    [[nodiscard]] GprError with_dim_if_unset(std::size_t dim_place) const;
 
     /// Checks structural equality between two GprError instances.
     [[nodiscard]] bool operator==(const GprError& other) const = default;

@@ -198,10 +198,24 @@ TEST(CheckedTest, ValidateDistanceTargetsAndQueryEnforceExactOrdering) {
               cxxgpr::GprErrorCode::NonFiniteInput);
     EXPECT_TRUE(cxxgpr::validate_query(two_vals, 1U, 2U, 2U).has_value());
 
-    // validate_matrix rejects non-finite and shape errors.
+    // validate_matrix order: EmptyInput -> SizeOverflow -> LengthMismatch -> NonFiniteInput.
+    EXPECT_EQ(cxxgpr::validate_matrix(empty, max_sz, 2U).error().code(),
+              cxxgpr::GprErrorCode::EmptyInput);
+    EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 0U, 2U).error().code(),
+              cxxgpr::GprErrorCode::EmptyInput);
+    EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 2U, 0U).error().code(),
+              cxxgpr::GprErrorCode::EmptyInput);
+    EXPECT_EQ(cxxgpr::validate_matrix(inf_two, max_sz, 2U).error().code(),
+              cxxgpr::GprErrorCode::SizeOverflow);
+    EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 1U, 3U).error().code(),
+              cxxgpr::GprErrorCode::LengthMismatch);
     EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 1U, 2U).error().code(),
               cxxgpr::GprErrorCode::NonFiniteInput);
-    EXPECT_TRUE(cxxgpr::validate_matrix(two_vals, 2U, 1U).has_value());
+    const std::array<double, 2> valid_subnormal_mat{
+        std::numeric_limits<double>::denorm_min(),
+        2.0,
+    };
+    EXPECT_TRUE(cxxgpr::validate_matrix(valid_subnormal_mat, 2U, 1U).has_value());
 }
 
 } // namespace
