@@ -2,9 +2,9 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M0-2
+**今**：M1-1
 
-目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ規約・仕様群（M0-1）を完了し、CMake / vcpkg / GoogleTest / QA ゲート / GitHub Actions（M0-2）へ進む段階である。
+目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）およびビルド・検査・CI 基盤（M0-2）を完了し、コア基盤（M1-1）へ進む段階である。
 
 品質管理の仕組み（追跡・基準結果・結果変更記録・来歴・プラットフォーム認定）は [品質保証計画](quality/quality-plan.md)、ID と試験の対応は [追跡表](quality/traceability.md) にある。
 
@@ -36,7 +36,7 @@ flowchart LR
 | ID | 種類 | 題 | Issue | 状態 |
 |---|---|---|---|---|
 | M0-1 | Task | リポジトリ基盤：開発規約、Rules／Skills、仕様書、ロードマップの整備 | #1 | Done |
-| M0-2 | Task | ビルド・検査・CI 基盤：CMake、vcpkg、GTest、品質・仕様検査ツール、GitHub Actions の構築 | #2 | Todo |
+| M0-2 | Task | ビルド・検査・CI 基盤：CMake、vcpkg、GTest、品質・仕様検査ツール、GitHub Actions の構築 | #2 | Done |
 
 ## M1：コア・線形代数・精度・前処理基盤
 

@@ -1,0 +1,42 @@
+{
+  "name": "cxxgpr",
+  "version-string": "0.1.0-dev",
+  "license": "Apache-2.0",
+  "builtin-baseline": "2ec0f1747d8186a5c9babe276e2ad57cd2b12d2a",
+  "dependencies": [
+    "eigen3",
+    "nlohmann-json"
+  ],
+  "features": {
+    "tests": {
+      "description": "Product and numerical verification tests (GoogleTest)",
+      "dependencies": [
+        "gtest"
+      ]
+    },
+    "benchmarks": {
+      "description": "Kernel and Exact GPR benchmarks (Google Benchmark)",
+      "dependencies": [
+        "benchmark"
+      ]
+    }
+  },
+  "overrides": [
+    {
+      "name": "benchmark",
+      "version-semver": "1.9.5"
+    },
+    {
+      "name": "eigen3",
+      "version": "5.0.1"
+    },
+    {
+      "name": "gtest",
+      "version-semver": "1.18.0"
+    },
+    {
+      "name": "nlohmann-json",
+      "version": "3.12.0"
+    }
+  ]
+}

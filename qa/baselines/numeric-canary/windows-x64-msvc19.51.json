@@ -1,0 +1,22 @@
+{
+  "schema": "cxxgpr.baseline/1",
+  "case": "numeric-canary",
+  "platform": "windows-x64-msvc19.51",
+  "values": {
+    "two_product.product": "0x1.0000006000000p+0",
+    "two_product.err_fma": "0x1.0000000000000p-53",
+    "neumaier.sum": "0x1.e000000000000p+0",
+    "eigen_llt.half_log_det": "-0x1.46826908b20c6p-1",
+    "eigen_llt.alpha0": "0x1.3fad4f0ce04e8p+1",
+    "eigen_llt.alpha_norm2": "0x1.554d904a7c1ffp+5",
+    "libm.sin": "0x1.e354b7e89cc4bp-1",
+    "libm.cos": "0x1.51d8ed12b6275p-2",
+    "libm.exp": "0x1.e3b40ebefcd7ep-2",
+    "libm.log": "0x1.d5240f0e0e078p-1",
+    "libm.pow": "0x1.8146ad57a255dp+1",
+    "libm.sqrt": "0x1.1e3779b97f4a8p+1",
+    "libm.erfc": "0x1.15aaa8ec85205p-5",
+    "prng.splitmix_u01": "0x1.c4415072f63b9p-1",
+    "prng.bitcast_check": "0x1.0000000000001p+0"
+  }
+}
