@@ -6,14 +6,14 @@
 
 ```mermaid
 flowchart TB
-  CORE["core (errors, views, rng, intervals, build_info)"]
+  CORE["core (errors, views, rng, intervals, likelihood, build_info)"]
   PREC["precision (Double/Single/Mixed, IR engine)"]
   LIN["linalg (Eigen LLT, solves, jitter retry, OpenMP helpers)"]
   XFM["transform (input/target maps, pipelines)"]
   KERN["kernel (10 leaves, Spec/Compiled, Custom, Distance slots)"]
   WS["workspace (WorkspaceCore, FitBuffers, QueryWorkspace, HessianScratch, LeafCache)"]
   OPT["optimizer (Objective hierarchy, Lbfgs, NelderMead, TrustRegion, FSA, Fixed)"]
-  GPR["gpr (GaussianLikelihood, Gpr, FittedGpr, MLL/grad/Hessian, predict, LOO)"]
+  GPR["gpr (Gpr, FittedGpr, MLL/grad/Hessian, predict, LOO)"]
   PER["persist (config.json, model.safetensors, mmap, PersistRegistry)"]
 
   CORE --> PREC
@@ -53,7 +53,7 @@ flowchart TB
 
 | モジュール | 許可される直接依存モジュール | 解説 |
 |---|---|---|
-| `core` | （なし） | 最下層。エラー型・ビュー型・チェック済み算術・乱数・ビルド情報 |
+| `core` | （なし） | 最下層。エラー型・ビュー型・チェック済み算術・乱数・`GaussianLikelihood`・ビルド情報 |
 | `precision` | `core` | 精度ポリシータグと反復改良収束判定 |
 | `linalg` | `core`, `precision` | Eigen 密行列 Cholesky・三角行列求解・Jitter ループ・OpenMP 補助 |
 | `transform` | `core` | 入力と目的変数の学習前・学習後変換およびカスタム基底 |
