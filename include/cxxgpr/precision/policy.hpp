@@ -5,6 +5,7 @@
 #include "cxxgpr/core/error.hpp"
 #include "cxxgpr/core/views.hpp"
 
+#include <algorithm>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -173,11 +174,13 @@ copy_storage_to_refine(std::span<const typename P::Storage> src,
     if (src.empty() || dst.empty()) {
         return std::unexpected(GprError::empty_input());
     }
-    if (auto ok = require_count(dst.size(), src.size(), "refine_alpha"); !ok) {
-        return std::unexpected(std::move(ok).error());
+    if (dst.size() != src.size()) {
+        return std::unexpected(
+            detail::make_count_mismatch_error(dst.size(), src.size(), "refine_alpha"));
     }
     using Refine = typename P::Refine;
-    for (std::size_t i = 0; i < src.size(); ++i) {
+    const std::size_t n = std::min(src.size(), dst.size());
+    for (std::size_t i = 0; i < n; ++i) {
         dst[i] = static_cast<Refine>(static_cast<double>(src[i]));
     }
     return {};
@@ -192,16 +195,18 @@ compute_storage_means(MatrixRef<typename P::Storage> k_storage,
     if (k_storage.is_empty() || k_storage.data() == nullptr || alpha.empty() || out.empty()) {
         return std::unexpected(GprError::empty_input());
     }
-    if (auto ok = require_count(alpha.size(), k_storage.rows(), "alpha"); !ok) {
-        return std::unexpected(std::move(ok).error());
+    if (alpha.size() != k_storage.rows()) {
+        return std::unexpected(
+            detail::make_count_mismatch_error(alpha.size(), k_storage.rows(), "alpha"));
     }
-    if (auto ok = require_count(out.size(), k_storage.cols(), "out"); !ok) {
-        return std::unexpected(std::move(ok).error());
+    if (out.size() != k_storage.cols()) {
+        return std::unexpected(
+            detail::make_count_mismatch_error(out.size(), k_storage.cols(), "out"));
     }
 
     using Refine = typename P::Refine;
-    const std::size_t n_rows = k_storage.rows();
-    const std::size_t n_cols = k_storage.cols();
+    const std::size_t n_rows = std::min(k_storage.rows(), alpha.size());
+    const std::size_t n_cols = std::min(k_storage.cols(), out.size());
     for (std::size_t col = 0; col < n_cols; ++col) {
         const auto column = k_storage.col(col);
         double sum = 0.0;
