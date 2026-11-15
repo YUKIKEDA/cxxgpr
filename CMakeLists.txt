@@ -44,6 +44,7 @@ add_library(cxxgpr STATIC
     src/core/interval.cpp
     src/core/likelihood.cpp
     src/core/rng.cpp
+    src/precision/refine.cpp
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
 add_dependencies(cxxgpr cxxgpr_git_revision)

@@ -81,6 +81,16 @@ cxxgpr_add_test(core.rng
     LABELS unit property
 )
 
+cxxgpr_add_test(precision.policy
+    SOURCES precision/policy_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(precision.refine
+    SOURCES precision/refine_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
