@@ -108,7 +108,7 @@ def select(paths: list[str], *, full: bool = False) -> dict[str, bool]:
             flags["trace"] = True
 
         if path in {"docs/architecture.md", "tools/qa/arch_check.py"} or path.startswith(
-            ("include/", "src/", "tests/")
+            ("include/", "src/", "tests/", "benchmarks/")
         ):
             flags["arch"] = True
 

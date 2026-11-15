@@ -11,7 +11,7 @@ from urllib.parse import unquote
 
 PUBLIC_INCLUDE_ROOT = Path("include/cxxgpr")
 
-INTERNAL_ID_RE = re.compile(r"\b(?:REQ|DES|FMT|QA)-\d+\b|\bM[0-6]-\d+\b")
+INTERNAL_ID_RE = re.compile(r"\b(?:REQ|DES|FMT|QA)-\d+\b|\bM[0-6]-(?:\d+|[A-Z])\b|\bREL-\d+\b")
 CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]")
 DECL_RE = re.compile(
     r"^\s*(?:template\s*<.*?>\s*)?(?:inline\s+|constexpr\s+|static\s+|friend\s+|virtual\s+|explicit\s+)*"
@@ -165,10 +165,19 @@ def main() -> int:
             pub = Path(tmp) / "include" / "cxxgpr"
             pub.mkdir(parents=True)
             bad = pub / "bad.hpp"
-            bad.write_text("/// REQ-01 leak.\nstruct Bad {};\nstruct Undoc {};\n", encoding="utf-8")
+            bad.write_text(
+                "/// REQ-01 leak.\n"
+                "struct BadReq {};\n"
+                "/// Scheduled in M2-A.\n"
+                "struct BadMilestone {};\n"
+                "/// Planned for REL-1.\n"
+                "struct BadRel {};\n"
+                "struct Undoc {};\n",
+                encoding="utf-8",
+            )
             errs = check_public_headers(pub)
-            if len(errs) != 2:
-                print(f"Self-test expected 2 errors, got {len(errs)}: {errs}")
+            if len(errs) != 4:
+                print(f"Self-test expected 4 errors, got {len(errs)}: {errs}")
                 return 1
         print("Doc check self-test passed.")
         return 0

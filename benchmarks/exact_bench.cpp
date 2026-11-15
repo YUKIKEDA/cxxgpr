@@ -7,7 +7,7 @@ namespace {
 
 void bm_build_info(benchmark::State& state) {
     for (auto _ : state) {
-        const auto info = cxxgpr::build_info();
+        auto info = cxxgpr::build_info();
         benchmark::DoNotOptimize(info.platform_key);
     }
 }

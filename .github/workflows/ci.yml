@@ -186,6 +186,16 @@ jobs:
           ./out/vcpkg/bootstrap-vcpkg.sh -disableMetrics
           echo "VCPKG_ROOT=$GITHUB_WORKSPACE/out/vcpkg" >> "$GITHUB_ENV"
           echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/out/vcpkg-cache" >> "$GITHUB_ENV"
+      - name: Ensure toolchain
+        run: |
+          missing=""
+          command -v ninja >/dev/null || missing="$missing ninja-build"
+          command -v g++-14 >/dev/null || missing="$missing g++-14"
+          if [ -n "$missing" ]; then
+            sudo apt-get update && sudo apt-get install -y $missing
+          fi
+          ninja --version
+          g++-14 --version
       - name: Configure and compile benchmarks
         run: |
           cmake --preset linux-benchmark

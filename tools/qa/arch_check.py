@@ -12,6 +12,7 @@ ARCH_DOC = Path("docs/architecture.md")
 PUBLIC_ROOT = Path("include/cxxgpr")
 SRC_ROOT = Path("src")
 TESTS_ROOT = Path("tests")
+BENCHMARKS_ROOT = Path("benchmarks")
 
 TABLE_ROW_RE = re.compile(r"^\|\s*`([a-z_]+)`\s*\|\s*([^|]+)\|\s*[^|]+\|\s*$")
 BACKTICK_MOD_RE = re.compile(r"`([a-z_]+)`")
@@ -61,6 +62,7 @@ def check_repository(
     public_root: Path = PUBLIC_ROOT,
     src_root: Path = SRC_ROOT,
     tests_root: Path = TESTS_ROOT,
+    benchmarks_root: Path = BENCHMARKS_ROOT,
 ) -> list[str]:
     """Validate include graph and third-party isolation across public, src, and tests."""
     allowed_deps, errors = parse_allowed_deps(arch_doc)
@@ -145,22 +147,24 @@ def check_repository(
                         f"not permitted in module '{mod}'"
                     )
 
-    if tests_root.exists():
-        for test_file in sorted(
-            p for p in tests_root.rglob("*") if p.is_file() and p.suffix in {".hpp", ".cpp"}
+    for consumer_root, kind in ((tests_root, "tests"), (benchmarks_root, "benchmarks")):
+        if not consumer_root.exists():
+            continue
+        for source_file in sorted(
+            p for p in consumer_root.rglob("*") if p.is_file() and p.suffix in {".hpp", ".cpp"}
         ):
-            rel_posix = test_file.as_posix()
+            rel_posix = source_file.as_posix()
             for line_no, line in enumerate(
-                test_file.read_text(encoding="utf-8").splitlines(), start=1
+                source_file.read_text(encoding="utf-8").splitlines(), start=1
             ):
                 inc_match = INCLUDE_RE.match(line)
                 if not inc_match:
                     continue
                 target = inc_match.group(2)
-                if target.startswith("src/"):
+                if target.startswith("src/") or "detail/" in target:
                     errors.append(
-                        f"{rel_posix}:{line_no}: tests must not include "
-                        f"private src/ path '{target}'"
+                        f"{rel_posix}:{line_no}: {kind} must not include "
+                        f"private header path '{target}'"
                     )
 
     return errors
@@ -171,18 +175,22 @@ def _self_test() -> int:
         root = Path(tmp)
         pub = root / "include" / "cxxgpr"
         src = root / "src"
+        bench = root / "benchmarks"
         (pub / "core").mkdir(parents=True)
         (src / "kernel").mkdir(parents=True)
+        bench.mkdir(parents=True)
         (pub / "core" / "bad.hpp").write_text("#include <Eigen/Core>\n", encoding="utf-8")
         (src / "kernel" / "bad.cpp").write_text('#include "cxxgpr/gpr/fit.hpp"\n', encoding="utf-8")
+        (bench / "bad_bench.cpp").write_text('#include "src/core/internal.hpp"\n', encoding="utf-8")
         errs = check_repository(
             arch_doc=ARCH_DOC,
             public_root=pub,
             src_root=src,
             tests_root=root / "tests",
+            benchmarks_root=bench,
         )
-        if len(errs) != 2:
-            print(f"Self-test expected 2 errors, got {len(errs)}: {errs}")
+        if len(errs) != 3:
+            print(f"Self-test expected 3 errors, got {len(errs)}: {errs}")
             return 1
     print("Architecture check self-test passed.")
     return 0

@@ -73,10 +73,15 @@ TEST(AllocationAuditTest, FixedSizeEigenWorkAllocatesZero) {
     b << 2.0, -0.1, 0.3, 0.8;
     Eigen::Matrix2d c = Eigen::Matrix2d::Zero();
 
-    cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
-    c.noalias() = a * b;
-    cxxgpr::test_support::touch_for_test(c.data());
-    EXPECT_EQ(scope.delta_allocations(), 0U);
+    EXPECT_TRUE(Eigen::internal::is_malloc_allowed());
+    {
+        cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
+        EXPECT_FALSE(Eigen::internal::is_malloc_allowed());
+        c.noalias() = a * b;
+        cxxgpr::test_support::touch_for_test(c.data());
+        EXPECT_EQ(scope.delta_allocations(), 0U);
+    }
+    EXPECT_TRUE(Eigen::internal::is_malloc_allowed());
     EXPECT_NEAR(c(0, 0), 2.06, 1e-15);
 }
 

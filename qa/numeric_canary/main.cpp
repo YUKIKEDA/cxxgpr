@@ -103,7 +103,10 @@ void prng_step() {
 
 int run() {
     try {
-        std::cout << "platform " << cxxgpr::build_info().platform_key << '\n';
+        const auto info = cxxgpr::build_info();
+        std::cout << "platform " << info.platform_key << '\n';
+        std::cout << "uncommitted_changes " << (info.uncommitted_changes ? "true" : "false")
+                  << '\n';
         two_product();
         neumaier_sums();
         exact_gpr_cholesky();

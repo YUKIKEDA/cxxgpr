@@ -30,6 +30,14 @@ class CiScopeTest(unittest.TestCase):
         self.assertTrue(flags["skills"])
         self.assertTrue(flags["checks"])
 
+    def test_benchmark_change_triggers_benchmark_and_arch(self) -> None:
+        flags = select(["benchmarks/exact_bench.cpp"])
+        self.assertTrue(flags["benchmark"])
+        self.assertTrue(flags["arch"])
+        self.assertTrue(flags["format"])
+        self.assertTrue(flags["checks"])
+        self.assertFalse(flags["build"])
+
     def test_full_forces_everything(self) -> None:
         flags = select([], full=True)
         self.assertTrue(all(flags.values()))
