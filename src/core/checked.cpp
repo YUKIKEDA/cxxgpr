@@ -80,14 +80,14 @@ std::expected<void, GprError> require_nonempty(std::size_t n) noexcept {
     return {};
 }
 
-std::expected<void, GprError> require_count(std::size_t actual, std::size_t expected,
-                                            std::string_view what) {
-    if (actual == expected) {
-        return {};
-    }
-    return std::unexpected(
-        GprError::length_mismatch(std::format("expected {} {}, got {}", expected, what, actual)));
+namespace detail {
+
+GprError make_count_mismatch_error(std::size_t actual, std::size_t expected,
+                                   std::string_view what) {
+    return GprError::length_mismatch(std::format("expected {} {}, got {}", expected, what, actual));
 }
+
+} // namespace detail
 
 std::expected<void, GprError> require_finite(std::span<const double> values) noexcept {
     return require_finite_impl(values);
