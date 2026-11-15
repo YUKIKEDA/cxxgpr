@@ -1,0 +1,43 @@
+name: Spike
+description: 設計判断のための期限付き調査
+title: "[spike] "
+labels: ["type:spike"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 問い、競合する仮説、判断を決める測定基準。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。
+      placeholder: M3-A
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 関連する仕様文書とID。
+      placeholder: "docs/design.md DES-12"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#2"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 比較計測と採用判断の記録先（設計書またはADR）。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。

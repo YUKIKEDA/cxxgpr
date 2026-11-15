@@ -1,0 +1,21 @@
+---
+description: 品質保証の決まり：追跡、基準結果、変更管理、来歴、環境認定
+alwaysApply: true
+---
+
+# 品質保証
+
+正本は [docs/quality/quality-plan.md](../../docs/quality/quality-plan.md)（`QA-01`〜`QA-10`）。
+
+## 追跡（QA-01）
+
+- 要求・設計・永続化・品質の各 ID（`REQ-*` / `DES-*` / `FMT-*` / `QA-*`）は正本文書で見出し・表先頭欄・定義形式で宣言する。
+- 数値・契約試験（`tests/`）は確かめる ID をテスト近傍コメントまたは GTest メタデータ `RecordProperty("spec", "...")` に記す（公開ヘッダの Doxygen には書かない）。
+- 仕様 ID の追加・変更後は `tools/qa/trace.py matrix` で `docs/quality/traceability.md` を再生成し、`just trace-check` を通す。`traceability.md` を手編集しない。
+
+## 基準結果と結果変更管理（QA-03 / QA-04）
+
+- 基準結果（`qa/baselines/`）は hexfloat（丸めなし）で保存し、`tools/qa/results.py accept` だけが更新する。手編集を禁ずる。
+- 既存の基準結果が 1 ビットでも変わる変更には、同じ PR に [結果変更記録](../../docs/quality/result-changes/README.md)（`NNNN-<slug>.md`）と原因・相対変化・数値予算比・所有者承認が必要となる。
+- 認定外プラットフォームでは `just results-check` が失敗する。黙って許容差を緩めたり記録なしに上書きしたりせず、プラットフォーム認定手順（QA-07）として扱う。
+- 検証記録・基準結果は原則として未 commit 変更のないビルド（`build_info().uncommitted_changes == false`）から採取する。

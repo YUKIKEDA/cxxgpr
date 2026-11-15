@@ -1,0 +1,43 @@
+name: Test
+description: 製品挙動を追加しない検証・参照比較の作業
+title: "[test] "
+labels: ["type:test"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 対象ID、独立参照、比較する量と許容差。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。
+      placeholder: M5-1
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 検証対象の仕様文書とID。
+      placeholder: "docs/design.md REQ-01"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#12"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 確認可能な完了条件。変異テストや負対照を含む。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。

@@ -1,0 +1,12 @@
+---
+description: 取り除いた経路だけに仕えていたコードや文書を全て取り除く
+alwaysApply: true
+---
+
+# 死んだコードを残さない
+
+ある機能や経路を削除・移植対象外とするとき、それにのみ仕えていた型・関数・定数・エラー種・試験・CMake オプション・文書記述を同じ変更で取り除く。
+
+- `cxxgpr` は Exact GPR のみを移植する。`OnlineGpr` / `LdltStore` / `PointId` / `Sgpr` / `Svgp` / `grad_cross` / `hess_cross` / `grad_wrt_coord_dim` / `*_wrt_sq_dist` の痕跡をコードや公開 API に残さない。
+- v1.0 公開前の内部整備段階では、効果のない旧 API を後方互換の名目で残さない。
+- どのゲート・ターゲット・レシピも参照しない設定ファイルやスクリプトを置かない。

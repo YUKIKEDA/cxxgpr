@@ -1,0 +1,43 @@
+name: Feat
+description: 仕様に基づく新機能の実装
+title: "[feat] "
+labels: ["type:feat"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 何を実装するか。対応する要求ID・決定ID（REQ-* / DES-* / FMT-*）。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。例 - M1-1
+      placeholder: M1-1
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 実装・変更する仕様文書とID。
+      placeholder: "docs/design.md DES-01"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "M0-2 または #2"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 確認可能な完了条件。独立参照、許容差、負対照、確保上限を明記する。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。スコープ外とした項目と、それを担うロードマップ行。

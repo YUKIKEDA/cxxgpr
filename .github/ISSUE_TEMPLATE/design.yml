@@ -1,0 +1,43 @@
+name: Design
+description: 仕様の欠陥・曖昧さの解消、またはADRの記録
+title: "[design] "
+labels: ["type:docs"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 該当節、最小の反例、変えるべき式・状態・精度・契約。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。
+      placeholder: M0-1
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 変更対象の仕様・ADR文書。
+      placeholder: "docs/design.md DES-04"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#1"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 更新すべき正本、整合検索、影響する既存結果の再検証。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。

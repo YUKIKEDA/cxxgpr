@@ -1,0 +1,13 @@
+---
+description: Windows PowerShell 環境でのビルド実行とスクリプトの決まり
+alwaysApply: true
+---
+
+# シェルとビルド実行（Windows）
+
+Windows の既定シェルは PowerShell 7（Linux / CI Bash は `sh` / `bash`）。
+
+- **MSVC 環境起動**：Windows での CMake / Ninja / clang-tidy 実行は `pwsh -NoProfile -File tools/dev/msvc.ps1 <command>`（または `just` レシピ）経由で行う。`msvc.ps1` は VsDevCmd が上書きする `VCPKG_ROOT` を呼び出し前の値へ復元する。
+- **終了コード検査**：PowerShell は外部コマンドが非 0 終了しても次の文へ進むため、複数コマンドを `;` で繋いで直後の成否を無視しない。各コマンド後に `$LASTEXITCODE` を確認するか、`if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` または GitHub Actions のステップ分離を使う。
+- **文字コード**：Python スクリプトで UTF-8 出力を扱う際は `-X utf8` または `encoding="utf-8"` を明示し、`cp932` 起因の文字化けを防ぐ。
+- **削除・移動の対象指定**：スクリプト・コマンドの `rm` / `mv` 対象は明示パスを指定する。複数行文字列は単引用 here-string（`@' ... '@`）または UTF-8 ファイル経由で渡す。

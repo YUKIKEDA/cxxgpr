@@ -1,0 +1,24 @@
+# New source and configuration: normalized, LF in the working tree on every OS.
+* text=auto eol=lf
+
+# Byte-exact areas: keep original bytes without EOL conversion.
+docs/** -text
+qa/baselines/** -text
+tests/fixtures/** -text
+README.md -text
+README.ja.md -text
+AGENTS.md -text
+.agents/skills/github-closing/** -text
+.agents/skills/publish-review/** -text
+.claude/skills/github-closing/** -text
+.claude/skills/publish-review/** -text
+
+# External skills (skills-lock.json) are kept verbatim.
+.agents/skills/grilling/** -text
+.agents/skills/natural-japanese/** -text
+.claude/skills/grilling/** -text
+.claude/skills/natural-japanese/** -text
+
+*.png binary
+*.pdf binary
+*.safetensors binary

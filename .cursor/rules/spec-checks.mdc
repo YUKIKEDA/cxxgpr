@@ -1,0 +1,13 @@
+---
+description: 検査と試験は仕様文の全体を実装する
+alwaysApply: true
+---
+
+# 仕様の文を確かめる
+
+仕様（`docs/design.md`・`docs/persist-format.md`）の文を検証する試験は、必要条件の一部だけで済ませず、仕様文の条件・順序・失敗種別の全体を実装する。
+
+- 試験の範囲・入力次元・カーネル葉（10 種）・精度（3 ポリシー）・最適化器（5 種）は完了条件の列挙と一致させる。
+- 入力検査が順序を持つとき（`EmptyInput` → `SizeOverflow` → `LengthMismatch` → `DimensionMismatch` → `NonFiniteInput` → `InsufficientData` など）、隣り合う 2 条件が同時に成立する入力で先のエラーが返ることを試す。
+- 仕様上の全エラー（`GprError` の各コード）について、それを起こす最小入力を 1 つずつ用意し、2〜3 種で代表させない。
+- 仕様文が変わるとき、`docs/design.md`・`docs/persist-format.md`・`docs/architecture.md`・README・規則を検索して整合を同時に直す。

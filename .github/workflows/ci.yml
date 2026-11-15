@@ -1,0 +1,259 @@
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: select affected checks
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+      benchmark: ${{ steps.scope.outputs.benchmark }}
+      format: ${{ steps.scope.outputs.format }}
+      python: ${{ steps.scope.outputs.python }}
+      skills: ${{ steps.scope.outputs.skills }}
+      trace: ${{ steps.scope.outputs.trace }}
+      arch: ${{ steps.scope.outputs.arch }}
+      doc: ${{ steps.scope.outputs.doc }}
+      checks: ${{ steps.scope.outputs.checks }}
+      test_regex: ${{ steps.scope.outputs.test_regex }}
+      build_targets: ${{ steps.scope.outputs.build_targets }}
+      cpp_files: ${{ steps.scope.outputs.cpp_files }}
+      format_files: ${{ steps.scope.outputs.format_files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test scope selection logic
+        run: python3 -X utf8 tools/dev/ci_scope_test.py
+      - name: Select affected checks
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python3 -X utf8 tools/dev/ci_scope.py
+
+  windows:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    name: build and test (windows, msvc)
+    runs-on: windows-2025
+    env:
+      CI_TEST_REGEX: ${{ needs.changes.outputs.test_regex }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout vcpkg baseline
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: out/vcpkg
+          fetch-depth: 0
+      - name: vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: out/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+      - name: Bootstrap vcpkg
+        run: ./out/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+      - name: Configure vcpkg environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/vcpkg-cache | Out-Null
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE/out/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:GITHUB_WORKSPACE/out/vcpkg-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compiler version
+        run: pwsh -NoProfile -File tools/dev/msvc.ps1 cl
+      - name: Configure
+        run: pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --preset windows-msvc
+      - name: Build Debug
+        run: pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --build --preset windows-debug
+      - name: Test Debug
+        shell: pwsh
+        run: |
+          if ($env:CI_TEST_REGEX) {
+            pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --preset windows-debug -R $env:CI_TEST_REGEX
+          } else {
+            pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --preset windows-debug
+          }
+      - name: Build Release
+        run: pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --build --preset windows-release
+      - name: Test Release
+        shell: pwsh
+        run: |
+          if ($env:CI_TEST_REGEX) {
+            pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --preset windows-release -R $env:CI_TEST_REGEX
+          } else {
+            pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --preset windows-release
+          }
+      - name: Check numeric canary baseline
+        run: python -X utf8 tools/qa/results.py check --if-certified --case numeric-canary --run out/build/windows-msvc/Release/cxxgpr_numeric_canary.exe
+
+  linux:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    name: build and test (linux, gcc 14, ${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-debug, linux-release, linux-sanitize]
+    env:
+      CXX: g++-14
+      CI_TEST_REGEX: ${{ needs.changes.outputs.test_regex }}
+      CI_CPP_FILES: ${{ needs.changes.outputs.cpp_files }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout vcpkg baseline
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: out/vcpkg
+          fetch-depth: 0
+      - name: vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: out/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+      - name: Bootstrap vcpkg
+        run: |
+          mkdir -p out/vcpkg-cache
+          ./out/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/out/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/out/vcpkg-cache" >> "$GITHUB_ENV"
+      - name: Ensure toolchain
+        run: |
+          missing=""
+          command -v ninja >/dev/null || missing="$missing ninja-build"
+          command -v g++-14 >/dev/null || missing="$missing g++-14"
+          if [ -n "$missing" ]; then
+            sudo apt-get update && sudo apt-get install -y $missing
+          fi
+          ninja --version
+          g++-14 --version
+      - name: Configure, build, test
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+          if [ -n "$CI_TEST_REGEX" ]; then
+            ctest --preset ${{ matrix.preset }} -R "$CI_TEST_REGEX"
+          else
+            ctest --preset ${{ matrix.preset }}
+          fi
+      - name: Check numeric canary baseline
+        if: matrix.preset == 'linux-release'
+        run: python3 -X utf8 tools/qa/results.py check --if-certified --case numeric-canary --run out/build/linux-release/cxxgpr_numeric_canary
+      - name: clang-tidy
+        if: matrix.preset == 'linux-debug' && needs.changes.outputs.format == 'true'
+        run: |
+          pipx install clang-tidy==21.1.1
+          if [ -n "$CI_CPP_FILES" ]; then
+            clang-tidy -p out/build/linux-debug --quiet $CI_CPP_FILES
+          else
+            clang-tidy -p out/build/linux-debug --quiet $(git ls-files 'src/*.cpp' 'tests/*.cpp' 'qa/*.cpp')
+          fi
+
+  benchmark:
+    needs: changes
+    if: needs.changes.outputs.benchmark == 'true'
+    name: compile optional benchmark (linux, gcc 14)
+    runs-on: ubuntu-24.04
+    env:
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: out/vcpkg
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: out/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+      - name: Bootstrap vcpkg
+        run: |
+          mkdir -p out/vcpkg-cache
+          ./out/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/out/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/out/vcpkg-cache" >> "$GITHUB_ENV"
+      - name: Ensure toolchain
+        run: |
+          missing=""
+          command -v ninja >/dev/null || missing="$missing ninja-build"
+          command -v g++-14 >/dev/null || missing="$missing g++-14"
+          if [ -n "$missing" ]; then
+            sudo apt-get update && sudo apt-get install -y $missing
+          fi
+          ninja --version
+          g++-14 --version
+      - name: Configure and compile benchmarks
+        run: |
+          cmake --preset linux-benchmark
+          cmake --build --preset linux-benchmark --target cxxgpr_bench
+      - name: List registered benchmarks
+        run: out/build/linux-benchmark/benchmarks/cxxgpr_bench --benchmark_list_tests=true | grep '^bm_build_info$'
+
+  checks:
+    needs: changes
+    if: needs.changes.outputs.checks == 'true'
+    name: static, docs, skills, traceability checks
+    runs-on: ubuntu-24.04
+    env:
+      CI_FORMAT_FILES: ${{ needs.changes.outputs.format_files }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Formatting
+        if: needs.changes.outputs.format == 'true'
+        run: |
+          pip install clang-format==21.1.2
+          if [ -n "$CI_FORMAT_FILES" ]; then
+            for source in $CI_FORMAT_FILES; do
+              [ ! -f "$source" ] || clang-format --dry-run --Werror "$source"
+            done
+          else
+            clang-format --dry-run --Werror $(git ls-files 'include/*.hpp' 'src/*.hpp' 'src/*.cpp' 'tests/*.hpp' 'tests/*.cpp' 'qa/*.hpp' 'qa/*.cpp' 'benchmarks/*.hpp' 'benchmarks/*.cpp')
+          fi
+      - name: Python lint and strict type check
+        if: needs.changes.outputs.python == 'true'
+        run: |
+          pip install ruff==0.17.4 pyright==1.1.408
+          ruff check tools
+          ruff format --check tools
+          pyright
+      - name: Skills mirror check
+        if: needs.changes.outputs.skills == 'true'
+        run: python3 -X utf8 tools/dev/sync_skills.py --check
+      - name: Traceability check
+        if: needs.changes.outputs.trace == 'true'
+        run: python3 -X utf8 tools/qa/trace.py check
+      - name: Architecture boundary check
+        if: needs.changes.outputs.arch == 'true'
+        run: python3 -X utf8 tools/qa/arch_check.py
+      - name: Documentation check
+        if: needs.changes.outputs.doc == 'true'
+        run: python3 -X utf8 tools/qa/doc_check.py
+
+  ci:
+    name: ci
+    if: always()
+    needs: [changes, windows, linux, benchmark, checks]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every required job passed
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 -X utf8 tools/dev/ci_scope.py --verify-needs

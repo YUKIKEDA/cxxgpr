@@ -1,0 +1,17 @@
+---
+description: 範囲は仕様と要求が決める。半端な能力を出さない
+alwaysApply: true
+---
+
+# スコープ管理
+
+対象は `gprx` の Exact GPR モデル（`Gpr` / `FittedGpr`）の忠実な C++23 移植であり、`Sgpr`・`Svgp`・`OnlineGpr`・誘導点座標微分は対象外である。
+
+- 実装の手間を理由に機能を削らない。たとえば「`DoublePrecision` のみ対応し `MixedPrecision` / `SinglePrecision` を落とす」「10 カーネルのうち一部だけ置く」「供給二乗距離や `Custom` 葉を省く」といった部分実装を正当化しない。
+- 分割する場合は必ず [docs/roadmap.md](../../docs/roadmap.md) の該当マイルストーン行と Issue で残作業の担い手を明示する。
+- 完了状態は「仕様実装適合」「数値照合合格」「ベンチ測定完了」を区別して報告する。
+
+```text
+BAD   Eigen 都合で MixedPrecision や Periodic/RQ の解析勾配を黙って省略する
+GOOD  仕様が定めた精度ポリシー・全 10 カーネル・5 最適化器をロードマップ行に沿って完全に揃える
+```

@@ -1,0 +1,43 @@
+name: Bug
+description: 仕様または試験に反する不具合の修正
+title: "[bug] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 何が起きているか、仕様の何が定めるか、最小の再現入力。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。例 - M2-A
+      placeholder: M2-A
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 該当する仕様文書とID。
+      placeholder: "docs/design.md DES-05"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#12"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 回帰試験、独立参照、許容差、負対照、影響版の有無。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。基準結果への影響や関連Issue。

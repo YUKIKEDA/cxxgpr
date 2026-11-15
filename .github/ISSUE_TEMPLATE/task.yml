@@ -1,0 +1,43 @@
+name: Task
+description: リポジトリ基盤、ビルド、CI、ツール、文書の整備
+title: "[task] "
+labels: ["type:chore"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 何をなぜ行うか。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。例 - M0-2
+      placeholder: M0-2
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 関連する仕様・品質計画・ADR。
+      placeholder: "docs/quality/quality-plan.md QA-01"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#1"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 確認可能な完了条件と実行するゲート。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。
