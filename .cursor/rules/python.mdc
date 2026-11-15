@@ -1,0 +1,15 @@
+---
+description: tools/ 配下 Python スクリプトの型付け・検査・整形規則
+alwaysApply: false
+globs: "tools/**/*.py,ruff.toml,pyrightconfig.json"
+---
+
+# Python ツールの規約
+
+`tools/` 配下の品質検査・開発支援スクリプトは CI ゲートが依存する重要コードであり、C++ 同等の厳密さで書く。
+
+- **ゲート**：`just lint-python`（`ruff check`、`ruff format --check`、`pyright` strict モード）を警告・型エラー 0 で通す。設定正本は `ruff.toml` と `pyrightconfig.json`。
+- **依存なし**：外部 PyPI パッケージへ依存させず Python 標準ライブラリだけで書く（ビルド・環境依存を増やさない）。
+- **厳格な型絞り**：`json.loads()` などの動的戻り値は `object` として受け、`isinstance` 等で検査・絞り込みを行ってからアクセスする。
+- **除外パス**：`ruff.toml` / `pyrightconfig.json` で一時出力やビルド先を除外する際は `./out` のようにリポジトリ根に固定し、裸の名前で関係ディレクトリを誤除外しない。
+- **文字コード**：日本語を含む出力や JSON 読込は常に UTF-8 を明示する（Windows `cp932` 対策）。

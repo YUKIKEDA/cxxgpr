@@ -1,0 +1,13 @@
+---
+description: GoogleTest・CTest 試験構成とラベル運用
+alwaysApply: false
+globs: "tests/**"
+---
+
+# 製品試験の構成（GoogleTest）
+
+- **枠組み**：GoogleTest v1.18.0（vcpkg feature `tests`）および CMake `cxxgpr_add_test()` ヘルパ（M0-2 で整備）を使う。1 テストターゲットが CTest の 1 つ以上のテストケースを登録する。
+- **対応配置**：`src/<module>/foo.cpp` の試験は `tests/<module>/foo_test.cpp` へ対応させる。
+- **CTest ラベル**：試験の性質を `unit`、`property`、`negative`、`integration`、`verification` でラベル付けし、局所実行は `ctest --preset <preset> -L <label>` または `-R <regex>` で絞る。テスト件数 0 の実行は失敗として扱う。
+- **仕様 ID 追跡**：数値・契約試験には該当 ID（例：`// Spec: REQ-01, DES-05` または `RecordProperty("spec", "DES-05")`）を付け、`just trace-check` で追跡可能にする。
+- **並列安全性**：CTest が並列実行するため、一時ディレクトリ（永続化試験等）はテスト名や一意 ID を含めて分離し、必ず後片付けする。

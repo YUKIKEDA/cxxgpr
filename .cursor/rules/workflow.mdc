@@ -1,0 +1,14 @@
+---
+description: Grill から PR・振り返りまでの開発手順
+alwaysApply: true
+---
+
+# 開発フロー
+
+手順：Grill（設計が分岐するとき）→ Issue（テンプレート必須）→ ブランチ（`type/<Issue番号>-<slug>`）→ 作業 → 検査 → commit → push → PR → レビュー → 所有者の squash merge → 振り返り（3点コメント＋教訓 PR）。
+
+- `main` へ直接 commit しない。1 Issue につき 1 PR を原則とする。
+- Issue には [docs/roadmap.md](../../docs/roadmap.md) の行 ID を明記し、完了条件（独立参照、許容差、負対照、確保上限）を記す。
+- 編集後の全体検証（`just gate` 等）は最後に 1 回へまとめ、作業中は対象モジュールの局所試験で回す。
+- commit 前に `git branch --show-current` を同じコマンド列で確認し、対象ブランチであることを確かめる。
+- PR 作成後、CI の完了をポーリングして待たない。PR の URL と手元検査結果を報告して返す。

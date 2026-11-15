@@ -1,0 +1,12 @@
+---
+description: 文書とコードの言語の使い分け
+alwaysApply: true
+---
+
+# 言語規約
+
+- **日本語（常体）**：`docs/` 配下、`.cursor/rules/`、`AGENTS.md`、`CONTRIBUTING.md`、Issue・PR の本文、commit メッセージ本文。
+- **英語**：C++ ソースとヘッダ（識別子・コメント・Doxygen）、commit 件名（`type(scope): subject`）、PR 題名、`.github/` テンプレートの見出し（`Summary` 等）、CMake・Python ツールの標準出力メッセージ。
+- **バイリンガル入口**：`README.md`（英語）と `README.ja.md`（日本語）は両方維持し、機能追加時に整合を保つ。
+- **利用者への応答**：日本語で回答する。
+- 図は Mermaid、数式は `$...$` / `$$...$$` とし、ASCII 図を使わない。

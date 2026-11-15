@@ -1,0 +1,13 @@
+---
+description: Issue 番号の前の閉じる動詞は否定文の中でも Issue を閉じる
+alwaysApply: true
+---
+
+# PR からの Issue クローズ管理
+
+GitHub は `close(s/d)`、`fix(es/ed)`、`resolve(s/d)` の直後に `#N` があると否定文中でも Issue を閉じてしまう。
+
+- PR が Issue を完全に満たす場合のみ、`## Related` の下に `Closes #N` だけの行を置く。
+- 未完了条件が残る PR や部分対応では閉じる動詞を使わず `Part of #N` または `Refs #N` と書く。
+- PR 作成後・更新後に `gh pr view <n> --json closingIssuesReferences` を実行し、閉じる対象が意図通りか確認する。
+- 手順の詳細は [github-closing Skill](../../.agents/skills/github-closing/SKILL.md) に従う。

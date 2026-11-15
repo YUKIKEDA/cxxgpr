@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Roadmap
+    url: https://github.com/YUKIKEDA/cxxgpr/blob/main/docs/roadmap.md
+    about: Order and status of the work. Agree on a row before opening an Issue.

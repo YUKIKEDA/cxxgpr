@@ -1,0 +1,13 @@
+---
+description: 文書・図・数式・Doxygen の形式
+alwaysApply: false
+globs: "docs/**/*.md,include/**/*.hpp"
+---
+
+# 文書と Doxygen の形式
+
+- 日本語文書（`docs/`）の図は `mermaid` コードブロックで描き、ASCII アート図を使わない（ディレクトリ木や式ブロックは除く）。
+- 数式は行内 `$...$`、別行 `$$...$$` を使う。`\(` `\[` を使わず、コードブロック内に `$` を入れない。
+- スクリプト等で LaTeX・正規表現を含む文書を書く際は、エスケープ欠落による `\t` / `\f` 等の制御文字混入がないか検証する。
+- 公開ヘッダ（`include/cxxgpr/`）の Doxygen コメント（`///`）は **英語** で書く。`REQ-`・`DES-`・`FMT-`・`QA-`・`M0-`・`M1-` といった内部トラッキング ID を公開 API の Doxygen に書かない（追跡用 ID は `tests/` や検証記録へ置く）。
+- 日本語文書は常体で書き、`.agents/skills/natural-japanese/SKILL.md` の基準で確認する。

@@ -1,0 +1,13 @@
+---
+description: PR の題と本文はテンプレートに従う
+alwaysApply: true
+---
+
+# Pull Request
+
+- 題名は Conventional Commits（英語・1 行）とする。
+- 本文は [.github/pull_request_template.md](../../.github/pull_request_template.md) の見出しを順のまま使う。不要な節は `N/A`。
+- `## Verification` には Issue の完了条件の各項目と結果、走らせたコマンド・OS・コンパイラ版を書く。未実行の環境を通ったことにしない。
+- 満たせていない完了条件が残る PR は `Closes #N` ではなく `Part of #N` を使う。
+- PR 本文は UTF-8 ファイル経由（`--body-file`）で渡し、作業後に一時ファイルを削除する。
+- PR 作成後に CI を待たず、URL と現在の状態を報告して返す。

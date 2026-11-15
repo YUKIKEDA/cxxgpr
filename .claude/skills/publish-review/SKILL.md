@@ -1,0 +1,55 @@
+---
+name: publish-review
+description: >-
+  Read gprx's README, comparison docs, and public rustdoc before crates.io
+  publish. Use when preparing a release, running cargo package, running
+  cargo publish --dry-run, or checking that a stranger can understand the
+  crate from the docs alone.
+---
+
+# Publish review
+
+Run this on the commit that will be published, before `cargo package` and before `cargo publish --dry-run`. A single failure stops those commands. Do not run `cargo publish` without `--dry-run`.
+
+## Read first
+
+- `.cursor/rules/reader-docs.mdc`
+- `.cursor/rules/rust-docs.mdc`
+- Japanese pages in `.cursor/rules/reader-docs.mdc` are inspected by Gemini with `.agents/skills/natural-japanese/SKILL.md` (score mode). The agent running this review does not score or rewrite them.
+
+Do not restate those files here. Judge the pages against them.
+
+## Pages
+
+- `README.md` and `README.ja.md`
+- `docs/comparison.md` and `docs/comparison.ja.md`
+- Crate-level `//!` and every `///` on an item an external crate can name with default features
+- `Cargo.toml` `description`
+
+`gprx::internals` is outside the contract. `docs/design.md`, `docs/roadmap.md`, and `docs/adr/` are the decision record. Do not fail them for keeping issue and phase IDs.
+
+## How to judge
+
+Read as someone who has the crate page and has not opened this repository's issue tracker.
+
+Fail a page when any of these is true:
+
+- A sentence is false against the code or `Cargo.toml`. The same wording in the README, the Japanese README, the crate rustdoc, and `description` does not make it true (reader-docs Accuracy)
+- A comparison number has no committed source and the sentence does not say where it came from
+- The README is not in the order reader-docs requires, or the English and Japanese sections diverge
+- The README still contains the comparison tables or figures
+- A reader must know an issue number, a pull request number, a phase ID, a roadmap ID, `roadmap.md`, `AGENTS.md`, `.cursor/rules`, Grill, or a developer `just` recipe. The comparison doc may keep the `just` commands that regenerate its figures, and no other `just` recipe
+- Public rustdoc fails `.cursor/rules/rust-docs.mdc`, including Examples and Errors. `missing_docs` passing does not clear this
+- The first example is not pasteable after the documented dependency, or it uses `unwrap`
+- Column-major layout, `fit` consuming the trainer, `GaussianLikelihood`, the 0.x break policy, or `internals` being outside the contract is missing before the first example
+- The opening omits a default-feature model family (`Gpr`, `Sgpr`, `Svgp`), or a public item is described by a dependency the caller does not import
+- The README links relatively at a file that is not in the package, or embeds an image
+- Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, Gemini reports that the page is a gloss of the English, or a bare word in reader-docs Japanese vocabulary remains
+- A public item an external crate can name with default features has no rustdoc usage example (`.cursor/rules/rust-docs.mdc`). `internals` is outside that list. An item is what a `use` path names (reader-docs "Public API usage"); methods and variants are judged on their rustdoc. The saved-file schema stays in the persist-format doc
+- A README how-to block does not run as a doctest, uses `unwrap`, or shows more than one task, or a task in the reader-docs task list has no how-to
+- A README how-to block is a reference: it lists every method of a type instead of showing its task
+- A docs.rs link in the README does not resolve to a page of the items of the version being published. Check each against `cargo doc --no-deps` of the commit being published
+
+## Report
+
+For each failure, name the file, the text, the rule it breaks, and why a new reader stops. Fix the failures in the publish issue. When none remain, the package build and the dry-run are allowed.

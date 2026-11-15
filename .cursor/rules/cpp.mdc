@@ -1,0 +1,14 @@
+---
+description: C++23 コーディング規約・命名・警告ゼロ・ヘッダ分離
+alwaysApply: false
+globs: "**/*.hpp,**/*.cpp,CMakeLists.txt,cmake/*.cmake"
+---
+
+# C++23 実装規約
+
+- **言語水準と標準ライブラリ**：C++23 を用い、`__cpp_lib_expected >= 202211L` を要件とする。標準は `std::expected`、`std::span`、`std::ranges`、`std::bit_cast` などを活用し、未定義動作（符号付きオーバーフロー、整列違反、境界外参照）を許さない。
+- **命名規約**：名前空間は `cxxgpr`（下位 `cxxgpr::kernel`、`cxxgpr::transform`、`cxxgpr::persist`）。型は `PascalCase`、関数・メソッド・変数・定数は `snake_case`、マクロは `CXXGPR_` 接頭辞、プライベートメンバは末尾アンダースコア（`member_`）を基準とする。
+- **公開ヘッダの純潔**：`include/cxxgpr/**/*.hpp` で `<Eigen/*>`、`<nlohmann/*>`、`<omp.h>` や実装内部ヘッダを一切 `#include` しない（`just arch-check`）。ユーザーカスタム拡張点には軽量ビュー `MatrixRef<T>` / `MatrixMut<T>` を使う。
+- **寸法・乗算のオーバーフロー検査**：`n_rows * n_cols`、`n * (n + 1) / 2` は積の前に `checked_mul` でオーバーフローを検査し、`GprError::SizeOverflow` を返す。
+- **警告ゼロと静的解析**：MSVC `/W4 /WX`、GCC/Clang `-Wall -Wextra -Wpedantic -Werror`、`.clang-format`（`just format-check`）、`.clang-tidy` WarningsAsErrors（`just lint`）を全て警告 0 で通す。
+- **Doxygen コメント**：公開ヘッダの要素には簡潔な英語 Doxygen（`///`）を付け、`REQ-`/`DES-`/`FMT-`/`QA-`/`M*-` を含めない（`just doc-check`）。

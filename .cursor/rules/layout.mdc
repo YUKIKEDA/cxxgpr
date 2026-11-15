@@ -1,0 +1,25 @@
+---
+description: リポジトリ構成の置き場所。必要になる前に空の器を作らない
+alwaysApply: true
+---
+
+# 配置
+
+ディレクトリ構成の正本は [docs/conventions.md](../../docs/conventions.md)。新しいモジュールやディレクトリを追加する PR が同じ PR で表を更新する。
+
+```text
+include/cxxgpr/<module>/  公開 C++23 ヘッダ（第三者ヘッダ非露出）
+src/<module>/             静的ライブラリの実装（Eigen / nlohmann / OpenMP はここ）
+tests/<module>/           GoogleTest による製品試験
+tests/support/            確保監査・比較補助など試験共通ハーネス
+benchmarks/               Google Benchmark（製品や CTest へリンクしない）
+cmake/                    コンパイラ方針、警告・オプション、vcpkg 依存検査、確保監査設定
+qa/numeric_canary/        数値環境検針カナリア実行ファイル
+qa/baselines/             プラットフォーム別 hexfloat 基準結果
+docs/                     設計書・永続化仕様・アーキテクチャ・品質計画・ADR・ロードマップ
+tools/                    開発補助（msvc.ps1 / sync_skills.py 等）と品質検査（trace / arch / doc / results）
+```
+
+- 必要になる前に空ディレクトリ・空ファイル・未実装レシピを作らない。
+- 単体試験も結合試験も `tests/` に置き、製品コードへ試験専用の分岐を入れない。
+- 依存追加は設計判断（`dependencies`）が先。

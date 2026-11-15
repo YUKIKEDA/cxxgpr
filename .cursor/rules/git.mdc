@@ -1,0 +1,13 @@
+---
+description: 通常の commit・push はタスクの一部。破壊的な git 操作は名指しの指示で行う
+alwaysApply: true
+---
+
+# git の運用
+
+`reset`、`rebase`、`push --force`、`push --force-with-lease`、`branch -D`、タグの削除・付け替え、`clean` は、操作と対象 SHA/ref の明示的な指示があるときだけ行う。
+
+- commit 前に `git branch --show-current` と `git diff --cached --name-status` を確認し、意図しないブランチ・意図しないファイルが混入していないことを確かめる。
+- 試験・検査に続く commit と push は終了コードで繋ぐ（PowerShell は `$LASTEXITCODE` を確認する）。`--no-verify` で hook を飛ばさない。
+- `Closes #N` は commit 本文に書かず、PR 本文の `## Related` に置く。commit から Issue を指す場合は `Refs #N` とする。
+- PR ブランチへ push する前に `gh pr view <n> --json state` を確認し、merge 済みブランチへ再 push しない。

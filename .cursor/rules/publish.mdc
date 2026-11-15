@@ -1,0 +1,14 @@
+---
+description: 公開・配布前の確認事項（ライセンス・API非漏洩・文書整合）
+alwaysApply: false
+---
+
+# 公開基準
+
+`cxxgpr` のリポジトリと公開ヘッダは第三者が利用・ビルドできる状態へ保つ。手順の詳細は [publish-review Skill](../../.agents/skills/publish-review/SKILL.md) を使う。
+
+- **ライセンスと第三者通知**：ルート `LICENSE`（Apache-2.0）と [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) が一致し、`EIGEN_MPL2_ONLY` が有効であること。GPL/LGPL の依存・ファイルを混ぜない。
+- **公開ヘッダの非漏洩**：`include/cxxgpr/**/*.hpp` が Eigen・`nlohmann/json`・OpenMP（`<omp.h>` / `Eigen/` / `nlohmann/`）および内部詳細ヘッダを含まないこと（`just arch-check`）。
+- **英語／日本語の入り口**：`README.md`（英語）と `README.ja.md`（日本語）が現在の対応範囲・ビルド方法・未実装注記と一致していること。
+- **個人情報・ローカルパスの非混入**：利用者のローカルユーザー名やホームディレクトリ絶対パスを CMake・生成物・公開文書へハードコードしない。
+- エージェントは単独で公開タグ打ちやリリース確定を行わない。

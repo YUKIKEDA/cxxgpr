@@ -1,0 +1,13 @@
+---
+description: 会話で受けた訂正は同じ変更の中で規則・仕様・ADRへ書く
+alwaysApply: true
+---
+
+# 訂正をリポジトリへ残す
+
+所有者から受けた訂正や運用改善は、エージェント固有のメモリだけに留めず、該当するリポジトリ文書へ同じ変更の中で追記する。
+
+- 開発手法・チェック基準：`.cursor/rules/*.mdc`（1 ファイル 1 関心事、BAD/GOOD 例と経緯を添える）。
+- API・数式・アルゴリズム仕様：`docs/design.md` または `docs/persist-format.md`（設計変更なら `design` Issue を先に出す）。
+- 技術選定とその理由：`docs/adr/`。
+- 作業手順：`AGENTS.md` / `CONTRIBUTING.md` / `.agents/skills/`（`.claude/skills/` へ同期する）。

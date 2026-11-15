@@ -1,0 +1,43 @@
+name: Refactor
+description: 振る舞いと数値を変えない構造改善
+title: "[refactor] "
+labels: ["type:refactor"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 何を整理するか、および結果が変わらないことの確認方法。
+    validations:
+      required: true
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap ID
+      description: docs/roadmap.md の行ID。
+      placeholder: M3-B
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification
+      description: 関連する仕様文書とID。
+      placeholder: "docs/architecture.md"
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#12"
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      description: 確認可能な完了条件（試験一致、ビット一致・許容差、確保数維持）。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: 任意。

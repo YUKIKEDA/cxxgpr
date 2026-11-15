@@ -1,0 +1,16 @@
+---
+description: アロケーションゼロ、OpenMP 決定的畳み込み、Eigen 運用の原則
+alwaysApply: false
+globs: "include/**/*.hpp,src/**/*.cpp,tests/**/*.cpp,benchmarks/**/*.cpp"
+---
+
+# 性能・メモリ・並列規約
+
+- **ホットパス新規確保ゼロ**：ワークスペース確保後の `MLL + grad` 1 評価、およびウォームアップ後の `predict_into` / `predict_with_into` では新規ヒープ確保を行わない（`tests/support/allocation_audit.hpp` + `EIGEN_RUNTIME_NO_MALLOC` で検証・ラチェット管理）。
+- **OpenMP 並列と決定性**：
+  - `EIGEN_DONT_PARALLELIZE` を内部定義し、OpenMP ループ内側と Eigen 内部の二重スレッド化を防ぐ。
+  - 並列作業中に共有バッファへ書いたり、OpenMP 並列領域内で確保したりしない（事前確保済みワークスペースまたはスレッド別スクラッチを事前分配）。
+  - $\langle W, \partial K / \partial \theta \rangle_F$ などの総和は列並列計算後に列番号昇順など固定順で畳み込み（reduction 順序の揺らぎによる最適化軌道変化を防ぐ）、スレッド数を変えても逐次実行とビット一致させる。
+- **下三角評価の原則**：対称 Gram 行列と勾配は `uplo = Lower` だけを計算・走査し、無用な 2 倍計算を避ける。
+- **供給二乗距離の性能契約**：同じ $n, d$・カーネル・精度の座標モデル（`Cached`）より遅く・多く確保してはならない（`DES-10`）。
+- 測定なしで複雑な近似・キャッシュを追加しない。効果は `benchmarks/`（Google Benchmark）で同じ環境・交互計測により確かめる。

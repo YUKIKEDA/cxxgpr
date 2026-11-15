@@ -1,0 +1,15 @@
+---
+description: 不正な状態を表現できなくする型設計
+alwaysApply: false
+globs: "**/*.hpp,**/*.cpp"
+---
+
+# 型設計
+
+実行時検査で防ぐ前に、型によって不正状態そのものを書けなくする。
+
+- **未学習と学習済みの型分離**：`Gpr`（トレーナー）は `predict` / `loo_predict` / `save` を持たず、`FittedGpr` だけが持つ。`NotFitted` というエラー種は置かない。同様に前処理も `UnfittedInputTransform` / `FittedInputTransform` を型で分ける。
+- **選択と状態**：排他的な設定に `bool` と `std::optional` を並べて「両方指定で失敗」にしない。`enum class` または `std::variant`（例：`JitterPolicy`、`PrecisionPolicy`、`KernelExp`）を使う。
+- **距離供給の型表現**：`DistanceKernel<DistanceOnly>` と `DistanceKernel<WithPoints>`、およびスロット識別型を分け、他カーネルのスロット混用や座標なしモデルの誤用を検出する。
+- **区間の閉じた不変条件**：正値ハイパーパラメータの閉／開区間 `Interval` は `lo < hi`・非負有限を `create` で保証し、設定後に破綻させない。
+- **失敗しない関数に `expected` を付けない**：失敗経路を持たないクエリ getter（`n()`, `d()`, `noise_variance()` 等）は直接値を返す。

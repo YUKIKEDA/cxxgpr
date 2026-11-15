@@ -1,0 +1,15 @@
+---
+description: C++23 公開 API の契約（std::expected、const fit、例外なし、列優先、決定性）
+alwaysApply: false
+globs: "include/**/*.hpp,src/**/*.cpp"
+---
+
+# 公開 API 契約
+
+詳細契約は [docs/design.md](../../docs/design.md) を正本とし、全モジュールで次の原則を守る。
+
+- **エラーと例外**：例外を API 境界へ送出せず、`[[nodiscard]] std::expected<T, GprError>`（返却値がない場合は `std::expected<void, GprError>`）で失敗を値として返す。外部ライブラリ由来の例外が内部で起き得る場合も境界で捕捉し `GprError` へ写像する。
+- **不変性**：`Gpr::fit(...)` と `Gpr::factor(...)` は `const` メンバ関数とし、成功時は値所有の `FittedGpr<O, P, K>` を返し、失敗時は `*this`（および外部出力引数）を変更しない。
+- **生成ルール**：失敗しないオブジェクト（`Gpr`、`Lbfgs`、`StandardizeInput` 等）は通常のコンストラクタで構築し、検証で失敗し得る型（`RbfKernel`、`GaussianLikelihood`、`Interval` 等）は `static std::expected<T, GprError> create(...)` ファクトリを提供する（コンストラクタを非公開にし不正値構築を防ぐ）。
+- **メモリ配置**：行列引数は一貫して列優先（column-major）の `std::span<const double>`（`x`, `n_rows`, `n_cols`）を受ける。
+- **決定性**：`sample`、`with_restarts`、`FastSimulatedAnnealing` は組み込み `Xoshiro256++` + SplitMix64 初期化を用い、固定シードで OS・実行回数に依らず同じ乱数列を生成する。
