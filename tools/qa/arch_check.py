@@ -18,8 +18,8 @@ BACKTICK_MOD_RE = re.compile(r"`([a-z_]+)`")
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+([<"])([^>"]+)[>"]')
 CXXGPR_INCLUDE_RE = re.compile(r"^cxxgpr/([a-z_]+)/")
 
-EIGEN_MODULES = frozenset({"linalg", "workspace", "gpr"})
-OPENMP_MODULES = frozenset({"linalg", "workspace", "gpr"})
+EIGEN_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
+OPENMP_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
 JSON_MODULES = frozenset({"persist"})
 
 

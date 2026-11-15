@@ -18,24 +18,24 @@
 | `REQ-12` | 永続化・乱数・独立検証 | [design.md#L22](../design.md#L22) | — | — |
 | `DES-01` | 型設計・生成契約・公開境界 | [design.md#L28](../design.md#L28) | — | — |
 | `DES-02` | エラー型 `GprError` と入力検査契約 | [design.md#L42](../design.md#L42) | — | — |
-| `DES-03` | 線形代数バックエンド（Eigen + OpenMP） | [design.md#L76](../design.md#L76) | `tests/core/build_info_test.cpp` | — |
-| `DES-04` | 観測ノイズ `GaussianLikelihood` と `JitterPolicy` | [design.md#L85](../design.md#L85) | — | — |
-| `DES-05` | 精度ポリシーと混合精度反復改良（IR） | [design.md#L97](../design.md#L97) | — | — |
-| `DES-06` | `KernelSpec`（宣言層）と `CompiledKernel<T>`（実行層） | [design.md#L122](../design.md#L122) | — | — |
-| `DES-07` | 全 10 種組込みカーネル葉の数理定義と区間 | [design.md#L131](../design.md#L131) | — | — |
-| `DES-08` | ユーザー定義カーネル拡張 `KernelTerm<T>` | [design.md#L152](../design.md#L152) | — | — |
-| `DES-09` | 距離キャッシュ方針（`DistanceCachePolicy`） | [design.md#L179](../design.md#L179) | — | — |
-| `DES-10` | 供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel<C>`） | [design.md#L186](../design.md#L186) | — | — |
-| `DES-11` | 増分更新対応（`LeafCache` と `USES_CHANGE_INDICES`） | [design.md#L199](../design.md#L199) | — | — |
-| `DES-12` | 指数評価バックエンド `KernelExp` | [design.md#L206](../design.md#L206) | — | — |
-| `DES-13` | MLL と解析勾配の単一パス算法（`keep_plan`） | [design.md#L217](../design.md#L217) | — | — |
-| `DES-14` | 解析ヘッセ行列（`HessianScratch`） | [design.md#L238](../design.md#L238) | — | — |
-| `DES-15` | `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先 | [design.md#L249](../design.md#L249) | — | — |
-| `DES-16` | 推論 API・共分散・標本抽出・LOO | [design.md#L254](../design.md#L254) | — | — |
-| `DES-17` | ワークスペース構造とライフサイクル | [design.md#L270](../design.md#L270) | — | — |
-| `DES-18` | 前処理クラス階層（`cxxgpr::transform`） | [design.md#L288](../design.md#L288) | — | — |
-| `DES-19` | 自前最適化器群（`cxxgpr::optimizer`） | [design.md#L295](../design.md#L295) | — | — |
-| `DES-20` | 決定的乱数（`Xoshiro256++`）とスレッド不変 OpenMP 並列 | [design.md#L308](../design.md#L308) | — | — |
+| `DES-03` | 線形代数バックエンド（Eigen + OpenMP） | [design.md#L77](../design.md#L77) | `tests/core/build_info_test.cpp` | — |
+| `DES-04` | 観測ノイズ `GaussianLikelihood` と `JitterPolicy` | [design.md#L86](../design.md#L86) | — | — |
+| `DES-05` | 精度ポリシーと混合精度反復改良（IR） | [design.md#L98](../design.md#L98) | — | — |
+| `DES-06` | `KernelSpec`（宣言層）と `CompiledKernel<T>`（実行層） | [design.md#L126](../design.md#L126) | — | — |
+| `DES-07` | 全 10 種組込みカーネル葉の数理定義と区間 | [design.md#L135](../design.md#L135) | — | — |
+| `DES-08` | ユーザー定義カーネル拡張 `KernelTerm<T>` | [design.md#L156](../design.md#L156) | — | — |
+| `DES-09` | 距離キャッシュ方針（`DistanceCachePolicy`） | [design.md#L182](../design.md#L182) | — | — |
+| `DES-10` | 供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel<C>`） | [design.md#L189](../design.md#L189) | — | — |
+| `DES-11` | 増分更新対応（`LeafCache` と `USES_CHANGE_INDICES`） | [design.md#L202](../design.md#L202) | — | — |
+| `DES-12` | 指数評価バックエンド `KernelExp` | [design.md#L209](../design.md#L209) | — | — |
+| `DES-13` | MLL と解析勾配の単一パス算法（`keep_plan`） | [design.md#L220](../design.md#L220) | — | — |
+| `DES-14` | 解析ヘッセ行列（`HessianScratch`） | [design.md#L241](../design.md#L241) | — | — |
+| `DES-15` | `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先 | [design.md#L252](../design.md#L252) | — | — |
+| `DES-16` | 推論 API・共分散・標本抽出・LOO | [design.md#L257](../design.md#L257) | — | — |
+| `DES-17` | ワークスペース構造とライフサイクル | [design.md#L273](../design.md#L273) | — | — |
+| `DES-18` | 前処理クラス階層（`cxxgpr::transform`） | [design.md#L291](../design.md#L291) | — | — |
+| `DES-19` | 自前最適化器群（`cxxgpr::optimizer`） | [design.md#L298](../design.md#L298) | — | — |
+| `DES-20` | 決定的乱数（`Xoshiro256++`）とスレッド不変 OpenMP 並列 | [design.md#L311](../design.md#L311) | — | — |
 | `FMT-01` | ディレクトリ構成とバージョン契約 | [persist-format.md#L7](../persist-format.md#L7) | — | — |
 | `FMT-02` | 原子的書き込みと入力信頼境界 | [persist-format.md#L18](../persist-format.md#L18) | — | — |
 | `FMT-03` | `config.json` スキーマ | [persist-format.md#L28](../persist-format.md#L28) | — | — |
@@ -43,7 +43,7 @@
 | `FMT-05` | `save` / `save_with_factor` と `f64` 因子 `mmap` 読込 | [persist-format.md#L73](../persist-format.md#L73) | — | — |
 | `FMT-06` | カスタム拡張登録と `PersistRegistry` | [persist-format.md#L85](../persist-format.md#L85) | — | — |
 | `FMT-07` | 供給二乗距離モデルの永続化（`LoadedDistanceGpr<C>`） | [persist-format.md#L95](../persist-format.md#L95) | — | — |
-| `FMT-08` | エラー種別・外部ツール互換マッピング | [persist-format.md#L114](../persist-format.md#L114) | — | — |
+| `FMT-08` | エラー種別・外部ツール互換マッピング | [persist-format.md#L121](../persist-format.md#L121) | — | — |
 | `QA-01` | 追跡 | [quality-plan.md#L11](quality-plan.md#L11) | — | — |
 | `QA-02` | 検証記録 | [quality-plan.md#L20](quality-plan.md#L20) | — | — |
 | `QA-03` | 基準結果（hexfloat ベースライン） | [quality-plan.md#L24](quality-plan.md#L24) | — | — |

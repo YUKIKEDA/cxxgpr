@@ -18,13 +18,20 @@ flowchart LR
   M02 --> M1["M1 Core/Precision/Linalg/Transform"]
   M1 --> M2A["M2-A Kernels/Leaves/Composed"]
   M1 --> M2B["M2-B DistanceKernel/Slots"]
-  M1 --> M2C["M2-C KernelExp/Custom/LeafCache"]
-  M2A --> M3A["M3-A Exact MLL/Grad/Hessian/LOO"]
+  M1 --> M2C["M2-C KernelExp/Custom KernelTerm"]
+  M1 --> M2D["M2-D DistanceCachePolicy & Packed Cache"]
+  M2A --> M2E["M2-E LeafCache & OpenMP Parallel"]
+  M2C --> M2E
+  M2A --> M3A["M3-A Workspaces/MLL/Grad"]
   M2B --> M3A
-  M2C --> M3A
-  M3A --> M4A["M4-A Optimizers & Restarts"]
-  M3A --> M4B["M4-B MixedPrecision IR & Gpr/FittedGpr"]
-  M3A --> M4C["M4-C Persist JSON/Safetensors/mmap"]
+  M2D --> M3A
+  M2E --> M3A
+  M3A --> M3B["M3-B HessianScratch & CholeskyBuffer"]
+  M3A --> M3C["M3-C LOO & Predict/Cov/Sample"]
+  M3B --> M4A["M4-A Optimizers & Restarts"]
+  M3B --> M4B["M4-B MixedPrecision IR & Gpr/FittedGpr"]
+  M3C --> M4B
+  M3C --> M4C["M4-C Persist JSON/Safetensors/mmap"]
   M4A --> M5["M5 Validation & Benchmarks"]
   M4B --> M5
   M4C --> M5

@@ -22,6 +22,7 @@ flowchart TB
   CORE --> XFM
   CORE --> KERN
   PREC --> KERN
+  LIN --> KERN
   CORE --> WS
   PREC --> WS
   LIN --> WS
@@ -36,8 +37,11 @@ flowchart TB
   OPT --> GPR
   CORE --> PER
   PREC --> PER
+  LIN --> PER
   XFM --> PER
   KERN --> PER
+  WS --> PER
+  OPT --> PER
   GPR --> PER
 ```
 
@@ -53,11 +57,11 @@ flowchart TB
 | `precision` | `core` | 精度ポリシータグと反復改良収束判定 |
 | `linalg` | `core`, `precision` | Eigen 密行列 Cholesky・三角行列求解・Jitter ループ・OpenMP 補助 |
 | `transform` | `core` | 入力と目的変数の学習前・学習後変換およびカスタム基底 |
-| `kernel` | `core`, `precision` | カーネル仕様・コンパイル木・供給二乗距離スロット・`KernelTerm<T>` |
+| `kernel` | `core`, `precision`, `linalg` | カーネル仕様・コンパイル木・供給二乗距離スロット・`KernelTerm<T>` |
 | `workspace` | `core`, `precision`, `linalg`, `kernel` | 事前確保バッファ、距離キャッシュ、ヘッセ行列スクラッチ、葉キャッシュ |
 | `optimizer` | `core` | 目的関数インターフェース、logit 変換、各種最適化ソルバ |
 | `gpr` | `core`, `precision`, `linalg`, `transform`, `kernel`, `workspace`, `optimizer` | Exact GPR の学習・推論・NLML・勾配・ヘッセ・LOO 統合 |
-| `persist` | `core`, `precision`, `transform`, `kernel`, `gpr` | モデルのシリアライズ・デシリアライズと `mmap` 読込 |
+| `persist` | `core`, `precision`, `linalg`, `transform`, `kernel`, `workspace`, `optimizer`, `gpr` | モデルのシリアライズ・デシリアライズと `mmap` 読込 |
 
 ## 第三者ヘッダ隔離境界
 
@@ -69,7 +73,7 @@ flowchart TB
    - `<omp.h>` を `#include` してはならない。
    - `detail/` 配下の非公開ヘッダや `src/` 側ファイルを `#include` してはならない。
 2. **内部実装層（`src/<module>/**`）**：
-   - `linalg`・`workspace`・`gpr` の実装 `.cpp`（および `src/` 内のプライベートヘッダ）のみが Eigen（`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`）および OpenMP を使用できる（ただし依存版文字列採取のため `src/core/build_info.cpp` に限り `<Eigen/Core>` のバージョンマクロ参照を許可する）。
-   - `persist` の実装 `.cpp` のみが `<nlohmann/json.hpp>` を使用できる（ただし来歴 JSON 出力のため `src/core/build_info.cpp` に限り許可する）。
+   - `linalg`・`kernel`・`workspace`・`gpr` の実装 `.cpp`（および `src/` 内のプライベートヘッダ）のみが Eigen（`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`）および OpenMP を使用できる（ただし `QA-06` の依存版文字列採取のため `src/core/build_info.cpp` に限り `<Eigen/Core>` のバージョンマクロ参照を許可する）。
+   - `persist` の実装 `.cpp`（および `src/persist/` 内のプライベートヘッダ）のみが `<nlohmann/json.hpp>` を使用できる（ただし `QA-06` の来歴 JSON 出力のため `src/core/build_info.cpp` に限り許可する）。
 3. **試験・ベンチマーク（`tests/**`・`benchmarks/**`）**：
    - `tests/` は製品公開 API をテストすることを原則とし、独自参照実装のため `Eigen` が必要な場合は独立テストまたは `tests/support/` に限定する。`tests/support/allocation_audit.hpp` 等は内部仕様 `EIGEN_RUNTIME_NO_MALLOC` と連携してヒープ確保監査を行う。

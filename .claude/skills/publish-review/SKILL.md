@@ -1,55 +1,59 @@
 ---
 name: publish-review
 description: >-
-  Read gprx's README, comparison docs, and public rustdoc before crates.io
-  publish. Use when preparing a release, running cargo package, running
-  cargo publish --dry-run, or checking that a stranger can understand the
-  crate from the docs alone.
+  Review cxxgpr's bilingual READMEs, public C++23 headers, Doxygen comments,
+  and third-party license notices before release tagging or packaging.
 ---
 
 # Publish review
 
-Run this on the commit that will be published, before `cargo package` and before `cargo publish --dry-run`. A single failure stops those commands. Do not run `cargo publish` without `--dry-run`.
+Run this review before creating a release tag or distributing a package (`REL-2`), and whenever `include/cxxgpr/**/*.hpp`, `README.md`, `README.ja.md`, or `THIRD_PARTY_NOTICES.md` changes for public release.
+
+Require all repository quality gates to pass before approving:
+
+- `just gate`
+- `just format-check`
+- `just lint`
+- `just lint-python`
+- `just skills-check`
+- `just trace-check`
+- `just arch-check`
+- `just doc-check`
+- `just results-check`
 
 ## Read first
 
-- `.cursor/rules/reader-docs.mdc`
-- `.cursor/rules/rust-docs.mdc`
-- Japanese pages in `.cursor/rules/reader-docs.mdc` are inspected by Gemini with `.agents/skills/natural-japanese/SKILL.md` (score mode). The agent running this review does not score or rewrite them.
+- `.cursor/rules/publish.mdc`
+- `.cursor/rules/dev-docs.mdc`
+- `.cursor/rules/api-contract.mdc`
+- `docs/quality/quality-plan.md` (`QA-09`)
+- `.agents/skills/natural-japanese/SKILL.md` (`score` mode, for inspecting Japanese prose in `README.ja.md`)
 
-Do not restate those files here. Judge the pages against them.
+Do not restate those rules here; audit every public surface directly against them.
 
-## Pages
+## Surfaces to audit
 
-- `README.md` and `README.ja.md`
-- `docs/comparison.md` and `docs/comparison.ja.md`
-- Crate-level `//!` and every `///` on an item an external crate can name with default features
-- `Cargo.toml` `description`
+1. `README.md` (English entry point) and `README.ja.md` (Japanese entry point)
+2. `LICENSE` (Apache-2.0) and `THIRD_PARTY_NOTICES.md` against `vcpkg.json` and `CMakeLists.txt`
+3. Every public header under `include/cxxgpr/**/*.hpp` and its Doxygen comments
 
-`gprx::internals` is outside the contract. `docs/design.md`, `docs/roadmap.md`, and `docs/adr/` are the decision record. Do not fail them for keeping issue and phase IDs.
+Internal planning and specification documents (`docs/design.md`, `docs/persist-format.md`, `docs/roadmap.md`, `docs/adr/`, `docs/quality/`) and `detail` implementation symbols are excluded from the external-reader restrictions below.
 
-## How to judge
+## Fail criteria
 
-Read as someone who has the crate page and has not opened this repository's issue tracker.
+Read as a C++23 library user who only sees the repository landing page, build files, and `include/cxxgpr/` headers without opening the issue tracker. Reject the release review if any of the following holds:
 
-Fail a page when any of these is true:
-
-- A sentence is false against the code or `Cargo.toml`. The same wording in the README, the Japanese README, the crate rustdoc, and `description` does not make it true (reader-docs Accuracy)
-- A comparison number has no committed source and the sentence does not say where it came from
-- The README is not in the order reader-docs requires, or the English and Japanese sections diverge
-- The README still contains the comparison tables or figures
-- A reader must know an issue number, a pull request number, a phase ID, a roadmap ID, `roadmap.md`, `AGENTS.md`, `.cursor/rules`, Grill, or a developer `just` recipe. The comparison doc may keep the `just` commands that regenerate its figures, and no other `just` recipe
-- Public rustdoc fails `.cursor/rules/rust-docs.mdc`, including Examples and Errors. `missing_docs` passing does not clear this
-- The first example is not pasteable after the documented dependency, or it uses `unwrap`
-- Column-major layout, `fit` consuming the trainer, `GaussianLikelihood`, the 0.x break policy, or `internals` being outside the contract is missing before the first example
-- The opening omits a default-feature model family (`Gpr`, `Sgpr`, `Svgp`), or a public item is described by a dependency the caller does not import
-- The README links relatively at a file that is not in the package, or embeds an image
-- Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, Gemini reports that the page is a gloss of the English, or a bare word in reader-docs Japanese vocabulary remains
-- A public item an external crate can name with default features has no rustdoc usage example (`.cursor/rules/rust-docs.mdc`). `internals` is outside that list. An item is what a `use` path names (reader-docs "Public API usage"); methods and variants are judged on their rustdoc. The saved-file schema stays in the persist-format doc
-- A README how-to block does not run as a doctest, uses `unwrap`, or shows more than one task, or a task in the reader-docs task list has no how-to
-- A README how-to block is a reference: it lists every method of a type instead of showing its task
-- A docs.rs link in the README does not resolve to a page of the items of the version being published. Check each against `cargo doc --no-deps` of the commit being published
+1. **Third-party or internal header leakage**: Any file under `include/cxxgpr/**/*.hpp` includes `<Eigen/...>`, `<nlohmann/...>`, `<omp.h>`, any `detail/` header, or any path under `src/`.
+2. **Internal tracking IDs or local paths exposed**: Public Doxygen comments in `include/cxxgpr/**/*.hpp`, `README.md`, or `README.ja.md` contain internal spec/roadmap/issue identifiers (`REQ-*`, `DES-*`, `FMT-*`, `QA-*`, `M*-*`, `#N`) or hardcoded local filesystem paths (`C:\Users\...`, `/home/...`).
+3. **Missing or non-English Doxygen comments**: Any public type, enum, enumerator, or function under `include/cxxgpr/**/*.hpp` lacks English `///` or `/**` Doxygen documentation, or contains non-English prose in header comments.
+4. **API contract inaccuracy**: Documentation contradicts actual API signatures or contracts, including:
+   - Column-major (`column-major`) storage layout for matrices passed via `std::span<const double>` (`x`, `n_rows`, `n_cols`);
+   - `Gpr::fit(...)` and `Gpr::factor(...)` being `const` member functions returning `[[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError>` without throwing exceptions across the API boundary and leaving `*this` and output arguments unchanged on failure;
+   - `GaussianLikelihood` noise variance handling and `0.x` pre-1.0 API stability expectations.
+5. **Out-of-scope claims**: `README.md`, `README.ja.md`, or public headers claim support for out-of-scope models (`Sgpr`, `Svgp`, `OnlineGpr`) or unimplemented features as if shipped.
+6. **Bilingual README drift or unnatural Japanese**: `README.md` and `README.ja.md` diverge in section structure, supported scope, build steps, or code examples; relative links are broken; unverified benchmark/accuracy claims appear without source attribution; or `README.ja.md` fails the `natural-japanese` skill criteria.
+7. **License and notice mismatch**: `LICENSE` is not Apache-2.0, `THIRD_PARTY_NOTICES.md` disagrees with the pinned versions or licenses in `vcpkg.json`, or `EIGEN_MPL2_ONLY` enforcement is omitted.
 
 ## Report
 
-For each failure, name the file, the text, the rule it breaks, and why a new reader stops. Fix the failures in the publish issue. When none remain, the package build and the dry-run are allowed.
+For each failure, state the file path, the offending text, the violated rule, and why an external C++ user is misled or blocked. Fix all findings before tagging or packaging a release.

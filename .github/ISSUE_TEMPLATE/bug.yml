@@ -14,8 +14,8 @@ body:
     id: roadmap
     attributes:
       label: Roadmap ID
-      description: docs/roadmap.md の行ID。例 - M2-1
-      placeholder: M2-1
+      description: docs/roadmap.md の行ID。例 - M2-A
+      placeholder: M2-A
     validations:
       required: true
   - type: input
