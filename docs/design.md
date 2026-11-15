@@ -67,7 +67,8 @@
 | `PersistFailed` | I/O・JSON 構成・テンソル検査・誤モデル・ID 未登録等の永続化エラー（`PersistErrorKind`） |
 | `UnsupportedPersistVersion` | `format_version != 1`（`found`, `supported`） |
 
-**検査順序の原則**：空入力（`EmptyInput`）→ 積オーバーフロー（`SizeOverflow`）→ 長さ・次元一致（`LengthMismatch` / `DimensionMismatch`）→ 非有限入力（`NonFiniteInput`）の順で検査する。IEEE 754 非正規化数（subnormal）は有効な有限値としてそのまま処理し、MXCSR / FPCR を操作しない。
+**検査順序の原則**：複数の検証違反が同時に成立する場合は、次の厳密な全順序で最初に該当した `GprError` を返す。
+`EmptyInput`（$n = 0$、座標モデルの $d = 0$、空スライス・空配列）→ `SizeOverflow`（`n_rows * n_cols` や $n(n+1)/2$ 等の `std::size_t` 乗算オーバーフロー）→ `LengthMismatch`（`x.size() != n_rows * n_cols`、`y.size() != n_rows`、出力スライス長不一致）→ `DimensionMismatch`（学習済みモデル・前処理変換・ARD カーネルが期待する特徴量次元 $d$ と入力列数 `n_cols` の不一致）→ `NonFiniteInput`（`x`, `y`, $\theta$ 等の `NaN` / `±∞`）→ `InsufficientData`（処理に必要な最小サンプル数未満）。IEEE 754 非正規化数（subnormal）は有効な有限値としてそのまま処理し、MXCSR / FPCR を操作しない。
 
 ---
 
@@ -108,12 +109,15 @@ struct MixedPrecision  { using Storage = float;  using Refine = double; using Re
 
 - **`DoublePrecision`**：格納・演算・推論すべて `double`（既定）。
 - **`SinglePrecision`**：格納・演算・推論すべて `float`。反復改良なし。
-- **`MixedPrecision<R>`**：`K + σn²I + jI` を `float`（$u_f \approx 1.19 \times 10^{-7}$）で分解・格納し、予測ウェイト $\alpha$ のみを `double`（$u_r \approx 2.22 \times 10^{-16}$）残差で反復改良する。学習ループ中の MLL・解析勾配は `float` 因子をそのまま使用する。
+- **`MixedPrecision<R>`**：`K + σn²I + jI` を `float`（$u_f \approx 1.19 \times 10^{-7}$）で分解・格納し、予測ウェイト $\alpha$ のみを `double` 残差で反復改良する。学習ループ中の MLL・解析勾配は `float` 因子をそのまま使用する。
+- **記号定義**：$B = A + (\sigma_n^2 + j)I$（採用された jitter $j \ge 0$ を含む訓練系行列）、$w_k = \alpha^{(k)} \in \mathbb{R}^n$（第 $k$ 反復の重み近似解）、$b = y \in \mathbb{R}^n$（変換後目的変数ベクトル）、$r_k = b - B w_k$（`double` で評価した残差ベクトル）、$\|\cdot\|_\infty$ はベクトルの最大絶対値ノルム（$\|v\|_\infty = \max_i |v_i|$）および行列の最大行絶対値和ノルム（$\|B\|_\infty = \max_i \sum_j |B_{ij}|$）、$\varepsilon_{64} = 2^{-52} \approx 2.220446049250313 \times 10^{-16}$（`std::numeric_limits<double>::epsilon()`、`gprx` の `f64::EPSILON` と同一）とし、停止閾値を $\text{tol} = 10 \cdot n \cdot \varepsilon_{64}$ と定める。
 - **反復改良パラメータと停止・フォールバック契約**（内部定数固定）：
   - 最大補正反復回数：`10`
-  - 収束条件：$\|r_k\|_\infty / (\|B\|_\infty \|w_k\|_\infty + \|b\|_\infty) < 10 \cdot n \cdot \varepsilon_{64}$
+  - 収束条件：分母 $\|B\|_\infty \|w_k\|_\infty + \|b\|_\infty > 0$ かつ $\|r_k\|_\infty / (\|B\|_\infty \|w_k\|_\infty + \|b\|_\infty) < 10 \cdot n \cdot \varepsilon_{64}$
   - 停滞打切り：残差ノルム比 $\|r_k\|_\infty / \|r_{k-1}\|_\infty > 0.9$ が 2 回連続
-  - `PromoteStorage` の収束後検証：`PromoteStorage` で収束した $\alpha$ について真の `f64` カーネル行列との残差を列ブロック評価（$n \times n$ `f64` 行列は保持しない）で 1 回検査し、$\kappa(A) u_{32}$ 過大等により基準を外れた場合、または IR 自体が不収束／停滞した場合は **エラーを返さず、同じ $(A + jI)$ 系を `f64` Cholesky 分解で解き直す**。IR 不収束時に jitter を増やさない。
+  - `PromoteStorage` の収束後検証：`PromoteStorage` で収束判定を満たした解 $w$ に対し、真の `f64` カーネル行列による系 $B_{\text{f64}} = K_{\text{f64}}(X) + (\sigma_n^2 + j)I$ を列ブロック（ブロック幅 32、$n \times n$ の `f64` 行列全体は保持しない）で評価して真の残差 $r_{\text{f64}} = b - B_{\text{f64}} w$ と行和ノルム $\|B_{\text{f64}}\|_\infty$ を 1 回計算し、反復停止条件と同一の相対残差式
+    $$\|r_{\text{f64}}\|_\infty / \left(\|B_{\text{f64}}\|_\infty \|w\|_\infty + \|b\|_\infty\right) < 10 \cdot n \cdot \varepsilon_{64}$$
+    （かつ分母 $> 0$）を満たすか検査する。満たさない場合（$\kappa(A) u_{32}$ 過大等）、または IR が最大反復回数・停滞判定で収束しなかった場合は、**エラーを返さず、同じ $(A + (\sigma_n^2 + j)I)$ 系を `f64` Cholesky 分解で解き直す**。IR 不収束時に jitter を増やさない。
 
 ---
 
@@ -147,11 +151,11 @@ struct MixedPrecision  { using Storage = float;  using Refine = double; using Re
 | `LinearKernel` | $\sigma^2 x^\top x'$ | $[\log \sigma^2]$ |
 | `WhiteKernel` | $\sigma_w^2 \delta_{x, x'}$（学習 Gram 対角のみ非零、交差共分散 0） | $[\log \sigma_w^2]$ |
 
-1 階微分 $\partial K / \partial \theta_i$ および 2 階微分 $\partial^2 K / \partial \theta_i \partial \theta_j$（`hess` / `hess_points`）を各葉について解析的に実装する。`Matern(Ard)` の $r=0$（対角および重複点）における 1・2 階微分は連続極限値 $0$ とし、ゼロ除算を起こさない。
+1 階微分 $\partial K / \partial \theta_i$ および 2 階微分 $\partial^2 K / \partial \theta_i \partial \theta_j$（二乗距離入力用 `hess` / 座標葉用 `hess_points`）を各葉について解析的に実装する。`Matern(Ard)` の $r=0$（対角および重複点）における 1・2 階微分は連続極限値 $0$ とし、ゼロ除算を起こさない。
 
 ### DES-08 ユーザー定義カーネル拡張 `KernelTerm<T>`
 
-ユーザーカスタム葉は仮想基底クラス `KernelTerm<float>` および `KernelTerm<double>`（共通クラステンプレートまたは型消去ラッパ経由）で受け入れる。Eigen 型を公開ヘッダに出さないため、距離・座標・出力行列は軽量ビュー `MatrixRef<T>` / `MatrixMut<T>`（`data()`, `rows()`, `cols()`, `col_stride()`）として渡す。
+ユーザーカスタム葉は二乗距離行列 `dist`（または距離ブロック）から評価される葉インターフェースとして定義し、仮想基底クラス `KernelTerm<float>` および `KernelTerm<double>`（共通クラステンプレートまたは型消去ラッパ経由）で受け入れる。座標モデルで使用する場合も `cxxgpr` 側が座標 `x` から二乗距離行列 `dist` を計算（または距離キャッシュから供給）したうえで `apply`・`apply_cross`・`grad`・`hess` を呼び出す。Eigen 型を公開ヘッダに出さないため、距離・出力行列は軽量ビュー `MatrixRef<T>` / `MatrixMut<T>`（`data()`, `rows()`, `cols()`, `col_stride()`）として渡す。
 
 ```cpp
 // Public concept / interface signature overview (no Eigen headers)
@@ -168,7 +172,6 @@ public:
     virtual std::expected<void, GprError> fill_diag(std::span<T> out) const = 0;
     virtual std::expected<void, GprError> grad(MatrixRef<T> dist, MatrixMut<T> d_k, std::size_t param_idx, Triangle uplo) const = 0;
     virtual std::expected<void, GprError> hess(MatrixRef<T> dist, MatrixMut<T> d2_k, std::size_t i, std::size_t j, Triangle uplo) const = 0;
-    virtual std::expected<void, GprError> hess_points(MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i, std::size_t j, Triangle uplo) const = 0;
     virtual std::string_view persist_id() const { return ""; }
     virtual std::expected<std::string, GprError> persist_state_json() const;
 };
@@ -180,7 +183,7 @@ public:
 
 `DistanceCachePolicy::{Cached, Uncached}` を実行時列挙で保持する（既定は `Cached`）。
 
-- **`Cached`**：`fit`/`factor` 開始時に訓練点間の二乗ユークリッド距離（密な $n \times n$ 列優先行列、等方葉用）および次元ごと生差分二乗 $(\Delta x_d)^2$（列ごとに下三角を詰めた $d \cdot n(n+1)/2$ 配列、ARD 葉用）を 1 度だけ計算・保持し、最適化中の全反復で再利用する。コンパイル済みカーネルが距離・ARD キャッシュを読まない（例：単独 `Constant` / `Linear` / `White`）場合は一切確保しない。
+- **`Cached`**：`fit`/`factor` 開始時に訓練点間の二乗ユークリッド距離（密な $n \times n$ 列優先行列、等方葉用）および次元ごと生差分二乗 $(\Delta x_m)^2$（長さ $\text{dims} \cdot n(n+1)/2$ の連続配列上で次元 $m \in [0, \text{dims})$ のブロックを順に並べ、各ブロック内の下三角要素 $(i \ge j)$ を列優先パック位置 $p = jn - j(j-1)/2 + (i - j)$、すなわちフラット添字 `m * (n*(n+1)/2) + p` に格納、ARD 葉用）を 1 度だけ計算・保持し、最適化中の全反復で再利用する。コンパイル済みカーネルが距離・ARD キャッシュを読まない（例：単独 `Constant` / `Linear` / `White`）場合は一切確保しない。
 - **`Uncached`**：これら中間距離バッファを確保せず、各評価時に座標 `X` から直接計算する。
 
 ### DES-10 供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel<C>`）
@@ -244,7 +247,7 @@ H_{ij} = \frac{\partial^2 \mathcal{L}}{\partial \theta_i \partial \theta_j}
   + \alpha^\top A_i A^{-1} A_j \alpha
 $$
 
-ここで $A_i = \partial A / \partial \theta_i$、$S_i = L^{-1} A_i L^{-\top}$、$v_i = L^{-1} A_i \alpha$ とおくと、$\operatorname{Tr}(A^{-1} A_i A^{-1} A_j) = \langle S_i, S_j \rangle_F$、$\alpha^\top A_i A^{-1} A_j \alpha = v_i^\top v_j$ が得られ、全体 $O(p n^3 + p^2 n^2)$ で解析ヘッセ行列（行優先 / 対称 $p \times p$）を算出する。`HessianScratch`（$p$ 枚の $n\times n$ 行列 $S_i$ と $n \times p$ 行列 $v$）は `WorkspaceCore` 内で最初の呼び出しまで空とし、2 回目以降は再利用して追加確保しない。
+ここで $A_i = \partial A / \partial \theta_i$、$S_i = L^{-1} A_i L^{-\top}$、$v_i = L^{-1} A_i \alpha$ とおくと、$\operatorname{Tr}(A^{-1} A_i A^{-1} A_j) = \langle S_i, S_j \rangle_F$、$\alpha^\top A_i A^{-1} A_j \alpha = v_i^\top v_j$ が得られ、全体 $O(p n^3 + p^2 n^2)$ で解析ヘッセ行列（列優先 / 対称 $p \times p$）を算出する。`HessianScratch`（$p$ 枚の $n\times n$ 行列 $S_i$ と $n \times p$ 行列 $v$）は `WorkspaceCore` 内で最初の呼び出しまで空とし、2 回目以降は再利用して追加確保しない。
 
 ### DES-15 `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先
 
@@ -259,12 +262,12 @@ $$
 - `predict_into(..., Prediction<Refine>& out)` / `predict_with_into(...)`：同じクエリ形状 $(m, d)$ での 2 回目以降の呼び出しで、`QueryWorkspace` と出力 `mean`/`variance` 容量を再利用し **新規確保 0** を達成する。
 - `predict_covariance` / `predict_covariance_with`：完全な事後共分散行列 $\Sigma_* = K_{**} - (L^{-1} K_*)^\top (L^{-1} K_*)$（列優先 $m \times m$、`Observation` 時は対角に $\sigma_n^2$ 加算）を返す。
 - `sample(xs, n_rows, n_cols, n_draws, seed)` / `sample_with`：対称化した事後共分散に数値微小ジッタを伴う Cholesky 因子を求め、`Xoshiro256++` + Box–Muller 標準正規乱数から $n_{\text{draws}}$ 本（長さ $n_{\text{draws}} \cdot m$）の事後標本を生成する。
-- `loo_predict()` / `loo_predict_with()`（GPML §5.4.2 閉じた式）：$Q_{ii} = (A^{-1})_{ii} = \|L^{-1} e_i\|_2^2$ から次を求め、目的変数逆変換を適用する：
+- `loo_predict()` / `loo_predict_with()`（GPML §5.4.2 閉じた式）：$Q_{ii} = (A^{-1})_{ii} = \|L^{-1} e_i\|_2^2$ および `TargetTransform` 適用後の訓練目的変数 $\tilde{y}_i$ を用い、変換後空間で $\tilde{\mu}_{\text{LOO}, i}$ と $\tilde{\sigma}_{\text{LOO}, i}^2$ を計算した**後に** `TargetTransform` の閉じたアフィン逆変換（平均の逆変換および分散の $s^2$ 倍）を適用して元尺度の `Prediction<T>` を返す：
 
 $$
-\mu_{\text{LOO}, i} = y_i - \frac{\alpha_i}{Q_{ii}}, \qquad
-\sigma_{\text{LOO}, \text{obs}, i}^2 = \frac{1}{Q_{ii}}, \qquad
-\sigma_{\text{LOO}, \text{lat}, i}^2 = \max\!\left(0,\; \frac{1}{Q_{ii}} - \sigma_n^2\right)
+\tilde{\mu}_{\text{LOO}, i} = \tilde{y}_i - \frac{\alpha_i}{Q_{ii}}, \qquad
+\tilde{\sigma}_{\text{LOO}, \text{obs}, i}^2 = \frac{1}{Q_{ii}}, \qquad
+\tilde{\sigma}_{\text{LOO}, \text{lat}, i}^2 = \max\!\left(0,\; \frac{1}{Q_{ii}} - \sigma_n^2\right)
 $$
 
 ### DES-17 ワークスペース構造とライフサイクル

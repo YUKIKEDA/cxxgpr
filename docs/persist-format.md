@@ -56,7 +56,7 @@
 
 ## FMT-04 `model.safetensors` レイアウトと列優先契約
 
-[safetensors](https://github.com/huggingface/safetensors) 仕様に準拠する（先頭 8 バイト小エンディアン `uint64` ヘッダ長 + JSON ヘッダ + 生テンソルデータ列。`__metadata__` は出力しない）。**すべての行列は列優先（Column-major / Fortran 順）** で格納し、`(i, j)` 要素の位置は `j * n + i` とする。データ部は 8 バイト境界に整列されていなければならない。
+[safetensors](https://github.com/huggingface/safetensors) 仕様に準拠する（先頭 8 バイト小エンディアン `uint64` ヘッダ長 + JSON ヘッダ + 生テンソルデータ列。`__metadata__` は出力しない）。**2 次元行列（`x`, `l`）は列優先（Column-major / Fortran 順）** で格納し、`(i, j)` 要素の位置は `j * n + i` とする。一方、`d2.<k>` の ARD スロットは次元ブロック連結（`dims` 軸が外側、`n(n+1)/2` パック軸が内側ストライド 1）で格納する。データ部は 8 バイト境界に整列されていなければならない。
 
 | テンソル名 | 形状 `shape` | `dtype` | 保存条件 | 内容 |
 |---|---|---|---|---|
@@ -64,9 +64,9 @@
 | `y` | `[n]` | `F64` | 常に | 目的変数変換前の学習用 `y` |
 | `l` | `[n, n]` | `double`→`F64`、`single`/`mixed`→`F32` | `has_factor == true` | $A + (\sigma_n^2 + j)I$ の下三角 Cholesky 因子 $L$（対角より上は `0` 詰め） |
 | `alpha` | `[n]` | `single`→`F32`、`double`/`mixed`→`F64` | `has_factor == true` | 解重み $\alpha$（変換後 `y` 空間の値） |
-| `d2.<k>` | スカラー `[n(n+1)/2]` / ARD `[dims, n(n+1)/2]` | `single`→`F32`、`double`/`mixed`→`F64` | 距離モデル時のみ | スロット `k` の修復済み下三角二乗距離（`FMT-07`） |
+| `d2.<k>` | スカラー `[n(n+1)/2]` / ARD `[dims, n(n+1)/2]` | `single`→`F32`、`double`/`mixed`→`F64` | 距離モデル時のみ | スロット `k` の修復済み下三角二乗距離。スカラーはパック位置 $p = jn - j(j-1)/2 + (i-j)$、ARD は次元 $m \in [0, \text{dims})$ ごとに長さ $\text{packed\_len} = n(n+1)/2$ のパック配列を順に連結（フラット添字 `m * packed_len + p`）（`FMT-07`） |
 
-NumPy から直接検証・利用する際は `flat.reshape(meta["shape"], order="F")` により元の行列形状へビット一致復元できる。
+NumPy から直接検証・利用する際は、`x` や `l` 等の列優先行列は `flat.reshape(meta["shape"], order="F")`、ARD 距離テンソル `d2.<k>` は `flat.reshape(meta["shape"], order="C")` により元の形状・意味へビット一致復元できる（1 次元テンソル `y`, `alpha`, スカラー `d2.<k>` はいずれでも同一）。
 
 ---
 
@@ -105,7 +105,14 @@ NumPy から直接検証・利用する際は `flat.reshape(meta["shape"], order
 
 - `points` は `"distance_only"` または `"with_points"`。`DistanceKernel<WithPoints>` を `DistanceOnly` ローダー（またはその逆・座標用 `LoadedGpr`）で読んだ場合はすべて `PersistFailed(WrongModel)` を返す。
 - `slots` は `DistanceKernel::slots()` の順（深さ優先初回出現順）に一致しなければならない。`distance_only` カーネルが座標依存葉（`rbf_ard`, `linear` 等）を含む場合も `PersistFailed(Config)` で拒否する。
-- **`d2.<k>` 格納規則**：列 $j$ の下三角要素 `j..n`（対角含む）を列順に詰めて格納する（スカラー長 $n(n+1)/2$、ARD 長 $\text{dims} \cdot n(n+1)/2$）。`MixedPrecision` モデルでは保持している高精度な `double` 側の `d²` を書き出し、読込時に `float` へ再丸めする。
+- **`d2.<k>` 格納規則**：スカラー距離スロットでは列 $j$ の下三角要素 `j..n`（対角含む）を列順に詰めて格納し（パック位置 $p = jn - j(j-1)/2 + (i - j)$、長さ $n(n+1)/2$）、ARD 距離スロット（ヘッダ `shape` は `[dims, n(n+1)/2]`）では次元 $m \in [0, \text{dims})$ ごとに長さ $\text{packed\_len} = n(n+1)/2$ の下三角パック配列を順に連結して格納する（フラット添字 `m * packed_len + p`、内側軸が `packed_len`）。したがって NumPy 等で読む際は、2 次元列優先行列（`x`, `l`）は `flat.reshape(meta["shape"], order="F")`、距離テンソル `d2.<k>` は `flat.reshape(meta["shape"], order="C")` で解釈する（1 次元のスカラー `d2.<k>` は `F`/`C` いずれでも同一）。`MixedPrecision` モデルでは保持している高精度な `double` 側の `d²` を書き出し、読込時に `float` へ再丸めする。
+
+```python
+# Python / NumPy 最小読込規則（x, l は列優先、ARD の d2.<k> は次元ブロック連結）
+def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarray":
+    order = "C" if name.startswith("d2.") else "F"
+    return flat.reshape(shape, order=order)
+```
 - **新スロット発行**：読込時にモデル専用の新規スロットハンドル列を生成するため、保存前の `ScalarDistance` / `ArdDistance` は読込後のモデルへ使えない。利用者は `slots()` / `to_kernel()` から新スロットを取得して予測供給を作成する。
 - 読込時、`d2.<k>` の有限性・非負性・対角ゼロ・形状をすべて検証し、違反時は `InvalidDistance` を返す。
 
