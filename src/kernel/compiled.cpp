@@ -6,8 +6,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <utility>
 #include <variant>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace cxxgpr {
 
@@ -88,58 +93,59 @@ template <KernelScalarConcept T>
     return {};
 }
 
-template <KernelScalarConcept T>
-void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept {
+template <KernelScalarConcept T, typename Op>
+void apply_binary_op(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo, Op&& op) noexcept {
     const std::size_t n_rows = dst.rows();
     const std::size_t n_cols = dst.cols();
+    const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
     if (uplo == Triangle::Lower && n_rows == n_cols) {
-        for (std::size_t col = 0; col < n_cols; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n_cols >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = col; row < n_rows; ++row) {
-                dst(row, col) += src(row, col);
+                op(dst(row, col), src(row, col));
             }
         }
         return;
     }
     if (uplo == Triangle::Upper && n_rows == n_cols) {
-        for (std::size_t col = 0; col < n_cols; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n_cols >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = 0; row <= col; ++row) {
-                dst(row, col) += src(row, col);
+                op(dst(row, col), src(row, col));
             }
         }
         return;
     }
-    for (std::size_t col = 0; col < n_cols; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n_cols >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
         for (std::size_t row = 0; row < n_rows; ++row) {
-            dst(row, col) += src(row, col);
+            op(dst(row, col), src(row, col));
         }
     }
 }
 
 template <KernelScalarConcept T>
+void copy_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept {
+    apply_binary_op(dst, src, uplo, [](T& d, T s) { d = s; });
+}
+
+template <KernelScalarConcept T>
+void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept {
+    apply_binary_op(dst, src, uplo, [](T& d, T s) { d += s; });
+}
+
+template <KernelScalarConcept T>
 void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept {
-    const std::size_t n_rows = dst.rows();
-    const std::size_t n_cols = dst.cols();
-    if (uplo == Triangle::Lower && n_rows == n_cols) {
-        for (std::size_t col = 0; col < n_cols; ++col) {
-            for (std::size_t row = col; row < n_rows; ++row) {
-                dst(row, col) *= src(row, col);
-            }
-        }
-        return;
-    }
-    if (uplo == Triangle::Upper && n_rows == n_cols) {
-        for (std::size_t col = 0; col < n_cols; ++col) {
-            for (std::size_t row = 0; row <= col; ++row) {
-                dst(row, col) *= src(row, col);
-            }
-        }
-        return;
-    }
-    for (std::size_t col = 0; col < n_cols; ++col) {
-        for (std::size_t row = 0; row < n_rows; ++row) {
-            dst(row, col) *= src(row, col);
-        }
-    }
+    apply_binary_op(dst, src, uplo, [](T& d, T s) { d *= s; });
 }
 
 } // namespace
@@ -499,31 +505,82 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     }
 
     [[nodiscard]] std::expected<void, GprError>
+    eval_leaf_at(std::size_t leaf_idx, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
+                 NestedBuffers<T>& nested, std::size_t level_idx,
+                 const DistanceCache<T>* cache = nullptr) const {
+        const KernelLeaf& kl = leaves[leaf_idx];
+        if (cache != nullptr) {
+            if (cache->has_dist() && leaf_reads_distances(kl)) {
+                return detail::leaf_apply_dist(kl, cache->dist_view(), out, uplo, exp_mode);
+            }
+            if (cache->has_ard() && leaf_needs_ard(kl)) {
+                return detail::leaf_apply_ard_packed(kl, cached_ls[leaf_idx], cache->ard_packed(),
+                                                     x.rows(), out, uplo, exp_mode);
+            }
+        }
+        if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+            if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows()); !ok.has_value()) {
+                return ok;
+            }
+            auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+            fill_square_sq_dist(x, dist_buf);
+            return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
+        }
+        return detail::leaf_apply_points(kl, x, out, uplo, exp_mode);
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    eval_combine_term(const Term& term, std::span<const MatrixRef<T>> leaf_grams, MatrixMut<T> out,
+                      Triangle uplo, NestedBuffers<T>& nested, std::size_t level_idx) const {
+        if (const auto* leaf = std::get_if<LeafRef>(&term)) {
+            copy_into(out, leaf_grams[leaf->leaf_idx], uplo);
+            return {};
+        }
+        const bool is_sum = std::holds_alternative<SumTerm>(term);
+        const auto& terms =
+            is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+        if (terms.empty()) {
+            return std::unexpected(
+                GprError::unsupported_kernel_operation("composite kernel has no terms"));
+        }
+        if (auto res = eval_combine_term(terms[0], leaf_grams, out, uplo, nested, level_idx);
+            !res.has_value()) {
+            return res;
+        }
+        for (std::size_t k = 1; k < terms.size(); ++k) {
+            if (const auto* leaf = std::get_if<LeafRef>(&terms[k])) {
+                if (is_sum) {
+                    add_into(out, leaf_grams[leaf->leaf_idx], uplo);
+                } else {
+                    mul_into(out, leaf_grams[leaf->leaf_idx], uplo);
+                }
+            } else {
+                if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols());
+                    !ok.has_value()) {
+                    return ok;
+                }
+                auto buf = nested.level(level_idx, out.rows(), out.cols());
+                if (auto res =
+                        eval_combine_term(terms[k], leaf_grams, buf, uplo, nested, level_idx + 1U);
+                    !res.has_value()) {
+                    return res;
+                }
+                if (is_sum) {
+                    add_into(out, buf.as_ref(), uplo);
+                } else {
+                    mul_into(out, buf.as_ref(), uplo);
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
     eval_term_points(const Term& term, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
                      MatrixMut<T> scratch, NestedBuffers<T>& nested, std::size_t level_idx,
                      const DistanceCache<T>* cache = nullptr) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            const KernelLeaf& kl = leaves[leaf->leaf_idx];
-            if (cache != nullptr) {
-                if (cache->has_dist() && leaf_reads_distances(kl)) {
-                    return detail::leaf_apply_dist(kl, cache->dist_view(), out, uplo, exp_mode);
-                }
-                if (cache->has_ard() && leaf_needs_ard(kl)) {
-                    return detail::leaf_apply_ard_packed(kl, cached_ls[leaf->leaf_idx],
-                                                         cache->ard_packed(), x.rows(), out, uplo,
-                                                         exp_mode);
-                }
-            }
-            if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
-                if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
-                    !ok.has_value()) {
-                    return ok;
-                }
-                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
-                fill_square_sq_dist(x, dist_buf);
-                return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
-            }
-            return detail::leaf_apply_points(kl, x, out, uplo, exp_mode);
+            return eval_leaf_at(leaf->leaf_idx, x, out, uplo, nested, level_idx, cache);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -1552,6 +1609,71 @@ CompiledKernel<T>::hess_cached(MatrixRef<T> x, const DistanceCache<T>& cache, Ma
                                MatrixMut<T> scratch_b, MatrixMut<T> scratch_c) const {
     auto nested = make_nested_buffers(d2_k.rows(), d2_k.cols());
     return hess_cached(x, cache, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested);
+}
+
+template <KernelScalarConcept T>
+std::expected<std::size_t, GprError>
+CompiledKernel<T>::leaf_index_for_param(std::size_t param_idx) const {
+    if (param_idx >= impl_->bindings.size()) {
+        return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+    }
+    return impl_->bindings[param_idx].leaf_id;
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_leaf_points(std::size_t leaf_idx, MatrixRef<T> x, MatrixMut<T> out,
+                                     Triangle uplo, NestedBuffers<T>& nested) const {
+    if (leaf_idx >= impl_->leaves.size()) {
+        return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
+    }
+    return impl_->eval_leaf_at(leaf_idx, x, out, uplo, nested, 0);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_leaf_cached(std::size_t leaf_idx, MatrixRef<T> x,
+                                     const DistanceCache<T>& cache, MatrixMut<T> out, Triangle uplo,
+                                     NestedBuffers<T>& nested) const {
+    if (leaf_idx >= impl_->leaves.size()) {
+        return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
+    }
+    if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value()) {
+        return cs;
+    }
+    return impl_->eval_leaf_at(leaf_idx, x, out, uplo, nested, 0, &cache);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::combine_from_leaf_grams(std::span<const MatrixRef<T>> leaf_grams,
+                                           MatrixMut<T> out, Triangle uplo, MatrixMut<T> scratch,
+                                           NestedBuffers<T>& nested) const {
+    if (out.is_empty() || out.data() == nullptr) {
+        return std::unexpected(GprError::empty_input());
+    }
+    if (out.rows() != out.cols()) {
+        return std::unexpected(GprError::length_mismatch("output matrix must be square"));
+    }
+    if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
+        return sc;
+    }
+    if (leaf_grams.size() != impl_->leaves.size()) {
+        return std::unexpected(
+            GprError::length_mismatch("leaf Gram count does not match compiled kernel leaves"));
+    }
+    for (const auto& gram : leaf_grams) {
+        if (gram.rows() != out.rows() || gram.cols() != out.cols() || gram.data() == nullptr) {
+            return std::unexpected(GprError::length_mismatch("leaf Gram matrix shape mismatch"));
+        }
+    }
+    return impl_->eval_combine_term(impl_->root, leaf_grams, out, uplo, nested, 0);
 }
 
 template class NestedBuffers<double>;

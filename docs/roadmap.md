@@ -2,9 +2,9 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M2-E
+**今**：M3-A
 
-目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）・組込みカーネル 10 葉（M2-A）・供給二乗距離（M2-B）・`KernelExp` とユーザー定義 `KernelTerm<T>`（M2-C）・`DistanceCachePolicy` と生 $(\Delta x_d)^2$ 詰め下三角キャッシュ（M2-D）を完了し、`LeafCache` 増分更新（M2-E）へ進む段階である。
+目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）および M2 カーネル・距離・キャッシュ基盤（M2-A〜M2-E）を完了し、ワークスペースと MLL・解析勾配（M3-A）へ進む段階である。
 
 品質管理の仕組み（追跡・基準結果・結果変更記録・来歴・プラットフォーム認定）は [品質保証計画](quality/quality-plan.md)、ID と試験の対応は [追跡表](quality/traceability.md) にある。
 
@@ -62,7 +62,7 @@ flowchart LR
 | M2-B | Feat | 供給二乗距離：`ScalarDistance`・`ArdDistance`・`DistanceKernel<DistanceOnly \| WithPoints>`・`tidy` | #16 | Done |
 | M2-C | Feat | `KernelExp::{Accurate, FastApprox}`・ユーザー定義 `KernelTerm<T>` | #18 | Done |
 | M2-D | Feat | `DistanceCachePolicy::{Cached, Uncached}` と生 `(Δx_d)²` 詰め下三角キャッシュ | #20 | Done |
-| M2-E | Feat | `LeafCache` 増分更新、`USES_CHANGE_INDICES` ビット一致検証、OpenMP 列並列化 | - | Todo |
+| M2-E | Feat | `LeafCache` 増分更新、`USES_CHANGE_INDICES` ビット一致検証、OpenMP 列並列化 | #22 | Done |
 
 ## M3：Exact GPR 数理演算・ワークスペース・推論
 

@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-01, REQ-02, REQ-04, REQ-08, DES-11
+
+#include "cxxgpr/workspace/workspace.hpp"
+
+#include "allocation_audit.hpp"
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace {
+
+struct DummyNormalOptimizer {};
+
+struct DummyFsaOptimizer {
+    static constexpr bool uses_change_indices = true;
+};
+
+static_assert(!cxxgpr::optimizer_uses_change_indices_v<DummyNormalOptimizer>);
+static_assert(cxxgpr::optimizer_uses_change_indices_v<DummyFsaOptimizer>);
+
+TEST(LeafCacheTest, RequireChangeIndicesAndBitwiseChecksRejectInvalidSteps) {
+    EXPECT_EQ(cxxgpr::require_change_indices(std::span<const std::size_t>{}, 3U).error().code(),
+              cxxgpr::GprErrorCode::IndexOutOfRange);
+
+    const std::array<std::size_t, 1> oob{3U};
+    EXPECT_EQ(cxxgpr::require_change_indices(oob, 3U).error().code(),
+              cxxgpr::GprErrorCode::IndexOutOfRange);
+
+    const std::array<std::size_t, 2> dup{1U, 1U};
+    EXPECT_EQ(cxxgpr::require_change_indices(dup, 3U).error().code(),
+              cxxgpr::GprErrorCode::IndexOutOfRange);
+
+    const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value()) +
+                      cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.1).value());
+    const auto compiled = spec.compile<double>();
+
+    cxxgpr::LeafCache<double> cache;
+    ASSERT_TRUE(cache.resize(compiled.num_leaves(), 3U).has_value());
+
+    const std::array<std::size_t, 2> init_idx{0U, 1U};
+    const std::array<double, 3> p0{0.0, -2.0, 0.5};
+    ASSERT_TRUE(cache.prepare_step(p0, init_idx, compiled, 3U).has_value());
+    ASSERT_TRUE(cache.record(p0).has_value());
+    EXPECT_TRUE(cache.is_primed());
+
+    // Undeclared change in index 1 (must be rejected).
+    const std::array<std::size_t, 1> only_0{0U};
+    const std::array<double, 3> p_bad{0.2, -2.0 + 1e-12, 0.5};
+    EXPECT_EQ(cache.prepare_step(p_bad, only_0, compiled, 3U).error().code(),
+              cxxgpr::GprErrorCode::IndexOutOfRange);
+
+    // +0.0 -> -0.0 bit difference at undeclared index 0 must also be detected.
+    const std::array<std::size_t, 1> only_1{1U};
+    const std::array<double, 3> p_neg_zero{-0.0, -1.5, 0.5};
+    EXPECT_EQ(cache.prepare_step(p_neg_zero, only_1, compiled, 3U).error().code(),
+              cxxgpr::GprErrorCode::IndexOutOfRange);
+
+    // Changing only likelihood index 2 leaves all kernel leaves clean.
+    const std::array<std::size_t, 1> only_2{2U};
+    const std::array<double, 3> p_lik{0.0, -2.0, 0.9};
+    ASSERT_TRUE(cache.prepare_step(p_lik, only_2, compiled, 3U).has_value());
+    EXPECT_FALSE(cache.is_leaf_dirty(0U));
+    EXPECT_FALSE(cache.is_leaf_dirty(1U));
+
+    // Changing only leaf 0 (+0.0 -> -0.0) marks only leaf 0 dirty.
+    const std::array<double, 3> p_neg_zero_only0{-0.0, -2.0, 0.5};
+    ASSERT_TRUE(cache.prepare_step(p_neg_zero_only0, only_0, compiled, 3U).has_value());
+    EXPECT_TRUE(cache.is_leaf_dirty(0U));
+    EXPECT_FALSE(cache.is_leaf_dirty(1U));
+}
+
+TEST(LeafCacheTest, IncrementalEvaluationMatchesFullAndSkipsCleanLeavesZeroAlloc) {
+    const std::vector<double> x_data{0.0, 0.5, 1.3, -0.4, 0.7, 1.1};
+    const cxxgpr::MatrixRef<double> x(x_data.data(), 3, 2, 3);
+
+    const auto spec =
+        (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.5).value()) *
+         cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())) +
+        (cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array<double, 2>{0.9, 1.4},
+                                                            cxxgpr::MaternNu::ThreeHalves)
+                                .value()) *
+         cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.8, 2.2).value())) +
+        cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+
+    auto compiled = spec.compile<double>();
+    const std::size_t n_kernel = compiled.num_params();
+    const std::size_t total_params = n_kernel + 1U; // +1 for likelihood param
+
+    auto dcache = cxxgpr::DistanceCache<double>::build(x, compiled.reads_distances(),
+                                                       compiled.needs_ard_sq_diff(),
+                                                       cxxgpr::DistanceCachePolicy::Cached);
+    ASSERT_TRUE(dcache.has_value());
+    if (!dcache.has_value()) {
+        return;
+    }
+
+    constexpr std::size_t n = 3U;
+    std::vector<double> theta(total_params, 0.0);
+    ASSERT_TRUE(compiled.get_params(std::span<double>(theta.data(), n_kernel)).has_value());
+    theta[n_kernel] = -1.0;
+
+    std::vector<std::size_t> all_idx(total_params);
+    for (std::size_t k = 0; k < total_params; ++k) {
+        all_idx[k] = k;
+    }
+
+    cxxgpr::LeafCache<double> lcache;
+    std::vector<double> out_inc(n * n);
+    std::vector<double> out_ref(n * n);
+    std::vector<double> scratch(n * n);
+    auto nested = compiled.make_nested_buffers(n, n);
+
+    // Step 1: full initial evaluation.
+    ASSERT_TRUE(lcache
+                    .evaluate_incremental(
+                        compiled, x, &(*dcache), theta, all_idx, total_params,
+                        cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested)
+                    .has_value());
+    ASSERT_TRUE(compiled
+                    .apply_points(x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n),
+                                  cxxgpr::Triangle::Lower,
+                                  cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested)
+                    .has_value());
+    for (std::size_t col = 0; col < n; ++col) {
+        for (std::size_t row = col; row < n; ++row) {
+            EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+        }
+    }
+
+    // Step 2: change only leaf 1 (RbfKernel param at index 1) under NoAllocationScope.
+    theta[1] = std::log(1.8);
+    ASSERT_TRUE(compiled.set_params(std::span<const double>(theta.data(), n_kernel)).has_value());
+    const std::array<std::size_t, 1> step2_idx{1U};
+    {
+        const cxxgpr::test_support::NoAllocationScope audit;
+        ASSERT_TRUE(
+            lcache
+                .evaluate_incremental(compiled, x, &(*dcache), theta, step2_idx, total_params,
+                                      cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n),
+                                      cxxgpr::Triangle::Lower,
+                                      cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested)
+                .has_value());
+    }
+    ASSERT_TRUE(compiled
+                    .apply_points(x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n),
+                                  cxxgpr::Triangle::Lower,
+                                  cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested)
+                    .has_value());
+    for (std::size_t col = 0; col < n; ++col) {
+        for (std::size_t row = col; row < n; ++row) {
+            EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+        }
+    }
+
+    // Step 3: prove clean leaves are truly reused by poisoning leaf 0 (Constant) and updating only
+    // likelihood param.
+    lcache.leaf_gram_mut(0U)(0, 0) = 99.0;
+    lcache.leaf_gram_mut(0U)(1, 0) = 99.0;
+    theta[n_kernel] = -0.5;
+    const std::array<std::size_t, 1> lik_only{n_kernel};
+    {
+        const cxxgpr::test_support::NoAllocationScope audit;
+        ASSERT_TRUE(lcache
+                        .evaluate_incremental(compiled, x, nullptr, theta, lik_only, total_params,
+                                              cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n),
+                                              cxxgpr::Triangle::Lower,
+                                              cxxgpr::MatrixMut<double>(scratch.data(), n, n, n),
+                                              nested)
+                        .has_value());
+    }
+    EXPECT_GT(out_inc[0], 50.0);
+}
+
+TEST(LeafCacheTest, OpenMpColumnParallelEvaluationIsBitwiseDeterministic) {
+    constexpr std::size_t n = 72U;
+    constexpr std::size_t d = 3U;
+    std::vector<double> x_data(n * d);
+    for (std::size_t col = 0; col < d; ++col) {
+        for (std::size_t row = 0; row < n; ++row) {
+            x_data[(col * n) + row] =
+                (0.15 * static_cast<double>(row)) - (0.3 * static_cast<double>(col));
+        }
+    }
+    const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+    const auto spec =
+        (cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.2).value()) *
+         cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array<double, 3>{0.8, 1.3, 1.7},
+                                                            cxxgpr::MaternNu::FiveHalves)
+                                .value())) +
+        cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.9, 2.5).value());
+    auto compiled = spec.compile<double>();
+    compiled.set_kernel_exp(cxxgpr::KernelExp::FastApprox);
+
+    auto run_all = [&](int threads) {
+#ifdef _OPENMP
+        omp_set_num_threads(threads);
+#else
+        (void)threads;
+#endif
+        auto dcache = cxxgpr::DistanceCache<double>::build(x, compiled.reads_distances(),
+                                                           compiled.needs_ard_sq_diff(),
+                                                           cxxgpr::DistanceCachePolicy::Cached);
+        EXPECT_TRUE(dcache.has_value());
+
+        std::vector<double> k_pts(n * n, 0.0);
+        std::vector<double> k_cached(n * n, 0.0);
+        std::vector<double> g_cached(n * n, 0.0);
+        std::vector<double> k_cross(n * n, 0.0);
+        std::vector<double> sc_a(n * n, 0.0);
+        std::vector<double> sc_b(n * n, 0.0);
+        auto nested = compiled.make_nested_buffers(n, n);
+
+        EXPECT_TRUE(compiled
+                        .apply_points(x, cxxgpr::MatrixMut<double>(k_pts.data(), n, n, n),
+                                      cxxgpr::Triangle::Full,
+                                      cxxgpr::MatrixMut<double>(sc_a.data(), n, n, n), nested)
+                        .has_value());
+        EXPECT_TRUE(compiled
+                        .apply_cached(x, *dcache,
+                                      cxxgpr::MatrixMut<double>(k_cached.data(), n, n, n),
+                                      cxxgpr::Triangle::Lower,
+                                      cxxgpr::MatrixMut<double>(sc_a.data(), n, n, n), nested)
+                        .has_value());
+        EXPECT_TRUE(compiled
+                        .grad_cached(x, *dcache,
+                                     cxxgpr::MatrixMut<double>(g_cached.data(), n, n, n), 1U,
+                                     cxxgpr::Triangle::Lower,
+                                     cxxgpr::MatrixMut<double>(sc_a.data(), n, n, n),
+                                     cxxgpr::MatrixMut<double>(sc_b.data(), n, n, n), nested)
+                        .has_value());
+        EXPECT_TRUE(compiled
+                        .apply_cross_points(x, x,
+                                            cxxgpr::MatrixMut<double>(k_cross.data(), n, n, n),
+                                            cxxgpr::MatrixMut<double>(sc_a.data(), n, n, n), nested)
+                        .has_value());
+
+        std::vector<double> combined;
+        combined.insert(combined.end(), dcache->dist_view().data(),
+                        dcache->dist_view().data() + (n * n));
+        combined.insert(combined.end(), dcache->ard_packed().begin(), dcache->ard_packed().end());
+        combined.insert(combined.end(), k_pts.begin(), k_pts.end());
+        combined.insert(combined.end(), k_cached.begin(), k_cached.end());
+        combined.insert(combined.end(), g_cached.begin(), g_cached.end());
+        combined.insert(combined.end(), k_cross.begin(), k_cross.end());
+        return combined;
+    };
+
+#ifdef _OPENMP
+    const int saved_threads = omp_get_max_threads();
+#endif
+    const auto r1 = run_all(1);
+    const auto r4 = run_all(4);
+#ifdef _OPENMP
+    omp_set_num_threads(saved_threads);
+#endif
+
+    ASSERT_EQ(r1.size(), r4.size());
+    for (std::size_t idx = 0; idx < r1.size(); ++idx) {
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r4[idx]))
+            << "idx=" << idx;
+    }
+}
+
+} // namespace

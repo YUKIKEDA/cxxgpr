@@ -236,6 +236,26 @@ public:
                 std::size_t j, Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
                 MatrixMut<T> scratch_c) const;
 
+    /// Returns the leaf index in [0, num_leaves()) owning flattened parameter param_idx.
+    [[nodiscard]] std::expected<std::size_t, GprError>
+    leaf_index_for_param(std::size_t param_idx) const;
+
+    /// Evaluates a single leaf kernel from point coordinates x into out.
+    [[nodiscard]] std::expected<void, GprError> apply_leaf_points(std::size_t leaf_idx,
+                                                                  MatrixRef<T> x, MatrixMut<T> out,
+                                                                  Triangle uplo,
+                                                                  NestedBuffers<T>& nested) const;
+
+    /// Evaluates a single leaf kernel using precomputed distance and ARD caches when populated.
+    [[nodiscard]] std::expected<void, GprError>
+    apply_leaf_cached(std::size_t leaf_idx, MatrixRef<T> x, const DistanceCache<T>& cache,
+                      MatrixMut<T> out, Triangle uplo, NestedBuffers<T>& nested) const;
+
+    /// Reconstructs the composite Gram matrix from precomputed per-leaf Gram matrices.
+    [[nodiscard]] std::expected<void, GprError>
+    combine_from_leaf_grams(std::span<const MatrixRef<T>> leaf_grams, MatrixMut<T> out,
+                            Triangle uplo, MatrixMut<T> scratch, NestedBuffers<T>& nested) const;
+
 private:
     struct Impl;
 
