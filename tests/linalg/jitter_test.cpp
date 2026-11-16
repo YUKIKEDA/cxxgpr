@@ -43,7 +43,10 @@ TEST(JitterPolicyTest, FixedPositiveYieldsSingleRetry) {
 
     auto sched = policy.retry_schedule();
     const auto first = sched.next();
-    ASSERT_TRUE(first.has_value());
+    if (!first.has_value()) {
+        ADD_FAILURE() << "expected first jitter";
+        return;
+    }
     EXPECT_DOUBLE_EQ(*first, 1e-6);
     EXPECT_FALSE(sched.next().has_value());
 }

@@ -156,10 +156,12 @@ jobs:
         if: matrix.preset == 'linux-debug' && needs.changes.outputs.format == 'true'
         run: |
           pipx install clang-tidy==21.1.1
+          OMP_INC=$(mktemp -d)
+          cp "$(g++-14 -print-file-name=include/omp.h)" "$OMP_INC/"
           if [ -n "$CI_CPP_FILES" ]; then
-            clang-tidy -p out/build/linux-debug --quiet $CI_CPP_FILES
+            clang-tidy -p out/build/linux-debug --extra-arg="-isystem$OMP_INC" --quiet $CI_CPP_FILES
           else
-            clang-tidy -p out/build/linux-debug --quiet $(git ls-files 'src/*.cpp' 'tests/*.cpp' 'qa/*.cpp')
+            clang-tidy -p out/build/linux-debug --extra-arg="-isystem$OMP_INC" --quiet $(git ls-files 'src/*.cpp' 'tests/*.cpp' 'qa/*.cpp')
           fi
 
   benchmark:

@@ -166,8 +166,12 @@ TEST(CholeskyLinalgTest, JitterEscalatesOnIndefiniteAndPreservesFactorJitter) {
         *exhaust_policy, CholeskyStage::Fit);
     ASSERT_FALSE(exhaust_res.has_value());
     EXPECT_EQ(exhaust_res.error().code(), GprErrorCode::CholeskyFailed);
-    ASSERT_TRUE(exhaust_res.error().jitter().has_value());
-    EXPECT_DOUBLE_EQ(*exhaust_res.error().jitter(), 1e-6 * 10.0 * 10.0);
+    const auto err_jitter = exhaust_res.error().jitter();
+    if (!err_jitter.has_value()) {
+        ADD_FAILURE() << "expected CholeskyFailed jitter";
+        return;
+    }
+    EXPECT_DOUBLE_EQ(*err_jitter, 1e-6 * 10.0 * 10.0);
     EXPECT_EQ(exhaust_res.error().matrix_size(), 2U);
     EXPECT_EQ(exhaust_res.error().cholesky_stage(), CholeskyStage::Fit);
     (void)singular;
