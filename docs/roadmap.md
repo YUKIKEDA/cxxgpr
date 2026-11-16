@@ -2,9 +2,9 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M4-A
+**今**：M4-B
 
-目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）・M2 カーネル基盤（M2-A〜M2-E）・ワークスペースと MLL・解析勾配（M3-A）・解析ヘッセ行列とメモリ/速度優先統合（M3-B）・LOO 推論と予測・サンプリング（M3-C）を完了し、自前最適化器群（M4-A）へ進む段階である。
+目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）・M2 カーネル基盤（M2-A〜M2-E）・ワークスペースと MLL・解析勾配（M3-A）・解析ヘッセ行列とメモリ/速度優先統合（M3-B）・LOO 推論と予測・サンプリング（M3-C）・自前最適化器群（M4-A）を完了し、公開モデル統合（M4-B）へ進む段階である。
 
 品質管理の仕組み（追跡・基準結果・結果変更記録・来歴・プラットフォーム認定）は [品質保証計画](quality/quality-plan.md)、ID と試験の対応は [追跡表](quality/traceability.md) にある。
 
@@ -76,7 +76,7 @@ flowchart LR
 
 | ID | 種類 | 題 | Issue | 状態 |
 |---|---|---|---|---|
-| M4-A | Feat | 自前最適化器：`Lbfgs`（Moré–Thuente）・`NelderMead`・`TrustRegion`（Steihaug–Toint CG）・`FastSimulatedAnnealing`・`Fixed`・logit 変換・`with_restarts` | - | Todo |
+| M4-A | Feat | 自前最適化器：`Lbfgs`（Moré–Thuente）・`NelderMead`・`TrustRegion`（Steihaug–Toint CG）・`FastSimulatedAnnealing`・`Fixed`・logit 変換・`with_restarts` | #30 | Done |
 | M4-B | Feat | 公開モデル `Gpr<O, P, K>`・`FittedGpr<O, P, K>` 統合（`fit`/`factor`/`refit`/`into_trainer`、`MixedPrecision` 統合） | - | Todo |
 | M4-C | Feat | 永続化 `cxxgpr::persist`：`config.json` / `model.safetensors`、原子保存、`f64` mmap 読込、`PersistRegistry` | - | Todo |
 
