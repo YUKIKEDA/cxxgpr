@@ -45,6 +45,7 @@ add_library(cxxgpr STATIC
     src/core/likelihood.cpp
     src/core/rng.cpp
     src/kernel/compiled.cpp
+    src/kernel/distance.cpp
     src/kernel/leaf_eval.cpp
     src/kernel/leaves.cpp
     src/kernel/spec.cpp

@@ -111,6 +111,7 @@ private:
 
     template <KernelScalarConcept T> friend class CompiledKernel;
     friend struct KernelSpecAccess;
+    friend struct DistanceKernelAccess;
 };
 
 /// Combines two kernel specifications by addition.
