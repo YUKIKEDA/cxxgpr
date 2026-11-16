@@ -27,6 +27,43 @@ namespace {
 }
 
 template <KernelScalarConcept T>
+void fill_square_sq_dist(MatrixRef<T> x, MatrixMut<T> dist) noexcept {
+    const std::size_t n = x.rows();
+    const std::size_t d = x.cols();
+    for (std::size_t col = 0; col < n; ++col) {
+        dist(col, col) = T{0};
+        for (std::size_t row = col + 1U; row < n; ++row) {
+            const std::size_t r1 = row;
+            const std::size_t r2 = col;
+            T acc = T{0};
+            for (std::size_t k = 0; k < d; ++k) {
+                const T diff = x(r1, k) - x(r2, k);
+                acc += diff * diff;
+            }
+            dist(r1, r2) = acc;
+            dist(r2, r1) = acc;
+        }
+    }
+}
+
+template <KernelScalarConcept T>
+void fill_cross_sq_dist(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> dist) noexcept {
+    const std::size_t n1 = x1.rows();
+    const std::size_t n2 = x2.rows();
+    const std::size_t d = x1.cols();
+    for (std::size_t col = 0; col < n2; ++col) {
+        for (std::size_t row = 0; row < n1; ++row) {
+            T acc = T{0};
+            for (std::size_t k = 0; k < d; ++k) {
+                const T diff = x1(row, k) - x2(col, k);
+                acc += diff * diff;
+            }
+            dist(row, col) = acc;
+        }
+    }
+}
+
+template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError> require_scratch(MatrixRef<T> out, MatrixMut<T> scratch,
                                                             std::string_view /*label*/) {
     if (scratch.rows() != out.rows() || scratch.cols() != out.cols()) {
@@ -146,6 +183,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     Term root;
     CoordMode coord_mode = CoordMode::Either;
     std::size_t nested_depth = 0;
+    KernelExp exp_mode = KernelExp::Accurate;
 
     static std::pair<std::size_t, std::size_t> param_range(const Term& term) noexcept {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
@@ -359,7 +397,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     eval_term_dist(const Term& term, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo,
                    MatrixMut<T> scratch, NestedBuffers<T>& nested, std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_apply_dist(leaves[leaf->leaf_idx], dist, out, uplo);
+            return detail::leaf_apply_dist(leaves[leaf->leaf_idx], dist, out, uplo, exp_mode);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -410,7 +448,17 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     eval_term_points(const Term& term, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
                      MatrixMut<T> scratch, NestedBuffers<T>& nested, std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_apply_points(leaves[leaf->leaf_idx], x, out, uplo);
+            const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
+                    !ok.has_value()) {
+                    return ok;
+                }
+                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+                fill_square_sq_dist(x, dist_buf);
+                return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
+            }
+            return detail::leaf_apply_points(kl, x, out, uplo, exp_mode);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -460,7 +508,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                          MatrixMut<T> scratch, NestedBuffers<T>& nested,
                          std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_apply_cross_dist(leaves[leaf->leaf_idx], dist, out);
+            return detail::leaf_apply_cross_dist(leaves[leaf->leaf_idx], dist, out, exp_mode);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -511,7 +559,17 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                            MatrixMut<T> scratch, NestedBuffers<T>& nested,
                            std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_apply_cross_points(leaves[leaf->leaf_idx], x1, x2, out);
+            const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                if (auto ok = ensure_nested(nested, level_idx, x1.rows(), x2.rows());
+                    !ok.has_value()) {
+                    return ok;
+                }
+                auto dist_buf = nested.level(level_idx, x1.rows(), x2.rows());
+                fill_cross_sq_dist(x1, x2, dist_buf);
+                return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
+            }
+            return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -604,7 +662,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                    NestedBuffers<T>& nested, std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             return detail::leaf_grad_dist(leaves[leaf->leaf_idx], dist, d_k,
-                                          param_idx - leaf->param_begin, uplo);
+                                          param_idx - leaf->param_begin, uplo, exp_mode);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -652,8 +710,19 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                      Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
                      NestedBuffers<T>& nested, std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_grad_points(leaves[leaf->leaf_idx], x, d_k,
-                                            param_idx - leaf->param_begin, uplo);
+            const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
+                    !ok.has_value()) {
+                    return ok;
+                }
+                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+                fill_square_sq_dist(x, dist_buf);
+                return custom->template term<T>().grad(dist_buf.as_ref(), d_k,
+                                                       param_idx - leaf->param_begin, uplo);
+            }
+            return detail::leaf_grad_points(kl, x, d_k, param_idx - leaf->param_begin, uplo,
+                                            exp_mode);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -702,7 +771,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                    MatrixMut<T> scratch_c, NestedBuffers<T>& nested, std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             return detail::leaf_hess_dist(leaves[leaf->leaf_idx], dist, d2_k, i - leaf->param_begin,
-                                          j - leaf->param_begin, uplo);
+                                          j - leaf->param_begin, uplo, exp_mode);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -799,8 +868,19 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                      MatrixMut<T> scratch_c, NestedBuffers<T>& nested,
                      std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_hess_points(leaves[leaf->leaf_idx], x, d2_k, i - leaf->param_begin,
-                                            j - leaf->param_begin, uplo);
+            const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
+                    !ok.has_value()) {
+                    return ok;
+                }
+                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+                fill_square_sq_dist(x, dist_buf);
+                return custom->template term<T>().hess(
+                    dist_buf.as_ref(), d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo);
+            }
+            return detail::leaf_hess_points(kl, x, d2_k, i - leaf->param_begin,
+                                            j - leaf->param_begin, uplo, exp_mode);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -918,12 +998,24 @@ CompiledKernel<T> CompiledKernel<T>::from_spec(const KernelSpec& spec) {
     std::size_t next_param_idx = 0;
     impl->root = Impl::compile_node(spec, impl->leaves, impl->bindings, next_param_idx);
     CoordMode mode = CoordMode::Either;
+    bool has_custom_leaf = false;
     for (const auto& leaf : impl->leaves) {
         mode = combine_coord_mode(mode, detail::leaf_coord_mode(leaf));
+        if (std::holds_alternative<CustomKernel>(leaf)) {
+            has_custom_leaf = true;
+        }
     }
     impl->coord_mode = mode;
-    impl->nested_depth = Impl::compute_nested_depth(impl->root);
+    impl->nested_depth = Impl::compute_nested_depth(impl->root) + (has_custom_leaf ? 1U : 0U);
     return CompiledKernel<T>(std::move(impl));
+}
+
+template <KernelScalarConcept T> KernelExp CompiledKernel<T>::kernel_exp() const noexcept {
+    return impl_->exp_mode;
+}
+
+template <KernelScalarConcept T> void CompiledKernel<T>::set_kernel_exp(KernelExp mode) noexcept {
+    impl_->exp_mode = mode;
 }
 
 template <KernelScalarConcept T> std::size_t CompiledKernel<T>::num_params() const noexcept {

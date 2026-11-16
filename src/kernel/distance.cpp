@@ -129,11 +129,12 @@ template <KernelScalarConcept T>
     return 1.0;
 }
 
-template <KernelScalarConcept T> [[nodiscard]] T eval_matern_u_d(T u, MaternNu nu) noexcept {
+template <KernelScalarConcept T>
+[[nodiscard]] T eval_matern_u_d(T u, MaternNu nu, KernelExp exp_mode) noexcept {
     if (u <= T{0}) {
         return T{1};
     }
-    const T e = std::exp(-u);
+    const T e = eval_kernel_exp(-u, exp_mode);
     switch (nu) {
     case MaternNu::OneHalf:
         return e;
@@ -145,37 +146,108 @@ template <KernelScalarConcept T> [[nodiscard]] T eval_matern_u_d(T u, MaternNu n
     return e;
 }
 
-template <KernelScalarConcept T> [[nodiscard]] T eval_matern_grad_g1_d(T u, MaternNu nu) noexcept {
+template <KernelScalarConcept T>
+[[nodiscard]] T eval_matern_grad_g1_d(T u, MaternNu nu, KernelExp exp_mode) noexcept {
     if (u <= T{0}) {
         return T{0};
     }
-    const T e = std::exp(-u);
+    if (exp_mode == KernelExp::Accurate) {
+        const T e = std::exp(-u);
+        switch (nu) {
+        case MaternNu::OneHalf:
+            return u * e;
+        case MaternNu::ThreeHalves:
+            return (u * u) * e;
+        case MaternNu::FiveHalves:
+            return (((u * u) * (T{1} + u)) / T{3}) * e;
+        }
+        return T{0};
+    }
+    const ExpJet<T> jet = eval_kernel_exp_jet(-u, exp_mode);
     switch (nu) {
     case MaternNu::OneHalf:
-        return u * e;
+        return u * jet.d1;
     case MaternNu::ThreeHalves:
-        return (u * u) * e;
+        return u * (((T{1} + u) * jet.d1) - jet.v);
     case MaternNu::FiveHalves:
-        return (((u * u) * (T{1} + u)) / T{3}) * e;
+        return u *
+               (((T{1} + u + ((u * u) / T{3})) * jet.d1) - ((T{1} + ((T{2} * u) / T{3})) * jet.v));
     }
     return T{0};
 }
 
 template <KernelScalarConcept T>
-[[nodiscard]] T eval_matern_ard_cross_d(T u, MaternNu nu) noexcept {
+[[nodiscard]] T eval_matern_ard_cross_d(T u, MaternNu nu, KernelExp exp_mode) noexcept {
     if (u <= T{0}) {
         return T{0};
     }
-    const T e = std::exp(-u);
+    if (exp_mode == KernelExp::Accurate) {
+        const T e = std::exp(-u);
+        switch (nu) {
+        case MaternNu::OneHalf:
+            return u * (u + T{1}) * e;
+        case MaternNu::ThreeHalves:
+            return (u * u * u) * e;
+        case MaternNu::FiveHalves:
+            return ((u * u * u * u) / T{3}) * e;
+        }
+        return T{0};
+    }
+    const ExpJet<T> jet = eval_kernel_exp_jet(-u, exp_mode);
     switch (nu) {
     case MaternNu::OneHalf:
-        return u * (u + T{1}) * e;
-    case MaternNu::ThreeHalves:
-        return (u * u * u) * e;
-    case MaternNu::FiveHalves:
-        return ((u * u * u * u) / T{3}) * e;
+        return u * ((u * jet.d2) + jet.d1);
+    case MaternNu::ThreeHalves: {
+        const T d2k = ((T{1} + u) * jet.d2) - (T{2} * jet.d1);
+        const T dk = jet.v - ((T{1} + u) * jet.d1);
+        return (u * u * d2k) - (u * dk);
+    }
+    case MaternNu::FiveHalves: {
+        const T poly = T{1} + u + ((u * u) / T{3});
+        const T dpoly = T{1} + ((T{2} * u) / T{3});
+        const T d2k = (poly * jet.d2) - (T{2} * dpoly * jet.d1) + ((T{2} / T{3}) * jet.v);
+        const T dk = (dpoly * jet.v) - (poly * jet.d1);
+        return (u * u * d2k) - (u * dk);
+    }
     }
     return T{0};
+}
+
+template <KernelScalarConcept T>
+void fill_square_sq_dist(MatrixRef<T> x, MatrixMut<T> dist) noexcept {
+    const std::size_t n = x.rows();
+    const std::size_t d = x.cols();
+    for (std::size_t col = 0; col < n; ++col) {
+        dist(col, col) = T{0};
+        for (std::size_t row = col + 1U; row < n; ++row) {
+            const std::size_t r1 = row;
+            const std::size_t r2 = col;
+            T acc = T{0};
+            for (std::size_t k = 0; k < d; ++k) {
+                const T diff = x(r1, k) - x(r2, k);
+                acc += diff * diff;
+            }
+            dist(r1, r2) = acc;
+            dist(r2, r1) = acc;
+        }
+    }
+}
+
+template <KernelScalarConcept T>
+void fill_cross_sq_dist(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> dist) noexcept {
+    const std::size_t n1 = x1.rows();
+    const std::size_t n2 = x2.rows();
+    const std::size_t d = x1.cols();
+    for (std::size_t col = 0; col < n2; ++col) {
+        for (std::size_t row = 0; row < n1; ++row) {
+            T acc = T{0};
+            for (std::size_t k = 0; k < d; ++k) {
+                const T diff = x1(row, k) - x2(col, k);
+                acc += diff * diff;
+            }
+            dist(row, col) = acc;
+        }
+    }
 }
 
 } // namespace
@@ -524,6 +596,13 @@ ScalarDistance::rational_quadratic(RationalQuadraticKernel leaf) const {
                 .data = SuppliedScalarNode{.slot = id_, .leaf = leaf}}));
 }
 
+DistanceKernel<DistanceOnly> ScalarDistance::custom(CustomKernel leaf) const {
+    return DistanceKernel<DistanceOnly>(
+        std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
+            DistanceKernel<DistanceOnly>::InternalNode{
+                .data = SuppliedScalarNode{.slot = id_, .leaf = std::move(leaf)}}));
+}
+
 std::expected<ArdDistance, GprError> ArdDistance::create(std::size_t dims) {
     if (dims == 0U) {
         return std::unexpected(GprError::empty_input());
@@ -830,6 +909,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
     Term root;
     bool has_coord_points = false;
     std::size_t nested_depth = 0;
+    KernelExp exp_mode = KernelExp::Accurate;
 
     void refresh_cached_ls() {
         cached_ls.resize(leaves.size());
@@ -1129,7 +1209,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         if (std::holds_alternative<RbfArdKernel>(leaf)) {
             visit_triangle<T>(n, uplo, [&](std::size_t row, std::size_t col) {
                 const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
-                out(row, col) = std::exp(-T{0.5} * s2);
+                out(row, col) = eval_kernel_exp(-T{0.5} * s2, exp_mode);
             });
             return;
         }
@@ -1139,7 +1219,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             visit_triangle<T>(n, uplo, [&](std::size_t row, std::size_t col) {
                 const T u2 = c * ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
                 const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
-                out(row, col) = eval_matern_u_d(u, nu);
+                out(row, col) = eval_matern_u_d(u, nu, exp_mode);
             });
             return;
         }
@@ -1148,7 +1228,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         visit_triangle<T>(n, uplo, [&](std::size_t row, std::size_t col) {
             const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
             const T w = s2 / (T{2} * alpha);
-            out(row, col) = std::exp(-alpha * std::log1p(w));
+            out(row, col) = eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
         });
     }
 
@@ -1163,7 +1243,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             for (std::size_t col = 0; col < n_cols; ++col) {
                 for (std::size_t row = 0; row < n_rows; ++row) {
                     const T s2 = ard_scaled_sq_cross(blocks, n_rows, n_cols, ls, row, col);
-                    out(row, col) = std::exp(-T{0.5} * s2);
+                    out(row, col) = eval_kernel_exp(-T{0.5} * s2, exp_mode);
                 }
             }
             return;
@@ -1175,7 +1255,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
                 for (std::size_t row = 0; row < n_rows; ++row) {
                     const T u2 = c * ard_scaled_sq_cross(blocks, n_rows, n_cols, ls, row, col);
                     const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
-                    out(row, col) = eval_matern_u_d(u, nu);
+                    out(row, col) = eval_matern_u_d(u, nu, exp_mode);
                 }
             }
             return;
@@ -1186,7 +1266,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             for (std::size_t row = 0; row < n_rows; ++row) {
                 const T s2 = ard_scaled_sq_cross(blocks, n_rows, n_cols, ls, row, col);
                 const T w = s2 / (T{2} * alpha);
-                out(row, col) = std::exp(-alpha * std::log1p(w));
+                out(row, col) = eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
             }
         }
     }
@@ -1205,7 +1285,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
                 const std::size_t p = packed_lower_index(n, row, col);
                 const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
                 const T sp2 = packed[(local_idx * per_dim) + p] * inv_l2;
-                d_k(row, col) = sp2 * std::exp(-T{0.5} * s2);
+                d_k(row, col) = sp2 * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
             });
             return;
         }
@@ -1223,7 +1303,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
                 }
                 const T u = std::sqrt(u2);
                 const T wp = (c * packed[(local_idx * per_dim) + p] * inv_l2) / u2;
-                d_k(row, col) = eval_matern_grad_g1_d(u, nu) * wp;
+                d_k(row, col) = eval_matern_grad_g1_d(u, nu, exp_mode) * wp;
             });
             return;
         }
@@ -1235,13 +1315,13 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
             const T w = s2 / (T{2} * alpha);
             const T b = T{1} + w;
-            const T kv = std::exp(-alpha * std::log1p(w));
+            const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
             if (local_idx < alpha_idx) {
                 const T ell_p = static_cast<T>(ls[local_idx]);
                 const T sp2 = packed[(local_idx * per_dim) + p] / (ell_p * ell_p);
-                d_k(row, col) = (sp2 / b) * kv;
+                d_k(row, col) = (sp2 / b) * d1_exp;
             } else {
-                d_k(row, col) = alpha * ((w / b) - std::log1p(w)) * kv;
+                d_k(row, col) = alpha * ((w / b) - std::log1p(w)) * d1_exp;
             }
         });
     }
@@ -1260,13 +1340,13 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             visit_triangle<T>(n, uplo, [&](std::size_t row, std::size_t col) {
                 const std::size_t p = packed_lower_index(n, row, col);
                 const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
-                const T kv = std::exp(-T{0.5} * s2);
+                const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
                 const T si2 = packed[(i * per_dim) + p] * inv_li2;
                 if (i == j) {
-                    d2_k(row, col) = si2 * (si2 - T{2}) * kv;
+                    d2_k(row, col) = (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
                 } else {
                     const T sj2 = packed[(j * per_dim) + p] * inv_lj2;
-                    d2_k(row, col) = si2 * sj2 * kv;
+                    d2_k(row, col) = si2 * sj2 * jet.d2;
                 }
             });
             return;
@@ -1286,9 +1366,9 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
                 const T u = std::sqrt(u2);
                 const T wi = (c * packed[(i * per_dim) + p] * inv_li2) / u2;
                 const T wj = (c * packed[(j * per_dim) + p] * inv_lj2) / u2;
-                T val = eval_matern_ard_cross_d(u, nu) * wi * wj;
+                T val = eval_matern_ard_cross_d(u, nu, exp_mode) * wi * wj;
                 if (i == j) {
-                    val -= T{2} * eval_matern_grad_g1_d(u, nu) * wi;
+                    val -= T{2} * eval_matern_grad_g1_d(u, nu, exp_mode) * wi;
                 }
                 d2_k(row, col) = val;
             });
@@ -1302,23 +1382,25 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             const T s2 = ard_scaled_sq_square(packed, n, per_dim, ls, row, col);
             const T w = s2 / (T{2} * alpha);
             const T b = T{1} + w;
-            const T kv = std::exp(-alpha * std::log1p(w));
+            const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
             const T g_alpha = alpha * ((w / b) - std::log1p(w));
             if (i == alpha_idx && j == alpha_idx) {
-                d2_k(row, col) = ((g_alpha * g_alpha) + g_alpha + ((alpha * w * w) / (b * b))) * kv;
+                d2_k(row, col) = ((g_alpha * g_alpha) * jet.d2) +
+                                 ((g_alpha + ((alpha * w * w) / (b * b))) * jet.d1);
             } else if (i == alpha_idx || j == alpha_idx) {
                 const std::size_t ls_idx = (i == alpha_idx) ? j : i;
                 const T ell_ls = static_cast<T>(ls[ls_idx]);
                 const T s_ls2 = packed[(ls_idx * per_dim) + p] / (ell_ls * ell_ls);
-                d2_k(row, col) = (s_ls2 / b) * (g_alpha + (w / b)) * kv;
+                d2_k(row, col) = (s_ls2 / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
             } else {
                 const T ell_i = static_cast<T>(ls[i]);
                 const T ell_j = static_cast<T>(ls[j]);
                 const T si2 = packed[(i * per_dim) + p] / (ell_i * ell_i);
                 const T sj2 = packed[(j * per_dim) + p] / (ell_j * ell_j);
-                T val = (((alpha + T{1}) * si2 * sj2) / (alpha * b * b)) * kv;
+                const T sq_term = (si2 * sj2) / (b * b);
+                T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
                 if (i == j) {
-                    val -= ((T{2} * si2) / b) * kv;
+                    val -= ((T{2} * si2) / b) * jet.d1;
                 }
                 d2_k(row, col) = val;
             }
@@ -1344,7 +1426,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         if (const auto* s = std::get_if<SuppliedScalarRef>(&term)) {
             const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(),
                                     store.cols());
-            return detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo);
+            return detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode);
         }
         if (const auto* a = std::get_if<SuppliedArdRef>(&term)) {
             eval_supplied_ard_square(*a, store, out, uplo);
@@ -1352,7 +1434,17 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         }
         if (const auto* c = std::get_if<CoordLeafRef>(&term)) {
             if (x.has_value()) {
-                return detail::leaf_apply_points(leaves[c->leaf_idx], *x, out, uplo);
+                const KernelLeaf& kl = leaves[c->leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                    if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows());
+                        !ok.has_value()) {
+                        return ok;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
+                }
+                return detail::leaf_apply_points(kl, *x, out, uplo, exp_mode);
             }
             // Constant or White only: pass dummy 0-safe shape via Constant/White on square n x n.
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx])) {
@@ -1420,7 +1512,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         if (const auto* s = std::get_if<SuppliedScalarRef>(&term)) {
             const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(),
                                     store.cols());
-            return detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out);
+            return detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode);
         }
         if (const auto* a = std::get_if<SuppliedArdRef>(&term)) {
             eval_supplied_ard_cross(*a, store, out);
@@ -1428,7 +1520,17 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         }
         if (const auto* c = std::get_if<CoordLeafRef>(&term)) {
             if (x1.has_value() && x2.has_value()) {
-                return detail::leaf_apply_cross_points(leaves[c->leaf_idx], *x1, *x2, out);
+                const KernelLeaf& kl = leaves[c->leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                    if (auto ok = ensure_nested(nested, level_idx, x1->rows(), x2->rows());
+                        !ok.has_value()) {
+                        return ok;
+                    }
+                    auto dist_buf = nested.level(level_idx, x1->rows(), x2->rows());
+                    fill_cross_sq_dist(*x1, *x2, dist_buf);
+                    return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
+                }
+                return detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode);
             }
             const T val =
                 std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx])
@@ -1548,7 +1650,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(),
                                     store.cols());
             return detail::leaf_grad_dist(leaves[s->leaf_idx], dist, d_k,
-                                          param_idx - s->param_begin, uplo);
+                                          param_idx - s->param_begin, uplo, exp_mode);
         }
         if (const auto* a = std::get_if<SuppliedArdRef>(&term)) {
             eval_supplied_ard_grad(*a, store, d_k, param_idx - a->param_begin, uplo);
@@ -1556,8 +1658,19 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         }
         if (const auto* c = std::get_if<CoordLeafRef>(&term)) {
             if (x.has_value()) {
-                return detail::leaf_grad_points(leaves[c->leaf_idx], *x, d_k,
-                                                param_idx - c->param_begin, uplo);
+                const KernelLeaf& kl = leaves[c->leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                    if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows());
+                        !ok.has_value()) {
+                        return ok;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return custom->template term<T>().grad(dist_buf.as_ref(), d_k,
+                                                           param_idx - c->param_begin, uplo);
+                }
+                return detail::leaf_grad_points(kl, *x, d_k, param_idx - c->param_begin, uplo,
+                                                exp_mode);
             }
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx])) {
                 const T val = static_cast<T>(ck->constant());
@@ -1622,7 +1735,7 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
             const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(),
                                     store.cols());
             return detail::leaf_hess_dist(leaves[s->leaf_idx], dist, d2_k, i - s->param_begin,
-                                          j - s->param_begin, uplo);
+                                          j - s->param_begin, uplo, exp_mode);
         }
         if (const auto* a = std::get_if<SuppliedArdRef>(&term)) {
             eval_supplied_ard_hess(*a, store, d2_k, i - a->param_begin, j - a->param_begin, uplo);
@@ -1630,8 +1743,19 @@ template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl {
         }
         if (const auto* c = std::get_if<CoordLeafRef>(&term)) {
             if (x.has_value()) {
-                return detail::leaf_hess_points(leaves[c->leaf_idx], *x, d2_k, i - c->param_begin,
-                                                j - c->param_begin, uplo);
+                const KernelLeaf& kl = leaves[c->leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+                    if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows());
+                        !ok.has_value()) {
+                        return ok;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return custom->template term<T>().hess(
+                        dist_buf.as_ref(), d2_k, i - c->param_begin, j - c->param_begin, uplo);
+                }
+                return detail::leaf_hess_points(kl, *x, d2_k, i - c->param_begin,
+                                                j - c->param_begin, uplo, exp_mode);
             }
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx])) {
                 const T val = static_cast<T>(ck->constant());
@@ -2141,9 +2265,28 @@ CompiledDistanceKernel<T> DistanceKernel<Mode>::compile() const {
     std::size_t next_param = 0;
     impl->root =
         CompiledDistanceKernel<T>::Impl::template compile_node<Mode>(*root_, *impl, next_param);
-    impl->nested_depth = CompiledDistanceKernel<T>::Impl::compute_nested_depth(impl->root);
+    bool has_custom_coord = false;
+    if (impl->has_coord_points) {
+        for (const auto& leaf : impl->leaves) {
+            if (std::holds_alternative<CustomKernel>(leaf)) {
+                has_custom_coord = true;
+                break;
+            }
+        }
+    }
+    impl->nested_depth = CompiledDistanceKernel<T>::Impl::compute_nested_depth(impl->root) +
+                         (has_custom_coord ? 1U : 0U);
     impl->refresh_cached_ls();
     return CompiledDistanceKernel<T>(std::move(impl));
+}
+
+template <KernelScalarConcept T> KernelExp CompiledDistanceKernel<T>::kernel_exp() const noexcept {
+    return impl_->exp_mode;
+}
+
+template <KernelScalarConcept T>
+void CompiledDistanceKernel<T>::set_kernel_exp(KernelExp mode) noexcept {
+    impl_->exp_mode = mode;
 }
 
 template <KernelScalarConcept T>
