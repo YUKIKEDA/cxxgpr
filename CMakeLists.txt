@@ -61,6 +61,7 @@ add_library(cxxgpr STATIC
     src/transform/input.cpp
     src/transform/pipeline.cpp
     src/transform/target.cpp
+    src/workspace/leaf_cache.cpp
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
 add_dependencies(cxxgpr cxxgpr_git_revision)

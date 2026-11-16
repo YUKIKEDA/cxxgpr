@@ -166,6 +166,11 @@ cxxgpr_add_test(kernel.distance_cache
     LABELS unit property negative
 )
 
+cxxgpr_add_test(workspace.leaf_cache
+    SOURCES workspace/leaf_cache_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

@@ -5,8 +5,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <numbers>
 #include <utility>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace cxxgpr::detail {
 
@@ -14,23 +19,36 @@ namespace {
 
 template <KernelScalarConcept T, typename Fn>
 void visit_triangle(std::size_t n, Triangle uplo, Fn&& fn) {
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
     switch (uplo) {
     case Triangle::Lower:
-        for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = col; row < n; ++row) {
                 fn(row, col);
             }
         }
         return;
     case Triangle::Upper:
-        for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = 0; row <= col; ++row) {
                 fn(row, col);
             }
         }
         return;
     case Triangle::Full:
-        for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = 0; row < n; ++row) {
                 fn(row, col);
             }
@@ -53,14 +71,14 @@ template <KernelScalarConcept T>
         return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
     }
     const std::size_t n = dist.rows();
-    bool ok = true;
-    visit_triangle<T>(n, uplo, [&](std::size_t row, std::size_t col) {
-        if (!std::isfinite(dist(row, col))) {
-            ok = false;
+    for (std::size_t col = 0; col < n; ++col) {
+        const std::size_t r_begin = (uplo == Triangle::Lower) ? col : 0U;
+        const std::size_t r_end = (uplo == Triangle::Upper) ? (col + 1U) : n;
+        for (std::size_t row = r_begin; row < r_end; ++row) {
+            if (!std::isfinite(dist(row, col))) {
+                return std::unexpected(GprError::non_finite_input());
+            }
         }
-    });
-    if (!ok) {
-        return std::unexpected(GprError::non_finite_input());
     }
     return {};
 }
@@ -327,8 +345,15 @@ void write_square_dist(MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, ElemF
 
 template <KernelScalarConcept T, typename ElemFn>
 void write_cross_dist(MatrixRef<T> dist, MatrixMut<T> out, ElemFn&& elem_fn) {
-    for (std::size_t col = 0; col < dist.cols(); ++col) {
-        for (std::size_t row = 0; row < dist.rows(); ++row) {
+    const std::size_t n_rows = dist.rows();
+    const std::size_t n_cols = dist.cols();
+    const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n_cols >= 64U || (n_rows * n_cols) >= 4096U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        for (std::size_t row = 0; row < n_rows; ++row) {
             out(row, col) = elem_fn(dist(row, col), row, col);
         }
     }
@@ -342,8 +367,15 @@ void write_square_points(MatrixRef<T> x, MatrixMut<T> out, Triangle uplo, ElemFn
 
 template <KernelScalarConcept T, typename ElemFn>
 void write_cross_points(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out, ElemFn&& elem_fn) {
-    for (std::size_t col = 0; col < x2.rows(); ++col) {
-        for (std::size_t row = 0; row < x1.rows(); ++row) {
+    const std::size_t n_rows = x1.rows();
+    const std::size_t n_cols = x2.rows();
+    const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n_cols >= 64U || (n_rows * n_cols) >= 4096U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        for (std::size_t row = 0; row < n_rows; ++row) {
             out(row, col) = elem_fn(row, col);
         }
     }
@@ -1423,8 +1455,13 @@ template <KernelScalarConcept T>
 
 template <KernelScalarConcept T, typename Fn>
 void write_square_packed(std::size_t n, MatrixMut<T> out, Triangle uplo, Fn&& fn) noexcept {
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
     if (uplo == Triangle::Lower) {
-        for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = col; row < n; ++row) {
                 out(row, col) = fn(row, col);
             }
@@ -1432,14 +1469,22 @@ void write_square_packed(std::size_t n, MatrixMut<T> out, Triangle uplo, Fn&& fn
         return;
     }
     if (uplo == Triangle::Upper) {
-        for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
             for (std::size_t row = 0; row <= col; ++row) {
                 out(row, col) = fn(row, col);
             }
         }
         return;
     }
-    for (std::size_t col = 0; col < n; ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
         out(col, col) = fn(col, col);
         for (std::size_t row = col + 1U; row < n; ++row) {
             const std::size_t r1 = row;

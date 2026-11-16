@@ -4,8 +4,13 @@
 #include "cxxgpr/core/checked.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <utility>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace cxxgpr {
 
@@ -45,7 +50,12 @@ void fill_square_dist_matrix(MatrixRef<T> x, std::span<T> dst) noexcept {
     const std::size_t n = x.rows();
     const std::size_t d = x.cols();
     MatrixMut<T> dist(dst.data(), n, n, n);
-    for (std::size_t col = 0; col < n; ++col) {
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
         dist(col, col) = T{0};
         for (std::size_t row = col + 1U; row < n; ++row) {
             const std::size_t r1 = row;
@@ -66,15 +76,21 @@ void fill_packed_ard_sq_diff(MatrixRef<T> x, std::span<T> dst) noexcept {
     const std::size_t n = x.rows();
     const std::size_t d = x.cols();
     const std::size_t per_dim = (n * (n + 1U)) / 2U;
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
     for (std::size_t dim = 0; dim < d; ++dim) {
         const auto x_col = x.col(dim);
-        std::size_t offset = dim * per_dim;
-        for (std::size_t col = 0; col < n; ++col) {
+        const std::size_t dim_base = dim * per_dim;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+            const auto col = static_cast<std::size_t>(col_s);
+            const std::size_t col_base = dim_base + ((col * ((2U * n) - col + 1U)) / 2U);
             const T x_col_val = x_col[col];
-            dst[offset++] = T{0};
+            dst[col_base] = T{0};
             for (std::size_t row = col + 1U; row < n; ++row) {
                 const T diff = x_col[row] - x_col_val;
-                dst[offset++] = diff * diff;
+                dst[col_base + (row - col)] = diff * diff;
             }
         }
     }
