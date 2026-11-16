@@ -242,4 +242,155 @@ TEST(WorkspaceMllTest, MllAndGradientAreBitwiseDeterministicAcrossOpenMpThreads)
     }
 }
 
+TEST(WorkspaceMllTest, AnalyticalHessianMatchesFiniteDiffAndZeroAllocForSpeedAndMemoryPolicies) {
+    const std::vector<double> x_data{0.0, 0.5, 1.1, 1.7, -0.4, 0.2, 0.9, 1.4};
+    const std::vector<double> y{0.4, 1.0, 0.7, -0.3};
+    constexpr std::size_t n = 4U;
+    const cxxgpr::MatrixRef<double> x(x_data.data(), n, 2U, n);
+
+    const auto spec =
+        (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.3).value()) *
+         cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())) +
+        cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array<double, 2>{0.9, 1.4},
+                                                           cxxgpr::MaternNu::ThreeHalves)
+                               .value()) +
+        cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+
+    const auto jitter = cxxgpr::JitterPolicy::adaptive(1e-8, 10.0, 6U, 1.0).value();
+
+    for (const auto policy :
+         {cxxgpr::FitPolicy::prefer_speed(), cxxgpr::FitPolicy::prefer_memory()}) {
+        auto compiled = spec.compile<double>();
+        auto lik = cxxgpr::GaussianLikelihood::create(0.08).value();
+        auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, policy);
+        ASSERT_TRUE(bufs.has_value());
+        if (!bufs.has_value()) {
+            return;
+        }
+        EXPECT_FALSE(bufs->core.hessian.is_allocated());
+
+        const std::size_t n_kernel = compiled.num_params();
+        const std::size_t total_params = n_kernel + 1U;
+        std::vector<double> theta(total_params);
+        ASSERT_TRUE(compiled.get_params(std::span<double>(theta.data(), n_kernel)).has_value());
+        theta[n_kernel] = std::log(lik.noise_variance());
+
+        std::vector<double> grad(total_params, 0.0);
+        std::vector<double> hess(total_params * total_params, 0.0);
+
+        auto mll_res =
+            cxxgpr::value_gradient_hessian_into(compiled, lik, x, y, jitter, *bufs, grad, hess);
+        ASSERT_TRUE(mll_res.has_value());
+        EXPECT_TRUE(bufs->core.hessian.is_allocated());
+
+        // Subsequent hessian_into and value_gradient_hessian_into must allocate zero heap memory.
+        std::vector<double> hess2(total_params * total_params, 0.0);
+        {
+            const cxxgpr::test_support::NoAllocationScope audit;
+            ASSERT_TRUE(
+                cxxgpr::hessian_into(compiled, lik, x, y, jitter, *bufs, hess2).has_value());
+            auto mll2 = cxxgpr::value_gradient_hessian_into(compiled, lik, x, y, jitter, *bufs,
+                                                            grad, hess2);
+            ASSERT_TRUE(mll2.has_value());
+            EXPECT_DOUBLE_EQ(*mll2, *mll_res);
+        }
+
+        for (std::size_t idx = 0; idx < hess.size(); ++idx) {
+            EXPECT_DOUBLE_EQ(hess2[idx], hess[idx]);
+        }
+
+        // Verify symmetry and finite-difference match against gradient.
+        constexpr double h = 1e-6;
+        std::vector<double> g_plus(total_params);
+        std::vector<double> g_minus(total_params);
+        for (std::size_t j = 0; j < total_params; ++j) {
+            auto tp = theta;
+            tp[j] += h;
+            if (j < n_kernel) {
+                ASSERT_TRUE(
+                    compiled.set_params(std::span<const double>(tp.data(), n_kernel)).has_value());
+            } else {
+                lik = cxxgpr::GaussianLikelihood::create(std::exp(tp[j])).value();
+            }
+            ASSERT_TRUE(cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, g_plus)
+                            .has_value());
+
+            auto tm = theta;
+            tm[j] -= h;
+            if (j < n_kernel) {
+                ASSERT_TRUE(
+                    compiled.set_params(std::span<const double>(tm.data(), n_kernel)).has_value());
+            } else {
+                lik = cxxgpr::GaussianLikelihood::create(std::exp(tm[j])).value();
+            }
+            ASSERT_TRUE(cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, g_minus)
+                            .has_value());
+
+            if (j < n_kernel) {
+                ASSERT_TRUE(compiled.set_params(std::span<const double>(theta.data(), n_kernel))
+                                .has_value());
+            } else {
+                lik = cxxgpr::GaussianLikelihood::create(std::exp(theta[j])).value();
+            }
+
+            for (std::size_t i = 0; i < total_params; ++i) {
+                EXPECT_DOUBLE_EQ(hess[(i * total_params) + j], hess[(j * total_params) + i]);
+                const double fd = (g_plus[i] - g_minus[i]) / (2.0 * h);
+                EXPECT_NEAR(hess[(i * total_params) + j], fd, 1e-5 * std::max(1.0, std::abs(fd)))
+                    << "i=" << i << ", j=" << j;
+            }
+        }
+    }
+}
+
+TEST(WorkspaceMllTest, AnalyticalHessianIsBitwiseDeterministicAcrossOpenMpThreads) {
+    constexpr std::size_t n = 72U;
+    constexpr std::size_t d = 2U;
+    std::vector<double> x_data(n * d);
+    std::vector<double> y(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double t = 0.08 * static_cast<double>(i);
+        x_data[i] = t;
+        x_data[n + i] = std::cos(t);
+        y[i] = std::sin(t);
+    }
+    const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+    const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value()) +
+                      cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+    const auto compiled = spec.compile<double>();
+    const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+    const auto jitter = cxxgpr::JitterPolicy::adaptive(1e-8, 10.0, 6U, 1.0).value();
+
+    auto run_threads = [&](int threads) {
+#ifdef _OPENMP
+        omp_set_num_threads(threads);
+#else
+        (void)threads;
+#endif
+        auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(
+            n, cxxgpr::FitPolicy::prefer_speed());
+        EXPECT_TRUE(bufs.has_value());
+        const std::size_t p = compiled.num_params() + 1U;
+        std::vector<double> hess(p * p, 0.0);
+        EXPECT_TRUE(cxxgpr::hessian_into(compiled, lik, x, y, jitter, *bufs, hess).has_value());
+        return hess;
+    };
+
+#ifdef _OPENMP
+    const int saved = omp_get_max_threads();
+#endif
+    const auto h1 = run_threads(1);
+    const auto h4 = run_threads(4);
+#ifdef _OPENMP
+    omp_set_num_threads(saved);
+#endif
+
+    ASSERT_EQ(h1.size(), h4.size());
+    for (std::size_t i = 0; i < h1.size(); ++i) {
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(h1[i]), std::bit_cast<std::uint64_t>(h4[i]))
+            << "i=" << i;
+    }
+}
+
 } // namespace
