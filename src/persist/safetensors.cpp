@@ -1,0 +1,403 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "safetensors.hpp"
+
+#include "cxxgpr/core/checked.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <utility>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+namespace cxxgpr::persist::detail {
+namespace {
+
+static_assert(std::endian::native == std::endian::little,
+              "safetensors persistence requires little-endian byte order");
+
+[[nodiscard]] constexpr std::size_t align_up_8(std::size_t v) noexcept {
+    return (v + 7U) & ~std::size_t{7U};
+}
+
+[[nodiscard]] constexpr std::size_t dtype_size(TensorDtype dt) noexcept {
+    return (dt == TensorDtype::F64) ? sizeof(double) : sizeof(float);
+}
+
+[[nodiscard]] std::string_view dtype_name(TensorDtype dt) noexcept {
+    return (dt == TensorDtype::F64) ? "F64" : "F32";
+}
+
+} // namespace
+
+MappedFile::MappedFile(MappedFile&& other) noexcept
+    : data_(std::exchange(other.data_, nullptr)), size_(std::exchange(other.size_, 0U))
+#ifdef _WIN32
+      ,
+      file_handle_(std::exchange(other.file_handle_, nullptr)),
+      mapping_handle_(std::exchange(other.mapping_handle_, nullptr))
+#else
+      ,
+      fd_(std::exchange(other.fd_, -1))
+#endif
+{
+}
+
+MappedFile& MappedFile::operator=(MappedFile&& other) noexcept {
+    if (this != &other) {
+        close();
+        data_ = std::exchange(other.data_, nullptr);
+        size_ = std::exchange(other.size_, 0U);
+#ifdef _WIN32
+        file_handle_ = std::exchange(other.file_handle_, nullptr);
+        mapping_handle_ = std::exchange(other.mapping_handle_, nullptr);
+#else
+        fd_ = std::exchange(other.fd_, -1);
+#endif
+    }
+    return *this;
+}
+
+MappedFile::~MappedFile() {
+    close();
+}
+
+void MappedFile::close() noexcept {
+#ifdef _WIN32
+    if (data_ != nullptr) {
+        UnmapViewOfFile(data_);
+        data_ = nullptr;
+    }
+    if (mapping_handle_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(mapping_handle_));
+        mapping_handle_ = nullptr;
+    }
+    if (file_handle_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(file_handle_));
+        file_handle_ = nullptr;
+    }
+#else
+    if (data_ != nullptr && size_ > 0U) {
+        munmap(const_cast<std::byte*>(data_), size_);
+        data_ = nullptr;
+    }
+    if (fd_ >= 0) {
+        ::close(fd_);
+        fd_ = -1;
+    }
+#endif
+    size_ = 0U;
+}
+
+std::expected<MappedFile, GprError> MappedFile::open_read(const std::filesystem::path& path) {
+    MappedFile out;
+#ifdef _WIN32
+    const std::wstring wpath = path.wstring();
+    HANDLE fh = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE) {
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Io, "failed to open safetensors file"));
+    }
+    LARGE_INTEGER file_size{};
+    if (GetFileSizeEx(fh, &file_size) == 0 || file_size.QuadPart < 8) {
+        CloseHandle(fh);
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Tensor, "safetensors file is too small"));
+    }
+    HANDLE mh = CreateFileMappingW(fh, nullptr, PAGE_READONLY, 0U, 0U, nullptr);
+    if (mh == nullptr) {
+        CloseHandle(fh);
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Io, "CreateFileMappingW failed"));
+    }
+    const void* view = MapViewOfFile(mh, FILE_MAP_READ, 0U, 0U, 0U);
+    if (view == nullptr) {
+        CloseHandle(mh);
+        CloseHandle(fh);
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Io, "MapViewOfFile failed"));
+    }
+    out.file_handle_ = fh;
+    out.mapping_handle_ = mh;
+    out.data_ = static_cast<const std::byte*>(view);
+    out.size_ = static_cast<std::size_t>(file_size.QuadPart);
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Io, "failed to open safetensors file"));
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size < 8) {
+        ::close(fd);
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Tensor, "safetensors file is too small"));
+    }
+    const auto fsize = static_cast<std::size_t>(st.st_size);
+    void* mapped = ::mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapped == MAP_FAILED) {
+        ::close(fd);
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Io, "mmap failed"));
+    }
+    out.fd_ = fd;
+    out.data_ = static_cast<const std::byte*>(mapped);
+    out.size_ = fsize;
+#endif
+    return out;
+}
+
+std::expected<std::shared_ptr<const MappedSafetensors>, GprError>
+MappedSafetensors::open(const std::filesystem::path& path) {
+    auto file = MappedFile::open_read(path);
+    if (!file.has_value()) {
+        return std::unexpected(std::move(file).error());
+    }
+    if (file->size() < 8U) {
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Tensor, "safetensors header truncated"));
+    }
+
+    std::uint64_t header_len_u64 = 0U;
+    std::memcpy(&header_len_u64, file->data(), sizeof(std::uint64_t));
+    if (header_len_u64 > file->size() - 8U) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Tensor, "safetensors header length exceeds file size"));
+    }
+    const auto header_len = static_cast<std::size_t>(header_len_u64);
+    const std::size_t data_base = 8U + header_len;
+    if ((data_base % 8U) != 0U) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Tensor, "safetensors data section is not 8-byte aligned"));
+    }
+
+    const std::string_view header_sv(reinterpret_cast<const char*>(file->data() + 8U), header_len);
+    nlohmann::json header_json;
+    try {
+        header_json = nlohmann::json::parse(header_sv);
+    } catch (const nlohmann::json::exception&) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "invalid JSON in safetensors header"));
+    }
+    if (!header_json.is_object()) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Tensor, "safetensors header must be a JSON object"));
+    }
+
+    const std::size_t data_section_bytes = file->size() - data_base;
+    std::unordered_map<std::string, TensorRecord> records;
+
+    for (const auto& [name, meta] : header_json.items()) {
+        if (name == "__metadata__") {
+            continue;
+        }
+        if (!meta.is_object() || !meta.contains("dtype") || !meta.contains("shape") ||
+            !meta.contains("data_offsets")) {
+            return std::unexpected(GprError::persist_failed(
+                PersistErrorKind::Tensor, "missing required tensor metadata fields"));
+        }
+        if (!meta["dtype"].is_string() || !meta["shape"].is_array() ||
+            !meta["data_offsets"].is_array() || meta["data_offsets"].size() != 2U) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "invalid tensor metadata types"));
+        }
+
+        TensorRecord rec;
+        const std::string dt_str = meta["dtype"].get<std::string>();
+        if (dt_str == "F64") {
+            rec.dtype = TensorDtype::F64;
+        } else if (dt_str == "F32") {
+            rec.dtype = TensorDtype::F32;
+        } else {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "unsupported safetensors dtype"));
+        }
+
+        std::size_t elem_count = 1U;
+        for (const auto& dim_val : meta["shape"]) {
+            if (!dim_val.is_number_unsigned()) {
+                return std::unexpected(GprError::persist_failed(
+                    PersistErrorKind::Tensor, "tensor shape entries must be unsigned integers"));
+            }
+            const auto dim_sz = dim_val.get<std::size_t>();
+            auto prod = checked_mul(elem_count, dim_sz);
+            if (!prod.has_value()) {
+                return std::unexpected(std::move(prod).error());
+            }
+            elem_count = *prod;
+            rec.shape.push_back(dim_sz);
+        }
+
+        const auto& off = meta["data_offsets"];
+        if (!off[0].is_number_unsigned() || !off[1].is_number_unsigned()) {
+            return std::unexpected(GprError::persist_failed(
+                PersistErrorKind::Tensor, "data_offsets must be unsigned integers"));
+        }
+        const auto off_begin = off[0].get<std::size_t>();
+        const auto off_end = off[1].get<std::size_t>();
+        if (off_end < off_begin || off_end > data_section_bytes) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "tensor data_offsets out of bounds"));
+        }
+        if (((data_base + off_begin) % 8U) != 0U) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "tensor data is not 8-byte aligned"));
+        }
+        auto expected_bytes = checked_mul(elem_count, dtype_size(rec.dtype));
+        if (!expected_bytes.has_value() || (off_end - off_begin) != *expected_bytes) {
+            return std::unexpected(GprError::persist_failed(
+                PersistErrorKind::Tensor, "tensor byte length does not match shape and dtype"));
+        }
+        rec.byte_offset = off_begin;
+        rec.byte_length = off_end - off_begin;
+        records.emplace(name, std::move(rec));
+    }
+
+    auto result = std::make_shared<MappedSafetensors>();
+    result->file_ = std::move(*file);
+    result->data_base_offset_ = data_base;
+    result->records_ = std::move(records);
+    return result;
+}
+
+bool MappedSafetensors::contains(std::string_view name) const {
+    return records_.contains(std::string(name));
+}
+
+std::expected<std::span<const double>, GprError>
+MappedSafetensors::read_f64(std::string_view name,
+                            std::span<const std::size_t> expected_shape) const {
+    const auto it = records_.find(std::string(name));
+    if (it == records_.end()) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "missing tensor in model.safetensors"));
+    }
+    const TensorRecord& rec = it->second;
+    if (rec.dtype != TensorDtype::F64) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "tensor dtype mismatch (expected F64)"));
+    }
+    if (!std::ranges::equal(rec.shape, expected_shape)) {
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Tensor, "tensor shape mismatch"));
+    }
+    const std::byte* ptr = file_.data() + data_base_offset_ + rec.byte_offset;
+    if ((reinterpret_cast<std::uintptr_t>(ptr) % alignof(double)) != 0U) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Tensor, "F64 tensor pointer is not 8-byte aligned"));
+    }
+    const auto count = rec.byte_length / sizeof(double);
+    const std::span<const double> view(reinterpret_cast<const double*>(ptr), count);
+    for (const double v : view) {
+        if (!std::isfinite(v)) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "non-finite value in F64 tensor"));
+        }
+    }
+    return view;
+}
+
+std::expected<std::span<const float>, GprError>
+MappedSafetensors::read_f32(std::string_view name,
+                            std::span<const std::size_t> expected_shape) const {
+    const auto it = records_.find(std::string(name));
+    if (it == records_.end()) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "missing tensor in model.safetensors"));
+    }
+    const TensorRecord& rec = it->second;
+    if (rec.dtype != TensorDtype::F32) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "tensor dtype mismatch (expected F32)"));
+    }
+    if (!std::ranges::equal(rec.shape, expected_shape)) {
+        return std::unexpected(
+            GprError::persist_failed(PersistErrorKind::Tensor, "tensor shape mismatch"));
+    }
+    const std::byte* ptr = file_.data() + data_base_offset_ + rec.byte_offset;
+    if ((reinterpret_cast<std::uintptr_t>(ptr) % alignof(float)) != 0U) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                        "F32 tensor pointer is not aligned"));
+    }
+    const auto count = rec.byte_length / sizeof(float);
+    const std::span<const float> view(reinterpret_cast<const float*>(ptr), count);
+    for (const float v : view) {
+        if (!std::isfinite(v)) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Tensor,
+                                                            "non-finite value in F32 tensor"));
+        }
+    }
+    return view;
+}
+
+std::expected<void, GprError> write_safetensors_file(const std::filesystem::path& path,
+                                                     std::span<const TensorWriteView> tensors) {
+    nlohmann::json header = nlohmann::json::object();
+    std::size_t cursor = 0U;
+    std::vector<std::pair<std::size_t, std::size_t>> offsets;
+    offsets.reserve(tensors.size());
+
+    for (const auto& t : tensors) {
+        const std::size_t begin = align_up_8(cursor);
+        const std::size_t end = begin + t.bytes.size();
+        offsets.emplace_back(begin, end);
+        cursor = end;
+
+        nlohmann::json meta;
+        meta["dtype"] = dtype_name(t.dtype);
+        meta["shape"] = t.shape;
+        meta["data_offsets"] = nlohmann::json::array({begin, end});
+        header[std::string(t.name)] = std::move(meta);
+    }
+
+    std::string header_str = header.dump();
+    const std::size_t padded_header_len = align_up_8(header_str.size());
+    header_str.append(padded_header_len - header_str.size(), ' ');
+    const auto header_len_u64 = static_cast<std::uint64_t>(header_str.size());
+
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Io, "failed to open temporary safetensors file for writing"));
+    }
+    ofs.write(reinterpret_cast<const char*>(&header_len_u64), sizeof(header_len_u64));
+    ofs.write(header_str.data(), static_cast<std::streamsize>(header_str.size()));
+
+    std::size_t written = 0U;
+    static constexpr std::array<char, 8> k_zero_pad{};
+    for (std::size_t idx = 0; idx < tensors.size(); ++idx) {
+        const std::size_t pad = offsets[idx].first - written;
+        if (pad > 0U) {
+            ofs.write(k_zero_pad.data(), static_cast<std::streamsize>(pad));
+            written += pad;
+        }
+        const auto& bytes = tensors[idx].bytes;
+        if (!bytes.empty()) {
+            ofs.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+            written += bytes.size();
+        }
+    }
+    ofs.flush();
+    if (!ofs) {
+        return std::unexpected(GprError::persist_failed(PersistErrorKind::Io,
+                                                        "failed while writing safetensors file"));
+    }
+    return {};
+}
+
+} // namespace cxxgpr::persist::detail

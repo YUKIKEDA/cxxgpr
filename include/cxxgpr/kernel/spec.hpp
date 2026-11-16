@@ -115,6 +115,7 @@ private:
 
     template <KernelScalarConcept T> friend class CompiledKernel;
     friend struct KernelSpecAccess;
+    friend struct KernelSpecPersistAccess;
     friend struct DistanceKernelAccess;
 };
 
