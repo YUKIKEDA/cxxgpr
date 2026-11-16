@@ -23,6 +23,69 @@ enum class CholeskyBuffer : std::uint8_t {
     Reuse,
 };
 
+/// Combined distance-cache and Cholesky-buffer preference preset for model fitting.
+struct FitPolicy {
+    /// Distance cache strategy used during optimization.
+    DistanceCachePolicy distance_cache = DistanceCachePolicy::Cached;
+    /// Cholesky / W buffer retention strategy used during gradient and Hessian evaluations.
+    CholeskyBuffer cholesky_buffer = CholeskyBuffer::Retain;
+
+    /// Returns the default speed-preferring preset (Cached distances + Retained W buffer).
+    [[nodiscard]] static constexpr FitPolicy prefer_speed() noexcept {
+        return {.distance_cache = DistanceCachePolicy::Cached,
+                .cholesky_buffer = CholeskyBuffer::Retain};
+    }
+
+    /// Returns the memory-preferring preset (Uncached distances + Reused Cholesky buffer).
+    [[nodiscard]] static constexpr FitPolicy prefer_memory() noexcept {
+        return {.distance_cache = DistanceCachePolicy::Uncached,
+                .cholesky_buffer = CholeskyBuffer::Reuse};
+    }
+
+    /// Checks value equality between two FitPolicy values.
+    [[nodiscard]] friend constexpr bool operator==(const FitPolicy&,
+                                                   const FitPolicy&) noexcept = default;
+};
+
+/// On-demand scratch buffers for analytical Hessian computation, empty until first use.
+template <KernelScalarConcept S> struct HessianScratch {
+    /// Ensures storage for p matrices S_i of size n x n, matrix V (n x p), and scratch vectors.
+    [[nodiscard]] std::expected<void, GprError> ensure(std::size_t n, std::size_t p);
+
+    /// Returns true if buffers have been allocated for non-zero dimensions.
+    [[nodiscard]] bool is_allocated() const noexcept {
+        return order_ > 0U && num_params_ > 0U;
+    }
+
+    /// Returns a mutable n x n view of S_i for parameter index i.
+    [[nodiscard]] MatrixMut<S> s_mut(std::size_t i) noexcept;
+
+    /// Returns an immutable n x n view of S_i for parameter index i.
+    [[nodiscard]] MatrixRef<S> s_ref(std::size_t i) const noexcept;
+
+    /// Returns a mutable span over column i of V (length n).
+    [[nodiscard]] std::span<S> v_col_mut(std::size_t i) noexcept;
+
+    /// Returns an immutable span over column i of V (length n).
+    [[nodiscard]] std::span<const S> v_col_ref(std::size_t i) const noexcept;
+
+    /// Returns a mutable n x n view of the auxiliary third scratch matrix.
+    [[nodiscard]] MatrixMut<S> scratch_c_mut() noexcept;
+
+    /// Training order n.
+    std::size_t order_ = 0;
+    /// Total parameter count p.
+    std::size_t num_params_ = 0;
+    /// Contiguous storage for p matrices S_i of shape n x n (column-major).
+    std::vector<S> s_storage;
+    /// Contiguous storage for n x p matrix V (column-major).
+    std::vector<S> v_storage;
+    /// Auxiliary length-n vector for A_i * alpha.
+    std::vector<S> u;
+    /// Auxiliary n x n scratch matrix for second-derivative tree evaluation.
+    std::vector<S> scratch_c;
+};
+
 /// Reusable core training buffers shared across MLL, gradient, and Hessian evaluations.
 template <PrecisionPolicyConcept P> struct WorkspaceCore {
     /// Storage scalar type for Cholesky factors and kernel matrices.
@@ -71,6 +134,8 @@ template <PrecisionPolicyConcept P> struct WorkspaceCore {
     NestedBuffers<Storage> nested;
     /// Pre-allocated buffers for keep_plan and weighted_grads walks.
     NestedBuffers<Storage> weighted;
+    /// On-demand analytical Hessian scratch buffers (empty until first Hessian evaluation).
+    HessianScratch<Storage> hessian;
     /// Diagonal jitter added during the last successful Cholesky factorization.
     double factor_jitter = 0.0;
 };
@@ -84,6 +149,10 @@ template <PrecisionPolicyConcept P> struct FitBuffers {
     [[nodiscard]] static std::expected<FitBuffers<P>, GprError>
     create(std::size_t n, DistanceCachePolicy cache = DistanceCachePolicy::Cached,
            CholeskyBuffer buffer = CholeskyBuffer::Retain);
+
+    /// Allocates training buffers for n points using a FitPolicy preset.
+    [[nodiscard]] static std::expected<FitBuffers<P>, GprError> create(std::size_t n,
+                                                                       FitPolicy policy);
 
     /// Returns true if gradient evaluation overwrites k_matrix and requires refactoring L.
     [[nodiscard]] bool overwrites_cholesky() const noexcept {
@@ -138,6 +207,9 @@ template <PrecisionPolicyConcept P> struct QueryWorkspace {
     /// Current feature dimension capacity d.
     std::size_t dims = 0;
 };
+
+extern template struct HessianScratch<double>;
+extern template struct HessianScratch<float>;
 
 extern template struct WorkspaceCore<DoublePrecision>;
 extern template struct WorkspaceCore<SinglePrecision>;

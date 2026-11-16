@@ -33,6 +33,25 @@ mll_and_gradient_into(const CompiledKernel<typename P::Storage>& kernel,
                       std::span<const typename P::Storage> y, const JitterPolicy& jitter,
                       FitBuffers<P>& buffers, std::span<double> out_grad);
 
+/// Computes the analytical log-space Hessian matrix (p x p, row/symm-major flattened) of the
+/// negative marginal log-likelihood into out_hess.
+template <PrecisionPolicyConcept P>
+[[nodiscard]] std::expected<void, GprError>
+hessian_into(const CompiledKernel<typename P::Storage>& kernel,
+             const GaussianLikelihood& likelihood, MatrixRef<typename P::Storage> x,
+             std::span<const typename P::Storage> y, const JitterPolicy& jitter,
+             FitBuffers<P>& buffers, std::span<double> out_hess);
+
+/// Computes the negative marginal log-likelihood, analytical gradient, and analytical Hessian
+/// together in one pass, restoring L when CholeskyBuffer::Reuse is active.
+template <PrecisionPolicyConcept P>
+[[nodiscard]] std::expected<double, GprError>
+value_gradient_hessian_into(const CompiledKernel<typename P::Storage>& kernel,
+                            const GaussianLikelihood& likelihood, MatrixRef<typename P::Storage> x,
+                            std::span<const typename P::Storage> y, const JitterPolicy& jitter,
+                            FitBuffers<P>& buffers, std::span<double> out_grad,
+                            std::span<double> out_hess);
+
 extern template std::expected<double, GprError>
 factor_and_mll<DoublePrecision>(const CompiledKernel<double>&, const GaussianLikelihood&,
                                 MatrixRef<double>, std::span<const double>, const JitterPolicy&,
@@ -67,5 +86,41 @@ mll_and_gradient_into<MixedPrecision<ReevaluateKernel>>(
     const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
     std::span<const float>, const JitterPolicy&, FitBuffers<MixedPrecision<ReevaluateKernel>>&,
     std::span<double>);
+
+extern template std::expected<void, GprError>
+hessian_into<DoublePrecision>(const CompiledKernel<double>&, const GaussianLikelihood&,
+                              MatrixRef<double>, std::span<const double>, const JitterPolicy&,
+                              FitBuffers<DoublePrecision>&, std::span<double>);
+extern template std::expected<void, GprError>
+hessian_into<SinglePrecision>(const CompiledKernel<float>&, const GaussianLikelihood&,
+                              MatrixRef<float>, std::span<const float>, const JitterPolicy&,
+                              FitBuffers<SinglePrecision>&, std::span<double>);
+extern template std::expected<void, GprError> hessian_into<MixedPrecision<PromoteStorage>>(
+    const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
+    std::span<const float>, const JitterPolicy&, FitBuffers<MixedPrecision<PromoteStorage>>&,
+    std::span<double>);
+extern template std::expected<void, GprError> hessian_into<MixedPrecision<ReevaluateKernel>>(
+    const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
+    std::span<const float>, const JitterPolicy&, FitBuffers<MixedPrecision<ReevaluateKernel>>&,
+    std::span<double>);
+
+extern template std::expected<double, GprError> value_gradient_hessian_into<DoublePrecision>(
+    const CompiledKernel<double>&, const GaussianLikelihood&, MatrixRef<double>,
+    std::span<const double>, const JitterPolicy&, FitBuffers<DoublePrecision>&, std::span<double>,
+    std::span<double>);
+extern template std::expected<double, GprError> value_gradient_hessian_into<SinglePrecision>(
+    const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
+    std::span<const float>, const JitterPolicy&, FitBuffers<SinglePrecision>&, std::span<double>,
+    std::span<double>);
+extern template std::expected<double, GprError>
+value_gradient_hessian_into<MixedPrecision<PromoteStorage>>(
+    const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
+    std::span<const float>, const JitterPolicy&, FitBuffers<MixedPrecision<PromoteStorage>>&,
+    std::span<double>, std::span<double>);
+extern template std::expected<double, GprError>
+value_gradient_hessian_into<MixedPrecision<ReevaluateKernel>>(
+    const CompiledKernel<float>&, const GaussianLikelihood&, MatrixRef<float>,
+    std::span<const float>, const JitterPolicy&, FitBuffers<MixedPrecision<ReevaluateKernel>>&,
+    std::span<double>, std::span<double>);
 
 } // namespace cxxgpr

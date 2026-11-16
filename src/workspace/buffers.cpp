@@ -7,6 +7,65 @@
 
 namespace cxxgpr {
 
+template <KernelScalarConcept S>
+std::expected<void, GprError> HessianScratch<S>::ensure(std::size_t n, std::size_t p) {
+    if (n == 0U || p == 0U) {
+        return std::unexpected(GprError::empty_input());
+    }
+    auto n2 = checked_mul(n, n);
+    if (!n2.has_value()) {
+        return std::unexpected(std::move(n2).error());
+    }
+    auto pn2 = checked_mul(p, *n2);
+    if (!pn2.has_value()) {
+        return std::unexpected(std::move(pn2).error());
+    }
+    auto np = checked_mul(n, p);
+    if (!np.has_value()) {
+        return std::unexpected(std::move(np).error());
+    }
+
+    if (s_storage.size() < *pn2) {
+        s_storage.resize(*pn2);
+    }
+    if (v_storage.size() < *np) {
+        v_storage.resize(*np);
+    }
+    if (u.size() < n) {
+        u.resize(n);
+    }
+    if (scratch_c.size() < *n2) {
+        scratch_c.resize(*n2);
+    }
+    order_ = n;
+    num_params_ = p;
+    return {};
+}
+
+template <KernelScalarConcept S> MatrixMut<S> HessianScratch<S>::s_mut(std::size_t i) noexcept {
+    const std::size_t n2 = order_ * order_;
+    return {s_storage.data() + (i * n2), order_, order_, order_};
+}
+
+template <KernelScalarConcept S>
+MatrixRef<S> HessianScratch<S>::s_ref(std::size_t i) const noexcept {
+    const std::size_t n2 = order_ * order_;
+    return {s_storage.data() + (i * n2), order_, order_, order_};
+}
+
+template <KernelScalarConcept S> std::span<S> HessianScratch<S>::v_col_mut(std::size_t i) noexcept {
+    return {v_storage.data() + (i * order_), order_};
+}
+
+template <KernelScalarConcept S>
+std::span<const S> HessianScratch<S>::v_col_ref(std::size_t i) const noexcept {
+    return {v_storage.data() + (i * order_), order_};
+}
+
+template <KernelScalarConcept S> MatrixMut<S> HessianScratch<S>::scratch_c_mut() noexcept {
+    return {scratch_c.data(), order_, order_, order_};
+}
+
 template <PrecisionPolicyConcept P>
 std::expected<WorkspaceCore<P>, GprError> WorkspaceCore<P>::create(std::size_t n) {
     if (n == 0U) {
@@ -101,6 +160,11 @@ FitBuffers<P>::create(std::size_t n, DistanceCachePolicy cache, CholeskyBuffer b
     return out;
 }
 
+template <PrecisionPolicyConcept P>
+std::expected<FitBuffers<P>, GprError> FitBuffers<P>::create(std::size_t n, FitPolicy policy) {
+    return create(n, policy.distance_cache, policy.cholesky_buffer);
+}
+
 template <PrecisionPolicyConcept P> MatrixMut<typename P::Storage> FitBuffers<P>::w_mut() noexcept {
     if (buffer_policy == CholeskyBuffer::Retain) {
         return {w_matrix.data(), core.order_, core.order_, core.order_};
@@ -157,6 +221,9 @@ std::expected<void, GprError> QueryWorkspace<P>::ensure(std::size_t n, std::size
     dims = d;
     return {};
 }
+
+template struct HessianScratch<double>;
+template struct HessianScratch<float>;
 
 template struct WorkspaceCore<DoublePrecision>;
 template struct WorkspaceCore<SinglePrecision>;
