@@ -2,9 +2,9 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M1-4
+**今**：M2-A
 
-目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）を完了し、前処理基盤（M1-4）へ進む段階である。
+目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）を完了し、カーネル・距離供給・拡張点（M2-A〜E）へ進む段階である。
 
 品質管理の仕組み（追跡・基準結果・結果変更記録・来歴・プラットフォーム認定）は [品質保証計画](quality/quality-plan.md)、ID と試験の対応は [追跡表](quality/traceability.md) にある。
 
@@ -52,7 +52,7 @@ flowchart LR
 | M1-1 | Feat | コア基盤：`GprError`・`Interval`・`GaussianLikelihood`・checked 寸法・`Xoshiro256++`・ビュー型 | #6 | Done |
 | M1-2 | Feat | 精度基盤：`DoublePrecision` / `SinglePrecision` / `MixedPrecision` と反復改良エンジン | #8 | Done |
 | M1-3 | Feat | 線形代数基盤：Eigen LLT（`uplo=Lower`）、三角求解、適応的 Jitter、補償・OpenMP 補助 | #10 | Done |
-| M1-4 | Feat | 前処理基盤：`Identity`・`Standardize`・`MinMax`・`Pipeline`・`ColumnwiseInput`・カスタム I/F | - | Todo |
+| M1-4 | Feat | 前処理基盤：`Identity`・`Standardize`・`MinMax`・`Pipeline`・`ColumnwiseInput`・カスタム I/F | #11 | Done |
 
 ## M2：カーネル・距離供給・拡張点
 

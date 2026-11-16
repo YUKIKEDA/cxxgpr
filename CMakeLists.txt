@@ -49,6 +49,10 @@ add_library(cxxgpr STATIC
     src/linalg/jitter.cpp
     src/linalg/parallel.cpp
     src/precision/refine.cpp
+    src/transform/columnwise.cpp
+    src/transform/input.cpp
+    src/transform/pipeline.cpp
+    src/transform/target.cpp
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
 add_dependencies(cxxgpr cxxgpr_git_revision)
