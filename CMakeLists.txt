@@ -44,6 +44,7 @@ add_library(cxxgpr STATIC
     src/core/interval.cpp
     src/core/likelihood.cpp
     src/core/rng.cpp
+    src/gpr/gpr_engine.cpp
     src/kernel/compiled.cpp
     src/kernel/custom.cpp
     src/kernel/distance.cpp

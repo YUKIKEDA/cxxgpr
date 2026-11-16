@@ -1632,6 +1632,10 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
 template <KernelScalarConcept T>
 CompiledKernel<T>::CompiledKernel(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 
+template <KernelScalarConcept T>
+CompiledKernel<T>::CompiledKernel(CompiledKernel&& other) noexcept = default;
+template <KernelScalarConcept T>
+CompiledKernel<T>& CompiledKernel<T>::operator=(CompiledKernel&& other) noexcept = default;
 template <KernelScalarConcept T> CompiledKernel<T>::~CompiledKernel() = default;
 
 template <KernelScalarConcept T>

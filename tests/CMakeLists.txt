@@ -186,6 +186,11 @@ cxxgpr_add_test(optimizer.optimizers
     LABELS unit property negative
 )
 
+cxxgpr_add_test(gpr.models
+    SOURCES gpr/gpr_test.cpp
+    LABELS unit property negative integration
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

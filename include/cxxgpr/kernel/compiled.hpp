@@ -65,9 +65,9 @@ public:
     /// Copy-assigns a compiled kernel with independent mutable leaf state.
     CompiledKernel& operator=(const CompiledKernel& other);
     /// Move-constructs a compiled kernel.
-    CompiledKernel(CompiledKernel&& other) noexcept = default;
+    CompiledKernel(CompiledKernel&& other) noexcept;
     /// Move-assigns a compiled kernel.
-    CompiledKernel& operator=(CompiledKernel&& other) noexcept = default;
+    CompiledKernel& operator=(CompiledKernel&& other) noexcept;
     /// Destroys the compiled kernel.
     ~CompiledKernel();
 
