@@ -56,6 +56,12 @@ add_library(cxxgpr STATIC
     src/linalg/dense.cpp
     src/linalg/jitter.cpp
     src/linalg/parallel.cpp
+    src/optimizer/bounds.cpp
+    src/optimizer/fixed.cpp
+    src/optimizer/fsa.cpp
+    src/optimizer/lbfgs.cpp
+    src/optimizer/nelder_mead.cpp
+    src/optimizer/trust_region.cpp
     src/precision/refine.cpp
     src/transform/columnwise.cpp
     src/transform/input.cpp
