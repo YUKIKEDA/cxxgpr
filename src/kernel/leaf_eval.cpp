@@ -20,40 +20,16 @@ namespace {
 template <KernelScalarConcept T, typename Fn>
 void visit_triangle(std::size_t n, Triangle uplo, Fn&& fn) {
     const auto n_cols = static_cast<std::ptrdiff_t>(n);
-    switch (uplo) {
-    case Triangle::Lower:
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (n >= 64U)
 #endif
-        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
-            const auto col = static_cast<std::size_t>(col_s);
-            for (std::size_t row = col; row < n; ++row) {
-                fn(row, col);
-            }
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        const std::size_t row_begin = (uplo == Triangle::Lower) ? col : 0U;
+        const std::size_t row_end = (uplo == Triangle::Upper) ? (col + 1U) : n;
+        for (std::size_t row = row_begin; row < row_end; ++row) {
+            fn(row, col);
         }
-        return;
-    case Triangle::Upper:
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (n >= 64U)
-#endif
-        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
-            const auto col = static_cast<std::size_t>(col_s);
-            for (std::size_t row = 0; row <= col; ++row) {
-                fn(row, col);
-            }
-        }
-        return;
-    case Triangle::Full:
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (n >= 64U)
-#endif
-        for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
-            const auto col = static_cast<std::size_t>(col_s);
-            for (std::size_t row = 0; row < n; ++row) {
-                fn(row, col);
-            }
-        }
-        return;
     }
 }
 
