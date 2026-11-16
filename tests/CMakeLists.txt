@@ -131,6 +131,21 @@ cxxgpr_add_test(transform.columnwise
     LABELS unit property negative
 )
 
+cxxgpr_add_test(kernel.leaves
+    SOURCES kernel/leaves_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(kernel.spec
+    SOURCES kernel/spec_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(kernel.compiled
+    SOURCES kernel/compiled_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
