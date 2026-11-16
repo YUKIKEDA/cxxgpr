@@ -171,6 +171,11 @@ cxxgpr_add_test(workspace.leaf_cache
     LABELS unit property negative
 )
 
+cxxgpr_add_test(workspace.mll
+    SOURCES workspace/mll_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

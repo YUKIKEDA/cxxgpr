@@ -4,14 +4,14 @@
 
 | ID | 項目 | 正本位置 | テスト | 検証記録 |
 |---|---|---|---|---|
-| `REQ-01` | Exact GPR スコープ | [design.md#L11](../design.md#L11) | `tests/kernel/compiled_test.cpp`<br>`tests/kernel/custom_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/distance_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp` | — |
-| `REQ-02` | C++23 非例外・値返却 API | [design.md#L12](../design.md#L12) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/kernel/compiled_test.cpp`<br>`tests/kernel/custom_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/distance_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp` | — |
+| `REQ-01` | Exact GPR スコープ | [design.md#L11](../design.md#L11) | `tests/kernel/compiled_test.cpp`<br>`tests/kernel/custom_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/distance_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp`<br>`tests/workspace/mll_test.cpp` | — |
+| `REQ-02` | C++23 非例外・値返却 API | [design.md#L12](../design.md#L12) | `tests/core/error_test.cpp`<br>`tests/core/interval_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/kernel/compiled_test.cpp`<br>`tests/kernel/custom_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/distance_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp`<br>`tests/workspace/mll_test.cpp` | — |
 | `REQ-03` | 列優先入力と入力検査順序 | [design.md#L13](../design.md#L13) | `tests/core/checked_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp` | — |
-| `REQ-04` | カーネル体系と合成 | [design.md#L14](../design.md#L14) | `tests/kernel/compiled_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp` | — |
+| `REQ-04` | カーネル体系と合成 | [design.md#L14](../design.md#L14) | `tests/kernel/compiled_test.cpp`<br>`tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/kernel/leaves_test.cpp`<br>`tests/kernel/spec_test.cpp`<br>`tests/workspace/leaf_cache_test.cpp`<br>`tests/workspace/mll_test.cpp` | — |
 | `REQ-05` | 供給二乗距離 | [design.md#L15](../design.md#L15) | `tests/kernel/distance_cache_test.cpp`<br>`tests/kernel/distance_test.cpp` | — |
 | `REQ-06` | ノイズと Jitter の分離 | [design.md#L16](../design.md#L16) | `tests/core/likelihood_test.cpp`<br>`tests/linalg/cholesky_test.cpp` | — |
 | `REQ-07` | 3 種精度ポリシーと IR | [design.md#L17](../design.md#L17) | `tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp` | — |
-| `REQ-08` | MLL・微分・LOO | [design.md#L18](../design.md#L18) | `tests/workspace/leaf_cache_test.cpp` | — |
+| `REQ-08` | MLL・微分・LOO | [design.md#L18](../design.md#L18) | `tests/workspace/leaf_cache_test.cpp`<br>`tests/workspace/mll_test.cpp` | — |
 | `REQ-09` | 自前最適化器群 | [design.md#L19](../design.md#L19) | — | — |
 | `REQ-10` | 前処理パイプライン | [design.md#L20](../design.md#L20) | `tests/kernel/custom_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
 | `REQ-11` | ゼロ確保・決定的並列・境界 | [design.md#L21](../design.md#L21) | `tests/core/build_info_test.cpp`<br>`tests/core/error_test.cpp`<br>`tests/core/likelihood_test.cpp`<br>`tests/core/rng_test.cpp`<br>`tests/core/views_test.cpp`<br>`tests/kernel/compiled_test.cpp`<br>`tests/kernel/exp_test.cpp`<br>`tests/linalg/cholesky_test.cpp`<br>`tests/linalg/parallel_test.cpp`<br>`tests/precision/policy_test.cpp`<br>`tests/precision/refine_test.cpp`<br>`tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
@@ -28,14 +28,14 @@
 | `DES-10` | 供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel<C>`） | [design.md#L189](../design.md#L189) | `tests/kernel/custom_test.cpp`<br>`tests/kernel/distance_test.cpp` | — |
 | `DES-11` | 増分更新対応（`LeafCache` と `USES_CHANGE_INDICES`） | [design.md#L202](../design.md#L202) | `tests/workspace/leaf_cache_test.cpp` | — |
 | `DES-12` | 指数評価バックエンド `KernelExp` | [design.md#L209](../design.md#L209) | — | — |
-| `DES-13` | MLL と解析勾配の単一パス算法（`keep_plan`） | [design.md#L220](../design.md#L220) | — | — |
+| `DES-13` | MLL と解析勾配の単一パス算法（`keep_plan`） | [design.md#L220](../design.md#L220) | `tests/workspace/mll_test.cpp` | — |
 | `DES-14` | 解析ヘッセ行列（`HessianScratch`） | [design.md#L241](../design.md#L241) | — | — |
-| `DES-15` | `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先 | [design.md#L252](../design.md#L252) | — | — |
+| `DES-15` | `CholeskyBuffer::{Retain, Reuse}` とメモリ・速度優先 | [design.md#L252](../design.md#L252) | `tests/workspace/mll_test.cpp` | — |
 | `DES-16` | 推論 API・共分散・標本抽出・LOO | [design.md#L257](../design.md#L257) | `tests/core/views_test.cpp` | — |
-| `DES-17` | ワークスペース構造とライフサイクル | [design.md#L273](../design.md#L273) | — | — |
+| `DES-17` | ワークスペース構造とライフサイクル | [design.md#L273](../design.md#L273) | `tests/workspace/mll_test.cpp` | — |
 | `DES-18` | 前処理クラス階層（`cxxgpr::transform`） | [design.md#L291](../design.md#L291) | `tests/transform/columnwise_test.cpp`<br>`tests/transform/input_test.cpp`<br>`tests/transform/pipeline_test.cpp`<br>`tests/transform/target_test.cpp` | — |
 | `DES-19` | 自前最適化器群（`cxxgpr::optimizer`） | [design.md#L298](../design.md#L298) | — | — |
-| `DES-20` | 決定的乱数（`Xoshiro256++`）とスレッド不変 OpenMP 並列 | [design.md#L311](../design.md#L311) | `tests/core/rng_test.cpp`<br>`tests/linalg/parallel_test.cpp` | — |
+| `DES-20` | 決定的乱数（`Xoshiro256++`）とスレッド不変 OpenMP 並列 | [design.md#L311](../design.md#L311) | `tests/core/rng_test.cpp`<br>`tests/linalg/parallel_test.cpp`<br>`tests/workspace/mll_test.cpp` | — |
 | `FMT-01` | ディレクトリ構成とバージョン契約 | [persist-format.md#L7](../persist-format.md#L7) | — | — |
 | `FMT-02` | 原子的書き込みと入力信頼境界 | [persist-format.md#L18](../persist-format.md#L18) | — | — |
 | `FMT-03` | `config.json` スキーマ | [persist-format.md#L28](../persist-format.md#L28) | `tests/precision/policy_test.cpp` | — |

@@ -256,6 +256,36 @@ public:
     combine_from_leaf_grams(std::span<const MatrixRef<T>> leaf_grams, MatrixMut<T> out,
                             Triangle uplo, MatrixMut<T> scratch, NestedBuffers<T>& nested) const;
 
+    /// Returns the maximum number of top-level products whose factor Grams can be kept within
+    /// the unkept contraction buffer budget.
+    [[nodiscard]] std::size_t kept_products() const noexcept;
+
+    /// Returns the number of n x n buffers kept for the first products top-level products.
+    [[nodiscard]] std::size_t kept_buffers(std::size_t products) const noexcept;
+
+    /// Returns the total n x n buffers needed by weighted_grads when keeping products products.
+    [[nodiscard]] std::size_t weighted_buffers(std::size_t products) const noexcept;
+
+    /// Evaluates the training Gram matrix from points x while saving kept product factor Grams.
+    [[nodiscard]] std::expected<void, GprError> apply_keeping(MatrixRef<T> x, MatrixMut<T> out,
+                                                              Triangle uplo, MatrixMut<T> scratch,
+                                                              NestedBuffers<T>& nested,
+                                                              NestedBuffers<T>& kept_bufs,
+                                                              std::size_t products) const;
+
+    /// Evaluates the training Gram matrix using cached distances while saving kept factor Grams.
+    [[nodiscard]] std::expected<void, GprError>
+    apply_cached_keeping(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> out,
+                         Triangle uplo, MatrixMut<T> scratch, NestedBuffers<T>& nested,
+                         NestedBuffers<T>& kept_bufs, std::size_t products) const;
+
+    /// Evaluates <weight_lower, dK/dtheta_p>_F for all kernel parameters p in one tree walk.
+    [[nodiscard]] std::expected<void, GprError>
+    weighted_grads(MatrixRef<T> x, const DistanceCache<T>* cache, MatrixRef<T> weight_lower,
+                   std::span<double> out_grads, MatrixMut<T> kernel_scratch,
+                   NestedBuffers<T>& nested, NestedBuffers<T>& weighted_bufs, std::size_t products,
+                   std::span<double> col_partials) const;
+
 private:
     struct Impl;
 
