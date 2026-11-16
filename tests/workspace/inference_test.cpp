@@ -456,6 +456,25 @@ TEST(WorkspaceInferenceTest, NegativeControlsRejectInvalidInputs) {
     ASSERT_FALSE(err_alpha.has_value());
     EXPECT_EQ(err_alpha.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
 
+    // DES-02 priority: LengthMismatch takes precedence over DimensionMismatch.
+    auto err_prio = cxxgpr::predict(kernel, fix.likelihood, fix.x_ref(), fix.l_ref(), bad_alpha,
+                                    cxxgpr::MatrixRef<double>(bad_dim_q.data(), 2U, 1U, 2U),
+                                    cxxgpr::PredictOptions{}, qws);
+    ASSERT_FALSE(err_prio.has_value());
+    EXPECT_EQ(err_prio.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+
+    const std::vector<double> empty_vec;
+    auto err_empty_alpha = cxxgpr::loo_predict<cxxgpr::DoublePrecision>(
+        fix.likelihood, fix.l_ref(), empty_vec, fix.y_refine, cxxgpr::PredictOptions{});
+    ASSERT_FALSE(err_empty_alpha.has_value());
+    EXPECT_EQ(err_empty_alpha.error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+    auto err_nonsq_l = cxxgpr::loo_predict<cxxgpr::DoublePrecision>(
+        fix.likelihood, cxxgpr::MatrixRef<double>(bad_dim_q.data(), 2U, 1U, 2U), fix.alpha,
+        fix.y_refine, cxxgpr::PredictOptions{});
+    ASSERT_FALSE(err_nonsq_l.has_value());
+    EXPECT_EQ(err_nonsq_l.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+
     const std::vector<double> bad_y = {1.0};
     auto err_loo = cxxgpr::loo_predict<cxxgpr::DoublePrecision>(
         fix.likelihood, fix.l_ref(), fix.alpha, bad_y, cxxgpr::PredictOptions{});

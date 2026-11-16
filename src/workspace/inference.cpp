@@ -10,7 +10,7 @@
 #include <limits>
 #include <utility>
 
-#if defined(CXXGPR_HAS_OPENMP) && CXXGPR_HAS_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -26,14 +26,11 @@ template <PrecisionPolicyConcept P>
 [[nodiscard]] std::expected<void, GprError> validate_predict_inputs(
     MatrixRef<typename P::Storage> x_train, MatrixRef<typename P::Storage> l_factor,
     std::span<const typename P::Refine> alpha, MatrixRef<typename P::Storage> x_query) {
-    if (x_train.is_empty() || x_query.is_empty()) {
+    if (x_train.is_empty() || x_query.is_empty() || l_factor.is_empty() || alpha.empty()) {
         return std::unexpected(GprError::empty_input());
     }
     const std::size_t n = x_train.rows();
     const std::size_t d = x_train.cols();
-    if (x_query.cols() != d) {
-        return std::unexpected(GprError::dimension_mismatch(x_query.cols(), d));
-    }
     if (l_factor.rows() != n || l_factor.cols() != n) {
         return std::unexpected(
             GprError::length_mismatch("Cholesky factor dimension must match training samples"));
@@ -41,6 +38,9 @@ template <PrecisionPolicyConcept P>
     if (alpha.size() != n) {
         return std::unexpected(
             GprError::length_mismatch("alpha length must match training sample count"));
+    }
+    if (x_query.cols() != d) {
+        return std::unexpected(GprError::dimension_mismatch(x_query.cols(), d));
     }
     for (const auto val : alpha) {
         if (!std::isfinite(val)) {
@@ -90,7 +90,7 @@ template <PrecisionPolicyConcept P>
     Refine* mean_ptr = out_mean.data();
 
     const auto m_signed = static_cast<std::ptrdiff_t>(m_local);
-#if defined(CXXGPR_HAS_OPENMP) && CXXGPR_HAS_OPENMP
+#ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (m_local >= 16U)
 #endif
     for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx) {
@@ -147,7 +147,7 @@ predict_into(const CompiledKernel<typename P::Storage>& kernel,
     Refine* var_ptr = out.variance.data();
 
     const auto m_signed = static_cast<std::ptrdiff_t>(m);
-#if defined(CXXGPR_HAS_OPENMP) && CXXGPR_HAS_OPENMP
+#ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (m >= 16U)
 #endif
     for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx) {
@@ -330,11 +330,11 @@ loo_predict_into(const GaussianLikelihood& likelihood, MatrixRef<typename P::Sto
                  std::span<typename P::Storage> scratch_diag, Prediction<typename P::Refine>& out) {
     using Refine = P::Refine;
 
-    if (l_factor.is_empty()) {
+    if (l_factor.is_empty() || alpha.empty() || y_train.empty()) {
         return std::unexpected(GprError::empty_input());
     }
     if (!l_factor.is_square()) {
-        return std::unexpected(GprError::dimension_mismatch(l_factor.cols(), l_factor.rows()));
+        return std::unexpected(GprError::length_mismatch("Cholesky factor must be square"));
     }
     const std::size_t n = l_factor.rows();
     if (alpha.size() != n) {
