@@ -62,6 +62,7 @@ add_library(cxxgpr STATIC
     src/transform/pipeline.cpp
     src/transform/target.cpp
     src/workspace/buffers.cpp
+    src/workspace/inference.cpp
     src/workspace/leaf_cache.cpp
     src/workspace/mll.cpp
 )

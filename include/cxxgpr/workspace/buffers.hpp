@@ -200,6 +200,8 @@ template <PrecisionPolicyConcept P> struct QueryWorkspace {
     std::vector<Storage> query_dist;
     /// Prior diagonal k(x*_j, x*_j) for each query point (length m).
     std::vector<Storage> query_kss;
+    /// Scratch for zero-allocation diagonal tree evaluation (length >= (nested_depth + 1) * m).
+    std::vector<Storage> query_diag_scratch;
     /// Current training point capacity n.
     std::size_t train_n = 0;
     /// Current query point capacity m.
