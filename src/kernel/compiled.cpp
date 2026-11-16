@@ -148,6 +148,76 @@ void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept {
     apply_binary_op(dst, src, uplo, [](T& d, T s) { d *= s; });
 }
 
+template <KernelScalarConcept T> void scale_lower(MatrixMut<T> dst, T scale) noexcept {
+    const std::size_t n = dst.rows();
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        for (std::size_t row = col; row < n; ++row) {
+            dst(row, col) *= scale;
+        }
+    }
+}
+
+template <KernelScalarConcept T>
+[[nodiscard]] double lower_frobenius(MatrixRef<T> a, MatrixRef<T> b,
+                                     std::span<double> col_partials) noexcept {
+    const std::size_t n = a.rows();
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        const double diag = static_cast<double>(a(col, col)) * static_cast<double>(b(col, col));
+        double off = 0.0;
+        for (std::size_t row = col + 1U; row < n; ++row) {
+            off += static_cast<double>(a(row, col)) * static_cast<double>(b(row, col));
+        }
+        col_partials[col] = diag + (2.0 * off);
+    }
+    double total = 0.0;
+    for (std::size_t col = 0; col < n; ++col) {
+        total += col_partials[col];
+    }
+    return total;
+}
+
+template <KernelScalarConcept T>
+[[nodiscard]] double lower_sum(MatrixRef<T> w, std::span<double> col_partials) noexcept {
+    const std::size_t n = w.rows();
+    const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (n >= 64U)
+#endif
+    for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s) {
+        const auto col = static_cast<std::size_t>(col_s);
+        const auto diag = static_cast<double>(w(col, col));
+        double off = 0.0;
+        for (std::size_t row = col + 1U; row < n; ++row) {
+            off += static_cast<double>(w(row, col));
+        }
+        col_partials[col] = diag + (2.0 * off);
+    }
+    double total = 0.0;
+    for (std::size_t col = 0; col < n; ++col) {
+        total += col_partials[col];
+    }
+    return total;
+}
+
+template <KernelScalarConcept T> [[nodiscard]] double lower_diag_sum(MatrixRef<T> w) noexcept {
+    const std::size_t n = w.rows();
+    double total = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        total += static_cast<double>(w(i, i));
+    }
+    return total;
+}
+
 } // namespace
 
 // --- NestedBuffers ---
@@ -1118,6 +1188,442 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         }
         return {};
     }
+
+    // --- keep_plan and weighted_grads ---
+
+    [[nodiscard]] bool is_constant_term(const Term& term) const noexcept {
+        if (const auto* leaf = std::get_if<LeafRef>(&term)) {
+            return std::holds_alternative<ConstantKernel>(leaves[leaf->leaf_idx]);
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::size_t varying_factors(const std::vector<Term>& terms) const noexcept {
+        std::size_t count = 0;
+        for (const auto& t : terms) {
+            if (!is_constant_term(t)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    [[nodiscard]] T constant_scale(const std::vector<Term>& terms) const noexcept {
+        T scale = T{1};
+        for (const auto& t : terms) {
+            if (const auto* leaf = std::get_if<LeafRef>(&t)) {
+                if (const auto* ck = std::get_if<ConstantKernel>(&leaves[leaf->leaf_idx])) {
+                    scale *= static_cast<T>(ck->constant());
+                }
+            }
+        }
+        return scale;
+    }
+
+    [[nodiscard]] std::span<const Term> root_terms() const noexcept {
+        if (const auto* s = std::get_if<SumTerm>(&root)) {
+            return s->terms;
+        }
+        return std::span<const Term>(&root, 1U);
+    }
+
+    [[nodiscard]] static std::size_t unkept_buffers_of(const Term& term) noexcept {
+        if (const auto* s = std::get_if<SumTerm>(&term)) {
+            std::size_t mx = 0;
+            for (const auto& child : s->terms) {
+                mx = std::max(mx, unkept_buffers_of(child));
+            }
+            return mx;
+        }
+        if (const auto* p = std::get_if<ProductTerm>(&term)) {
+            std::size_t mx = 0;
+            for (const auto& child : p->terms) {
+                mx = std::max(mx, unkept_buffers_of(child));
+            }
+            return p->terms.size() + 1U + mx;
+        }
+        return 1U;
+    }
+
+    [[nodiscard]] std::size_t node_buffers_of(const Term& term, bool keeps) const noexcept {
+        if (const auto* s = std::get_if<SumTerm>(&term)) {
+            std::size_t mx = 0;
+            for (const auto& child : s->terms) {
+                mx = std::max(mx, node_buffers_of(child, false));
+            }
+            return mx;
+        }
+        if (const auto* p = std::get_if<ProductTerm>(&term)) {
+            std::size_t mx = 0;
+            for (const auto& child : p->terms) {
+                mx = std::max(mx, node_buffers_of(child, false));
+            }
+            if (keeps) {
+                return 1U + mx;
+            }
+            return varying_factors(p->terms) + 1U + mx;
+        }
+        return 1U;
+    }
+
+    [[nodiscard]] std::size_t kept_grams_count(std::size_t products) const noexcept {
+        std::size_t kept = 0;
+        std::size_t grams = 0;
+        for (const auto& t : root_terms()) {
+            if (const auto* p = std::get_if<ProductTerm>(&t)) {
+                const std::size_t v = varying_factors(p->terms);
+                if (v >= 2U && kept < products) {
+                    ++kept;
+                    grams += v;
+                }
+            }
+        }
+        return grams;
+    }
+
+    [[nodiscard]] std::size_t walk_buffers_count(std::size_t products) const noexcept {
+        std::size_t kept = 0;
+        std::size_t mx = 0;
+        for (const auto& t : root_terms()) {
+            bool keeps = false;
+            if (const auto* p = std::get_if<ProductTerm>(&t)) {
+                if (varying_factors(p->terms) >= 2U && kept < products) {
+                    ++kept;
+                    keeps = true;
+                }
+            }
+            mx = std::max(mx, node_buffers_of(t, keeps));
+        }
+        return mx;
+    }
+
+    [[nodiscard]] std::size_t compute_kept_products() const noexcept {
+        const std::size_t budget = unkept_buffers_of(root);
+        std::size_t candidates = 0;
+        for (const auto& t : root_terms()) {
+            if (const auto* p = std::get_if<ProductTerm>(&t)) {
+                if (varying_factors(p->terms) >= 2U) {
+                    ++candidates;
+                }
+            }
+        }
+        for (std::size_t p = candidates; p > 0U; --p) {
+            if (kept_grams_count(p) + walk_buffers_count(p) <= budget) {
+                return p;
+            }
+        }
+        return 0U;
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    grad_leaf_at(std::size_t leaf_idx, MatrixRef<T> x, const DistanceCache<T>* cache,
+                 MatrixMut<T> d_k, std::size_t local_idx, Triangle uplo, NestedBuffers<T>& nested,
+                 std::size_t level_idx) const {
+        const KernelLeaf& kl = leaves[leaf_idx];
+        if (cache != nullptr) {
+            if (cache->has_dist() && leaf_reads_distances(kl)) {
+                return detail::leaf_grad_dist(kl, cache->dist_view(), d_k, local_idx, uplo,
+                                              exp_mode);
+            }
+            if (cache->has_ard() && leaf_needs_ard(kl)) {
+                return detail::leaf_grad_ard_packed(kl, cached_ls[leaf_idx], cache->ard_packed(),
+                                                    x.rows(), d_k, local_idx, uplo, exp_mode);
+            }
+        }
+        if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
+            if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows()); !ok.has_value()) {
+                return ok;
+            }
+            auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+            fill_square_sq_dist(x, dist_buf);
+            return custom->template term<T>().grad(dist_buf.as_ref(), d_k, local_idx, uplo);
+        }
+        return detail::leaf_grad_points(kl, x, d_k, local_idx, uplo, exp_mode);
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    eval_keeping_impl(MatrixRef<T> x, const DistanceCache<T>* cache, MatrixMut<T> out,
+                      Triangle uplo, MatrixMut<T> scratch, NestedBuffers<T>& nested,
+                      NestedBuffers<T>& kept_bufs, std::size_t products) const {
+        const auto roots = root_terms();
+        if (roots.empty()) {
+            return std::unexpected(
+                GprError::unsupported_kernel_operation("composite kernel has no terms"));
+        }
+        const std::size_t n = out.rows();
+        std::size_t kept = 0;
+        std::size_t offset = 0;
+        for (std::size_t r_idx = 0; r_idx < roots.size(); ++r_idx) {
+            const Term& t = roots[r_idx];
+            MatrixMut<T> target = (r_idx == 0U) ? out : scratch;
+            bool keeps = false;
+            if (const auto* p = std::get_if<ProductTerm>(&t)) {
+                const std::size_t v = varying_factors(p->terms);
+                if (v >= 2U && kept < products) {
+                    keeps = true;
+                    ++kept;
+                    const T scale = constant_scale(p->terms);
+                    std::size_t v_idx = 0;
+                    for (const auto& f : p->terms) {
+                        if (is_constant_term(f)) {
+                            continue;
+                        }
+                        if (kept_bufs.depth() <= (offset + v_idx) || kept_bufs.rows() < n ||
+                            kept_bufs.cols() < n) {
+                            return std::unexpected(GprError::workspace_too_small());
+                        }
+                        auto kbuf = kept_bufs.level(offset + v_idx, n, n);
+                        MatrixMut<T> tmp = scratch;
+                        std::size_t sub_level = 0U;
+                        if (r_idx > 0U && v_idx > 0U && !std::holds_alternative<LeafRef>(f)) {
+                            if (auto ok = ensure_nested(nested, 0U, n, n); !ok.has_value()) {
+                                return ok;
+                            }
+                            tmp = nested.level(0U, n, n);
+                            sub_level = 1U;
+                        }
+                        if (auto res =
+                                eval_term_points(f, x, kbuf, uplo, tmp, nested, sub_level, cache);
+                            !res.has_value()) {
+                            return res;
+                        }
+                        if (v_idx == 0U) {
+                            copy_into(target, kbuf.as_ref(), uplo);
+                            if (scale != T{1}) {
+                                scale_lower(target, scale);
+                            }
+                        } else {
+                            mul_into(target, kbuf.as_ref(), uplo);
+                        }
+                        ++v_idx;
+                    }
+                    offset += v;
+                }
+            }
+            if (!keeps) {
+                if (r_idx == 0U || std::holds_alternative<LeafRef>(t)) {
+                    if (auto res = eval_term_points(t, x, target, uplo, scratch, nested, 0U, cache);
+                        !res.has_value()) {
+                        return res;
+                    }
+                } else {
+                    if (auto ok = ensure_nested(nested, 0U, n, n); !ok.has_value()) {
+                        return ok;
+                    }
+                    auto nbuf = nested.level(0U, n, n);
+                    if (auto res = eval_term_points(t, x, nbuf, uplo, scratch, nested, 1U, cache);
+                        !res.has_value()) {
+                        return res;
+                    }
+                    add_into(out, nbuf.as_ref(), uplo);
+                    continue;
+                }
+            }
+            if (r_idx > 0U) {
+                add_into(out, target.as_ref(), uplo);
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<double, GprError>
+    walk_weighted(const Term& term, MatrixRef<T> x, const DistanceCache<T>* cache,
+                  MatrixRef<T> weight, std::span<double> out_grads, MatrixMut<T> kernel_scratch,
+                  NestedBuffers<T>& nested, NestedBuffers<T>& weighted_bufs,
+                  std::size_t kept_offset, std::size_t kept_count, bool has_kept,
+                  std::size_t walk_cursor, std::span<double> col_partials, bool need_value) const {
+        const std::size_t n = x.rows();
+        if (const auto* s = std::get_if<SumTerm>(&term)) {
+            std::size_t p_off = 0;
+            double value = 0.0;
+            for (const auto& child : s->terms) {
+                const auto [cb, ce] = param_range(child);
+                const std::size_t count = ce - cb;
+                auto res = walk_weighted(child, x, cache, weight, out_grads.subspan(p_off, count),
+                                         kernel_scratch, nested, weighted_bufs, 0, 0, false,
+                                         walk_cursor, col_partials, need_value);
+                if (!res.has_value()) {
+                    return res;
+                }
+                value += *res;
+                p_off += count;
+            }
+            return value;
+        }
+        if (const auto* leaf = std::get_if<LeafRef>(&term)) {
+            const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (const auto* ck = std::get_if<ConstantKernel>(&kl)) {
+                const double val = ck->constant() * lower_sum(weight, col_partials);
+                out_grads[0] = val;
+                return val;
+            }
+            if (const auto* wk = std::get_if<WhiteKernel>(&kl)) {
+                const double val = wk->variance() * lower_diag_sum(weight);
+                out_grads[0] = val;
+                return need_value ? val : 0.0;
+            }
+            for (std::size_t p = 0; p < leaf->param_count; ++p) {
+                if (auto res = grad_leaf_at(leaf->leaf_idx, x, cache, kernel_scratch, p,
+                                            Triangle::Lower, nested, 0);
+                    !res.has_value()) {
+                    return std::unexpected(std::move(res).error());
+                }
+                out_grads[p] = lower_frobenius(weight, kernel_scratch.as_ref(), col_partials);
+            }
+            if (need_value) {
+                if (auto res = eval_leaf_at(leaf->leaf_idx, x, kernel_scratch, Triangle::Lower,
+                                            nested, 0, cache);
+                    !res.has_value()) {
+                    return std::unexpected(std::move(res).error());
+                }
+                return lower_frobenius(weight, kernel_scratch.as_ref(), col_partials);
+            }
+            return 0.0;
+        }
+
+        const auto& p = std::get<ProductTerm>(term);
+        const std::size_t varying = varying_factors(p.terms);
+        const T scale = constant_scale(p.terms);
+        const bool has_const = (varying < p.terms.size());
+
+        if (varying == 0U) {
+            const double val = static_cast<double>(scale) * lower_sum(weight, col_partials);
+            std::size_t p_off = 0;
+            for (const auto& f : p.terms) {
+                const auto [fb, fe] = param_range(f);
+                out_grads[p_off] = val;
+                p_off += (fe - fb);
+            }
+            return val;
+        }
+
+        if (varying == 1U) {
+            double val = 0.0;
+            if (has_const) {
+                if (auto ok = ensure_nested(weighted_bufs, walk_cursor, n, n); !ok.has_value()) {
+                    return std::unexpected(std::move(ok).error());
+                }
+            }
+            std::size_t p_off = 0;
+            for (const auto& f : p.terms) {
+                const auto [fb, fe] = param_range(f);
+                const std::size_t count = fe - fb;
+                if (!is_constant_term(f)) {
+                    MatrixRef<T> eff_w = weight;
+                    if (has_const) {
+                        auto w_buf = weighted_bufs.level(walk_cursor, n, n);
+                        copy_into(w_buf, weight, Triangle::Lower);
+                        if (scale != T{1}) {
+                            scale_lower(w_buf, scale);
+                        }
+                        eff_w = w_buf.as_ref();
+                    }
+                    auto res = walk_weighted(f, x, cache, eff_w, out_grads.subspan(p_off, count),
+                                             kernel_scratch, nested, weighted_bufs, 0, 0, false,
+                                             has_const ? (walk_cursor + 1U) : walk_cursor,
+                                             col_partials, need_value || has_const);
+                    if (!res.has_value()) {
+                        return res;
+                    }
+                    val = *res;
+                }
+                p_off += count;
+            }
+            if (has_const) {
+                std::size_t c_off = 0;
+                for (const auto& f : p.terms) {
+                    const auto [fb, fe] = param_range(f);
+                    if (is_constant_term(f)) {
+                        out_grads[c_off] = val;
+                    }
+                    c_off += (fe - fb);
+                }
+            }
+            return val;
+        }
+
+        // varying >= 2
+        const std::size_t g_base = has_kept ? kept_offset : walk_cursor;
+        const std::size_t next_cursor = has_kept ? walk_cursor : (walk_cursor + varying);
+        if (!has_kept) {
+            std::size_t v_idx = 0;
+            for (const auto& f : p.terms) {
+                if (is_constant_term(f)) {
+                    continue;
+                }
+                if (auto ok = ensure_nested(weighted_bufs, g_base + v_idx, n, n); !ok.has_value()) {
+                    return std::unexpected(std::move(ok).error());
+                }
+                auto g_buf = weighted_bufs.level(g_base + v_idx, n, n);
+                if (auto res = eval_term_points(f, x, g_buf, Triangle::Lower, kernel_scratch,
+                                                nested, 0, cache);
+                    !res.has_value()) {
+                    return std::unexpected(std::move(res).error());
+                }
+                ++v_idx;
+            }
+        } else if (kept_count < varying) {
+            return std::unexpected(GprError::workspace_too_small());
+        }
+
+        if (auto ok = ensure_nested(weighted_bufs, next_cursor, n, n); !ok.has_value()) {
+            return std::unexpected(std::move(ok).error());
+        }
+        auto w_eff = weighted_bufs.level(next_cursor, n, n);
+
+        double val = 0.0;
+        std::size_t p_off = 0;
+        std::size_t cur_v = 0;
+        for (const auto& f : p.terms) {
+            const auto [fb, fe] = param_range(f);
+            const std::size_t count = fe - fb;
+            if (!is_constant_term(f)) {
+                copy_into(w_eff, weight, Triangle::Lower);
+                if (scale != T{1}) {
+                    scale_lower(w_eff, scale);
+                }
+                for (std::size_t r = 0; r < varying; ++r) {
+                    if (r == cur_v) {
+                        continue;
+                    }
+                    mul_into(w_eff, weighted_bufs.level(g_base + r, n, n).as_ref(),
+                             Triangle::Lower);
+                }
+                if (auto res =
+                        walk_weighted(f, x, cache, w_eff.as_ref(), out_grads.subspan(p_off, count),
+                                      kernel_scratch, nested, weighted_bufs, 0, 0, false,
+                                      next_cursor + 1U, col_partials, false);
+                    !res.has_value()) {
+                    return res;
+                }
+                ++cur_v;
+            }
+            p_off += count;
+        }
+
+        if (need_value || has_const) {
+            copy_into(w_eff, weight, Triangle::Lower);
+            if (scale != T{1}) {
+                scale_lower(w_eff, scale);
+            }
+            for (std::size_t r = 1U; r < varying; ++r) {
+                mul_into(w_eff, weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
+            }
+            val = lower_frobenius(w_eff.as_ref(), weighted_bufs.level(g_base, n, n).as_ref(),
+                                  col_partials);
+            if (has_const) {
+                std::size_t c_off = 0;
+                for (const auto& f : p.terms) {
+                    const auto [fb, fe] = param_range(f);
+                    if (is_constant_term(f)) {
+                        out_grads[c_off] = val;
+                    }
+                    c_off += (fe - fb);
+                }
+            }
+        }
+        return val;
+    }
 };
 
 // --- CompiledKernel<T> public methods ---
@@ -1674,6 +2180,112 @@ CompiledKernel<T>::combine_from_leaf_grams(std::span<const MatrixRef<T>> leaf_gr
         }
     }
     return impl_->eval_combine_term(impl_->root, leaf_grams, out, uplo, nested, 0);
+}
+
+template <KernelScalarConcept T> std::size_t CompiledKernel<T>::kept_products() const noexcept {
+    return impl_->compute_kept_products();
+}
+
+template <KernelScalarConcept T>
+std::size_t CompiledKernel<T>::kept_buffers(std::size_t products) const noexcept {
+    return impl_->kept_grams_count(products);
+}
+
+template <KernelScalarConcept T>
+std::size_t CompiledKernel<T>::weighted_buffers(std::size_t products) const noexcept {
+    return impl_->kept_grams_count(products) + impl_->walk_buffers_count(products);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_keeping(MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
+                                 MatrixMut<T> scratch, NestedBuffers<T>& nested,
+                                 NestedBuffers<T>& kept_bufs, std::size_t products) const {
+    if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
+        return sc;
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
+    }
+    return impl_->eval_keeping_impl(x, nullptr, out, uplo, scratch, nested, kept_bufs, products);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_cached_keeping(MatrixRef<T> x, const DistanceCache<T>& cache,
+                                        MatrixMut<T> out, Triangle uplo, MatrixMut<T> scratch,
+                                        NestedBuffers<T>& nested, NestedBuffers<T>& kept_bufs,
+                                        std::size_t products) const {
+    if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
+        return sc;
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
+    }
+    if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value()) {
+        return cs;
+    }
+    return impl_->eval_keeping_impl(x, &cache, out, uplo, scratch, nested, kept_bufs, products);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError> CompiledKernel<T>::weighted_grads(
+    MatrixRef<T> x, const DistanceCache<T>* cache, MatrixRef<T> weight_lower,
+    std::span<double> out_grads, MatrixMut<T> kernel_scratch, NestedBuffers<T>& nested,
+    NestedBuffers<T>& weighted_bufs, std::size_t products, std::span<double> col_partials) const {
+    if (out_grads.size() != impl_->bindings.size()) {
+        return std::unexpected(GprError::length_mismatch("weighted_grads output length mismatch"));
+    }
+    if (auto v = impl_->validate_points_call(x, weight_lower); !v.has_value()) {
+        return v;
+    }
+    if (cache != nullptr) {
+        if (auto cs = impl_->validate_cache_shape(x, *cache); !cs.has_value()) {
+            return cs;
+        }
+    }
+    if (auto sc = require_scratch(weight_lower, kernel_scratch, "kernel_scratch");
+        !sc.has_value()) {
+        return sc;
+    }
+    if (col_partials.size() < x.rows()) {
+        return std::unexpected(GprError::workspace_too_small());
+    }
+    const std::size_t needed_bufs = weighted_buffers(products);
+    if (weighted_bufs.depth() < needed_bufs || weighted_bufs.rows() < x.rows() ||
+        weighted_bufs.cols() < x.rows()) {
+        return std::unexpected(GprError::workspace_too_small());
+    }
+
+    const std::size_t kept_total = impl_->kept_grams_count(products);
+    std::size_t p_off = 0;
+    std::size_t kept_idx = 0;
+    std::size_t kept_off = 0;
+    for (const auto& t : impl_->root_terms()) {
+        const auto [tb, te] = Impl::param_range(t);
+        const std::size_t count = te - tb;
+        std::size_t v = 0;
+        bool has_kept = false;
+        if (const auto* p = std::get_if<typename Impl::ProductTerm>(&t)) {
+            v = impl_->varying_factors(p->terms);
+            if (v >= 2U && kept_idx < products) {
+                has_kept = true;
+                ++kept_idx;
+            }
+        }
+        auto res =
+            impl_->walk_weighted(t, x, cache, weight_lower, out_grads.subspan(p_off, count),
+                                 kernel_scratch, nested, weighted_bufs, has_kept ? kept_off : 0U,
+                                 has_kept ? v : 0U, has_kept, kept_total, col_partials, false);
+        if (!res.has_value()) {
+            return std::unexpected(std::move(res).error());
+        }
+        if (has_kept) {
+            kept_off += v;
+        }
+        p_off += count;
+    }
+    return {};
 }
 
 template class NestedBuffers<double>;

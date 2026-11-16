@@ -2,9 +2,9 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M3-A
+**今**：M3-B
 
-目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）および M2 カーネル・距離・キャッシュ基盤（M2-A〜M2-E）を完了し、ワークスペースと MLL・解析勾配（M3-A）へ進む段階である。
+目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）・M2 カーネル基盤（M2-A〜M2-E）およびワークスペースと MLL・`keep_plan` 解析勾配（M3-A）を完了し、解析ヘッセ行列・`CholeskyBuffer` 統合（M3-B）へ進む段階である。
 
 品質管理の仕組み（追跡・基準結果・結果変更記録・来歴・プラットフォーム認定）は [品質保証計画](quality/quality-plan.md)、ID と試験の対応は [追跡表](quality/traceability.md) にある。
 
@@ -68,7 +68,7 @@ flowchart LR
 
 | ID | 種類 | 題 | Issue | 状態 |
 |---|---|---|---|---|
-| M3-A | Feat | ワークスペース（`WorkspaceCore`/`FitBuffers`/`QueryWorkspace`）と MLL・`keep_plan` 解析勾配 | - | Todo |
+| M3-A | Feat | ワークスペース（`WorkspaceCore`/`FitBuffers`/`QueryWorkspace`）と MLL・`keep_plan` 解析勾配 | #24 | Done |
 | M3-B | Feat | 解析ヘッセ行列（`HessianScratch`）・`CholeskyBuffer::{Retain, Reuse}`・`with_prefer_memory` / `speed` | - | Todo |
 | M3-C | Feat | LOO 推論（GPML §5.4.2）・`predict` / `predict_into` / `predict_covariance` / `sample` | - | Todo |
 
