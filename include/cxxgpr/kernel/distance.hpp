@@ -101,6 +101,9 @@ public:
     [[nodiscard]] DistanceKernel<DistanceOnly>
     rational_quadratic(RationalQuadraticKernel leaf) const;
 
+    /// Binds a user-defined CustomKernel leaf to this scalar distance slot.
+    [[nodiscard]] DistanceKernel<DistanceOnly> custom(CustomKernel leaf) const;
+
 private:
     SlotId id_;
 };
@@ -341,6 +344,13 @@ public:
 
     /// Returns the number of nested intermediate buffers required for tree evaluation.
     [[nodiscard]] std::size_t nested_depth() const noexcept;
+
+    /// Returns the exponential evaluation backend used during kernel evaluation (default
+    /// Accurate).
+    [[nodiscard]] KernelExp kernel_exp() const noexcept;
+
+    /// Sets the exponential evaluation backend used during kernel evaluation.
+    void set_kernel_exp(KernelExp mode) noexcept;
 
     /// Allocates NestedBuffers sized for this kernel and an output matrix of shape rows x cols.
     [[nodiscard]] NestedBuffers<T> make_nested_buffers(std::size_t rows, std::size_t cols) const;

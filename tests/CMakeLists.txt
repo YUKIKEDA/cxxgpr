@@ -151,6 +151,16 @@ cxxgpr_add_test(kernel.distance
     LABELS unit property negative
 )
 
+cxxgpr_add_test(kernel.exp
+    SOURCES kernel/exp_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(kernel.custom
+    SOURCES kernel/custom_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

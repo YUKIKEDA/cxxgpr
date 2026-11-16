@@ -140,6 +140,10 @@ struct KernelSpecAccess {
 
 KernelSpec::KernelSpec(KernelLeaf leaf) : node_(std::move(leaf)) {}
 
+KernelSpec KernelSpec::custom(CustomKernel leaf) {
+    return {KernelLeaf(std::move(leaf))};
+}
+
 KernelSpec KernelSpec::sum(KernelSpec lhs, KernelSpec rhs) {
     auto lhs_ptr = std::make_shared<const KernelSpec>(std::move(lhs));
     auto rhs_ptr = std::make_shared<const KernelSpec>(std::move(rhs));

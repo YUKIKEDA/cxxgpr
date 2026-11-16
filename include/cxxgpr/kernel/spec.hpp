@@ -3,6 +3,7 @@
 
 #include "cxxgpr/core/error.hpp"
 #include "cxxgpr/core/interval.hpp"
+#include "cxxgpr/kernel/custom.hpp"
 #include "cxxgpr/kernel/leaves.hpp"
 #include "cxxgpr/precision/policy.hpp"
 
@@ -45,16 +46,19 @@ enum class CoordMode : std::uint8_t {
     Mixed,
 };
 
-/// Variant over all built-in kernel leaf types.
+/// Variant over all built-in kernel leaf types and user-defined custom leaves.
 using KernelLeaf = std::variant<RbfKernel, RbfArdKernel, MaternKernel, MaternArdKernel,
                                 PeriodicKernel, RationalQuadraticKernel, RationalQuadraticArdKernel,
-                                ConstantKernel, LinearKernel, WhiteKernel>;
+                                ConstantKernel, LinearKernel, WhiteKernel, CustomKernel>;
 
 /// Declaration-layer kernel expression tree holding double-precision parameters until compile.
 class KernelSpec {
 public:
-    /// Constructs a leaf specification from any built-in kernel leaf.
+    /// Constructs a leaf specification from any built-in or custom kernel leaf.
     /* implicit */ KernelSpec(KernelLeaf leaf);
+
+    /// Constructs a leaf specification from a user-defined CustomKernel.
+    [[nodiscard]] static KernelSpec custom(CustomKernel leaf);
 
     /// Constructs a sum of two kernel specifications.
     [[nodiscard]] static KernelSpec sum(KernelSpec lhs, KernelSpec rhs);
