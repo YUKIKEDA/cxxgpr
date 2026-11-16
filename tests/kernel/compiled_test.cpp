@@ -339,6 +339,43 @@ TEST(CompiledKernelTest, RejectsInvalidInputsAndAliasedBuffers) {
         nested_c.fill_diag(cxxgpr::MatrixRef<double>(x_dim2.data(), 2, 2), diag).has_value());
     EXPECT_DOUBLE_EQ(diag[0], 2.0 + 2.0 + ((0.0 * 0.0) + (0.5 * 0.5)));
     EXPECT_DOUBLE_EQ(diag[1], 2.0 + 2.0 + ((1.0 * 1.0) + (1.5 * 1.5)));
+
+    // Compound violations follow DES-02 precedence: EmptyInput -> LengthMismatch ->
+    // DimensionMismatch -> NonFiniteInput.
+    const std::array<double, 4> nan_dim2{std::numeric_limits<double>::quiet_NaN(), 1.0, 0.5, 1.5};
+    std::array<double, 1> bad_shape_out{};
+    std::array<double, 1> bad_shape_scratch{};
+    EXPECT_EQ(iso_plus_ard3
+                  .apply_points(cxxgpr::MatrixRef<double>(nan_dim2.data(), 2, 2),
+                                cxxgpr::MatrixMut<double>(bad_shape_out.data(), 1, 1),
+                                cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<double>(bad_shape_scratch.data(), 1, 1))
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::LengthMismatch);
+    EXPECT_EQ(iso_plus_ard3
+                  .apply_points(cxxgpr::MatrixRef<double>(nan_dim2.data(), 2, 2),
+                                cxxgpr::MatrixMut<double>(out.data(), 2, 2),
+                                cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), 2, 2))
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::DimensionMismatch);
+
+    const cxxgpr::MatrixRef<double> empty_x(nullptr, 0, 0);
+    EXPECT_EQ(iso_plus_ard3.fill_diag(empty_x, std::span<double>{}).error().code(),
+              cxxgpr::GprErrorCode::EmptyInput);
+    EXPECT_EQ(iso_plus_ard3
+                  .fill_diag(cxxgpr::MatrixRef<double>(nan_dim2.data(), 2, 2),
+                             std::span<double>{bad_shape_out})
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::LengthMismatch);
+    EXPECT_EQ(
+        iso_plus_ard3
+            .fill_diag(cxxgpr::MatrixRef<double>(nan_dim2.data(), 2, 2), std::span<double>{diag})
+            .error()
+            .code(),
+        cxxgpr::GprErrorCode::DimensionMismatch);
 }
 
 } // namespace

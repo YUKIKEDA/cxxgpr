@@ -102,31 +102,31 @@ template <KernelScalarConcept T>
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError> validate_square_points(MatrixRef<T> x,
                                                                    MatrixMut<T> out) {
-    if (auto v = validate_points(x); !v.has_value()) {
-        return v;
+    if (x.rows() == 0 || x.cols() == 0) {
+        return std::unexpected(GprError::empty_input());
     }
     if (out.rows() != x.rows() || out.cols() != x.rows()) {
         return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
     }
-    return {};
+    return validate_points(x);
 }
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError> validate_cross_points(MatrixRef<T> x1, MatrixRef<T> x2,
                                                                   MatrixMut<T> out) {
-    if (auto v = validate_points(x1); !v.has_value()) {
-        return v;
-    }
-    if (auto v = validate_points(x2); !v.has_value()) {
-        return v;
-    }
-    if (x1.cols() != x2.cols()) {
-        return std::unexpected(GprError::dimension_mismatch(x2.cols(), x1.cols()));
+    if (x1.rows() == 0 || x1.cols() == 0 || x2.rows() == 0 || x2.cols() == 0) {
+        return std::unexpected(GprError::empty_input());
     }
     if (out.rows() != x1.rows() || out.cols() != x2.rows()) {
         return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
     }
-    return {};
+    if (x1.cols() != x2.cols()) {
+        return std::unexpected(GprError::dimension_mismatch(x2.cols(), x1.cols()));
+    }
+    if (auto v = validate_points(x1); !v.has_value()) {
+        return v;
+    }
+    return validate_points(x2);
 }
 
 template <KernelScalarConcept T>

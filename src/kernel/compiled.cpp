@@ -296,6 +296,12 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         if (x.rows() == 0 || x.cols() == 0) {
             return std::unexpected(GprError::empty_input());
         }
+        if (out.rows() != x.rows() || out.cols() != x.rows()) {
+            return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+        }
+        if (auto ard = validate_ard_dims(x.cols()); !ard.has_value()) {
+            return ard;
+        }
         for (std::size_t col = 0; col < x.cols(); ++col) {
             for (std::size_t row = 0; row < x.rows(); ++row) {
                 if (!std::isfinite(x(row, col))) {
@@ -303,11 +309,36 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                 }
             }
         }
-        if (auto ard = validate_ard_dims(x.cols()); !ard.has_value()) {
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    validate_cross_points_call(MatrixRef<T> x1, MatrixRef<T> x2, MatrixRef<T> out) const {
+        if (x1.rows() == 0 || x1.cols() == 0 || x2.rows() == 0 || x2.cols() == 0) {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (out.rows() != x1.rows() || out.cols() != x2.rows()) {
+            return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+        }
+        if (x1.cols() != x2.cols()) {
+            return std::unexpected(GprError::dimension_mismatch(x2.cols(), x1.cols()));
+        }
+        if (auto ard = validate_ard_dims(x1.cols()); !ard.has_value()) {
             return ard;
         }
-        if (out.rows() != x.rows() || out.cols() != x.rows()) {
-            return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+        for (std::size_t col = 0; col < x1.cols(); ++col) {
+            for (std::size_t row = 0; row < x1.rows(); ++row) {
+                if (!std::isfinite(x1(row, col))) {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+            }
+        }
+        for (std::size_t col = 0; col < x2.cols(); ++col) {
+            for (std::size_t row = 0; row < x2.rows(); ++row) {
+                if (!std::isfinite(x2(row, col))) {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+            }
         }
         return {};
     }
@@ -1044,6 +1075,9 @@ CompiledKernel<T>::apply_cross_points(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMu
     if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
         return sc;
     }
+    if (auto v = impl_->validate_cross_points_call(x1, x2, out.as_ref()); !v.has_value()) {
+        return v;
+    }
     return impl_->eval_term_cross_points(impl_->root, x1, x2, out, scratch, nested, 0);
 }
 
@@ -1057,8 +1091,21 @@ CompiledKernel<T>::apply_cross_points(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMu
 
 template <KernelScalarConcept T>
 std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out) const {
+    if (x.rows() == 0 || x.cols() == 0) {
+        return std::unexpected(GprError::empty_input());
+    }
+    if (auto cnt = require_count(out.size(), x.rows(), "out"); !cnt.has_value()) {
+        return cnt;
+    }
     if (auto ard = impl_->validate_ard_dims(x.cols()); !ard.has_value()) {
         return ard;
+    }
+    for (std::size_t col = 0; col < x.cols(); ++col) {
+        for (std::size_t row = 0; row < x.rows(); ++row) {
+            if (!std::isfinite(x(row, col))) {
+                return std::unexpected(GprError::non_finite_input());
+            }
+        }
     }
     std::vector<T> scratch_vec((impl_->nested_depth + 1U) * out.size());
     return impl_->eval_fill_diag(impl_->root, x, out, scratch_vec, 0);
