@@ -13,6 +13,19 @@ namespace cxxgpr {
 
 namespace {
 
+[[nodiscard]] bool leaf_reads_distances(const KernelLeaf& leaf) noexcept {
+    return std::holds_alternative<RbfKernel>(leaf) || std::holds_alternative<MaternKernel>(leaf) ||
+           std::holds_alternative<PeriodicKernel>(leaf) ||
+           std::holds_alternative<RationalQuadraticKernel>(leaf) ||
+           std::holds_alternative<CustomKernel>(leaf);
+}
+
+[[nodiscard]] bool leaf_needs_ard(const KernelLeaf& leaf) noexcept {
+    return std::holds_alternative<RbfArdKernel>(leaf) ||
+           std::holds_alternative<MaternArdKernel>(leaf) ||
+           std::holds_alternative<RationalQuadraticArdKernel>(leaf);
+}
+
 [[nodiscard]] CoordMode combine_coord_mode(CoordMode a, CoordMode b) noexcept {
     if (a == b) {
         return a;
@@ -179,11 +192,52 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     };
 
     std::vector<KernelLeaf> leaves;
+    std::vector<std::vector<double>> cached_ls;
     std::vector<ParameterBinding> bindings;
     Term root;
     CoordMode coord_mode = CoordMode::Either;
     std::size_t nested_depth = 0;
     KernelExp exp_mode = KernelExp::Accurate;
+    bool reads_dist = false;
+    bool needs_ard = false;
+
+    void refresh_cached_ls() {
+        cached_ls.resize(leaves.size());
+        for (std::size_t idx = 0; idx < leaves.size(); ++idx) {
+            if (const auto* k = std::get_if<RbfArdKernel>(&leaves[idx])) {
+                cached_ls[idx] = k->lengthscales();
+            } else if (const auto* km = std::get_if<MaternArdKernel>(&leaves[idx])) {
+                cached_ls[idx] = km->lengthscales();
+            } else if (const auto* krq = std::get_if<RationalQuadraticArdKernel>(&leaves[idx])) {
+                cached_ls[idx] = krq->lengthscales();
+            } else {
+                cached_ls[idx].clear();
+            }
+        }
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    validate_cache_shape(MatrixRef<T> x, const DistanceCache<T>& cache) const {
+        if (cache.has_dist()) {
+            const auto dist = cache.dist_view();
+            if (dist.rows() != x.rows() || dist.cols() != x.rows()) {
+                return std::unexpected(GprError::length_mismatch("distance cache shape mismatch"));
+            }
+        }
+        if (cache.has_ard()) {
+            if (cache.num_points() != x.rows()) {
+                return std::unexpected(GprError::length_mismatch("ARD cache row count mismatch"));
+            }
+            if (cache.num_dims() != x.cols()) {
+                return std::unexpected(GprError::dimension_mismatch(cache.num_dims(), x.cols()));
+            }
+            const std::size_t per_dim = (x.rows() * (x.rows() + 1U)) / 2U;
+            if (cache.ard_packed().size() != cache.num_dims() * per_dim) {
+                return std::unexpected(GprError::length_mismatch("ARD cache length mismatch"));
+            }
+        }
+        return {};
+    }
 
     static std::pair<std::size_t, std::size_t> param_range(const Term& term) noexcept {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
@@ -446,9 +500,20 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
 
     [[nodiscard]] std::expected<void, GprError>
     eval_term_points(const Term& term, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
-                     MatrixMut<T> scratch, NestedBuffers<T>& nested, std::size_t level_idx) const {
+                     MatrixMut<T> scratch, NestedBuffers<T>& nested, std::size_t level_idx,
+                     const DistanceCache<T>* cache = nullptr) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (cache != nullptr) {
+                if (cache->has_dist() && leaf_reads_distances(kl)) {
+                    return detail::leaf_apply_dist(kl, cache->dist_view(), out, uplo, exp_mode);
+                }
+                if (cache->has_ard() && leaf_needs_ard(kl)) {
+                    return detail::leaf_apply_ard_packed(kl, cached_ls[leaf->leaf_idx],
+                                                         cache->ard_packed(), x.rows(), out, uplo,
+                                                         exp_mode);
+                }
+            }
             if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
                 if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
                     !ok.has_value()) {
@@ -467,13 +532,14 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             return std::unexpected(
                 GprError::unsupported_kernel_operation("composite kernel has no terms"));
         }
-        if (auto res = eval_term_points(terms[0], x, out, uplo, scratch, nested, level_idx);
+        if (auto res = eval_term_points(terms[0], x, out, uplo, scratch, nested, level_idx, cache);
             !res.has_value()) {
             return res;
         }
         for (std::size_t k = 1; k < terms.size(); ++k) {
             if (std::holds_alternative<LeafRef>(terms[k])) {
-                if (auto res = eval_term_points(terms[k], x, scratch, uplo, out, nested, level_idx);
+                if (auto res =
+                        eval_term_points(terms[k], x, scratch, uplo, out, nested, level_idx, cache);
                     !res.has_value()) {
                     return res;
                 }
@@ -488,8 +554,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                     return ok;
                 }
                 auto buf = nested.level(level_idx, out.rows(), out.cols());
-                if (auto res =
-                        eval_term_points(terms[k], x, buf, uplo, scratch, nested, level_idx + 1);
+                if (auto res = eval_term_points(terms[k], x, buf, uplo, scratch, nested,
+                                                level_idx + 1, cache);
                     !res.has_value()) {
                     return res;
                 }
@@ -708,9 +774,21 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     [[nodiscard]] std::expected<void, GprError>
     eval_grad_points(const Term& term, MatrixRef<T> x, MatrixMut<T> d_k, std::size_t param_idx,
                      Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
-                     NestedBuffers<T>& nested, std::size_t level_idx) const {
+                     NestedBuffers<T>& nested, std::size_t level_idx,
+                     const DistanceCache<T>* cache = nullptr) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (cache != nullptr) {
+                if (cache->has_dist() && leaf_reads_distances(kl)) {
+                    return detail::leaf_grad_dist(kl, cache->dist_view(), d_k,
+                                                  param_idx - leaf->param_begin, uplo, exp_mode);
+                }
+                if (cache->has_ard() && leaf_needs_ard(kl)) {
+                    return detail::leaf_grad_ard_packed(
+                        kl, cached_ls[leaf->leaf_idx], cache->ard_packed(), x.rows(), d_k,
+                        param_idx - leaf->param_begin, uplo, exp_mode);
+                }
+            }
             if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
                 if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
                     !ok.has_value()) {
@@ -728,7 +806,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             for (const auto& child : s->terms) {
                 if (contains_param(child, param_idx)) {
                     return eval_grad_points(child, x, d_k, param_idx, uplo, scratch_a, scratch_b,
-                                            nested, level_idx);
+                                            nested, level_idx, cache);
                 }
             }
             return std::unexpected(
@@ -747,7 +825,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                 GprError::index_out_of_range("kernel parameter index out of range"));
         }
         if (auto res = eval_grad_points(p.terms[owner], x, d_k, param_idx, uplo, scratch_a,
-                                        scratch_b, nested, level_idx);
+                                        scratch_b, nested, level_idx, cache);
             !res.has_value()) {
             return res;
         }
@@ -755,8 +833,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             if (m == owner) {
                 continue;
             }
-            if (auto res =
-                    eval_term_points(p.terms[m], x, scratch_a, uplo, scratch_b, nested, level_idx);
+            if (auto res = eval_term_points(p.terms[m], x, scratch_a, uplo, scratch_b, nested,
+                                            level_idx, cache);
                 !res.has_value()) {
                 return res;
             }
@@ -865,10 +943,22 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
     [[nodiscard]] std::expected<void, GprError>
     eval_hess_points(const Term& term, MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i,
                      std::size_t j, Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
-                     MatrixMut<T> scratch_c, NestedBuffers<T>& nested,
-                     std::size_t level_idx) const {
+                     MatrixMut<T> scratch_c, NestedBuffers<T>& nested, std::size_t level_idx,
+                     const DistanceCache<T>* cache = nullptr) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             const KernelLeaf& kl = leaves[leaf->leaf_idx];
+            if (cache != nullptr) {
+                if (cache->has_dist() && leaf_reads_distances(kl)) {
+                    return detail::leaf_hess_dist(kl, cache->dist_view(), d2_k,
+                                                  i - leaf->param_begin, j - leaf->param_begin,
+                                                  uplo, exp_mode);
+                }
+                if (cache->has_ard() && leaf_needs_ard(kl)) {
+                    return detail::leaf_hess_ard_packed(
+                        kl, cached_ls[leaf->leaf_idx], cache->ard_packed(), x.rows(), d2_k,
+                        i - leaf->param_begin, j - leaf->param_begin, uplo, exp_mode);
+                }
+            }
             if (const auto* custom = std::get_if<CustomKernel>(&kl)) {
                 if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows());
                     !ok.has_value()) {
@@ -888,7 +978,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                 const bool has_j = contains_param(child, j);
                 if (has_i && has_j) {
                     return eval_hess_points(child, x, d2_k, i, j, uplo, scratch_a, scratch_b,
-                                            scratch_c, nested, level_idx);
+                                            scratch_c, nested, level_idx, cache);
                 }
                 if (has_i || has_j) {
                     // Input shape, finiteness, and all ARD dimensions were already validated at
@@ -927,7 +1017,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         }
         if (owner_i == owner_j) {
             if (auto res = eval_hess_points(p.terms[owner_i], x, d2_k, i, j, uplo, scratch_a,
-                                            scratch_b, scratch_c, nested, level_idx);
+                                            scratch_b, scratch_c, nested, level_idx, cache);
                 !res.has_value()) {
                 return res;
             }
@@ -936,7 +1026,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                     continue;
                 }
                 if (auto res = eval_term_points(p.terms[m], x, scratch_b, uplo, scratch_c, nested,
-                                                level_idx);
+                                                level_idx, cache);
                     !res.has_value()) {
                     return res;
                 }
@@ -948,12 +1038,12 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         MatrixMut<T> work_a = scratch_b;
         MatrixMut<T> work_b = scratch_c;
         if (auto res = eval_grad_points(p.terms[owner_i], x, d2_k, i, uplo, work_a, work_b, nested,
-                                        level_idx);
+                                        level_idx, cache);
             !res.has_value()) {
             return res;
         }
         if (auto res = eval_grad_points(p.terms[owner_j], x, grad_rhs, j, uplo, work_a, work_b,
-                                        nested, level_idx);
+                                        nested, level_idx, cache);
             !res.has_value()) {
             return res;
         }
@@ -962,8 +1052,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             if (m == owner_i || m == owner_j) {
                 continue;
             }
-            if (auto res =
-                    eval_term_points(p.terms[m], x, scratch_b, uplo, scratch_c, nested, level_idx);
+            if (auto res = eval_term_points(p.terms[m], x, scratch_b, uplo, scratch_c, nested,
+                                            level_idx, cache);
                 !res.has_value()) {
                 return res;
             }
@@ -999,14 +1089,25 @@ CompiledKernel<T> CompiledKernel<T>::from_spec(const KernelSpec& spec) {
     impl->root = Impl::compile_node(spec, impl->leaves, impl->bindings, next_param_idx);
     CoordMode mode = CoordMode::Either;
     bool has_custom_leaf = false;
+    bool reads_dist = false;
+    bool needs_ard = false;
     for (const auto& leaf : impl->leaves) {
         mode = combine_coord_mode(mode, detail::leaf_coord_mode(leaf));
         if (std::holds_alternative<CustomKernel>(leaf)) {
             has_custom_leaf = true;
         }
+        if (leaf_reads_distances(leaf)) {
+            reads_dist = true;
+        }
+        if (leaf_needs_ard(leaf)) {
+            needs_ard = true;
+        }
     }
     impl->coord_mode = mode;
+    impl->reads_dist = reads_dist;
+    impl->needs_ard = needs_ard;
     impl->nested_depth = Impl::compute_nested_depth(impl->root) + (has_custom_leaf ? 1U : 0U);
+    impl->refresh_cached_ls();
     return CompiledKernel<T>(std::move(impl));
 }
 
@@ -1032,6 +1133,14 @@ template <KernelScalarConcept T> CoordMode CompiledKernel<T>::coord_mode() const
 
 template <KernelScalarConcept T> std::size_t CompiledKernel<T>::nested_depth() const noexcept {
     return impl_->nested_depth;
+}
+
+template <KernelScalarConcept T> bool CompiledKernel<T>::reads_distances() const noexcept {
+    return impl_->reads_dist;
+}
+
+template <KernelScalarConcept T> bool CompiledKernel<T>::needs_ard_sq_diff() const noexcept {
+    return impl_->needs_ard;
 }
 
 template <KernelScalarConcept T>
@@ -1073,6 +1182,7 @@ std::expected<void, GprError> CompiledKernel<T>::set_params(std::span<const doub
         offset += count;
     }
     impl_->leaves = std::move(updated);
+    impl_->refresh_cached_ls();
     return {};
 }
 
@@ -1340,6 +1450,108 @@ CompiledKernel<T>::hess_points(MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i,
                                MatrixMut<T> scratch_c) const {
     auto nested = make_nested_buffers(d2_k.rows(), d2_k.cols());
     return hess_points(x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> out,
+                                Triangle uplo, MatrixMut<T> scratch,
+                                NestedBuffers<T>& nested) const {
+    if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
+        return sc;
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
+    }
+    if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value()) {
+        return cs;
+    }
+    return impl_->eval_term_points(impl_->root, x, out, uplo, scratch, nested, 0, &cache);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::apply_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> out,
+                                Triangle uplo, MatrixMut<T> scratch) const {
+    auto nested = make_nested_buffers(out.rows(), out.cols());
+    return apply_cached(x, cache, out, uplo, scratch, nested);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::grad_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d_k,
+                               std::size_t param_idx, Triangle uplo, MatrixMut<T> scratch_a,
+                               MatrixMut<T> scratch_b, NestedBuffers<T>& nested) const {
+    if (auto sc_a = require_scratch(d_k.as_ref(), scratch_a, "scratch_a"); !sc_a.has_value()) {
+        return sc_a;
+    }
+    if (auto sc_b = require_scratch(d_k.as_ref(), scratch_b, "scratch_b"); !sc_b.has_value()) {
+        return sc_b;
+    }
+    if (scratch_a.data() == scratch_b.data()) {
+        return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+    }
+    if (auto v = impl_->validate_points_call(x, d_k.as_ref()); !v.has_value()) {
+        return v;
+    }
+    if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value()) {
+        return cs;
+    }
+    if (param_idx >= impl_->bindings.size()) {
+        return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+    }
+    return impl_->eval_grad_points(impl_->root, x, d_k, param_idx, uplo, scratch_a, scratch_b,
+                                   nested, 0, &cache);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::grad_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d_k,
+                               std::size_t param_idx, Triangle uplo, MatrixMut<T> scratch_a,
+                               MatrixMut<T> scratch_b) const {
+    auto nested = make_nested_buffers(d_k.rows(), d_k.cols());
+    return grad_cached(x, cache, d_k, param_idx, uplo, scratch_a, scratch_b, nested);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::hess_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d2_k,
+                               std::size_t i, std::size_t j, Triangle uplo, MatrixMut<T> scratch_a,
+                               MatrixMut<T> scratch_b, MatrixMut<T> scratch_c,
+                               NestedBuffers<T>& nested) const {
+    if (auto sc_a = require_scratch(d2_k.as_ref(), scratch_a, "scratch_a"); !sc_a.has_value()) {
+        return sc_a;
+    }
+    if (auto sc_b = require_scratch(d2_k.as_ref(), scratch_b, "scratch_b"); !sc_b.has_value()) {
+        return sc_b;
+    }
+    if (auto sc_c = require_scratch(d2_k.as_ref(), scratch_c, "scratch_c"); !sc_c.has_value()) {
+        return sc_c;
+    }
+    if (scratch_a.data() == scratch_b.data() || scratch_a.data() == scratch_c.data() ||
+        scratch_b.data() == scratch_c.data()) {
+        return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+    }
+    if (auto v = impl_->validate_points_call(x, d2_k.as_ref()); !v.has_value()) {
+        return v;
+    }
+    if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value()) {
+        return cs;
+    }
+    if (i >= impl_->bindings.size() || j >= impl_->bindings.size()) {
+        return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+    }
+    return impl_->eval_hess_points(impl_->root, x, d2_k, i, j, uplo, scratch_a, scratch_b,
+                                   scratch_c, nested, 0, &cache);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+CompiledKernel<T>::hess_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d2_k,
+                               std::size_t i, std::size_t j, Triangle uplo, MatrixMut<T> scratch_a,
+                               MatrixMut<T> scratch_b, MatrixMut<T> scratch_c) const {
+    auto nested = make_nested_buffers(d2_k.rows(), d2_k.cols());
+    return hess_cached(x, cache, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested);
 }
 
 template class NestedBuffers<double>;

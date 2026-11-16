@@ -1396,4 +1396,313 @@ template std::expected<void, GprError> leaf_hess_points<float>(const KernelLeaf&
                                                                MatrixMut<float>, std::size_t,
                                                                std::size_t, Triangle, KernelExp);
 
+namespace {
+
+[[nodiscard]] inline std::size_t packed_lower_index(std::size_t n, std::size_t row,
+                                                    std::size_t col) noexcept {
+    const std::size_t r = row >= col ? row : col;
+    const std::size_t c = row >= col ? col : row;
+    return ((c * ((2U * n) - c - 1U)) / 2U) + r;
+}
+
+template <KernelScalarConcept T>
+[[nodiscard]] T ard_scaled_sq_packed(std::span<const T> packed, std::size_t n, std::size_t per_dim,
+                                     std::span<const double> ls, std::size_t row,
+                                     std::size_t col) noexcept {
+    if (row == col) {
+        return T{0};
+    }
+    const std::size_t p = packed_lower_index(n, row, col);
+    T acc = T{0};
+    for (std::size_t dim = 0; dim < ls.size(); ++dim) {
+        const T ell = static_cast<T>(ls[dim]);
+        acc += packed[(dim * per_dim) + p] / (ell * ell);
+    }
+    return acc;
+}
+
+template <KernelScalarConcept T, typename Fn>
+void write_square_packed(std::size_t n, MatrixMut<T> out, Triangle uplo, Fn&& fn) noexcept {
+    if (uplo == Triangle::Lower) {
+        for (std::size_t col = 0; col < n; ++col) {
+            for (std::size_t row = col; row < n; ++row) {
+                out(row, col) = fn(row, col);
+            }
+        }
+        return;
+    }
+    if (uplo == Triangle::Upper) {
+        for (std::size_t col = 0; col < n; ++col) {
+            for (std::size_t row = 0; row <= col; ++row) {
+                out(row, col) = fn(row, col);
+            }
+        }
+        return;
+    }
+    for (std::size_t col = 0; col < n; ++col) {
+        out(col, col) = fn(col, col);
+        for (std::size_t row = col + 1U; row < n; ++row) {
+            const std::size_t r1 = row;
+            const std::size_t r2 = col;
+            const T val = fn(r1, r2);
+            out(r1, r2) = val;
+            out(r2, r1) = val;
+        }
+    }
+}
+
+} // namespace
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+leaf_apply_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                      std::span<const T> ard_packed, std::size_t n, MatrixMut<T> out, Triangle uplo,
+                      KernelExp exp_mode) {
+    if (n == 0U || ls.empty()) {
+        return std::unexpected(GprError::empty_input());
+    }
+    if (out.rows() != n || out.cols() != n) {
+        return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+    }
+    const std::size_t per_dim = (n * (n + 1U)) / 2U;
+    if (ard_packed.size() != ls.size() * per_dim) {
+        return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
+    }
+    if (std::holds_alternative<RbfArdKernel>(leaf)) {
+        write_square_packed(
+            n, out, uplo, [ard_packed, n, per_dim, ls, exp_mode](std::size_t row, std::size_t col) {
+                const T s2 = ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                return eval_kernel_exp(-T{0.5} * s2, exp_mode);
+            });
+        return {};
+    }
+    if (const auto* mat = std::get_if<MaternArdKernel>(&leaf)) {
+        const T c = matern_scale_sq<T>(mat->nu());
+        const MaternNu nu = mat->nu();
+        write_square_packed(
+            n, out, uplo,
+            [ard_packed, n, per_dim, ls, c, nu, exp_mode](std::size_t row, std::size_t col) {
+                const T u2 = c * ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
+                return eval_matern_u(u, nu, exp_mode);
+            });
+        return {};
+    }
+    if (const auto* rq = std::get_if<RationalQuadraticArdKernel>(&leaf)) {
+        const T alpha = static_cast<T>(rq->alpha());
+        write_square_packed(
+            n, out, uplo,
+            [ard_packed, n, per_dim, ls, alpha, exp_mode](std::size_t row, std::size_t col) {
+                const T s2 = ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                const T w = s2 / (T{2} * alpha);
+                return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
+            });
+        return {};
+    }
+    return std::unexpected(
+        GprError::unsupported_kernel_operation("leaf does not consume packed ARD distances"));
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+leaf_grad_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                     std::span<const T> ard_packed, std::size_t n, MatrixMut<T> d_k,
+                     std::size_t param_idx, Triangle uplo, KernelExp exp_mode) {
+    if (n == 0U || ls.empty()) {
+        return std::unexpected(GprError::empty_input());
+    }
+    if (d_k.rows() != n || d_k.cols() != n) {
+        return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+    }
+    const std::size_t per_dim = (n * (n + 1U)) / 2U;
+    if (ard_packed.size() != ls.size() * per_dim) {
+        return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
+    }
+    if (param_idx >= leaf_num_params(leaf)) {
+        return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+    }
+    if (std::holds_alternative<RbfArdKernel>(leaf)) {
+        const T ell_p = static_cast<T>(ls[param_idx]);
+        const T inv_l2 = T{1} / (ell_p * ell_p);
+        write_square_packed(n, d_k, uplo,
+                            [ard_packed, n, per_dim, ls, param_idx, inv_l2,
+                             exp_mode](std::size_t row, std::size_t col) {
+                                const std::size_t p = packed_lower_index(n, row, col);
+                                const T s2 =
+                                    ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                                const T sp2 = ard_packed[(param_idx * per_dim) + p] * inv_l2;
+                                return sp2 * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
+                            });
+        return {};
+    }
+    if (const auto* mat = std::get_if<MaternArdKernel>(&leaf)) {
+        const T c = matern_scale_sq<T>(mat->nu());
+        const MaternNu nu = mat->nu();
+        const T ell_p = static_cast<T>(ls[param_idx]);
+        const T inv_l2 = T{1} / (ell_p * ell_p);
+        write_square_packed(n, d_k, uplo,
+                            [ard_packed, n, per_dim, ls, c, nu, param_idx, inv_l2,
+                             exp_mode](std::size_t row, std::size_t col) {
+                                const std::size_t p = packed_lower_index(n, row, col);
+                                const T u2 =
+                                    c * ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                                if (u2 <= T{0}) {
+                                    return T{0};
+                                }
+                                const T u = std::sqrt(u2);
+                                const T wp =
+                                    (c * ard_packed[(param_idx * per_dim) + p] * inv_l2) / u2;
+                                return eval_matern_grad_g1(u, nu, exp_mode) * wp;
+                            });
+        return {};
+    }
+    if (const auto* rq = std::get_if<RationalQuadraticArdKernel>(&leaf)) {
+        const T alpha = static_cast<T>(rq->alpha());
+        const std::size_t alpha_idx = ls.size();
+        write_square_packed(
+            n, d_k, uplo,
+            [ard_packed, n, per_dim, ls, alpha, param_idx, alpha_idx, exp_mode](std::size_t row,
+                                                                                std::size_t col) {
+                const std::size_t p = packed_lower_index(n, row, col);
+                const T s2 = ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                const T w = s2 / (T{2} * alpha);
+                const T b = T{1} + w;
+                const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
+                if (param_idx < alpha_idx) {
+                    const T ell_p = static_cast<T>(ls[param_idx]);
+                    const T sp2 = ard_packed[(param_idx * per_dim) + p] / (ell_p * ell_p);
+                    return (sp2 / b) * d1_exp;
+                }
+                return alpha * ((w / b) - std::log1p(w)) * d1_exp;
+            });
+        return {};
+    }
+    return std::unexpected(
+        GprError::unsupported_kernel_operation("leaf does not consume packed ARD distances"));
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError>
+leaf_hess_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                     std::span<const T> ard_packed, std::size_t n, MatrixMut<T> d2_k, std::size_t i,
+                     std::size_t j, Triangle uplo, KernelExp exp_mode) {
+    if (n == 0U || ls.empty()) {
+        return std::unexpected(GprError::empty_input());
+    }
+    if (d2_k.rows() != n || d2_k.cols() != n) {
+        return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+    }
+    const std::size_t per_dim = (n * (n + 1U)) / 2U;
+    if (ard_packed.size() != ls.size() * per_dim) {
+        return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
+    }
+    const std::size_t np = leaf_num_params(leaf);
+    if (i >= np || j >= np) {
+        return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+    }
+    if (std::holds_alternative<RbfArdKernel>(leaf)) {
+        const T inv_li2 = T{1} / static_cast<T>(ls[i] * ls[i]);
+        const T inv_lj2 = T{1} / static_cast<T>(ls[j] * ls[j]);
+        write_square_packed(n, d2_k, uplo,
+                            [ard_packed, n, per_dim, ls, i, j, inv_li2, inv_lj2,
+                             exp_mode](std::size_t row, std::size_t col) {
+                                const std::size_t p = packed_lower_index(n, row, col);
+                                const T s2 =
+                                    ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                                const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
+                                const T si2 = ard_packed[(i * per_dim) + p] * inv_li2;
+                                if (i == j) {
+                                    return (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
+                                }
+                                const T sj2 = ard_packed[(j * per_dim) + p] * inv_lj2;
+                                return si2 * sj2 * jet.d2;
+                            });
+        return {};
+    }
+    if (const auto* mat = std::get_if<MaternArdKernel>(&leaf)) {
+        const T c = matern_scale_sq<T>(mat->nu());
+        const MaternNu nu = mat->nu();
+        const T inv_li2 = T{1} / static_cast<T>(ls[i] * ls[i]);
+        const T inv_lj2 = T{1} / static_cast<T>(ls[j] * ls[j]);
+        write_square_packed(n, d2_k, uplo,
+                            [ard_packed, n, per_dim, ls, c, nu, i, j, inv_li2, inv_lj2,
+                             exp_mode](std::size_t row, std::size_t col) {
+                                const std::size_t p = packed_lower_index(n, row, col);
+                                const T u2 =
+                                    c * ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                                if (u2 <= T{0}) {
+                                    return T{0};
+                                }
+                                const T u = std::sqrt(u2);
+                                const T wi = (c * ard_packed[(i * per_dim) + p] * inv_li2) / u2;
+                                const T wj = (c * ard_packed[(j * per_dim) + p] * inv_lj2) / u2;
+                                T val = eval_matern_ard_cross_coeff(u, nu, exp_mode) * wi * wj;
+                                if (i == j) {
+                                    val -= T{2} * eval_matern_grad_g1(u, nu, exp_mode) * wi;
+                                }
+                                return val;
+                            });
+        return {};
+    }
+    if (const auto* rq = std::get_if<RationalQuadraticArdKernel>(&leaf)) {
+        const T alpha = static_cast<T>(rq->alpha());
+        const std::size_t alpha_idx = ls.size();
+        write_square_packed(
+            n, d2_k, uplo,
+            [ard_packed, n, per_dim, ls, alpha, i, j, alpha_idx, exp_mode](std::size_t row,
+                                                                           std::size_t col) {
+                const std::size_t p = packed_lower_index(n, row, col);
+                const T s2 = ard_scaled_sq_packed(ard_packed, n, per_dim, ls, row, col);
+                const T w = s2 / (T{2} * alpha);
+                const T b = T{1} + w;
+                const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
+                const T g_alpha = alpha * ((w / b) - std::log1p(w));
+                if (i == alpha_idx && j == alpha_idx) {
+                    return ((g_alpha * g_alpha) * jet.d2) +
+                           ((g_alpha + ((alpha * w * w) / (b * b))) * jet.d1);
+                }
+                if (i == alpha_idx || j == alpha_idx) {
+                    const std::size_t ls_idx = (i == alpha_idx) ? j : i;
+                    const T ell_ls = static_cast<T>(ls[ls_idx]);
+                    const T s_ls2 = ard_packed[(ls_idx * per_dim) + p] / (ell_ls * ell_ls);
+                    return (s_ls2 / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
+                }
+                const T ell_i = static_cast<T>(ls[i]);
+                const T ell_j = static_cast<T>(ls[j]);
+                const T si2 = ard_packed[(i * per_dim) + p] / (ell_i * ell_i);
+                const T sj2 = ard_packed[(j * per_dim) + p] / (ell_j * ell_j);
+                const T sq_term = (si2 * sj2) / (b * b);
+                T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
+                if (i == j) {
+                    val -= ((T{2} * si2) / b) * jet.d1;
+                }
+                return val;
+            });
+        return {};
+    }
+    return std::unexpected(
+        GprError::unsupported_kernel_operation("leaf does not consume packed ARD distances"));
+}
+
+template std::expected<void, GprError>
+leaf_apply_ard_packed<double>(const KernelLeaf&, std::span<const double>, std::span<const double>,
+                              std::size_t, MatrixMut<double>, Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_apply_ard_packed<float>(const KernelLeaf&, std::span<const double>, std::span<const float>,
+                             std::size_t, MatrixMut<float>, Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_grad_ard_packed<double>(const KernelLeaf&, std::span<const double>, std::span<const double>,
+                             std::size_t, MatrixMut<double>, std::size_t, Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_grad_ard_packed<float>(const KernelLeaf&, std::span<const double>, std::span<const float>,
+                            std::size_t, MatrixMut<float>, std::size_t, Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_hess_ard_packed<double>(const KernelLeaf&, std::span<const double>, std::span<const double>,
+                             std::size_t, MatrixMut<double>, std::size_t, std::size_t, Triangle,
+                             KernelExp);
+template std::expected<void, GprError>
+leaf_hess_ard_packed<float>(const KernelLeaf&, std::span<const double>, std::span<const float>,
+                            std::size_t, MatrixMut<float>, std::size_t, std::size_t, Triangle,
+                            KernelExp);
+
 } // namespace cxxgpr::detail
