@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include "cxxgpr/kernel/compiled.hpp"
+#include "cxxgpr/kernel/leaves.hpp"
+#include "cxxgpr/kernel/spec.hpp"
