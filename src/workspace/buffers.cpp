@@ -194,6 +194,10 @@ std::expected<void, GprError> QueryWorkspace<P>::ensure(std::size_t n, std::size
     if (!nm.has_value()) {
         return std::unexpected(std::move(nm).error());
     }
+    auto diag_scratch_len = checked_mul(nested_depth + 1U, m);
+    if (!diag_scratch_len.has_value()) {
+        return std::unexpected(std::move(diag_scratch_len).error());
+    }
 
     if (query_xs.size() < *md) {
         query_xs.resize(*md);
@@ -212,6 +216,9 @@ std::expected<void, GprError> QueryWorkspace<P>::ensure(std::size_t n, std::size
     }
     if (query_kss.size() < m) {
         query_kss.resize(m);
+    }
+    if (query_diag_scratch.size() < *diag_scratch_len) {
+        query_diag_scratch.resize(*diag_scratch_len);
     }
     if (query_nested.depth() < nested_depth || query_nested.rows() < n || query_nested.cols() < m) {
         query_nested.resize(nested_depth, n, m);

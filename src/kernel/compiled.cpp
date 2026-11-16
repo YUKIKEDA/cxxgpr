@@ -810,7 +810,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
 
     [[nodiscard]] std::expected<void, GprError> eval_fill_diag(const Term& term, MatrixRef<T> x,
                                                                std::span<T> out,
-                                                               std::vector<T>& scratch_vec,
+                                                               std::span<T> scratch_vec,
                                                                std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             return detail::leaf_fill_diag(leaves[leaf->leaf_idx], x, out);
@@ -830,7 +830,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         }
         const std::size_t slice_offset = level_idx * out.size();
         if (scratch_vec.size() < slice_offset + out.size()) {
-            scratch_vec.resize(slice_offset + out.size());
+            return std::unexpected(
+                GprError::length_mismatch("diagonal evaluation scratch buffer is too small"));
         }
         for (std::size_t k = 1; k < terms.size(); ++k) {
             const std::span<T> sub(scratch_vec.data() + slice_offset, out.size());
@@ -1855,7 +1856,8 @@ CompiledKernel<T>::apply_cross_points(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMu
 }
 
 template <KernelScalarConcept T>
-std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out) const {
+std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out,
+                                                           std::span<T> scratch) const {
     if (x.rows() == 0 || x.cols() == 0) {
         return std::unexpected(GprError::empty_input());
     }
@@ -1865,6 +1867,11 @@ std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::
     if (auto ard = impl_->validate_ard_dims(x.cols()); !ard.has_value()) {
         return ard;
     }
+    const std::size_t min_scratch = (impl_->nested_depth + 1U) * out.size();
+    if (scratch.size() < min_scratch) {
+        return std::unexpected(
+            GprError::length_mismatch("diagonal evaluation scratch buffer is too small"));
+    }
     for (std::size_t col = 0; col < x.cols(); ++col) {
         for (std::size_t row = 0; row < x.rows(); ++row) {
             if (!std::isfinite(x(row, col))) {
@@ -1872,8 +1879,14 @@ std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::
             }
         }
     }
-    std::vector<T> scratch_vec((impl_->nested_depth + 1U) * out.size());
-    return impl_->eval_fill_diag(impl_->root, x, out, scratch_vec, 0);
+    return impl_->eval_fill_diag(impl_->root, x, out, scratch, 0);
+}
+
+template <KernelScalarConcept T>
+std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out) const {
+    const std::size_t min_scratch = (impl_->nested_depth + 1U) * out.size();
+    std::vector<T> scratch_vec(min_scratch);
+    return fill_diag(x, out, scratch_vec);
 }
 
 template <KernelScalarConcept T>

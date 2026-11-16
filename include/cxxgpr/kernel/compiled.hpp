@@ -150,6 +150,11 @@ public:
                                                                    MatrixMut<T> out,
                                                                    MatrixMut<T> scratch) const;
 
+    /// Fills the diagonal k(x_i, x_i) for points x using caller-provided scratch of length at
+    /// least (nested_depth() + 1) * x.rows() (zero heap allocations).
+    [[nodiscard]] std::expected<void, GprError> fill_diag(MatrixRef<T> x, std::span<T> out,
+                                                          std::span<T> scratch) const;
+
     /// Fills the diagonal k(x_i, x_i) for points x (or constant/stationary kernels of length n).
     [[nodiscard]] std::expected<void, GprError> fill_diag(MatrixRef<T> x, std::span<T> out) const;
 
