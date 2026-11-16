@@ -130,9 +130,7 @@ void parallel_for_lower_blocks_raw(std::size_t n, std::size_t num_threads,
     if (n_blocks > 1) {
         const int blocks_i = static_cast<int>(std::min<std::size_t>(
             n_blocks, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-        const int threads_i = static_cast<int>(std::min<std::size_t>(
-            effective_threads, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-#pragma omp parallel for schedule(static, 1) num_threads(threads_i)
+#pragma omp parallel for schedule(static, 1) num_threads(blocks_i)
         for (int b = 0; b < blocks_i; ++b) {
             const auto ub = static_cast<std::size_t>(b);
             const std::size_t col_begin = lower_block_start(n, ub, n_blocks);
