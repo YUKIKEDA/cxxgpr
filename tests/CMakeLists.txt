@@ -91,6 +91,26 @@ cxxgpr_add_test(precision.refine
     LABELS unit property negative
 )
 
+cxxgpr_add_test(transform.input
+    SOURCES transform/input_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(transform.target
+    SOURCES transform/target_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(transform.pipeline
+    SOURCES transform/pipeline_test.cpp
+    LABELS unit property negative
+)
+
+cxxgpr_add_test(transform.columnwise
+    SOURCES transform/columnwise_test.cpp
+    LABELS unit property negative
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
