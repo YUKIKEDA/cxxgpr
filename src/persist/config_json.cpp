@@ -5,6 +5,7 @@
 #include "cxxgpr/kernel/leaves.hpp"
 #include "cxxgpr/transform/columnwise.hpp"
 #include "cxxgpr/transform/pipeline.hpp"
+#include "json_depth.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -992,9 +993,15 @@ std::expected<ParsedConfig, GprError> parse_config_json(const std::filesystem::p
     }
     std::ostringstream oss;
     oss << ifs.rdbuf();
+    const std::string json_text = oss.str();
+    if (auto depth_ok =
+            check_json_max_depth(json_text, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Config);
+        !depth_ok.has_value()) {
+        return std::unexpected(std::move(depth_ok).error());
+    }
     nlohmann::json root;
     try {
-        root = nlohmann::json::parse(oss.str());
+        root = nlohmann::json::parse(json_text);
     } catch (const nlohmann::json::exception&) {
         return std::unexpected(config_err("invalid JSON syntax in config.json"));
     }

@@ -2,10 +2,12 @@
 #include "safetensors.hpp"
 
 #include "cxxgpr/core/checked.hpp"
+#include "json_depth.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -186,6 +188,11 @@ MappedSafetensors::open(const std::filesystem::path& path) {
     }
 
     const std::string_view header_sv(reinterpret_cast<const char*>(file->data() + 8U), header_len);
+    if (auto depth_ok =
+            check_json_max_depth(header_sv, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Tensor);
+        !depth_ok.has_value()) {
+        return std::unexpected(std::move(depth_ok).error());
+    }
     nlohmann::json header_json;
     try {
         header_json = nlohmann::json::parse(header_sv);

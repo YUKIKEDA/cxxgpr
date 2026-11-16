@@ -280,6 +280,7 @@ TEST(PersistModelsTest, SaveWithFactorMmapAndSaveRefactorRoundtrip) {
 
         auto typed = loaded->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
         ASSERT_TRUE(typed.has_value());
+        EXPECT_NEAR(typed->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
         auto typed_pred = typed->predict(xq_ref);
         ASSERT_TRUE(typed_pred.has_value());
         EXPECT_EQ(typed_pred->mean, orig_pred->mean);
@@ -298,6 +299,9 @@ TEST(PersistModelsTest, SaveWithFactorMmapAndSaveRefactorRoundtrip) {
         EXPECT_NEAR(pred_nf->mean[j], orig_pred->mean[j], 1e-11);
         EXPECT_NEAR(pred_nf->variance[j], orig_pred->variance[j], 1e-11);
     }
+    auto typed_nf = loaded_nf->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
+    ASSERT_TRUE(typed_nf.has_value());
+    EXPECT_NEAR(typed_nf->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
 }
 
 TEST(PersistModelsTest, PrecisionVariantsAndRegistryRoundtrip) {
@@ -416,6 +420,18 @@ TEST(PersistModelsTest, NegativeControlsRejectCorruptAndUnsupportedFiles) {
 
     check_bad_config("syntax", "{not valid json", cxxgpr::GprErrorCode::PersistFailed,
                      cxxgpr::PersistErrorKind::Config);
+    {
+        std::string deep_json;
+        for (std::size_t i = 0; i < 130U; ++i) {
+            deep_json += "{\"a\":";
+        }
+        deep_json += "1";
+        for (std::size_t i = 0; i < 130U; ++i) {
+            deep_json += "}";
+        }
+        check_bad_config("deep_nesting", deep_json, cxxgpr::GprErrorCode::PersistFailed,
+                         cxxgpr::PersistErrorKind::Config);
+    }
     check_bad_config("version", R"({"format_version": 99, "factor_kind": "llt"})",
                      cxxgpr::GprErrorCode::UnsupportedPersistVersion, std::nullopt);
     check_bad_config("wrong_model",
@@ -437,6 +453,31 @@ TEST(PersistModelsTest, NegativeControlsRejectCorruptAndUnsupportedFiles) {
     auto err_st = cxxgpr::persist::LoadedGpr::load(dir_st.path);
     ASSERT_FALSE(err_st.has_value());
     EXPECT_EQ(err_st.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+
+    // Deeply nested JSON in safetensors header -> PersistFailed(Tensor).
+    const TempDirGuard dir_st_deep("bad_safetensors_deep");
+    ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir_st_deep.path).has_value());
+    {
+        std::string deep_hdr;
+        for (std::size_t i = 0; i < 130U; ++i) {
+            deep_hdr += "{\"a\":";
+        }
+        deep_hdr += "1";
+        for (std::size_t i = 0; i < 130U; ++i) {
+            deep_hdr += "}";
+        }
+        while ((deep_hdr.size() % 8U) != 0U) {
+            deep_hdr.push_back(' ');
+        }
+        const std::uint64_t hdr_len = deep_hdr.size();
+        std::ofstream ofs(dir_st_deep.path / "model.safetensors",
+                          std::ios::binary | std::ios::trunc);
+        ofs.write(reinterpret_cast<const char*>(&hdr_len), sizeof(hdr_len));
+        ofs.write(deep_hdr.data(), static_cast<std::streamsize>(deep_hdr.size()));
+    }
+    auto err_st_deep = cxxgpr::persist::LoadedGpr::load(dir_st_deep.path);
+    ASSERT_FALSE(err_st_deep.has_value());
+    EXPECT_EQ(err_st_deep.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
 }
 
 } // namespace

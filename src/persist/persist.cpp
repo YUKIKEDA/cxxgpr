@@ -166,6 +166,21 @@ build_typed_state(const detail::ParsedConfig& cfg,
             state.alpha_owned.assign(a_sp->begin(), a_sp->end());
             state.alpha_view = state.alpha_owned;
         }
+        double quad = 0.0;
+        double log_det = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            quad += static_cast<double>(state.y_transformed[i]) *
+                    static_cast<double>(state.alpha_view[i]);
+            const auto l_ii = static_cast<double>(state.l_view[(i * n) + i]);
+            if (!(l_ii > 0.0) || !std::isfinite(l_ii)) {
+                return std::unexpected(GprError::persist_failed(
+                    PersistErrorKind::Tensor, "loaded Cholesky factor has non-positive diagonal"));
+            }
+            log_det += std::log(l_ii);
+        }
+        const double log_2pi = std::log(2.0 * std::numbers::pi);
+        state.log_marginal_likelihood =
+            (0.5 * quad) + log_det + (0.5 * static_cast<double>(n) * log_2pi);
         return state;
     }
 
@@ -776,6 +791,37 @@ std::expected<void, GprError> save_model_impl(const SaveInput& input,
                                               [[maybe_unused]] const PersistRegistry& registry) {
     if (input.n_train == 0U || input.n_features == 0U) {
         return std::unexpected(GprError::empty_input());
+    }
+    if (!std::isfinite(input.factor_jitter)) {
+        return std::unexpected(GprError::non_finite_input());
+    }
+    auto check_finite_span = [](auto sp) -> std::expected<void, GprError> {
+        for (const auto v : sp) {
+            if (!std::isfinite(v)) {
+                return std::unexpected(GprError::non_finite_input());
+            }
+        }
+        return {};
+    };
+    if (auto ok = check_finite_span(input.x_raw); !ok.has_value()) {
+        return ok;
+    }
+    if (auto ok = check_finite_span(input.y_raw); !ok.has_value()) {
+        return ok;
+    }
+    if (input.has_factor) {
+        if (auto ok = check_finite_span(input.l_f64); !ok.has_value()) {
+            return ok;
+        }
+        if (auto ok = check_finite_span(input.l_f32); !ok.has_value()) {
+            return ok;
+        }
+        if (auto ok = check_finite_span(input.alpha_f64); !ok.has_value()) {
+            return ok;
+        }
+        if (auto ok = check_finite_span(input.alpha_f32); !ok.has_value()) {
+            return ok;
+        }
     }
     auto cfg_str = serialize_config_json(input);
     if (!cfg_str.has_value()) {
