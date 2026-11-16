@@ -12,8 +12,9 @@ globs: "**/*.hpp,**/*.cpp,CMakeLists.txt,cmake/*.cmake"
 - **寸法・乗算のオーバーフロー検査**：`n_rows * n_cols`、`n * (n + 1) / 2` は積の前に `checked_mul` でオーバーフローを検査し、`GprError::SizeOverflow` を返す。
 - **警告ゼロと静的解析**：MSVC `/W4 /WX`、GCC/Clang `-Wall -Wextra -Wpedantic -Werror`、`.clang-format`（`just format-check`）、`.clang-tidy` WarningsAsErrors（`just lint`）を全て警告 0 で通す。
 - **Doxygen コメント**：公開ヘッダの要素には簡潔な英語 Doxygen（`///`）を付け、`REQ-`/`DES-`/`FMT-`/`QA-`/`M*-` を含めない（`just doc-check`）。
-- **`clang-tidy` 対策（`[modernize-use-std-numbers]`・`[bugprone-exception-escape]`・`[modernize-use-default-member-init]`）**：PR #7・PR #9 の経験に基づき次を守る。
+- **`clang-tidy` 対策（`[modernize-use-std-numbers]`・`[bugprone-exception-escape]`・`[modernize-use-default-member-init]`・`[bugprone-unchecked-optional-access]`）**：PR #7・PR #9・PR #13 の経験に基づき次を守る。
   - 浮動小数点の固定ゴールデン値が数学定数（$1/\pi$ 等）と偶然近く `[modernize-use-std-numbers]` に誤検知される場合は、`double` リテラル（BAD：`constexpr double expected = 0x1.467905d15dbccp-2;`）を避け、`std::uint64_t` ビット列＋`std::bit_cast`（GOOD：`constexpr std::uint64_t expected_bits = 0x3fd467905d15dbccULL;`）で照合する。
   - `GprError` は `std::string` を保持するため、文字列生成や `GprError` コピーを伴う `std::expected<T, GprError>` 返却関数へ `noexcept` を付けない（BAD：`std::expected<void, GprError> check(...) noexcept` 内で `GprError` をコピー、GOOD：非 `noexcept` とし `std::unexpected(std::move(res).error())` で受け渡す）。
   - クラスのスカラメンバにはコンストラクタ初期化子があっても既定メンバ初期化子（`= 0` / `= 0.0` / 既定列挙子）を付ける（`clang-tidy 21` の `[modernize-use-default-member-init]` 回避。BAD：`double inv_two_ell2_;`、GOOD：`double inv_two_ell2_ = 0.0;`）。
+  - `std::optional` の検査では `ASSERT_TRUE(opt.has_value())` が `clang-tidy 21` の `[bugprone-unchecked-optional-access]` に早期リターンとして認識されないため、ローカル変数へ受けて `if (!opt.has_value()) { ADD_FAILURE() << ...; return; }` でガードしてから `*opt` を参照する。
 - **GCC `-O3 -Werror=array-bounds` 対策**：ヘッダ内テンプレートや `inline` 関数で固定長 `std::array` の負対照試験を行う場合、`std::expected` 経由の間接検査（`require_count`）だけで後続ループを書くと `-fno-lto` 下の GCC 14 が死コード除去前に `__builtin_memcpy` 等へ展開して誤検知することがある。ヘッダ内では `dst.size() != src.size()` を直接判定し、さらにループ上限を `std::min(src.size(), dst.size())` で抑えて境界内アクセスを構文上明示する（失敗時の文字列整形のみ `detail::make_count_mismatch_error` へ分離する）。
