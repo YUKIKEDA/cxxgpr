@@ -17,10 +17,10 @@ namespace {
 
 [[nodiscard]] double apply_boundary(double val, double lo, double hi,
                                     BoundaryPolicy policy) noexcept {
-    const double min_val = std::nextafter(lo, hi);
-    const double max_val = std::nextafter(hi, lo);
+    const double lo_bound = std::nextafter(lo, hi);
+    const double hi_bound = std::nextafter(hi, lo);
     if (policy == BoundaryPolicy::Clamp) {
-        return std::clamp(val, min_val, max_val);
+        return std::clamp(val, lo_bound, hi_bound);
     }
     const double width = hi - lo;
     if (val > lo && val < hi) {
@@ -31,8 +31,8 @@ namespace {
     if (offset < 0.0) {
         offset += period;
     }
-    const double reflected = (offset <= width) ? (lo + offset) : (hi - (offset - width));
-    return std::clamp(reflected, min_val, max_val);
+    val = (offset <= width) ? (lo + offset) : (hi - (offset - width));
+    return std::clamp(val, lo_bound, hi_bound);
 }
 
 [[nodiscard]] std::expected<OptimizerResult, GprError>
