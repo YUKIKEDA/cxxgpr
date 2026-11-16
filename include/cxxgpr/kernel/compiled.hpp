@@ -4,6 +4,7 @@
 #include "cxxgpr/core/error.hpp"
 #include "cxxgpr/core/interval.hpp"
 #include "cxxgpr/core/views.hpp"
+#include "cxxgpr/kernel/distance_cache.hpp"
 #include "cxxgpr/kernel/exp.hpp"
 #include "cxxgpr/kernel/spec.hpp"
 #include "cxxgpr/precision/policy.hpp"
@@ -81,6 +82,12 @@ public:
 
     /// Returns the number of nested intermediate buffers required for tree evaluation.
     [[nodiscard]] std::size_t nested_depth() const noexcept;
+
+    /// Returns true if any leaf in the compiled tree reads squared-distance caches.
+    [[nodiscard]] bool reads_distances() const noexcept;
+
+    /// Returns true if any leaf in the compiled tree reads packed ARD squared-difference caches.
+    [[nodiscard]] bool needs_ard_sq_diff() const noexcept;
 
     /// Returns the exponential evaluation backend used during kernel evaluation (default
     /// Accurate).
@@ -192,6 +199,42 @@ public:
     [[nodiscard]] std::expected<void, GprError>
     hess_points(MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i, std::size_t j, Triangle uplo,
                 MatrixMut<T> scratch_a, MatrixMut<T> scratch_b, MatrixMut<T> scratch_c) const;
+
+    /// Evaluates the training Gram matrix using precomputed distance and ARD caches when populated.
+    [[nodiscard]] std::expected<void, GprError>
+    apply_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> out, Triangle uplo,
+                 MatrixMut<T> scratch, NestedBuffers<T>& nested) const;
+
+    /// Evaluates the training Gram matrix using precomputed distance and ARD caches when populated.
+    [[nodiscard]] std::expected<void, GprError> apply_cached(MatrixRef<T> x,
+                                                             const DistanceCache<T>& cache,
+                                                             MatrixMut<T> out, Triangle uplo,
+                                                             MatrixMut<T> scratch) const;
+
+    /// Evaluates the first derivative wrt param_idx using precomputed caches when populated.
+    [[nodiscard]] std::expected<void, GprError>
+    grad_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d_k,
+                std::size_t param_idx, Triangle uplo, MatrixMut<T> scratch_a,
+                MatrixMut<T> scratch_b, NestedBuffers<T>& nested) const;
+
+    /// Evaluates the first derivative wrt param_idx using precomputed caches when populated.
+    [[nodiscard]] std::expected<void, GprError> grad_cached(MatrixRef<T> x,
+                                                            const DistanceCache<T>& cache,
+                                                            MatrixMut<T> d_k, std::size_t param_idx,
+                                                            Triangle uplo, MatrixMut<T> scratch_a,
+                                                            MatrixMut<T> scratch_b) const;
+
+    /// Evaluates the second derivative wrt (i, j) using precomputed caches when populated.
+    [[nodiscard]] std::expected<void, GprError>
+    hess_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d2_k, std::size_t i,
+                std::size_t j, Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
+                MatrixMut<T> scratch_c, NestedBuffers<T>& nested) const;
+
+    /// Evaluates the second derivative wrt (i, j) using precomputed caches when populated.
+    [[nodiscard]] std::expected<void, GprError>
+    hess_cached(MatrixRef<T> x, const DistanceCache<T>& cache, MatrixMut<T> d2_k, std::size_t i,
+                std::size_t j, Triangle uplo, MatrixMut<T> scratch_a, MatrixMut<T> scratch_b,
+                MatrixMut<T> scratch_c) const;
 
 private:
     struct Impl;

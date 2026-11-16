@@ -47,6 +47,7 @@ add_library(cxxgpr STATIC
     src/kernel/compiled.cpp
     src/kernel/custom.cpp
     src/kernel/distance.cpp
+    src/kernel/distance_cache.cpp
     src/kernel/exp.cpp
     src/kernel/leaf_eval.cpp
     src/kernel/leaves.cpp

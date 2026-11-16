@@ -66,4 +66,23 @@ template <KernelScalarConcept T>
 leaf_hess_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i,
                  std::size_t j, Triangle uplo, KernelExp exp_mode = KernelExp::Accurate);
 
+template <KernelScalarConcept T>
+[[nodiscard]] std::expected<void, GprError>
+leaf_apply_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                      std::span<const T> ard_packed, std::size_t n, MatrixMut<T> out, Triangle uplo,
+                      KernelExp exp_mode = KernelExp::Accurate);
+
+template <KernelScalarConcept T>
+[[nodiscard]] std::expected<void, GprError>
+leaf_grad_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                     std::span<const T> ard_packed, std::size_t n, MatrixMut<T> d_k,
+                     std::size_t param_idx, Triangle uplo,
+                     KernelExp exp_mode = KernelExp::Accurate);
+
+template <KernelScalarConcept T>
+[[nodiscard]] std::expected<void, GprError>
+leaf_hess_ard_packed(const KernelLeaf& leaf, std::span<const double> ls,
+                     std::span<const T> ard_packed, std::size_t n, MatrixMut<T> d2_k, std::size_t i,
+                     std::size_t j, Triangle uplo, KernelExp exp_mode = KernelExp::Accurate);
+
 } // namespace cxxgpr::detail
