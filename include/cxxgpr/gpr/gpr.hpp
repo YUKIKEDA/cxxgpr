@@ -28,7 +28,10 @@
 
 namespace cxxgpr {
 
+/// Unfitted Exact Gaussian Process Regression trainer parameterized by optimizer, precision
+/// policy, and kernel specification.
 template <typename O, PrecisionPolicyConcept P, typename K> class Gpr;
+/// Fitted Exact Gaussian Process Regression model supporting prediction, sampling, and LOO.
 template <typename O, PrecisionPolicyConcept P, typename K> class FittedGpr;
 
 namespace detail {

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-05, REQ-08, REQ-09, REQ-11, DES-01, DES-05, DES-11, DES-15, DES-16, DES-17
 
-#include "cxxgpr/cxxgpr.hpp"
+#include "cxxgpr/gpr/gpr.hpp"
+#include "cxxgpr/kernel/kernel.hpp"
+#include "cxxgpr/transform/transform.hpp"
 
 #include "allocation_audit.hpp"
 
