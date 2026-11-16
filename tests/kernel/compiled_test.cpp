@@ -288,6 +288,57 @@ TEST(CompiledKernelTest, RejectsInvalidInputsAndAliasedBuffers) {
                   .error()
                   .code(),
               cxxgpr::GprErrorCode::NonFiniteInput);
+
+    // SumTerm cross-Hessian and gradient must still validate CoordMode and all ARD dimensions.
+    const auto c = cxxgpr::ConstantKernel::create(2.0);
+    const auto rbf_ard3 = cxxgpr::RbfArdKernel::create(std::array<double, 3>{1.0, 2.0, 3.0});
+    ASSERT_TRUE(c && rbf_ard3);
+
+    const auto ard_plus_c =
+        (cxxgpr::KernelSpec(*rbf_ard3) + cxxgpr::KernelSpec(*c)).compile<double>();
+    std::array<double, 4> sa{};
+    std::array<double, 4> sb{};
+    std::array<double, 4> sc{};
+    EXPECT_EQ(ard_plus_c
+                  .hess(cxxgpr::MatrixRef<double>(d2.data(), 2, 2),
+                        cxxgpr::MatrixMut<double>(out.data(), 2, 2), 0U, 3U,
+                        cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), 2, 2),
+                        cxxgpr::MatrixMut<double>(sb.data(), 2, 2),
+                        cxxgpr::MatrixMut<double>(sc.data(), 2, 2))
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::UnsupportedKernelOperation);
+
+    const auto iso_plus_ard3 =
+        (cxxgpr::KernelSpec(*rbf) + cxxgpr::KernelSpec(*rbf_ard3)).compile<double>();
+    const std::array<double, 4> x_dim2{0.0, 1.0, 0.5, 1.5};
+    EXPECT_EQ(iso_plus_ard3
+                  .hess_points(cxxgpr::MatrixRef<double>(x_dim2.data(), 2, 2),
+                               cxxgpr::MatrixMut<double>(out.data(), 2, 2), 0U, 1U,
+                               cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), 2, 2),
+                               cxxgpr::MatrixMut<double>(sb.data(), 2, 2),
+                               cxxgpr::MatrixMut<double>(sc.data(), 2, 2))
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::DimensionMismatch);
+    EXPECT_EQ(iso_plus_ard3
+                  .grad_points(cxxgpr::MatrixRef<double>(x_dim2.data(), 2, 2),
+                               cxxgpr::MatrixMut<double>(out.data(), 2, 2), 0U,
+                               cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), 2, 2),
+                               cxxgpr::MatrixMut<double>(sb.data(), 2, 2))
+                  .error()
+                  .code(),
+              cxxgpr::GprErrorCode::DimensionMismatch);
+
+    // Nested fill_diag evaluates compound sums/products accurately using preallocated scratch.
+    const auto nested_spec = (cxxgpr::KernelSpec(*c) * cxxgpr::KernelSpec(*rbf)) +
+                             (cxxgpr::KernelSpec(*c) + cxxgpr::KernelSpec(*lin));
+    const auto nested_c = nested_spec.compile<double>();
+    std::array<double, 2> diag{};
+    ASSERT_TRUE(
+        nested_c.fill_diag(cxxgpr::MatrixRef<double>(x_dim2.data(), 2, 2), diag).has_value());
+    EXPECT_DOUBLE_EQ(diag[0], 2.0 + 2.0 + ((0.0 * 0.0) + (0.5 * 0.5)));
+    EXPECT_DOUBLE_EQ(diag[1], 2.0 + 2.0 + ((1.0 * 1.0) + (1.5 * 1.5)));
 }
 
 } // namespace

@@ -5,6 +5,7 @@
 #include "kernel/leaf_eval.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <variant>
 
@@ -243,6 +244,74 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
         out_terms.push_back(compile_node(spec, out_leaves, out_bindings, next_param_idx));
     }
 
+    [[nodiscard]] std::expected<void, GprError> validate_ard_dims(std::size_t x_dim) const {
+        for (const auto& leaf : leaves) {
+            std::size_t expected_dim = 0;
+            if (const auto* k = std::get_if<RbfArdKernel>(&leaf)) {
+                expected_dim = k->num_params();
+            } else if (const auto* k_m = std::get_if<MaternArdKernel>(&leaf)) {
+                expected_dim = k_m->num_params();
+            } else if (const auto* k_rq = std::get_if<RationalQuadraticArdKernel>(&leaf)) {
+                expected_dim = k_rq->lengthscales().size();
+            }
+            if (expected_dim > 0 && x_dim != expected_dim) {
+                return std::unexpected(GprError::dimension_mismatch(x_dim, expected_dim));
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, GprError>
+    validate_dist_call(MatrixRef<T> dist, MatrixRef<T> out, Triangle uplo, bool square) const {
+        if (coord_mode == CoordMode::Points || coord_mode == CoordMode::Mixed) {
+            return std::unexpected(GprError::unsupported_kernel_operation(
+                "coordinate-dependent kernel cannot be evaluated from squared distances"));
+        }
+        if (dist.rows() == 0 || dist.cols() == 0) {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (square && dist.rows() != dist.cols()) {
+            return std::unexpected(
+                GprError::length_mismatch("distance matrix for square evaluation must be square"));
+        }
+        if (out.rows() != dist.rows() || out.cols() != dist.cols()) {
+            return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+        }
+        const std::size_t n_rows = dist.rows();
+        const std::size_t n_cols = dist.cols();
+        for (std::size_t col = 0; col < n_cols; ++col) {
+            const std::size_t row_begin = (square && uplo == Triangle::Lower) ? col : 0U;
+            const std::size_t row_end = (square && uplo == Triangle::Upper) ? (col + 1U) : n_rows;
+            for (std::size_t row = row_begin; row < row_end; ++row) {
+                if (!std::isfinite(dist(row, col))) {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, GprError> validate_points_call(MatrixRef<T> x,
+                                                                     MatrixRef<T> out) const {
+        if (x.rows() == 0 || x.cols() == 0) {
+            return std::unexpected(GprError::empty_input());
+        }
+        for (std::size_t col = 0; col < x.cols(); ++col) {
+            for (std::size_t row = 0; row < x.rows(); ++row) {
+                if (!std::isfinite(x(row, col))) {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+            }
+        }
+        if (auto ard = validate_ard_dims(x.cols()); !ard.has_value()) {
+            return ard;
+        }
+        if (out.rows() != x.rows() || out.cols() != x.rows()) {
+            return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+        }
+        return {};
+    }
+
     // --- Evaluation helpers ---
 
     [[nodiscard]] std::expected<void, GprError> ensure_nested(NestedBuffers<T>& nested,
@@ -459,7 +528,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
 
     [[nodiscard]] std::expected<void, GprError> eval_fill_diag(const Term& term, MatrixRef<T> x,
                                                                std::span<T> out,
-                                                               std::vector<T>& scratch_vec) const {
+                                                               std::vector<T>& scratch_vec,
+                                                               std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
             return detail::leaf_fill_diag(leaves[leaf->leaf_idx], x, out);
         }
@@ -470,15 +540,20 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             return std::unexpected(
                 GprError::unsupported_kernel_operation("composite kernel has no terms"));
         }
-        if (auto res = eval_fill_diag(terms[0], x, out, scratch_vec); !res.has_value()) {
+        if (auto res = eval_fill_diag(terms[0], x, out, scratch_vec, level_idx); !res.has_value()) {
             return res;
         }
-        if (terms.size() > 1 && scratch_vec.size() < out.size()) {
-            scratch_vec.resize(out.size());
+        if (terms.size() == 1U) {
+            return {};
+        }
+        const std::size_t slice_offset = level_idx * out.size();
+        if (scratch_vec.size() < slice_offset + out.size()) {
+            scratch_vec.resize(slice_offset + out.size());
         }
         for (std::size_t k = 1; k < terms.size(); ++k) {
-            std::vector<T> sub(out.size());
-            if (auto res = eval_fill_diag(terms[k], x, sub, scratch_vec); !res.has_value()) {
+            const std::span<T> sub(scratch_vec.data() + slice_offset, out.size());
+            if (auto res = eval_fill_diag(terms[k], x, sub, scratch_vec, level_idx + 1U);
+                !res.has_value()) {
                 return res;
             }
             for (std::size_t idx = 0; idx < out.size(); ++idx) {
@@ -607,13 +682,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                                           scratch_c, nested, level_idx);
                 }
                 if (has_i || has_j) {
-                    // Cross-derivative between distinct additive terms is identically zero;
-                    // still validate input shape/finiteness on first leaf.
-                    if (auto v = detail::leaf_hess_dist(leaves[0], dist, d2_k, 0, 0, uplo);
-                        !v.has_value() &&
-                        v.error().code() != GprErrorCode::UnsupportedKernelOperation) {
-                        return v;
-                    }
+                    // Input shape, finiteness, and CoordMode were already validated at entry.
                     for (std::size_t col = 0; col < d2_k.cols(); ++col) {
                         for (std::size_t row = 0; row < d2_k.rows(); ++row) {
                             if (uplo == Triangle::Lower && row < col) {
@@ -711,10 +780,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                                             scratch_c, nested, level_idx);
                 }
                 if (has_i || has_j) {
-                    if (auto v = detail::leaf_hess_points(leaves[0], x, d2_k, 0, 0, uplo);
-                        !v.has_value()) {
-                        return v;
-                    }
+                    // Input shape, finiteness, and all ARD dimensions were already validated at
+                    // entry.
                     for (std::size_t col = 0; col < d2_k.cols(); ++col) {
                         for (std::size_t row = 0; row < d2_k.rows(); ++row) {
                             if (uplo == Triangle::Lower && row < col) {
@@ -915,6 +982,9 @@ std::expected<void, GprError> CompiledKernel<T>::apply(MatrixRef<T> dist, Matrix
     if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
         return sc;
     }
+    if (auto v = impl_->validate_dist_call(dist, out.as_ref(), uplo, true); !v.has_value()) {
+        return v;
+    }
     return impl_->eval_term_dist(impl_->root, dist, out, uplo, scratch, nested, 0);
 }
 
@@ -931,6 +1001,9 @@ std::expected<void, GprError> CompiledKernel<T>::apply_points(MatrixRef<T> x, Ma
                                                               NestedBuffers<T>& nested) const {
     if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
         return sc;
+    }
+    if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value()) {
+        return v;
     }
     return impl_->eval_term_points(impl_->root, x, out, uplo, scratch, nested, 0);
 }
@@ -949,6 +1022,10 @@ std::expected<void, GprError> CompiledKernel<T>::apply_cross(MatrixRef<T> dist, 
                                                              NestedBuffers<T>& nested) const {
     if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value()) {
         return sc;
+    }
+    if (auto v = impl_->validate_dist_call(dist, out.as_ref(), Triangle::Full, false);
+        !v.has_value()) {
+        return v;
     }
     return impl_->eval_term_cross_dist(impl_->root, dist, out, scratch, nested, 0);
 }
@@ -980,8 +1057,11 @@ CompiledKernel<T>::apply_cross_points(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMu
 
 template <KernelScalarConcept T>
 std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out) const {
-    std::vector<T> scratch_vec;
-    return impl_->eval_fill_diag(impl_->root, x, out, scratch_vec);
+    if (auto ard = impl_->validate_ard_dims(x.cols()); !ard.has_value()) {
+        return ard;
+    }
+    std::vector<T> scratch_vec((impl_->nested_depth + 1U) * out.size());
+    return impl_->eval_fill_diag(impl_->root, x, out, scratch_vec, 0);
 }
 
 template <KernelScalarConcept T>
@@ -997,6 +1077,9 @@ CompiledKernel<T>::grad(MatrixRef<T> dist, MatrixMut<T> d_k, std::size_t param_i
     }
     if (scratch_a.data() == scratch_b.data()) {
         return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+    }
+    if (auto v = impl_->validate_dist_call(dist, d_k.as_ref(), uplo, true); !v.has_value()) {
+        return v;
     }
     if (param_idx >= impl_->bindings.size()) {
         return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
@@ -1026,6 +1109,9 @@ CompiledKernel<T>::grad_points(MatrixRef<T> x, MatrixMut<T> d_k, std::size_t par
     }
     if (scratch_a.data() == scratch_b.data()) {
         return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+    }
+    if (auto v = impl_->validate_points_call(x, d_k.as_ref()); !v.has_value()) {
+        return v;
     }
     if (param_idx >= impl_->bindings.size()) {
         return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
@@ -1061,6 +1147,9 @@ CompiledKernel<T>::hess(MatrixRef<T> dist, MatrixMut<T> d2_k, std::size_t i, std
         scratch_b.data() == scratch_c.data()) {
         return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
     }
+    if (auto v = impl_->validate_dist_call(dist, d2_k.as_ref(), uplo, true); !v.has_value()) {
+        return v;
+    }
     if (i >= impl_->bindings.size() || j >= impl_->bindings.size()) {
         return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
     }
@@ -1094,6 +1183,9 @@ CompiledKernel<T>::hess_points(MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i,
     if (scratch_a.data() == scratch_b.data() || scratch_a.data() == scratch_c.data() ||
         scratch_b.data() == scratch_c.data()) {
         return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+    }
+    if (auto v = impl_->validate_points_call(x, d2_k.as_ref()); !v.has_value()) {
+        return v;
     }
     if (i >= impl_->bindings.size() || j >= impl_->bindings.size()) {
         return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
