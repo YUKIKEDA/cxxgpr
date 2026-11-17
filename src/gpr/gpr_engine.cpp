@@ -612,27 +612,44 @@ prepare_query_matrix(const FittedPayload<P>& payload, MatrixRef<double> xs,
 
 template <typename T>
 [[nodiscard]] std::expected<void, GprError>
+apply_target_inverse_with_buf(const transform::FittedTargetTransform& target_tf,
+                              Prediction<T>& pred, std::span<double> buf) {
+    const std::size_t m = pred.mean.size();
+    for (std::size_t i = 0; i < m; ++i) {
+        buf[i] = static_cast<double>(pred.mean[i]);
+    }
+    if (auto m_res = target_tf.inverse_transform_mean(buf); !m_res.has_value()) {
+        return m_res;
+    }
+    for (std::size_t i = 0; i < m; ++i) {
+        pred.mean[i] = static_cast<T>(buf[i]);
+        buf[i] = static_cast<double>(pred.variance[i]);
+    }
+    if (auto v_res = target_tf.inverse_transform_variance(buf); !v_res.has_value()) {
+        return v_res;
+    }
+    for (std::size_t i = 0; i < m; ++i) {
+        pred.variance[i] = static_cast<T>(buf[i]);
+    }
+    return {};
+}
+
+template <typename T>
+[[nodiscard]] std::expected<void, GprError>
 apply_target_inverse_prediction(const transform::FittedTargetTransform& target_tf,
-                                Prediction<T>& pred) {
+                                Prediction<T>& pred, std::span<double> scratch_d = {}) {
     if constexpr (std::same_as<T, double>) {
         if (auto m_res = target_tf.inverse_transform_mean(pred.mean); !m_res.has_value()) {
             return m_res;
         }
         return target_tf.inverse_transform_variance(pred.variance);
     } else {
-        std::vector<double> mean_d(pred.mean.begin(), pred.mean.end());
-        std::vector<double> var_d(pred.variance.begin(), pred.variance.end());
-        if (auto m_res = target_tf.inverse_transform_mean(mean_d); !m_res.has_value()) {
-            return m_res;
+        const std::size_t m = pred.mean.size();
+        if (scratch_d.size() >= m) {
+            return apply_target_inverse_with_buf(target_tf, pred, scratch_d.subspan(0, m));
         }
-        if (auto v_res = target_tf.inverse_transform_variance(var_d); !v_res.has_value()) {
-            return v_res;
-        }
-        for (std::size_t i = 0; i < pred.mean.size(); ++i) {
-            pred.mean[i] = static_cast<T>(mean_d[i]);
-            pred.variance[i] = static_cast<T>(var_d[i]);
-        }
-        return {};
+        std::vector<double> owned(m);
+        return apply_target_inverse_with_buf(target_tf, pred, owned);
     }
 }
 
@@ -657,7 +674,7 @@ fitted_predict_into(const FittedPayload<P>& payload, MatrixRef<double> xs,
         !res.has_value()) {
         return res;
     }
-    return apply_target_inverse_prediction(*payload.target_transform, out);
+    return apply_target_inverse_prediction(*payload.target_transform, out, workspace.query_xs);
 }
 
 template <PrecisionPolicyConcept P>

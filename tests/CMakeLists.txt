@@ -206,6 +206,11 @@ cxxgpr_add_test(verification.golden
     LABELS verification integration
 )
 
+cxxgpr_add_test(verification.hotpath_ratchet
+    SOURCES verification/hotpath_ratchet_test.cpp
+    LABELS verification property
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
