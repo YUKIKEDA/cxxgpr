@@ -201,6 +201,11 @@ cxxgpr_add_test(integration.path_matrix
     LABELS integration property
 )
 
+cxxgpr_add_test(verification.golden
+    SOURCES verification/golden_test.cpp
+    LABELS verification integration
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
