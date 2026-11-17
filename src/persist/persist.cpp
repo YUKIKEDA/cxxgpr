@@ -81,6 +81,7 @@ template <typename P> struct LoadedTypedState {
     std::span<const Refine> alpha_view;
     double log_marginal_likelihood{0.0};
     mutable QueryWorkspace<P> query_ws;
+    mutable Prediction<Refine> tmp_pred;
 };
 
 template <PrecisionPolicyConcept P>
@@ -275,19 +276,18 @@ loaded_predict_typed(const LoadedTypedState<P>& st, const GaussianLikelihood& li
             return pr;
         }
     } else {
-        Prediction<float> tmp;
         if (auto pr = predict_into<P>(*st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view,
-                                      xq_ref, options, st.query_ws, tmp);
+                                      xq_ref, options, st.query_ws, st.tmp_pred);
             !pr.has_value()) {
             return pr;
         }
         out.mean.resize(m);
         out.variance.resize(m);
         for (std::size_t i = 0; i < m; ++i) {
-            out.mean[i] = static_cast<double>(tmp.mean[i]);
-            out.variance[i] = static_cast<double>(tmp.variance[i]);
+            out.mean[i] = static_cast<double>(st.tmp_pred.mean[i]);
+            out.variance[i] = static_cast<double>(st.tmp_pred.variance[i]);
         }
-        out.variance_kind = tmp.variance_kind;
+        out.variance_kind = st.tmp_pred.variance_kind;
     }
     if (auto im = tgt_tf.inverse_transform_mean(out.mean); !im.has_value()) {
         return im;

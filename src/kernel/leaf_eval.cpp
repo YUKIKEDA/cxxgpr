@@ -180,6 +180,16 @@ template <KernelScalarConcept T>
     return acc;
 }
 
+template <typename KernelT, typename Fn>
+[[nodiscard]] std::expected<void, GprError>
+with_ard_ls(const KernelT& k, std::span<const double> cached_ls, Fn&& fn) {
+    if (!cached_ls.empty()) {
+        return fn(cached_ls);
+    }
+    const auto fallback = k.lengthscales();
+    return fn(std::span<const double>(fallback));
+}
+
 template <KernelScalarConcept T> [[nodiscard]] constexpr T matern_scale(MaternNu nu) noexcept {
     switch (nu) {
     case MaternNu::OneHalf:
@@ -439,9 +449,9 @@ template <KernelScalarConcept T>
 }
 
 template <KernelScalarConcept T>
-[[nodiscard]] std::expected<void, GprError> eval_leaf_points(const KernelLeaf& leaf, MatrixRef<T> x,
-                                                             MatrixMut<T> out, Triangle uplo,
-                                                             KernelExp exp_mode) {
+[[nodiscard]] std::expected<void, GprError>
+eval_leaf_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
+                 KernelExp exp_mode, std::span<const double> cached_ls) {
     if (auto v = validate_square_points(x, out); !v.has_value()) {
         return v;
     }
@@ -457,16 +467,17 @@ template <KernelScalarConcept T>
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RbfArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                write_square_points(x, out, uplo,
-                                    [x, &ls, exp_mode](std::size_t row, std::size_t col) {
-                                        return eval_kernel_exp(
-                                            -T{0.5} * ard_scaled_sq(x, row, x, col, ls), exp_mode);
-                                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    write_square_points(
+                        x, out, uplo, [x, ls, exp_mode](std::size_t row, std::size_t col) {
+                            return eval_kernel_exp(-T{0.5} * ard_scaled_sq(x, row, x, col, ls),
+                                                   exp_mode);
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, MaternKernel>) {
                 const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
                 const MaternNu nu = k.nu();
@@ -478,19 +489,20 @@ template <KernelScalarConcept T>
                                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, MaternArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T c = matern_scale_sq<T>(k.nu());
-                const MaternNu nu = k.nu();
-                write_square_points(x, out, uplo,
-                                    [x, &ls, c, nu, exp_mode](std::size_t row, std::size_t col) {
-                                        const T u2 = c * ard_scaled_sq(x, row, x, col, ls);
-                                        const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
-                                        return eval_matern_u(u, nu, exp_mode);
-                                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T c = matern_scale_sq<T>(k.nu());
+                    const MaternNu nu = k.nu();
+                    write_square_points(x, out, uplo,
+                                        [x, ls, c, nu, exp_mode](std::size_t row, std::size_t col) {
+                                            const T u2 = c * ard_scaled_sq(x, row, x, col, ls);
+                                            const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
+                                            return eval_matern_u(u, nu, exp_mode);
+                                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, PeriodicKernel>) {
                 const T ell = static_cast<T>(k.lengthscale());
                 const T period = static_cast<T>(k.period());
@@ -509,17 +521,18 @@ template <KernelScalarConcept T>
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RationalQuadraticArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T alpha = static_cast<T>(k.alpha());
-                write_square_points(
-                    x, out, uplo, [x, &ls, alpha, exp_mode](std::size_t row, std::size_t col) {
-                        const T w = ard_scaled_sq(x, row, x, col, ls) / (T{2} * alpha);
-                        return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T alpha = static_cast<T>(k.alpha());
+                    write_square_points(
+                        x, out, uplo, [x, ls, alpha, exp_mode](std::size_t row, std::size_t col) {
+                            const T w = ard_scaled_sq(x, row, x, col, ls) / (T{2} * alpha);
+                            return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, ConstantKernel>) {
                 const T c = static_cast<T>(k.constant());
                 write_square_points(x, out, uplo, [c](std::size_t, std::size_t) { return c; });
@@ -605,7 +618,7 @@ eval_leaf_cross_dist(const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
 eval_leaf_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out,
-                       KernelExp exp_mode) {
+                       KernelExp exp_mode, std::span<const double> cached_ls) {
     if (auto v = validate_cross_points(x1, x2, out); !v.has_value()) {
         return v;
     }
@@ -621,16 +634,17 @@ eval_leaf_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2,
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RbfArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                write_cross_points(x1, x2, out,
-                                   [x1, x2, &ls, exp_mode](std::size_t row, std::size_t col) {
-                                       return eval_kernel_exp(
-                                           -T{0.5} * ard_scaled_sq(x1, row, x2, col, ls), exp_mode);
-                                   });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    write_cross_points(
+                        x1, x2, out, [x1, x2, ls, exp_mode](std::size_t row, std::size_t col) {
+                            return eval_kernel_exp(-T{0.5} * ard_scaled_sq(x1, row, x2, col, ls),
+                                                   exp_mode);
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, MaternKernel>) {
                 const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
                 const MaternNu nu = k.nu();
@@ -642,19 +656,21 @@ eval_leaf_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2,
                                    });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, MaternArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T c = matern_scale_sq<T>(k.nu());
-                const MaternNu nu = k.nu();
-                write_cross_points(
-                    x1, x2, out, [x1, x2, &ls, c, nu, exp_mode](std::size_t row, std::size_t col) {
-                        const T u2 = c * ard_scaled_sq(x1, row, x2, col, ls);
-                        const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
-                        return eval_matern_u(u, nu, exp_mode);
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T c = matern_scale_sq<T>(k.nu());
+                    const MaternNu nu = k.nu();
+                    write_cross_points(
+                        x1, x2, out,
+                        [x1, x2, ls, c, nu, exp_mode](std::size_t row, std::size_t col) {
+                            const T u2 = c * ard_scaled_sq(x1, row, x2, col, ls);
+                            const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
+                            return eval_matern_u(u, nu, exp_mode);
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, PeriodicKernel>) {
                 const T ell = static_cast<T>(k.lengthscale());
                 const T period = static_cast<T>(k.period());
@@ -673,17 +689,19 @@ eval_leaf_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2,
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RationalQuadraticArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T alpha = static_cast<T>(k.alpha());
-                write_cross_points(
-                    x1, x2, out, [x1, x2, &ls, alpha, exp_mode](std::size_t row, std::size_t col) {
-                        const T w = ard_scaled_sq(x1, row, x2, col, ls) / (T{2} * alpha);
-                        return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x1.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T alpha = static_cast<T>(k.alpha());
+                    write_cross_points(
+                        x1, x2, out,
+                        [x1, x2, ls, alpha, exp_mode](std::size_t row, std::size_t col) {
+                            const T w = ard_scaled_sq(x1, row, x2, col, ls) / (T{2} * alpha);
+                            return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, ConstantKernel>) {
                 const T c = static_cast<T>(k.constant());
                 write_cross_points(x1, x2, out, [c](std::size_t, std::size_t) { return c; });
@@ -844,9 +862,9 @@ std::expected<void, GprError> leaf_apply_dist(const KernelLeaf& leaf, MatrixRef<
 
 template <KernelScalarConcept T>
 std::expected<void, GprError> leaf_apply_points(const KernelLeaf& leaf, MatrixRef<T> x,
-                                                MatrixMut<T> out, Triangle uplo,
-                                                KernelExp exp_mode) {
-    return eval_leaf_points(leaf, x, out, uplo, exp_mode);
+                                                MatrixMut<T> out, Triangle uplo, KernelExp exp_mode,
+                                                std::span<const double> cached_ls) {
+    return eval_leaf_points(leaf, x, out, uplo, exp_mode, cached_ls);
 }
 
 template <KernelScalarConcept T>
@@ -856,15 +874,15 @@ std::expected<void, GprError> leaf_apply_cross_dist(const KernelLeaf& leaf, Matr
 }
 
 template <KernelScalarConcept T>
-std::expected<void, GprError> leaf_apply_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1,
-                                                      MatrixRef<T> x2, MatrixMut<T> out,
-                                                      KernelExp exp_mode) {
-    return eval_leaf_cross_points(leaf, x1, x2, out, exp_mode);
+std::expected<void, GprError>
+leaf_apply_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out,
+                        KernelExp exp_mode, std::span<const double> cached_ls) {
+    return eval_leaf_cross_points(leaf, x1, x2, out, exp_mode, cached_ls);
 }
 
 template <KernelScalarConcept T>
 std::expected<void, GprError> leaf_fill_diag(const KernelLeaf& leaf, MatrixRef<T> x,
-                                             std::span<T> out) {
+                                             std::span<T> out, std::span<const double> cached_ls) {
     if (auto v = validate_points(x); !v.has_value()) {
         return v;
     }
@@ -877,7 +895,9 @@ std::expected<void, GprError> leaf_fill_diag(const KernelLeaf& leaf, MatrixRef<T
             if constexpr (std::is_same_v<LeafT, RbfArdKernel> ||
                           std::is_same_v<LeafT, MaternArdKernel> ||
                           std::is_same_v<LeafT, RationalQuadraticArdKernel>) {
-                if (auto d = check_ard_dim<T>(x.cols(), k.lengthscales().size()); !d.has_value()) {
+                const std::size_t ls_dim =
+                    !cached_ls.empty() ? cached_ls.size() : k.lengthscales().size();
+                if (auto d = check_ard_dim<T>(x.cols(), ls_dim); !d.has_value()) {
                     return d;
                 }
                 std::fill(out.begin(), out.end(), T{1});
@@ -973,9 +993,9 @@ std::expected<void, GprError> leaf_grad_dist(const KernelLeaf& leaf, MatrixRef<T
 }
 
 template <KernelScalarConcept T>
-std::expected<void, GprError> leaf_grad_points(const KernelLeaf& leaf, MatrixRef<T> x,
-                                               MatrixMut<T> d_k, std::size_t param_idx,
-                                               Triangle uplo, KernelExp exp_mode) {
+std::expected<void, GprError>
+leaf_grad_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> d_k, std::size_t param_idx,
+                 Triangle uplo, KernelExp exp_mode, std::span<const double> cached_ls) {
     if (auto v = validate_square_points(x, d_k); !v.has_value()) {
         return v;
     }
@@ -993,21 +1013,22 @@ std::expected<void, GprError> leaf_grad_points(const KernelLeaf& leaf, MatrixRef
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RbfArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T ell_p = static_cast<T>(ls[param_idx]);
-                write_square_points(
-                    x, d_k, uplo,
-                    [x, &ls, param_idx, ell_p, exp_mode](std::size_t row, std::size_t col) {
-                        const std::size_t r1 = row;
-                        const std::size_t r2 = col;
-                        const T s2 = ard_scaled_sq(x, r1, x, r2, ls);
-                        const T diff = (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
-                        return (diff * diff) * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T ell_p = static_cast<T>(ls[param_idx]);
+                    write_square_points(
+                        x, d_k, uplo,
+                        [x, ls, param_idx, ell_p, exp_mode](std::size_t row, std::size_t col) {
+                            const std::size_t r1 = row;
+                            const std::size_t r2 = col;
+                            const T s2 = ard_scaled_sq(x, r1, x, r2, ls);
+                            const T diff = (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
+                            return (diff * diff) * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, MaternKernel>) {
                 const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
                 const MaternNu nu = k.nu();
@@ -1019,28 +1040,30 @@ std::expected<void, GprError> leaf_grad_points(const KernelLeaf& leaf, MatrixRef
                                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, MaternArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T c = matern_scale_sq<T>(k.nu());
-                const MaternNu nu = k.nu();
-                const T ell_p = static_cast<T>(ls[param_idx]);
-                write_square_points(
-                    x, d_k, uplo,
-                    [x, &ls, c, nu, param_idx, ell_p, exp_mode](std::size_t row, std::size_t col) {
-                        const std::size_t r1 = row;
-                        const std::size_t r2 = col;
-                        const T u2 = c * ard_scaled_sq(x, r1, x, r2, ls);
-                        if (u2 <= T{0}) {
-                            return T{0};
-                        }
-                        const T u = std::sqrt(u2);
-                        const T diff = (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
-                        const T w_p = (c * diff * diff) / u2;
-                        return eval_matern_grad_g1(u, nu, exp_mode) * w_p;
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T c = matern_scale_sq<T>(k.nu());
+                    const MaternNu nu = k.nu();
+                    const T ell_p = static_cast<T>(ls[param_idx]);
+                    write_square_points(x, d_k, uplo,
+                                        [x, ls, c, nu, param_idx, ell_p,
+                                         exp_mode](std::size_t row, std::size_t col) {
+                                            const std::size_t r1 = row;
+                                            const std::size_t r2 = col;
+                                            const T u2 = c * ard_scaled_sq(x, r1, x, r2, ls);
+                                            if (u2 <= T{0}) {
+                                                return T{0};
+                                            }
+                                            const T u = std::sqrt(u2);
+                                            const T diff =
+                                                (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
+                                            const T w_p = (c * diff * diff) / u2;
+                                            return eval_matern_grad_g1(u, nu, exp_mode) * w_p;
+                                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, PeriodicKernel>) {
                 const T ell = static_cast<T>(k.lengthscale());
                 const T period = static_cast<T>(k.period());
@@ -1062,30 +1085,32 @@ std::expected<void, GprError> leaf_grad_points(const KernelLeaf& leaf, MatrixRef
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RationalQuadraticArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T alpha = static_cast<T>(k.alpha());
-                const std::size_t alpha_idx = ls.size();
-                write_square_points(
-                    x, d_k, uplo,
-                    [x, &ls, alpha, param_idx, alpha_idx, exp_mode](std::size_t row,
-                                                                    std::size_t col) {
-                        const std::size_t r1 = row;
-                        const std::size_t r2 = col;
-                        const T s2 = ard_scaled_sq(x, r1, x, r2, ls);
-                        const T w = s2 / (T{2} * alpha);
-                        const T b = T{1} + w;
-                        const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
-                        if (param_idx < alpha_idx) {
-                            const T ell_p = static_cast<T>(ls[param_idx]);
-                            const T diff = (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
-                            return ((diff * diff) / b) * d1_exp;
-                        }
-                        return alpha * ((w / b) - std::log1p(w)) * d1_exp;
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T alpha = static_cast<T>(k.alpha());
+                    const std::size_t alpha_idx = ls.size();
+                    write_square_points(
+                        x, d_k, uplo,
+                        [x, ls, alpha, param_idx, alpha_idx, exp_mode](std::size_t row,
+                                                                       std::size_t col) {
+                            const std::size_t r1 = row;
+                            const std::size_t r2 = col;
+                            const T s2 = ard_scaled_sq(x, r1, x, r2, ls);
+                            const T w = s2 / (T{2} * alpha);
+                            const T b = T{1} + w;
+                            const T d1_exp =
+                                eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
+                            if (param_idx < alpha_idx) {
+                                const T ell_p = static_cast<T>(ls[param_idx]);
+                                const T diff = (x(r1, param_idx) - x(r2, param_idx)) / ell_p;
+                                return ((diff * diff) / b) * d1_exp;
+                            }
+                            return alpha * ((w / b) - std::log1p(w)) * d1_exp;
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, ConstantKernel>) {
                 const T c = static_cast<T>(k.constant());
                 write_square_points(x, d_k, uplo, [c](std::size_t, std::size_t) { return c; });
@@ -1185,7 +1210,8 @@ std::expected<void, GprError> leaf_hess_dist(const KernelLeaf& leaf, MatrixRef<T
 template <KernelScalarConcept T>
 std::expected<void, GprError> leaf_hess_points(const KernelLeaf& leaf, MatrixRef<T> x,
                                                MatrixMut<T> d2_k, std::size_t i, std::size_t j,
-                                               Triangle uplo, KernelExp exp_mode) {
+                                               Triangle uplo, KernelExp exp_mode,
+                                               std::span<const double> cached_ls) {
     if (auto v = validate_square_points(x, d2_k); !v.has_value()) {
         return v;
     }
@@ -1207,26 +1233,27 @@ std::expected<void, GprError> leaf_hess_points(const KernelLeaf& leaf, MatrixRef
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RbfArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T ell_i = static_cast<T>(ls[i]);
-                const T ell_j = static_cast<T>(ls[j]);
-                write_square_points(
-                    x, d2_k, uplo,
-                    [x, &ls, i, j, ell_i, ell_j, exp_mode](std::size_t row, std::size_t col) {
-                        const T s2 = ard_scaled_sq(x, row, x, col, ls);
-                        const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
-                        const T di = (x(row, i) - x(col, i)) / ell_i;
-                        const T si2 = di * di;
-                        if (i == j) {
-                            return (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
-                        }
-                        const T dj = (x(row, j) - x(col, j)) / ell_j;
-                        return si2 * (dj * dj) * jet.d2;
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T ell_i = static_cast<T>(ls[i]);
+                    const T ell_j = static_cast<T>(ls[j]);
+                    write_square_points(
+                        x, d2_k, uplo,
+                        [x, ls, i, j, ell_i, ell_j, exp_mode](std::size_t row, std::size_t col) {
+                            const T s2 = ard_scaled_sq(x, row, x, col, ls);
+                            const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
+                            const T di = (x(row, i) - x(col, i)) / ell_i;
+                            const T si2 = di * di;
+                            if (i == j) {
+                                return (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
+                            }
+                            const T dj = (x(row, j) - x(col, j)) / ell_j;
+                            return si2 * (dj * dj) * jet.d2;
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, MaternKernel>) {
                 const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
                 const MaternNu nu = k.nu();
@@ -1238,34 +1265,35 @@ std::expected<void, GprError> leaf_hess_points(const KernelLeaf& leaf, MatrixRef
                                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, MaternArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T c = matern_scale_sq<T>(k.nu());
-                const MaternNu nu = k.nu();
-                const T ell_i = static_cast<T>(ls[i]);
-                const T ell_j = static_cast<T>(ls[j]);
-                write_square_points(x, d2_k, uplo,
-                                    [x, &ls, c, nu, i, j, ell_i, ell_j, exp_mode](std::size_t row,
-                                                                                  std::size_t col) {
-                                        const T u2 = c * ard_scaled_sq(x, row, x, col, ls);
-                                        if (u2 <= T{0}) {
-                                            return T{0};
-                                        }
-                                        const T u = std::sqrt(u2);
-                                        const T di = (x(row, i) - x(col, i)) / ell_i;
-                                        const T wi = (c * di * di) / u2;
-                                        const T dj = (x(row, j) - x(col, j)) / ell_j;
-                                        const T wj = (c * dj * dj) / u2;
-                                        T val =
-                                            eval_matern_ard_cross_coeff(u, nu, exp_mode) * wi * wj;
-                                        if (i == j) {
-                                            val -= T{2} * eval_matern_grad_g1(u, nu, exp_mode) * wi;
-                                        }
-                                        return val;
-                                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T c = matern_scale_sq<T>(k.nu());
+                    const MaternNu nu = k.nu();
+                    const T ell_i = static_cast<T>(ls[i]);
+                    const T ell_j = static_cast<T>(ls[j]);
+                    write_square_points(
+                        x, d2_k, uplo,
+                        [x, ls, c, nu, i, j, ell_i, ell_j, exp_mode](std::size_t row,
+                                                                     std::size_t col) {
+                            const T u2 = c * ard_scaled_sq(x, row, x, col, ls);
+                            if (u2 <= T{0}) {
+                                return T{0};
+                            }
+                            const T u = std::sqrt(u2);
+                            const T di = (x(row, i) - x(col, i)) / ell_i;
+                            const T wi = (c * di * di) / u2;
+                            const T dj = (x(row, j) - x(col, j)) / ell_j;
+                            const T wj = (c * dj * dj) / u2;
+                            T val = eval_matern_ard_cross_coeff(u, nu, exp_mode) * wi * wj;
+                            if (i == j) {
+                                val -= T{2} * eval_matern_grad_g1(u, nu, exp_mode) * wi;
+                            }
+                            return val;
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, PeriodicKernel>) {
                 const T ell = static_cast<T>(k.lengthscale());
                 const T period = static_cast<T>(k.period());
@@ -1287,44 +1315,48 @@ std::expected<void, GprError> leaf_hess_points(const KernelLeaf& leaf, MatrixRef
                     });
                 return {};
             } else if constexpr (std::is_same_v<LeafT, RationalQuadraticArdKernel>) {
-                const auto ls = k.lengthscales();
-                if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
-                    return d;
-                }
-                const T alpha = static_cast<T>(k.alpha());
-                const std::size_t alpha_idx = ls.size();
-                write_square_points(
-                    x, d2_k, uplo,
-                    [x, &ls, alpha, i, j, alpha_idx, exp_mode](std::size_t row, std::size_t col) {
-                        const T s2 = ard_scaled_sq(x, row, x, col, ls);
-                        const T w = s2 / (T{2} * alpha);
-                        const T b = T{1} + w;
-                        const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
-                        const T g_alpha = alpha * ((w / b) - std::log1p(w));
-                        if (i == alpha_idx && j == alpha_idx) {
-                            return ((g_alpha * g_alpha) * jet.d2) +
-                                   ((g_alpha + ((alpha * w * w) / (b * b))) * jet.d1);
-                        }
-                        const std::size_t r1 = row;
-                        const std::size_t r2 = col;
-                        if (i == alpha_idx || j == alpha_idx) {
-                            const std::size_t ls_idx = (i == alpha_idx) ? j : i;
-                            const T diff =
-                                (x(r1, ls_idx) - x(r2, ls_idx)) / static_cast<T>(ls[ls_idx]);
-                            return ((diff * diff) / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
-                        }
-                        const T di = (x(r1, i) - x(r2, i)) / static_cast<T>(ls[i]);
-                        const T dj = (x(r1, j) - x(r2, j)) / static_cast<T>(ls[j]);
-                        const T si2 = di * di;
-                        const T sj2 = dj * dj;
-                        const T sq_term = (si2 * sj2) / (b * b);
-                        T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
-                        if (i == j) {
-                            val -= ((T{2} * si2) / b) * jet.d1;
-                        }
-                        return val;
-                    });
-                return {};
+                return with_ard_ls(k, cached_ls, [&](std::span<const double> ls) {
+                    if (auto d = check_ard_dim<T>(x.cols(), ls.size()); !d.has_value()) {
+                        return d;
+                    }
+                    const T alpha = static_cast<T>(k.alpha());
+                    const std::size_t alpha_idx = ls.size();
+                    write_square_points(
+                        x, d2_k, uplo,
+                        [x, ls, alpha, i, j, alpha_idx, exp_mode](std::size_t row,
+                                                                  std::size_t col) {
+                            const T s2 = ard_scaled_sq(x, row, x, col, ls);
+                            const T w = s2 / (T{2} * alpha);
+                            const T b = T{1} + w;
+                            const ExpJet<T> jet =
+                                eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
+                            const T g_alpha = alpha * ((w / b) - std::log1p(w));
+                            if (i == alpha_idx && j == alpha_idx) {
+                                return ((g_alpha * g_alpha) * jet.d2) +
+                                       ((g_alpha + ((alpha * w * w) / (b * b))) * jet.d1);
+                            }
+                            const std::size_t r1 = row;
+                            const std::size_t r2 = col;
+                            if (i == alpha_idx || j == alpha_idx) {
+                                const std::size_t ls_idx = (i == alpha_idx) ? j : i;
+                                const T diff =
+                                    (x(r1, ls_idx) - x(r2, ls_idx)) / static_cast<T>(ls[ls_idx]);
+                                return ((diff * diff) / b) *
+                                       ((g_alpha * jet.d2) + ((w / b) * jet.d1));
+                            }
+                            const T di = (x(r1, i) - x(r2, i)) / static_cast<T>(ls[i]);
+                            const T dj = (x(r1, j) - x(r2, j)) / static_cast<T>(ls[j]);
+                            const T si2 = di * di;
+                            const T sj2 = dj * dj;
+                            const T sq_term = (si2 * sj2) / (b * b);
+                            T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
+                            if (i == j) {
+                                val -= ((T{2} * si2) / b) * jet.d1;
+                            }
+                            return val;
+                        });
+                    return std::expected<void, GprError>{};
+                });
             } else if constexpr (std::is_same_v<LeafT, ConstantKernel>) {
                 const T c = static_cast<T>(k.constant());
                 write_square_points(x, d2_k, uplo, [c](std::size_t, std::size_t) { return c; });
@@ -1355,54 +1387,54 @@ template std::expected<void, GprError> leaf_apply_dist<double>(const KernelLeaf&
                                                                KernelExp);
 template std::expected<void, GprError>
 leaf_apply_dist<float>(const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, Triangle, KernelExp);
-template std::expected<void, GprError> leaf_apply_points<double>(const KernelLeaf&,
-                                                                 MatrixRef<double>,
-                                                                 MatrixMut<double>, Triangle,
-                                                                 KernelExp);
+template std::expected<void, GprError>
+leaf_apply_points<double>(const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, Triangle,
+                          KernelExp, std::span<const double>);
 template std::expected<void, GprError> leaf_apply_points<float>(const KernelLeaf&, MatrixRef<float>,
                                                                 MatrixMut<float>, Triangle,
-                                                                KernelExp);
+                                                                KernelExp, std::span<const double>);
 template std::expected<void, GprError>
 leaf_apply_cross_dist<double>(const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, KernelExp);
 template std::expected<void, GprError>
 leaf_apply_cross_dist<float>(const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp);
 template std::expected<void, GprError>
 leaf_apply_cross_points<double>(const KernelLeaf&, MatrixRef<double>, MatrixRef<double>,
-                                MatrixMut<double>, KernelExp);
-template std::expected<void, GprError> leaf_apply_cross_points<float>(const KernelLeaf&,
-                                                                      MatrixRef<float>,
-                                                                      MatrixRef<float>,
-                                                                      MatrixMut<float>, KernelExp);
+                                MatrixMut<double>, KernelExp, std::span<const double>);
+template std::expected<void, GprError>
+leaf_apply_cross_points<float>(const KernelLeaf&, MatrixRef<float>, MatrixRef<float>,
+                               MatrixMut<float>, KernelExp, std::span<const double>);
 template std::expected<void, GprError> leaf_fill_diag<double>(const KernelLeaf&, MatrixRef<double>,
-                                                              std::span<double>);
+                                                              std::span<double>,
+                                                              std::span<const double>);
 template std::expected<void, GprError> leaf_fill_diag<float>(const KernelLeaf&, MatrixRef<float>,
-                                                             std::span<float>);
+                                                             std::span<float>,
+                                                             std::span<const double>);
 template std::expected<void, GprError> leaf_grad_dist<double>(const KernelLeaf&, MatrixRef<double>,
                                                               MatrixMut<double>, std::size_t,
                                                               Triangle, KernelExp);
 template std::expected<void, GprError> leaf_grad_dist<float>(const KernelLeaf&, MatrixRef<float>,
                                                              MatrixMut<float>, std::size_t,
                                                              Triangle, KernelExp);
-template std::expected<void, GprError> leaf_grad_points<double>(const KernelLeaf&,
-                                                                MatrixRef<double>,
-                                                                MatrixMut<double>, std::size_t,
-                                                                Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_grad_points<double>(const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, std::size_t,
+                         Triangle, KernelExp, std::span<const double>);
 template std::expected<void, GprError> leaf_grad_points<float>(const KernelLeaf&, MatrixRef<float>,
                                                                MatrixMut<float>, std::size_t,
-                                                               Triangle, KernelExp);
+                                                               Triangle, KernelExp,
+                                                               std::span<const double>);
 template std::expected<void, GprError> leaf_hess_dist<double>(const KernelLeaf&, MatrixRef<double>,
                                                               MatrixMut<double>, std::size_t,
                                                               std::size_t, Triangle, KernelExp);
 template std::expected<void, GprError> leaf_hess_dist<float>(const KernelLeaf&, MatrixRef<float>,
                                                              MatrixMut<float>, std::size_t,
                                                              std::size_t, Triangle, KernelExp);
-template std::expected<void, GprError> leaf_hess_points<double>(const KernelLeaf&,
-                                                                MatrixRef<double>,
-                                                                MatrixMut<double>, std::size_t,
-                                                                std::size_t, Triangle, KernelExp);
+template std::expected<void, GprError>
+leaf_hess_points<double>(const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, std::size_t,
+                         std::size_t, Triangle, KernelExp, std::span<const double>);
 template std::expected<void, GprError> leaf_hess_points<float>(const KernelLeaf&, MatrixRef<float>,
                                                                MatrixMut<float>, std::size_t,
-                                                               std::size_t, Triangle, KernelExp);
+                                                               std::size_t, Triangle, KernelExp,
+                                                               std::span<const double>);
 
 namespace {
 

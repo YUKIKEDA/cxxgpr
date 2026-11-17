@@ -30,7 +30,7 @@ leaf_apply_dist(const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, Tri
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
 leaf_apply_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> out, Triangle uplo,
-                  KernelExp exp_mode = KernelExp::Accurate);
+                  KernelExp exp_mode = KernelExp::Accurate, std::span<const double> cached_ls = {});
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
@@ -40,11 +40,13 @@ leaf_apply_cross_dist(const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> ou
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
 leaf_apply_cross_points(const KernelLeaf& leaf, MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out,
-                        KernelExp exp_mode = KernelExp::Accurate);
+                        KernelExp exp_mode = KernelExp::Accurate,
+                        std::span<const double> cached_ls = {});
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError> leaf_fill_diag(const KernelLeaf& leaf, MatrixRef<T> x,
-                                                           std::span<T> out);
+                                                           std::span<T> out,
+                                                           std::span<const double> cached_ls = {});
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
@@ -54,7 +56,8 @@ leaf_grad_dist(const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> d_k, std:
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
 leaf_grad_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> d_k, std::size_t param_idx,
-                 Triangle uplo, KernelExp exp_mode = KernelExp::Accurate);
+                 Triangle uplo, KernelExp exp_mode = KernelExp::Accurate,
+                 std::span<const double> cached_ls = {});
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
@@ -64,7 +67,8 @@ leaf_hess_dist(const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> d2_k, std
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>
 leaf_hess_points(const KernelLeaf& leaf, MatrixRef<T> x, MatrixMut<T> d2_k, std::size_t i,
-                 std::size_t j, Triangle uplo, KernelExp exp_mode = KernelExp::Accurate);
+                 std::size_t j, Triangle uplo, KernelExp exp_mode = KernelExp::Accurate,
+                 std::span<const double> cached_ls = {});
 
 template <KernelScalarConcept T>
 [[nodiscard]] std::expected<void, GprError>

@@ -596,7 +596,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             fill_square_sq_dist(x, dist_buf);
             return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
         }
-        return detail::leaf_apply_points(kl, x, out, uplo, exp_mode);
+        return detail::leaf_apply_points(kl, x, out, uplo, exp_mode, cached_ls[leaf_idx]);
     }
 
     [[nodiscard]] std::expected<void, GprError>
@@ -762,7 +762,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                 fill_cross_sq_dist(x1, x2, dist_buf);
                 return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
             }
-            return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode);
+            return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode,
+                                                   cached_ls[leaf->leaf_idx]);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -813,7 +814,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                                                                std::span<T> scratch_vec,
                                                                std::size_t level_idx) const {
         if (const auto* leaf = std::get_if<LeafRef>(&term)) {
-            return detail::leaf_fill_diag(leaves[leaf->leaf_idx], x, out);
+            return detail::leaf_fill_diag(leaves[leaf->leaf_idx], x, out,
+                                          cached_ls[leaf->leaf_idx]);
         }
         const bool is_sum = std::holds_alternative<SumTerm>(term);
         const auto& terms =
@@ -928,7 +930,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                                                        param_idx - leaf->param_begin, uplo);
             }
             return detail::leaf_grad_points(kl, x, d_k, param_idx - leaf->param_begin, uplo,
-                                            exp_mode);
+                                            exp_mode, cached_ls[leaf->leaf_idx]);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -1098,7 +1100,8 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
                     dist_buf.as_ref(), d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo);
             }
             return detail::leaf_hess_points(kl, x, d2_k, i - leaf->param_begin,
-                                            j - leaf->param_begin, uplo, exp_mode);
+                                            j - leaf->param_begin, uplo, exp_mode,
+                                            cached_ls[leaf->leaf_idx]);
         }
         if (const auto* s = std::get_if<SumTerm>(&term)) {
             for (const auto& child : s->terms) {
@@ -1339,7 +1342,7 @@ template <KernelScalarConcept T> struct CompiledKernel<T>::Impl {
             fill_square_sq_dist(x, dist_buf);
             return custom->template term<T>().grad(dist_buf.as_ref(), d_k, local_idx, uplo);
         }
-        return detail::leaf_grad_points(kl, x, d_k, local_idx, uplo, exp_mode);
+        return detail::leaf_grad_points(kl, x, d_k, local_idx, uplo, exp_mode, cached_ls[leaf_idx]);
     }
 
     [[nodiscard]] std::expected<void, GprError>
