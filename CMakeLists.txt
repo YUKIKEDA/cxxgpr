@@ -12,7 +12,11 @@ set(CXXGPR_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include"
 file(MAKE_DIRECTORY "${CXXGPR_GENERATED_INCLUDE_DIR}/cxxgpr")
 
 include(CTest)
+include(GNUInstallDirs)
+option(CXXGPR_BUILD_TESTS "Build cxxgpr unit and verification tests" ${PROJECT_IS_TOP_LEVEL})
+option(CXXGPR_BUILD_CANARY "Build numeric canary executable" ${PROJECT_IS_TOP_LEVEL})
 option(CXXGPR_BUILD_BENCHMARKS "Build Google Benchmark targets" OFF)
+option(CXXGPR_INSTALL "Generate CMake install targets for cxxgpr" ${PROJECT_IS_TOP_LEVEL})
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerPolicy)
@@ -83,6 +87,7 @@ cxxgpr_configure_target(cxxgpr)
 target_include_directories(cxxgpr
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CXXGPR_GENERATED_INCLUDE_DIR}
@@ -90,21 +95,76 @@ target_include_directories(cxxgpr
 
 target_link_libraries(cxxgpr
     PRIVATE
-        cxxgpr::eigen
+        $<BUILD_INTERFACE:cxxgpr::eigen>
+        $<INSTALL_INTERFACE:Eigen3::Eigen>
         nlohmann_json::nlohmann_json
 )
 if(TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(cxxgpr PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-add_executable(cxxgpr_numeric_canary qa/numeric_canary/main.cpp)
-cxxgpr_configure_target(cxxgpr_numeric_canary)
-target_link_libraries(cxxgpr_numeric_canary PRIVATE cxxgpr cxxgpr::eigen)
+if(CXXGPR_BUILD_CANARY)
+    add_executable(cxxgpr_numeric_canary qa/numeric_canary/main.cpp)
+    cxxgpr_configure_target(cxxgpr_numeric_canary)
+    target_link_libraries(cxxgpr_numeric_canary PRIVATE cxxgpr cxxgpr::eigen)
+endif()
 
-if(BUILD_TESTING)
+if(CXXGPR_BUILD_TESTS AND BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
 if(CXXGPR_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+if(CXXGPR_INSTALL)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS cxxgpr
+        EXPORT cxxgprTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    )
+
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/cxxgpr"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+        FILES_MATCHING PATTERN "*.hpp"
+    )
+
+    install(EXPORT cxxgprTargets
+        FILE cxxgprTargets.cmake
+        NAMESPACE cxxgpr::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/cxxgpr"
+    )
+
+    set(CXXGPR_HAS_OPENMP OFF)
+    if(TARGET OpenMP::OpenMP_CXX)
+        set(CXXGPR_HAS_OPENMP ON)
+    endif()
+
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cxxgprConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/cxxgprConfig.cmake"
+        INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/cxxgpr"
+    )
+
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/cxxgprConfigVersion.cmake"
+        VERSION "${PROJECT_VERSION}"
+        COMPATIBILITY SameMinorVersion
+    )
+
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/cxxgprConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/cxxgprConfigVersion.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/cxxgpr"
+    )
+
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/cxxgpr"
+    )
 endif()
