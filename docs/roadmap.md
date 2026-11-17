@@ -2,7 +2,7 @@
 
 作業の順序と状態の正本。行が持つのは ID、種類、題、Issue、状態だけであり、詳細な完了条件は Issue に書く。行の追加と削除は Grill の後に行い、「今」を書き換えるのはその行を終える PR だけとする。
 
-**今**：M5-4
+**今**：REL-1
 
 目的は、Rust ライブラリ `gprx` の **Exact GPR** モデルを、C++23 静的ライブラリ `cxxgpr` として数値・API・永続化・性能の妥協なく移植することである。現在地はリポジトリ基盤（M0-1）・ビルド・検査・CI 基盤（M0-2）・コア基盤（M1-1）・精度基盤（M1-2）・線形代数基盤（M1-3）・前処理基盤（M1-4）・M2 カーネル基盤（M2-A〜M2-E）・ワークスペースと MLL・解析勾配（M3-A）・解析ヘッセ行列とメモリ/速度優先統合（M3-B）・LOO 推論と予測・サンプリング（M3-C）・自前最適化器群（M4-A）・公開モデル統合（M4-B）・永続化（M4-C）を完了し、総合検証・ベンチマーク（M5-1〜M5-4）へ進む段階である。
 
@@ -87,7 +87,7 @@ flowchart LR
 | M5-1 | Test | 全ペア結合試験（10 カーネル × 5 最適化器 × 3 精度 × 距離供給・前処理の `path_matrix`） | #36 | Done |
 | M5-2 | Test | `gprx` / `scikit-learn` / 解析解 golden 数値照合（fixed θ、L-BFGS 最適化、LOO） | #38 | Done |
 | M5-3 | Test | ホットパス確保ゼロ・ラチェット試験（MLL+grad・`predict_into`・距離供給の座標比上限） | #40 | Done |
-| M5-4 | Feat | Google Benchmark スイート（Forrester $n=256$ / ARD Sphere・`KernelExp`・距離供給比較） | - | Todo |
+| M5-4 | Feat | Google Benchmark スイート（Forrester $n=256$ / ARD Sphere・`KernelExp`・距離供給比較） | #42 | Done |
 
 ## REL：公開準備
 
