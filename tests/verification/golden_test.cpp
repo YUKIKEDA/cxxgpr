@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-08, REQ-09, REQ-12, DES-07, DES-13, DES-16, DES-19, QA-02
+
+#include "cxxgpr/gpr/gpr.hpp"
+#include "cxxgpr/kernel/kernel.hpp"
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <numbers>
+#include <vector>
+
+namespace {
+
+TEST(GoldenVerificationTest, AnalyticalClosedFormOneAndTwoPoints) {
+    // Spec: REQ-08, REQ-12, DES-07, DES-16
+    // 1-point closed-form Exact GPR: A = [[c + sigma_n^2]]
+    {
+        const double x0 = 0.5;
+        const double y0 = 2.0;
+        const double c = 1.5;
+        const double ls = 0.8;
+        const double nv = 0.5;
+        const double xq = 0.9;
+
+        const double a00 = c + nv;
+        const double alpha0 = y0 / a00;
+        const double expected_nll =
+            0.5 * ((y0 * alpha0) + std::log(a00) + std::log(2.0 * std::numbers::pi));
+        const double diff = xq - x0;
+        const double k_star = c * std::exp(-0.5 * (diff * diff) / (ls * ls));
+        const double expected_mean = k_star * alpha0;
+        const double expected_latent_var = c - ((k_star * k_star) / a00);
+        const double expected_obs_var = expected_latent_var + nv;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(c).value()) *
+                          cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(ls).value());
+        const auto trainer =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(nv).value();
+
+        const std::array<double, 1> x_tr{x0};
+        const std::array<double, 1> y_tr{y0};
+        const std::array<double, 1> x_qu{xq};
+        auto fitted = trainer.factor(x_tr, 1U, 1U, y_tr);
+        ASSERT_TRUE(fitted.has_value());
+        EXPECT_NEAR(fitted->log_marginal_likelihood(), expected_nll, 1e-14);
+        EXPECT_NEAR(fitted->alpha()[0], alpha0, 1e-14);
+
+        auto pred = fitted->predict(x_qu, 1U, 1U);
+        ASSERT_TRUE(pred.has_value());
+        EXPECT_NEAR(pred->mean[0], expected_mean, 1e-14);
+        EXPECT_NEAR(pred->variance[0], expected_obs_var, 1e-14);
+        auto pred_latent = fitted->predict(
+            x_qu, 1U, 1U, cxxgpr::PredictOptions{.variance_kind = cxxgpr::VarianceKind::Latent});
+        ASSERT_TRUE(pred_latent.has_value());
+        EXPECT_NEAR(pred_latent->variance[0], expected_latent_var, 1e-14);
+    }
+
+    // 2-point closed-form Exact GPR + LOO
+    {
+        const double c = 2.0;
+        const double ls = 1.0;
+        const double nv = 0.5;
+        const std::array<double, 2> x_tr{0.0, 1.0};
+        const std::array<double, 2> y_tr{1.0, 2.0};
+        const std::array<double, 1> x_qu{0.5};
+
+        const double a = c + nv;
+        const double b = c * std::exp(-0.5 / (ls * ls));
+        const double det = (a * a) - (b * b);
+        const double alpha0 = ((a * y_tr[0]) - (b * y_tr[1])) / det;
+        const double alpha1 = ((-b * y_tr[0]) + (a * y_tr[1])) / det;
+        const double expected_nll = 0.5 * ((y_tr[0] * alpha0) + (y_tr[1] * alpha1) + std::log(det) +
+                                           (2.0 * std::log(2.0 * std::numbers::pi)));
+
+        const double k0 = c * std::exp(-0.5 * 0.25 / (ls * ls));
+        const double k1 = k0;
+        const double expected_mean = (k0 * alpha0) + (k1 * alpha1);
+        const double v0 = ((k0 * a) - (k1 * b)) / det;
+        const double v1 = ((k1 * a) - (k0 * b)) / det;
+        const double expected_obs_var = (c - ((k0 * v0) + (k1 * v1))) + nv;
+
+        // Closed-form (A^{-1})_{00} = (A^{-1})_{11} = a / det
+        const double inv_diag = a / det;
+        const double loo_m0 = y_tr[0] - (alpha0 / inv_diag);
+        const double loo_m1 = y_tr[1] - (alpha1 / inv_diag);
+        const double loo_v = 1.0 / inv_diag;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(c).value()) *
+                          cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(ls).value());
+        const auto trainer =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(nv).value();
+
+        auto fitted = trainer.factor(x_tr, 2U, 1U, y_tr);
+        ASSERT_TRUE(fitted.has_value());
+        EXPECT_NEAR(fitted->log_marginal_likelihood(), expected_nll, 1e-13);
+        EXPECT_NEAR(fitted->alpha()[0], alpha0, 1e-13);
+        EXPECT_NEAR(fitted->alpha()[1], alpha1, 1e-13);
+
+        auto pred = fitted->predict(x_qu, 1U, 1U);
+        ASSERT_TRUE(pred.has_value());
+        EXPECT_NEAR(pred->mean[0], expected_mean, 1e-13);
+        EXPECT_NEAR(pred->variance[0], expected_obs_var, 1e-13);
+
+        auto loo = fitted->loo_predict();
+        ASSERT_TRUE(loo.has_value());
+        EXPECT_NEAR(loo->mean[0], loo_m0, 1e-13);
+        EXPECT_NEAR(loo->mean[1], loo_m1, 1e-13);
+        EXPECT_NEAR(loo->variance[0], loo_v, 1e-13);
+        EXPECT_NEAR(loo->variance[1], loo_v, 1e-13);
+    }
+}
+
+TEST(GoldenVerificationTest, Forrester1dFixedLbfgsAndLooMatchIndependentReference) {
+    // Spec: REQ-08, REQ-09, REQ-12, DES-13, DES-16, DES-19, QA-02
+    // Golden generated by scikit-learn 1.9.1 GaussianProcessRegressor via tools/qa/m5_2_golden.py
+    constexpr std::size_t n = 18;
+    std::vector<double> x_train(n);
+    std::vector<double> y_train(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i) / 17.0;
+        x_train[i] = x;
+        const double t = (6.0 * x) - 2.0;
+        y_train[i] = (0.1 * (t * t) * std::sin((12.0 * x) - 4.0)) + (0.02 * std::cos(50.0 * x));
+    }
+    const std::array<double, 3> x_query{0.15, 0.50, 0.85};
+    const auto x_ref = cxxgpr::MatrixRef<double>(x_train.data(), n, 1U, n);
+    const auto xq_ref = cxxgpr::MatrixRef<double>(x_query.data(), 3U, 1U, 3U);
+
+    // 1. Fixed theta (c=1.0, ls=0.25, nv=1e-3)
+    const auto fixed_spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value()) *
+                            cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+    const auto fixed_fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(fixed_spec)
+                               .with_noise_variance(1e-3)
+                               .value()
+                               .factor(x_ref, y_train);
+    ASSERT_TRUE(fixed_fit.has_value());
+    EXPECT_NEAR(fixed_fit->log_marginal_likelihood(), 20.165875928597817, 1e-11);
+
+    auto fixed_pred = fixed_fit->predict(xq_ref);
+    ASSERT_TRUE(fixed_pred.has_value());
+    const std::array<double, 3> ref_fixed_mean{-0.07287827118644119, 0.12066140078879073,
+                                               -0.049073256647872654};
+    const std::array<double, 3> ref_fixed_var{0.001375086789278889, 0.0013295846229423028,
+                                              0.001375086789278889};
+    for (std::size_t j = 0; j < 3U; ++j) {
+        EXPECT_NEAR(fixed_pred->mean[j], ref_fixed_mean[j], 1e-11);
+        EXPECT_NEAR(fixed_pred->variance[j], ref_fixed_var[j], 1e-11);
+    }
+
+    auto fixed_loo = fixed_fit->loo_predict();
+    ASSERT_TRUE(fixed_loo.has_value());
+    const std::array<double, 4> ref_loo_mean{0.089149243005906015, 0.075071029229255973,
+                                             -0.044029866994354641, -0.061314432419476428};
+    const std::array<double, 4> ref_loo_var{0.0075721491055109613, 0.0017666125661952572,
+                                            0.0017120285307303798, 0.001550549410145984};
+    for (std::size_t i = 0; i < 4U; ++i) {
+        EXPECT_NEAR(fixed_loo->mean[i], ref_loo_mean[i], 1e-11);
+        EXPECT_NEAR(fixed_loo->variance[i], ref_loo_var[i], 1e-11);
+    }
+
+    // MixedPrecision<PromoteStorage> agrees with DoublePrecision fixed reference
+    const auto mp_fit =
+        cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(
+            fixed_spec)
+            .with_noise_variance(1e-3)
+            .value()
+            .factor(x_ref, y_train);
+    ASSERT_TRUE(mp_fit.has_value());
+    auto mp_pred = mp_fit->predict(xq_ref);
+    ASSERT_TRUE(mp_pred.has_value());
+    for (std::size_t j = 0; j < 3U; ++j) {
+        EXPECT_NEAR(mp_pred->mean[j], ref_fixed_mean[j], 1e-4);
+    }
+
+    // 2. L-BFGS optimization from (c=1.0, ls=0.25, nv=1e-3), ls in (0.05, 5.0)
+    const auto ls_interval = cxxgpr::Interval::positive(0.05, 5.0).value();
+    const auto opt_spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value()) *
+                          cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25, ls_interval).value());
+    const auto opt_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(
+                             opt_spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(150U))
+                             .with_noise_variance(1e-3)
+                             .value()
+                             .fit(x_ref, y_train);
+    ASSERT_TRUE(opt_fit.has_value());
+    EXPECT_NEAR(opt_fit->log_marginal_likelihood(), -12.228652965879842, 1e-6);
+
+    auto opt_pred = opt_fit->predict(xq_ref);
+    ASSERT_TRUE(opt_pred.has_value());
+    const std::array<double, 3> ref_opt_mean{-0.09697608286101436, 0.08899342289447693,
+                                             -0.06767511995375886};
+    const std::array<double, 3> ref_opt_var{0.0006217691478609401, 0.0006028902745942588,
+                                            0.0006217691478607179};
+    for (std::size_t j = 0; j < 3U; ++j) {
+        EXPECT_NEAR(opt_pred->mean[j], ref_opt_mean[j], 1e-5);
+        EXPECT_NEAR(opt_pred->variance[j], ref_opt_var[j], 1e-5);
+    }
+}
+
+TEST(GoldenVerificationTest, TwoDimArdMatern52FixedLbfgsAndLooMatchIndependentReference) {
+    // Spec: REQ-08, REQ-09, REQ-12, DES-07, DES-16, DES-19, QA-02
+    // Golden generated by scikit-learn 1.9.1 GaussianProcessRegressor via tools/qa/m5_2_golden.py
+    constexpr std::size_t n = 10;
+    constexpr std::size_t d = 2;
+    std::vector<double> x_train(n * d);
+    std::vector<double> y_train(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x0 = 0.1 * static_cast<double>(i);
+        const double x1 = 0.1 * static_cast<double>(((3U * i) + 1U) % 10U);
+        x_train[i] = x0;
+        x_train[n + i] = x1;
+        y_train[i] = std::sin(3.0 * x0) + (0.5 * std::cos(4.0 * x1));
+    }
+    const std::array<double, 4> x_query{0.25, 0.75, 0.45, 0.15};
+    const auto x_ref = cxxgpr::MatrixRef<double>(x_train.data(), n, d, n);
+    const auto xq_ref = cxxgpr::MatrixRef<double>(x_query.data(), 2U, d, 2U);
+
+    // 1. Fixed theta (c=1.5, ls={0.5, 0.7}, nv=1e-3)
+    const auto fixed_spec =
+        cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.5).value()) *
+        cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array<double, 2>{0.5, 0.7},
+                                                           cxxgpr::MaternNu::FiveHalves)
+                               .value());
+    const auto fixed_fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(fixed_spec)
+                               .with_noise_variance(1e-3)
+                               .value()
+                               .factor(x_ref, y_train);
+    ASSERT_TRUE(fixed_fit.has_value());
+    EXPECT_NEAR(fixed_fit->log_marginal_likelihood(), 5.66595711118728, 1e-12);
+
+    auto fixed_pred = fixed_fit->predict(xq_ref);
+    ASSERT_TRUE(fixed_pred.has_value());
+    const std::array<double, 2> ref_fixed_mean{0.5242533403659311, 1.1765834879149546};
+    const std::array<double, 2> ref_fixed_var{0.027228735194945508, 0.021222291764173673};
+    for (std::size_t j = 0; j < 2U; ++j) {
+        EXPECT_NEAR(fixed_pred->mean[j], ref_fixed_mean[j], 1e-12);
+        EXPECT_NEAR(fixed_pred->variance[j], ref_fixed_var[j], 1e-12);
+    }
+
+    auto fixed_loo = fixed_fit->loo_predict();
+    ASSERT_TRUE(fixed_loo.has_value());
+    const std::array<double, 4> ref_loo_mean{0.47511104233595136, 0.31710307242382241,
+                                             0.20218565034477787, 1.2063754166456986};
+    const std::array<double, 4> ref_loo_var{0.21104107085086912, 0.094874366410935621,
+                                            0.17693838957444688, 0.18339011674970862};
+    for (std::size_t i = 0; i < 4U; ++i) {
+        EXPECT_NEAR(fixed_loo->mean[i], ref_loo_mean[i], 1e-12);
+        EXPECT_NEAR(fixed_loo->variance[i], ref_loo_var[i], 1e-12);
+    }
+
+    // 2. L-BFGS optimization from (c=1.0, ls={0.5, 0.5}, nv=1e-2)
+    const auto opt_spec =
+        cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value()) *
+        cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array<double, 2>{0.5, 0.5},
+                                                           cxxgpr::MaternNu::FiveHalves)
+                               .value());
+    const auto opt_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(
+                             opt_spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(120U))
+                             .with_noise_variance(1e-2)
+                             .value()
+                             .fit(x_ref, y_train);
+    ASSERT_TRUE(opt_fit.has_value());
+    EXPECT_NEAR(opt_fit->log_marginal_likelihood(), 3.055176152823967, 1e-6);
+
+    auto opt_pred = opt_fit->predict(xq_ref);
+    ASSERT_TRUE(opt_pred.has_value());
+    const std::array<double, 2> ref_opt_mean{0.5344606602886168, 1.1910654908750464};
+    const std::array<double, 2> ref_opt_var{0.00530926324040537, 0.004422124239719216};
+    for (std::size_t j = 0; j < 2U; ++j) {
+        EXPECT_NEAR(opt_pred->mean[j], ref_opt_mean[j], 1e-4);
+        EXPECT_NEAR(opt_pred->variance[j], ref_opt_var[j], 1e-5);
+    }
+}
+
+} // namespace
