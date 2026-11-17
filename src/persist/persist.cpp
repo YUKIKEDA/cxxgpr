@@ -93,6 +93,10 @@ build_typed_state(const detail::ParsedConfig& cfg,
 
     const std::size_t n = cfg.n;
     const std::size_t d = cfg.d;
+    if (!cfg.kernel_spec.has_value() || !cfg.likelihood.has_value()) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Config, "missing kernel or likelihood configuration"));
+    }
 
     std::vector<double> x_trans(x_raw.begin(), x_raw.end());
     if (auto ap = cfg.x_transform->apply(x_trans, n, d); !ap.has_value()) {
@@ -374,6 +378,34 @@ struct LoadedGpr::Impl {
 
 LoadedGpr::~LoadedGpr() = default;
 
+namespace {
+
+template <typename ImplT, typename Fn>
+[[nodiscard]] auto with_typed_state(const ImplT& impl, Fn&& fn) {
+    using Ret = decltype(fn(*impl.double_state));
+    auto call_opt = [&](const auto& opt) -> Ret {
+        if (!opt.has_value()) {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Config,
+                                                            "missing typed precision state"));
+        }
+        return fn(*opt);
+    };
+    switch (impl.precision_kind) {
+    case PersistPrecisionKind::Double:
+        return call_opt(impl.double_state);
+    case PersistPrecisionKind::Single:
+        return call_opt(impl.single_state);
+    case PersistPrecisionKind::MixedPromote:
+        return call_opt(impl.mixed_promote_state);
+    case PersistPrecisionKind::MixedReevaluate:
+        return call_opt(impl.mixed_reeval_state);
+    }
+    return Ret(std::unexpected(GprError::persist_failed(PersistErrorKind::Config,
+                                                        "invalid precision state in LoadedGpr")));
+}
+
+} // namespace
+
 std::expected<LoadedGpr, GprError> LoadedGpr::load(const std::filesystem::path& dir,
                                                    const PersistRegistry& registry) {
     auto cfg = detail::parse_config_json(dir / "config.json", registry);
@@ -394,6 +426,11 @@ std::expected<LoadedGpr, GprError> LoadedGpr::load(const std::filesystem::path& 
     auto y_sp = (*st)->read_f64("y", y_shape);
     if (!y_sp.has_value()) {
         return std::unexpected(std::move(y_sp).error());
+    }
+
+    if (!cfg->kernel_spec.has_value() || !cfg->likelihood.has_value()) {
+        return std::unexpected(GprError::persist_failed(
+            PersistErrorKind::Config, "missing kernel or likelihood configuration"));
     }
 
     auto impl = std::make_shared<Impl>(Impl{
@@ -516,24 +553,10 @@ DistanceCachePolicy LoadedGpr::distance_cache_policy() const noexcept {
 
 std::expected<void, GprError> LoadedGpr::predict_into(MatrixRef<double> xs, Prediction<double>& out,
                                                       const PredictOptions& options) const {
-    switch (impl_->precision_kind) {
-    case PersistPrecisionKind::Double:
-        return loaded_predict_typed(*impl_->double_state, impl_->likelihood, *impl_->x_transform,
-                                    *impl_->y_transform, impl_->n, impl_->d, xs, options, out);
-    case PersistPrecisionKind::Single:
-        return loaded_predict_typed(*impl_->single_state, impl_->likelihood, *impl_->x_transform,
-                                    *impl_->y_transform, impl_->n, impl_->d, xs, options, out);
-    case PersistPrecisionKind::MixedPromote:
-        return loaded_predict_typed(*impl_->mixed_promote_state, impl_->likelihood,
-                                    *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
-                                    xs, options, out);
-    case PersistPrecisionKind::MixedReevaluate:
-        return loaded_predict_typed(*impl_->mixed_reeval_state, impl_->likelihood,
-                                    *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
-                                    xs, options, out);
-    }
-    return std::unexpected(
-        GprError::persist_failed(PersistErrorKind::Config, "invalid precision state in LoadedGpr"));
+    return with_typed_state(*impl_, [&](const auto& st) {
+        return loaded_predict_typed(st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform,
+                                    impl_->n, impl_->d, xs, options, out);
+    });
 }
 
 std::expected<Prediction<double>, GprError>
@@ -604,18 +627,7 @@ LoadedGpr::predict_covariance(MatrixRef<double> xs, const PredictOptions& option
         return out;
     };
 
-    switch (impl_->precision_kind) {
-    case PersistPrecisionKind::Double:
-        return to_fitted_cov(*impl_->double_state);
-    case PersistPrecisionKind::Single:
-        return to_fitted_cov(*impl_->single_state);
-    case PersistPrecisionKind::MixedPromote:
-        return to_fitted_cov(*impl_->mixed_promote_state);
-    case PersistPrecisionKind::MixedReevaluate:
-        return to_fitted_cov(*impl_->mixed_reeval_state);
-    }
-    return std::unexpected(
-        GprError::persist_failed(PersistErrorKind::Config, "invalid precision state"));
+    return with_typed_state(*impl_, to_fitted_cov);
 }
 
 std::expected<std::vector<double>, GprError>
@@ -672,18 +684,7 @@ LoadedGpr::sample(MatrixRef<double> xs, std::size_t n_draws, std::uint64_t seed,
         return out;
     };
 
-    switch (impl_->precision_kind) {
-    case PersistPrecisionKind::Double:
-        return sample_typed(*impl_->double_state);
-    case PersistPrecisionKind::Single:
-        return sample_typed(*impl_->single_state);
-    case PersistPrecisionKind::MixedPromote:
-        return sample_typed(*impl_->mixed_promote_state);
-    case PersistPrecisionKind::MixedReevaluate:
-        return sample_typed(*impl_->mixed_reeval_state);
-    }
-    return std::unexpected(
-        GprError::persist_failed(PersistErrorKind::Config, "invalid precision state"));
+    return with_typed_state(*impl_, sample_typed);
 }
 
 std::expected<Prediction<double>, GprError>
@@ -713,18 +714,7 @@ LoadedGpr::loo_predict(const PredictOptions& options) const {
         return out;
     };
 
-    switch (impl_->precision_kind) {
-    case PersistPrecisionKind::Double:
-        return loo_typed(*impl_->double_state);
-    case PersistPrecisionKind::Single:
-        return loo_typed(*impl_->single_state);
-    case PersistPrecisionKind::MixedPromote:
-        return loo_typed(*impl_->mixed_promote_state);
-    case PersistPrecisionKind::MixedReevaluate:
-        return loo_typed(*impl_->mixed_reeval_state);
-    }
-    return std::unexpected(
-        GprError::persist_failed(PersistErrorKind::Config, "invalid precision state"));
+    return with_typed_state(*impl_, loo_typed);
 }
 
 template <PrecisionPolicyConcept P>
