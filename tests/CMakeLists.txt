@@ -196,6 +196,11 @@ cxxgpr_add_test(persist.models
     LABELS unit property negative integration
 )
 
+cxxgpr_add_test(integration.path_matrix
+    SOURCES integration/path_matrix_test.cpp
+    LABELS integration property
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"
