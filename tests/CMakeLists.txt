@@ -191,6 +191,11 @@ cxxgpr_add_test(gpr.models
     LABELS unit property negative integration
 )
 
+cxxgpr_add_test(persist.models
+    SOURCES persist/persist_test.cpp
+    LABELS unit property negative integration
+)
+
 if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
     add_test(NAME toolchain.third_party_notices
         COMMAND "${CMAKE_COMMAND}"

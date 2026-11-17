@@ -63,6 +63,9 @@ add_library(cxxgpr STATIC
     src/optimizer/lbfgs.cpp
     src/optimizer/nelder_mead.cpp
     src/optimizer/trust_region.cpp
+    src/persist/config_json.cpp
+    src/persist/persist.cpp
+    src/persist/safetensors.cpp
     src/precision/refine.cpp
     src/transform/columnwise.cpp
     src/transform/input.cpp

@@ -412,11 +412,13 @@ train_or_factor_payload(const TrainConfig<P>& cfg, MatrixRef<double> x, std::spa
     if (auto cp = copy_double_matrix_col_major(x, x_f64); !cp.has_value()) {
         return std::unexpected(std::move(cp).error());
     }
+    std::vector<double> x_raw = x_f64;
     for (const double val : y) {
         if (!std::isfinite(val)) {
             return std::unexpected(GprError::non_finite_input());
         }
     }
+    std::vector<double> y_raw(y.begin(), y.end());
 
     auto fitted_in = cfg.input_transform.fit(x_f64, n, d);
     if (!fitted_in.has_value()) {
@@ -551,6 +553,8 @@ train_or_factor_payload(const TrainConfig<P>& cfg, MatrixRef<double> x, std::spa
         .compiled_kernel = std::move(compiled),
         .input_transform = std::move(*fitted_in),
         .target_transform = std::move(*fitted_tgt),
+        .x_raw = std::move(x_raw),
+        .y_raw = std::move(y_raw),
         .x_train = std::move(x_storage),
         .y_transformed = std::move(y_refine),
         .l_factor = std::move(l_copy),

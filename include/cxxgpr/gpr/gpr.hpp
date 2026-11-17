@@ -34,6 +34,10 @@ template <typename O, PrecisionPolicyConcept P, typename K> class Gpr;
 /// Fitted Exact Gaussian Process Regression model supporting prediction, sampling, and LOO.
 template <typename O, PrecisionPolicyConcept P, typename K> class FittedGpr;
 
+namespace persist {
+class LoadedGpr;
+} // namespace persist
+
 namespace detail {
 
 template <PrecisionPolicyConcept P> struct FittedPayload {
@@ -45,6 +49,8 @@ template <PrecisionPolicyConcept P> struct FittedPayload {
     std::shared_ptr<const CompiledKernel<Storage>> compiled_kernel;
     std::unique_ptr<transform::FittedInputTransform> input_transform;
     std::unique_ptr<transform::FittedTargetTransform> target_transform;
+    std::vector<double> x_raw;
+    std::vector<double> y_raw;
     std::vector<Storage> x_train;
     std::vector<Refine> y_transformed;
     std::vector<Storage> l_factor;
@@ -435,6 +441,8 @@ public:
               .compiled_kernel = other.payload_.compiled_kernel,
               .input_transform = other.payload_.input_transform->clone(),
               .target_transform = other.payload_.target_transform->clone(),
+              .x_raw = other.payload_.x_raw,
+              .y_raw = other.payload_.y_raw,
               .x_train = other.payload_.x_train,
               .y_transformed = other.payload_.y_transformed,
               .l_factor = other.payload_.l_factor,
@@ -667,8 +675,31 @@ public:
         return jitter_;
     }
 
+    /// Returns the raw (pre-transform) column-major training features in double precision.
+    [[nodiscard]] std::span<const double> x_raw() const noexcept {
+        return payload_.x_raw;
+    }
+
+    /// Returns the raw (pre-transform) training targets in double precision.
+    [[nodiscard]] std::span<const double> y_raw() const noexcept {
+        return payload_.y_raw;
+    }
+
+    /// Returns the unfitted input transform configuration retained for persistence and refit.
+    [[nodiscard]] const transform::UnfittedInputTransform&
+    unfitted_input_transform() const noexcept {
+        return *unfitted_input_;
+    }
+
+    /// Returns the unfitted target transform configuration retained for persistence and refit.
+    [[nodiscard]] const transform::UnfittedTargetTransform&
+    unfitted_target_transform() const noexcept {
+        return *unfitted_target_;
+    }
+
 private:
     friend class Gpr<O, P, K>;
+    friend class persist::LoadedGpr;
 
     FittedGpr(detail::FittedPayload<P> payload, O optimizer, JitterPolicy jitter,
               std::unique_ptr<transform::UnfittedInputTransform> unfitted_input,
