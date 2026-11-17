@@ -232,3 +232,19 @@ add_test(NAME qa.numeric_canary
 set_tests_properties(qa.numeric_canary PROPERTIES
     LABELS "verification"
 )
+
+if(CXXGPR_INSTALL)
+    add_test(NAME integration.package_install
+        COMMAND "${CMAKE_COMMAND}"
+            "-DCXXGPR_BUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-DCXXGPR_CONFIG=$<CONFIG>"
+            "-DCXXGPR_GENERATOR=${CMAKE_GENERATOR}"
+            "-DCXXGPR_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+            "-DCXXGPR_VCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}"
+            "-DCXXGPR_VCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/VerifyPackage.cmake"
+    )
+    set_tests_properties(integration.package_install PROPERTIES
+        LABELS "integration"
+    )
+endif()

@@ -8,8 +8,9 @@
 
 ### 追加
 
-- リポジトリ基盤（開発規約、Rules／Skills、仕様書 `docs/design.md`・`docs/persist-format.md`・`docs/architecture.md`、ロードマップ）。
-
-### 既知の問題
-
-- ライブラリ本体および CMake/QA ゲートは順次整備中（M0-2 以降）。
+- Exact GPR（`Gpr` / `FittedGpr`）、全 10 種の組込みカーネル葉・合成・`Custom` 葉、`LeafCache` 増分更新、供給二乗距離（`DistanceKernel`）。
+- 5 種の自己完結型最適化器（`Lbfgs` / `NelderMead` / `TrustRegion` / `FastSimulatedAnnealing` / `Fixed`）。
+- 入力／目的変数前処理変換、`DoublePrecision` / `SinglePrecision` / `MixedPrecision`、`KernelExp` ポリシー。
+- `config.json` / `model.safetensors` による永続化（原子保存、`f64` 因子 mmap 読込、`PersistRegistry`）。
+- CMake `install` / `find_package(cxxgpr CONFIG)` / `FetchContent` パッケージ体裁と `0.1.0` 版統一（`REL-1`）。
+- 総合検証スイート（`path_matrix`・golden 数値照合・ホットパス確保ゼロラチェット・Google Benchmark・QA ゲート）。
