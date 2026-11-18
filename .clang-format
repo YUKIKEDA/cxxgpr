@@ -1,24 +1,165 @@
----
+# ==============================================================================
+# C++23 clang-format Configuration (LLVM / clang-format 22.1.3 準拠)
+# ==============================================================================
 Language: Cpp
-BasedOnStyle: LLVM
+BasedOnStyle: Microsoft
 Standard: Latest
+
+# ------------------------------------------------------------------------------
+# 1. 基本レイアウト・インデント
+# ------------------------------------------------------------------------------
+ColumnLimit: 120
 IndentWidth: 4
-TabWidth: 4
 UseTab: Never
-ColumnLimit: 100
+TabWidth: 4
+ContinuationIndentWidth: 4
+
+IndentCaseLabels: true
+IndentCaseBlocks: false
+IndentGotoLabels: false
+NamespaceIndentation: All
+IndentAccessModifiers: false
 AccessModifierOffset: -4
-AlignAfterOpenBracket: Align
-AllowShortFunctionsOnASingleLine: Empty
+IndentRequiresClause: true
+IndentExternBlock: Indent
+IndentPPDirectives: AfterHash
+PPIndentWidth: -1
+IndentWrappedFunctionNames: true
+
+# ------------------------------------------------------------------------------
+# 2. 波括弧 { } と 1 行収めルール
+# ------------------------------------------------------------------------------
+BreakBeforeBraces: Allman
+
+AllowShortBlocksOnASingleLine: Never
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: Inline
+AllowShortEnumsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortNamespacesOnASingleLine: false
+AllowShortCompoundRequirementOnASingleLine: true
+
+InsertBraces: false
+RemoveBracesLLVM: false
+
+# ------------------------------------------------------------------------------
+# 3. 括弧の折り返し・関数宣言/呼び出し・テンプレート・初期化子
+# ------------------------------------------------------------------------------
+AlignAfterOpenBracket: false
+
+BreakAfterOpenBracketBracedList: true
+BreakAfterOpenBracketFunction: true
+BreakAfterOpenBracketIf: false
+BreakAfterOpenBracketLoop: false
+BreakAfterOpenBracketSwitch: false
+
+BreakBeforeCloseBracketBracedList: true
+BreakBeforeCloseBracketFunction: true
+BreakBeforeCloseBracketIf: false
+BreakBeforeCloseBracketLoop: false
+BreakBeforeCloseBracketSwitch: false
+
+BinPackParameters: OnePerLine
 BinPackArguments: true
-BinPackParameters: true
-BreakBeforeBraces: Attach
-FixNamespaceComments: true
-NamespaceIndentation: None
+BinPackLongBracedList: true
+
+BreakAfterReturnType: Automatic
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+
+BreakConstructorInitializers: AfterColon
+PackConstructorInitializers: CurrentLine
+ConstructorInitializerIndentWidth: 4
+BreakInheritanceList: AfterColon
+
+BreakTemplateDeclarations: MultiLine
+BreakBeforeTemplateCloser: false
+BreakBeforeConceptDeclarations: Always
+
+# ------------------------------------------------------------------------------
+# 4. ポインタ・参照・修飾子・スペース
+# ------------------------------------------------------------------------------
 PointerAlignment: Left
-ReferenceAlignment: Left
-SortIncludes: CaseSensitive
+ReferenceAlignment: Pointer
+QualifierAlignment: Leave
+
+Cpp11BracedListStyle: true
+SpaceBeforeParens: ControlStatements
+SpacesInParens: Never
+SpacesInSquareBrackets: false
+
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceAfterTemplateKeyword: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeAssignmentOperators: true
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+
+# ------------------------------------------------------------------------------
+# 5. 演算子・属性・ラムダ・文字列リテラル
+# ------------------------------------------------------------------------------
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeTernaryOperators: true
+BreakAfterAttributes: Never
+LambdaBodyIndentation: OuterScope
+
+BreakStringLiterals: true
+BreakAdjacentStringLiterals: true
+AlwaysBreakBeforeMultilineStrings: false
+
+BitFieldColonSpacing: Both
+
+# ------------------------------------------------------------------------------
+# 6. 整列 (Alignment)
+# ------------------------------------------------------------------------------
+AlignConsecutiveDeclarations:
+  Enabled: false
+AlignConsecutiveAssignments:
+  Enabled: false
+AlignConsecutiveMacros:
+  Enabled: false
+AlignConsecutiveBitFields:
+  Enabled: false
+
+AlignArrayOfStructures: Right
+AlignOperands: DontAlign
+
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+SpacesBeforeTrailingComments: 2
+
+AlignEscapedNewlines: Left
+
+# ------------------------------------------------------------------------------
+# 7. 空行・コメント・名前空間
+# ------------------------------------------------------------------------------
+MaxEmptyLinesToKeep: 1
+KeepEmptyLines:
+  AtStartOfFile: false
+  AtEndOfFile: false
+  AtStartOfBlock: false
+
+SeparateDefinitionBlocks: Always
+EmptyLineBeforeAccessModifier: LogicalBlock
+EmptyLineAfterAccessModifier: Never
+
+ReflowComments: Always
+FixNamespaceComments: true
+ShortNamespaceLines: 1
+CompactNamespaces: false
+
+# ------------------------------------------------------------------------------
+# 8. #include / using ソート・数値リテラル・ファイル形式
+# ------------------------------------------------------------------------------
+SortIncludes:
+  Enabled: true
+  IgnoreCase: true
+
+IncludeBlocks: Regroup
+IncludeIsMainRegex: '(_test)?$'
 IncludeCategories:
   - Regex: '^"cxxgpr/'
     Priority: 1
@@ -28,4 +169,13 @@ IncludeCategories:
     Priority: 3
   - Regex: '.*'
     Priority: 4
-...
+
+SortUsingDeclarations: LexicographicNumeric
+
+IntegerLiteralSeparator:
+  Binary: 0
+  Decimal: 0
+  Hex: 0
+
+LineEnding: DeriveLF
+InsertNewlineAtEOF: true
