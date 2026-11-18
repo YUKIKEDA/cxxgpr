@@ -52,6 +52,11 @@ class CiScopeTest(unittest.TestCase):
         self.assertEqual(scope["test_regex"], "")
         self.assertEqual(scope["format_files"], "include/cxxgpr/core/build_info.hpp")
 
+    def test_test_scope_clang_format_change_checks_all_files(self) -> None:
+        scope = test_scope([".clang-format", "tests/core/build_info_test.cpp"])
+        self.assertEqual(scope["format_files"], "")
+        self.assertEqual(scope["cpp_files"], "")
+
     def test_verify_needs_accepts_matching_results(self) -> None:
         payload: dict[str, object] = {
             "changes": {

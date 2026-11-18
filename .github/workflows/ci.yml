@@ -220,7 +220,7 @@ jobs:
       - name: Formatting
         if: needs.changes.outputs.format == 'true'
         run: |
-          pip install clang-format==21.1.2
+          pip install clang-format==22.1.3
           if [ -n "$CI_FORMAT_FILES" ]; then
             for source in $CI_FORMAT_FILES; do
               [ ! -f "$source" ] || clang-format --dry-run --Werror "$source"
