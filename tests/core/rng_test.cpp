@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-11, REQ-12, DES-20
+/// @file rng_test.cpp
+/// @brief Unit and property tests for the deterministic Xoshiro256++ pseudo-random number generator.
+/// @details Verifies bit-exact parity against pinned gprx (rand_xoshiro 0.7) sequences for raw 64-bit
+/// words, unit/open-unit floats, bounded integers, Box-Muller normals, domain invariants, and zero
+/// heap allocation during sampling.
+
 #include "cxxgpr/core/rng.hpp"
 
 #include <gtest/gtest.h>
@@ -12,11 +19,10 @@
 
 #include "allocation_audit.hpp"
 
-// Spec: REQ-11, REQ-12, DES-20
 namespace
 {
 
-    // Pinned first 4 outputs for seeds 0 and 42 matching gprx/src/rng.rs (rand_xoshiro 0.7).
+    /// @brief Pinned first four 64-bit outputs for seed 0 matching gprx/src/rng.rs (rand_xoshiro 0.7).
     constexpr std::array<std::uint64_t, 4> expected_seed_0{
         0x53175d61490b23dfULL,
         0x61da6f3dc380d507ULL,
@@ -24,6 +30,7 @@ namespace
         0x02eebf8c3bbe5e1aULL,
     };
 
+    /// @brief Pinned first four 64-bit outputs for seed 42 matching gprx/src/rng.rs (rand_xoshiro 0.7).
     constexpr std::array<std::uint64_t, 4> expected_seed_42{
         0xd0764d4f4476689fULL,
         0x519e4174576f3791ULL,
@@ -31,6 +38,7 @@ namespace
         0xb37d9f600cd835b8ULL,
     };
 
+    /// @brief IEEE 754 binary64 bit patterns for the first four unit() / open_unit() draws from seed 0.
     constexpr std::array<std::uint64_t, 4> expected_unit_bits_seed_0{
         0x3fd4c5d7585242c8ULL,
         0x3fd8769bcf70e034ULL,
@@ -38,6 +46,7 @@ namespace
         0x3f8775fc61ddf2c0ULL,
     };
 
+    /// @brief IEEE 754 binary64 bit patterns for the first four unit() / open_unit() draws from seed 42.
     constexpr std::array<std::uint64_t, 4> expected_unit_bits_seed_42{
         0x3fea0ec9a9e88ecdULL,
         0x3fd467905d15dbccULL,
@@ -45,21 +54,30 @@ namespace
         0x3fe66fb3ec019b06ULL,
     };
 
+    /// @brief Golden up_to(9) sequence for seed 0 matching gprx Lemire-style bounded integer draws.
     constexpr std::array<std::size_t, 4> expected_up_to_9_seed_0{3U, 3U, 3U, 0U};
+
+    /// @brief Golden up_to(99) sequence for seed 42 matching gprx bounded integer draws.
     constexpr std::array<std::size_t, 4> expected_up_to_99_seed_42{81U, 31U, 98U, 70U};
 
+    /// @brief Golden first two Box-Muller unit_normal() variates for seed 0 from gprx.
     constexpr std::array<double, 2> expected_normal_seed_0{
         -1.1079085986338315,
         1.4264823081293447,
     };
 
+    /// @brief Golden first two Box-Muller unit_normal() variates for seed 42 from gprx.
     constexpr std::array<double, 2> expected_normal_seed_42{
         -0.26860736946209507,
         -0.054462170108151145,
     };
 
+    /// @brief Verifies bit-exact parity with pinned gprx reference RNG sequences across seeds 0 and 42.
+    /// @details Checks raw 64-bit draws, std::bit_cast IEEE 754 unit/open-unit bit patterns, up_to()
+    /// bounded integer sequences (including zero and SIZE_MAX bounds), unit_normal(), and equality.
     TEST(RngTest, MatchesPinnedReferenceGoldenSequencesBitForBit)
     {
+        // Check raw 64-bit Xoshiro256++ outputs for seeds 0 and 42 against gprx golden words.
         cxxgpr::Xoshiro256PlusPlus rng0(0);
         for (std::size_t i = 0; i < expected_seed_0.size(); ++i)
         {
@@ -72,7 +90,8 @@ namespace
             EXPECT_EQ(rng42.next_u64(), expected_seed_42.at(i)) << "mismatch at index " << i;
         }
 
-        // Verify derived unit(), open_unit(), up_to(), and unit_normal() match gprx golden outputs.
+        // Verify derived unit(), open_unit(), up_to(), and unit_normal() match gprx golden outputs
+        // via IEEE 754 uint64_t bit-casts to catch single-ULP drift and satisfy clang-tidy.
         cxxgpr::SeededRng unit_rng0(0);
         cxxgpr::SeededRng open_rng0(0);
         cxxgpr::SeededRng upto_rng0(0);
@@ -126,11 +145,15 @@ namespace
         EXPECT_NE(rng0, rng42);
     }
 
+    /// @brief Verifies unit(), open_unit(), up_to(), and unit_normal() stay within contract domains.
+    /// @details Confirms up_to(bound) <= bound, unit() in [0, 1), open_unit() in [2^-53, 1 - 2^-53],
+    /// and empirical sample mean and variance near 0 and 1 across 10,000 Box-Muller draws.
     TEST(RngTest, UnitOpenUnitUpToAndNormalStayInContractDomains)
     {
         cxxgpr::Xoshiro256PlusPlus rng(7);
         constexpr double eps = 1.0 / static_cast<double>(1ULL << 53U);
 
+        // Verify inclusive upper bound for zero, small, and larger up_to() ranges.
         for (const std::size_t bound :
             {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{9}, std::size_t{1000}})
         {
@@ -141,6 +164,7 @@ namespace
             }
         }
 
+        // Verify unit() never hits 1.0 and open_unit() stays strictly inside (0, 1) by 2^-53.
         for (int i = 0; i < 2000; ++i)
         {
             const double u = rng.unit();
@@ -172,6 +196,9 @@ namespace
         EXPECT_NEAR(var, 1.0, 0.08);
     }
 
+    /// @brief Verifies all RNG sampling methods allocate zero heap memory on the hot path.
+    /// @details Exercises next_u64(), unit(), open_unit(), unit_normal(), and up_to() inside
+    /// AuditMode::CppAndEigen NoAllocationScope and checks delta_allocations() == 0.
     TEST(RngTest, GenerationAllocatesZero)
     {
         cxxgpr::Xoshiro256PlusPlus rng(99);
@@ -180,6 +207,7 @@ namespace
         std::size_t idx = 0;
         std::size_t delta = 1;
 
+        // Touch accumulated outputs before leaving scope so no RNG draw is optimized away.
         {
             cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
             for (int i = 0; i < 64; ++i)

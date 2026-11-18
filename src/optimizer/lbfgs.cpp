@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file lbfgs.cpp
+/// @brief Implementation of L-BFGS optimization with Nocedal two-loop recursion and Moré–Thuente line search.
+/// @details Implements unconstrained L-BFGS over midpoint unit-Jacobian logit coordinates using a
+/// safeguarded cubic/quadratic strong-Wolfe Moré–Thuente line search and deterministic multi-start restarts.
+
 #include "cxxgpr/optimizer/lbfgs.hpp"
 
 #include "cxxgpr/optimizer/bounds.hpp"
@@ -17,18 +22,38 @@ namespace cxxgpr::optimizer
     namespace
     {
 
+        /// @brief Mutable bracket state maintained across Moré–Thuente 1D line-search step updates.
+        /// @details Tracks the current best step stx, opposite-endpoint bracket sty, their directional
+        /// values/derivatives, and whether a minimum has been bracketed between stx and sty.
         struct LineSearchState
         {
+            /// @brief Current best step length along the search direction.
             double stx{0.0};
+            /// @brief Objective value at stx.
             double fx{0.0};
+            /// @brief Directional derivative at stx.
             double dx{0.0};
+            /// @brief Opposite bracket endpoint step length (valid when bracketed is true).
             double sty{0.0};
+            /// @brief Objective value at sty.
             double fy{0.0};
+            /// @brief Directional derivative at sty.
             double dy{0.0};
+            /// @brief True once stx and sty bracket a local minimizer.
             bool bracketed{false};
         };
 
-        // Moré–Thuente (1994) safeguarded cubic/quadratic step update.
+        /// @brief Computes a safeguarded cubic/quadratic Moré–Thuente (1994) trial step and updates bracket state.
+        /// @details Handles all four Moré–Thuente interpolation cases (Case 1: fp > fx, Case 2: opposite-sign
+        /// derivatives, Case 3: same-sign decreasing slope magnitude, Case 4: non-decreasing slope magnitude),
+        /// updates stx/sty endpoints, clamps to [stpmin, stpmax], and bisects if bracket bounds are violated.
+        /// @param st LineSearchState updated in place with the new bracket endpoints.
+        /// @param stp Current trial step length.
+        /// @param fp Objective value (or modified Stage 1 value) at stp.
+        /// @param dp Directional derivative (or modified Stage 1 derivative) at stp.
+        /// @param stpmin Inclusive lower safeguard bound for the next trial step.
+        /// @param stpmax Inclusive upper safeguard bound for the next trial step.
+        /// @return Safeguarded next trial step length along the search direction.
         double cstep(LineSearchState& st, double stp, double fp, double dp, double stpmin, double stpmax)
         {
             const double sgnd = dp * (st.dx / std::abs(st.dx));
@@ -36,7 +61,7 @@ namespace cxxgpr::optimizer
 
             if (fp > st.fx)
             {
-                // Case 1: Higher function value; minimum is bracketed.
+                // Case 1: Higher function value; minimum is bracketed between stx and stp.
                 const double theta = (3.0 * (st.fx - fp) / (stp - st.stx)) + st.dx + dp;
                 const double s = std::max({std::abs(theta), std::abs(st.dx), std::abs(dp)});
                 const double gamma =
@@ -143,6 +168,7 @@ namespace cxxgpr::optimizer
                 }
             }
 
+            // Update bracket endpoints stx (best step) and sty (opposite side of bracket).
             if (fp > st.fx)
             {
                 st.sty = stp;
@@ -162,6 +188,7 @@ namespace cxxgpr::optimizer
                 st.dx = dp;
             }
 
+            // Clamp step within [stpmin, stpmax] and bisect if an interpolated bracket step hits an endpoint.
             stpf = std::clamp(stpf, stpmin, stpmax);
             if (st.bracketed)
             {
@@ -175,13 +202,25 @@ namespace cxxgpr::optimizer
             return stpf;
         }
 
+        /// @brief Secant correction pair (s, y) and reciprocal curvature rho = 1 / (s^T * y) for L-BFGS.
+        /// @details Stored in chronological order inside a bounded deque of size history_size_.
         struct LbfgsPair
         {
+            /// @brief Step displacement vector s_k = z_{k+1} - z_k in unconstrained logit space.
             std::vector<double> s;
+            /// @brief Gradient difference vector y_k = g_{k+1} - g_k in unconstrained logit space.
             std::vector<double> y;
+            /// @brief Reciprocal curvature weight rho_k = 1 / (s_k^T * y_k).
             double rho{0.0};
         };
 
+        /// @brief Computes the L-BFGS search direction d = -H_k * g using Nocedal two-loop recursion.
+        /// @details Runs the backward loop from newest to oldest pair to compute alpha_i and update q,
+        /// applies Oren-Luenberger diagonal scaling gamma = (s^T * y) / (y^T * y) from the newest pair,
+        /// and runs the forward loop to reconstruct -H_k * g into out_dir.
+        /// @param grad Current unconstrained gradient g_z of length d.
+        /// @param history Bounded deque of recent (s, y, rho) curvature pairs (oldest to newest).
+        /// @param out_dir Destination span of length d receiving the descent search direction.
         void compute_two_loop_direction(
             std::span<const double> grad, const std::deque<LbfgsPair>& history, std::span<double> out_dir
         )
@@ -196,6 +235,7 @@ namespace cxxgpr::optimizer
                 return;
             }
 
+            // Backward pass: accumulate multipliers alpha_i and subtract alpha_i * y_i from q.
             const std::size_t m = history.size();
             std::vector<double> alpha(m, 0.0);
             for (std::size_t idx = m; idx-- > 0;)
@@ -208,6 +248,7 @@ namespace cxxgpr::optimizer
                 }
             }
 
+            // Apply initial Hessian approximation H_0 = gamma * I using the latest curvature pair.
             const auto& newest = history.back();
             const double yy = detail::dot_vec(newest.y, newest.y);
             const double sy = detail::dot_vec(newest.s, newest.y);
@@ -217,6 +258,7 @@ namespace cxxgpr::optimizer
                 out_dir[i] *= gamma;
             }
 
+            // Forward pass: add (alpha_i - beta_i) * s_i to form the final quasi-Newton direction.
             for (std::size_t idx = 0; idx < m; ++idx)
             {
                 const double beta = history[idx].rho * detail::dot_vec(history[idx].y, out_dir);
@@ -228,6 +270,18 @@ namespace cxxgpr::optimizer
             }
         }
 
+        /// @brief Runs a single-start L-BFGS trajectory from initial_theta in unconstrained logit space.
+        /// @details Maps initial_theta into z, iteratively evaluates two-loop descent directions, performs
+        /// Moré–Thuente strong-Wolfe line search with EvalCache reuse and Stage 1 modified function
+        /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap.
+        /// @param obj Differentiable objective evaluated in log-theta space.
+        /// @param bounds Log-space bounds governing the z <-> theta transform.
+        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param max_iterations Maximum outer L-BFGS iterations.
+        /// @param tolerance Relative gradient and function-change convergence tolerance.
+        /// @param history_size Maximum number of (s, y) secant pairs retained.
+        /// @return OptimizerResult with best feasible log-space parameters found, or GprError if initial eval fails.
+        /// @retval GprErrorCode::NonFiniteInput When initial objective or gradient evaluation yields non-finite values.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_lbfgs_single(
             Differentiable& obj,
             const LogBounds& bounds,
@@ -267,6 +321,7 @@ namespace cxxgpr::optimizer
             std::vector<double> s_vec(d);
             std::vector<double> y_vec(d);
 
+            // Moré–Thuente strong-Wolfe parameters (c1 = 1e-4 sufficient decrease, c2 = 0.9 curvature).
             constexpr double k_c1 = 1e-4;
             constexpr double k_c2 = 0.9;
             constexpr double k_xtol = 1e-15;
@@ -287,6 +342,7 @@ namespace cxxgpr::optimizer
                     break;
                 }
 
+                // Compute quasi-Newton direction; reset L-BFGS memory to steepest descent if not a descent direction.
                 compute_two_loop_direction(grad_z, history, dir);
                 double dg_init = detail::dot_vec(grad_z, dir);
                 if (!std::isfinite(dg_init) || dg_init >= 0.0)
@@ -324,6 +380,7 @@ namespace cxxgpr::optimizer
                 bool step_accepted = false;
                 double f_next = f_init;
 
+                // Execute Moré–Thuente strong-Wolfe line search along dir starting from unit step stp = 1.
                 for (std::size_t fev = 0; fev < k_max_ls_fev; ++fev)
                 {
                     const double stpmin_cur = ls_state.bracketed ? std::min(ls_state.stx, ls_state.sty) : k_stp_min;
@@ -358,12 +415,14 @@ namespace cxxgpr::optimizer
                     const double dg = detail::dot_vec(grad_trial, dir);
                     const double f_test1 = f_init + (stp * dg_test);
 
+                    // Accept immediately when both strong-Wolfe sufficient decrease and curvature conditions hold.
                     if (f_next <= f_test1 && std::abs(dg) <= -k_c2 * dg_init)
                     {
                         step_accepted = true;
                         break;
                     }
 
+                    // Exit if bracket collapsed to xtol or hit step bounds while retaining decreasing trial values.
                     if (ls_state.bracketed
                         && (stp <= stpmin_cur || stp >= stpmax_cur || (stpmax_cur - stpmin_cur) <= k_xtol * stpmax_cur))
                     {
@@ -374,6 +433,7 @@ namespace cxxgpr::optimizer
                         break;
                     }
 
+                    // Transition from Moré–Thuente Stage 1 (modified psi) to Stage 2 once sufficient decrease holds.
                     if (stage1 && f_next <= f_test1 && dg >= std::min(k_c1, k_c2) * dg_init)
                     {
                         stage1 = false;
@@ -381,6 +441,7 @@ namespace cxxgpr::optimizer
 
                     if (stage1 && f_next <= ls_state.fx && f_next > f_test1)
                     {
+                        // In Stage 1, pass shifted auxiliary function psi(alpha) = f(alpha) - alpha * dg_test to cstep.
                         const double fm = f_next - (stp * dg_test);
                         const double fxm = ls_state.fx - (ls_state.stx * dg_test);
                         const double fym = ls_state.fy - (ls_state.sty * dg_test);
@@ -411,6 +472,7 @@ namespace cxxgpr::optimizer
                         stp = cstep(ls_state, stp, f_next, dg, stpmin_cur, std::min(k_stp_max, stpmax_cur));
                     }
 
+                    // Force a bisection step whenever two iterations fail to shrink bracket width by at least 0.66.
                     if (ls_state.bracketed)
                     {
                         const double new_width = std::abs(ls_state.sty - ls_state.stx);
@@ -423,6 +485,7 @@ namespace cxxgpr::optimizer
                     }
                 }
 
+                // Fall back to the best bracketed point stx if strong-Wolfe termination hit k_max_ls_fev.
                 if (!step_accepted)
                 {
                     if (ls_state.fx < f_cur)
@@ -466,6 +529,7 @@ namespace cxxgpr::optimizer
                     best_theta.assign(theta_buf.begin(), theta_buf.end());
                 }
 
+                // Retain secant pair only when curvature condition s^T y > 1e-12 * ||s|| * ||y|| holds.
                 if (history_size > 0U && sy > 1e-12 * s_norm * y_norm)
                 {
                     if (history.size() == history_size)
@@ -501,6 +565,17 @@ namespace cxxgpr::optimizer
 
     }  // namespace
 
+    /// @brief Minimizes obj starting from log-space initial_params.
+    /// @details Validates tolerance_ >= 0 and history_size_ >= 1, then runs run_lbfgs_single() across
+    /// initial_params and deterministic log-uniform restarts via detail::run_with_restarts().
+    /// @param obj Differentiable objective evaluated in log-theta space.
+    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
+    /// @retval GprErrorCode::InvalidConfig When tolerance is invalid/negative or history_size == 0.
+    /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
+    /// @retval GprErrorCode::LengthMismatch When initial_params.size() != obj.dim().
+    /// @retval GprErrorCode::NonFiniteInput When initial_params or initial objective/gradient is non-finite.
+    /// @retval GprErrorCode::InvalidInterval When objective intervals or initial_params are out of bounds.
     std::expected<OptimizerResult, GprError> Lbfgs::optimize(
         Differentiable& obj, std::span<const double> initial_params
     ) const

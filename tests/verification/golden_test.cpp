@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-08, REQ-09, REQ-12, DES-07, DES-13, DES-16, DES-19, QA-02
+/// @file golden_test.cpp
+/// @brief Independent verification tests comparing Exact GPR against analytical and scikit-learn oracles.
+/// @details Verifies 1-point and 2-point closed-form Exact GPR MLL, alpha, predictive mean/variance,
+/// and LOO predictions, plus 1D Forrester and 2D ARD Matern-5/2 fixed/L-BFGS/LOO reference
+/// benchmarks generated independently by scikit-learn 1.9.1 GaussianProcessRegressor.
 
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -15,6 +20,9 @@
 namespace
 {
 
+    /// @brief Verifies 1-point and 2-point Exact GPR outputs against closed-form analytical expressions.
+    /// @details Computes scalar and 2x2 determinant inverses, MLL, alpha, predictive Observation and
+    /// Latent variance, and closed-form LOO moments analytically and compares to 1e-13..1e-14.
     TEST(GoldenVerificationTest, AnalyticalClosedFormOneAndTwoPoints)
     {
         // Spec: REQ-08, REQ-12, DES-07, DES-16
@@ -27,6 +35,7 @@ namespace
             const double nv = 0.5;
             const double xq = 0.9;
 
+            // Closed-form 1x1 Gram matrix inverse, NLL, cross covariance, and posterior variances.
             const double a00 = c + nv;
             const double alpha0 = y0 / a00;
             const double expected_nll = 0.5 * ((y0 * alpha0) + std::log(a00) + std::log(2.0 * std::numbers::pi));
@@ -112,6 +121,9 @@ namespace
         }
     }
 
+    /// @brief Verifies 1D Forrester fixed-theta, MixedPrecision, L-BFGS, and LOO against scikit-learn.
+    /// @details Compares DoublePrecision and MixedPrecision<PromoteStorage> predictions, MLL, and
+    /// LOO moments on n = 18 Forrester + cosine points against scikit-learn 1.9.1 golden constants.
     TEST(GoldenVerificationTest, Forrester1dFixedLbfgsAndLooMatchIndependentReference)
     {
         // Spec: REQ-08, REQ-09, REQ-12, DES-13, DES-16, DES-19, QA-02
@@ -119,6 +131,7 @@ namespace
         constexpr std::size_t n = 18;
         std::vector<double> x_train(n);
         std::vector<double> y_train(n);
+        // Sample the perturbed 1D Forrester function on [0, 1].
         for (std::size_t i = 0; i < n; ++i)
         {
             const double x = static_cast<double>(i) / 17.0;
@@ -199,6 +212,9 @@ namespace
         }
     }
 
+    /// @brief Verifies 2D ARD Matern-5/2 fixed-theta, L-BFGS, and LOO against scikit-learn golden data.
+    /// @details Checks MLL, predictive mean/variance, and first four LOO predictions on a 10x2
+    /// trigonometric surface against scikit-learn 1.9.1 GaussianProcessRegressor reference values.
     TEST(GoldenVerificationTest, TwoDimArdMatern52FixedLbfgsAndLooMatchIndependentReference)
     {
         // Spec: REQ-08, REQ-09, REQ-12, DES-07, DES-16, DES-19, QA-02
@@ -207,6 +223,7 @@ namespace
         constexpr std::size_t d = 2;
         std::vector<double> x_train(n * d);
         std::vector<double> y_train(n);
+        // Generate column-major 2D design coordinates with non-collinear y1 stride.
         for (std::size_t i = 0; i < n; ++i)
         {
             const double x0 = 0.1 * static_cast<double>(i);

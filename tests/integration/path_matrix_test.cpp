@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-04, REQ-05, REQ-07, REQ-08, REQ-09, REQ-10, DES-05, DES-10, DES-12, DES-15,
 // DES-16, DES-18, DES-19
+/// @file path_matrix_test.cpp
+/// @brief Integration path-matrix tests covering kernels, optimizers, precisions, transforms, and persist.
+/// @details Exercises the 10-kernel x 5-optimizer x 4-precision product matrix, composite kernel
+/// persistence across all preprocessing transform pipelines, KernelExp x FitPolicy buffer matrices,
+/// and DistanceKernel parity against coordinate evaluation under Accurate and FastApprox.
 
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -22,16 +27,24 @@
 namespace
 {
 
+    /// @brief Named kernel specification entry used in integration matrix sweeps.
     struct NamedKernel
     {
+        /// @brief Human-readable kernel name attached to SCOPED_TRACE diagnostics.
         std::string name;
+        /// @brief Kernel AST specification under test.
         cxxgpr::KernelSpec spec;
     };
 
+    /// @brief Instantiates all ten built-in leaf kernel specifications for matrix testing.
+    /// @details Includes RBF, RBF-ARD, Matern-5/2, Matern-ARD-3/2, Periodic, RationalQuadratic,
+    /// RationalQuadratic-ARD, Constant, Linear, and White leaves with positive defaults.
+    /// @return Vector containing one NamedKernel per built-in kernel family.
     [[nodiscard]] std::vector<NamedKernel> make_all_ten_built_in_kernels()
     {
         const std::array<double, 2> ard_ls{1.0, 1.25};
         std::vector<NamedKernel> out;
+        // Register each of the 10 built-in kernel leaves with valid initial hyperparameters.
         out.push_back({.name = "Rbf", .spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value())});
         out.push_back({.name = "RbfArd", .spec = cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(ard_ls).value())});
         out.push_back(
@@ -60,6 +73,16 @@ namespace
         return out;
     }
 
+    /// @brief Runs end-to-end fit, predict, covariance, sample, and LOO checks for every kernel.
+    /// @details Executes fit(), predict_into(), predict_covariance(), sample(), and loo_predict()
+    /// for a given optimizer instance and precision policy across all kernels in the supplied list.
+    /// @tparam O Optimizer policy type (Fixed, Lbfgs, TrustRegion, NelderMead, or FSA).
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param opt Configured optimizer instance.
+    /// @param kernels Collection of named built-in kernel specs to test.
+    /// @param x_ref Column-major n x d training input view.
+    /// @param y_train Training target values of length n.
+    /// @param xq_ref Column-major m x d query input view.
     template <typename O, cxxgpr::PrecisionPolicyConcept P>
     void verify_kernel_matrix_for(
         const O& opt,
@@ -73,6 +96,7 @@ namespace
         for (const auto& nk : kernels)
         {
             SCOPED_TRACE(nk.name);
+            // Fit with adaptive jitter so single-precision and periodic/linear Gram matrices stay SPD.
             const auto trainer = cxxgpr::Gpr<O, P>(nk.spec, opt)
                                      .with_noise_variance(5e-2)
                                      .value()
@@ -121,6 +145,14 @@ namespace
         }
     }
 
+    /// @brief Sweeps all five optimizer policies for a single precision policy P.
+    /// @details Invokes verify_kernel_matrix_for() with Fixed, Lbfgs, TrustRegion, NelderMead,
+    /// and FastSimulatedAnnealing over the supplied kernel suite.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param kernels Collection of named kernel specs to test.
+    /// @param x_ref Column-major n x d training input view.
+    /// @param y_train Training target values of length n.
+    /// @param xq_ref Column-major m x d query input view.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_all_optimizers_for_precision(
         const std::vector<NamedKernel>& kernels,
@@ -147,6 +179,9 @@ namespace
         );
     }
 
+    /// @brief Verifies the full 10-kernel x 5-optimizer x 4-precision integration matrix.
+    /// @details Exercises DoublePrecision, SinglePrecision, MixedPrecision<PromoteStorage>, and
+    /// MixedPrecision<ReevaluateKernel> across every optimizer and built-in kernel family.
     TEST(PathMatrixTest, TenKernelsByFiveOptimizersByPrecisionPolicies)
     {
         // Spec: REQ-01, REQ-04, REQ-07, REQ-08, REQ-09, DES-05, DES-16, DES-19
@@ -192,6 +227,10 @@ namespace
         }
     }
 
+    /// @brief Verifies composite kernels with every transform mode survive save_with_factor()/load().
+    /// @details Sweeps Identity, Standardize, MinMax, and multi-stage Pipeline preprocessing with a
+    /// nested Constant * (RbfArd + Matern + Periodic) + Linear + White kernel and checks loaded
+    /// predict(), loo_predict(), and log_marginal_likelihood() parity.
     TEST(PathMatrixTest, CompositeKernelsTransformsAndPersistIntegration)
     {
         // Spec: REQ-04, REQ-10, DES-18, FMT-05
@@ -199,6 +238,7 @@ namespace
         const std::size_t d = 2;
         std::vector<double> x_train(n * d);
         std::vector<double> y_train(n);
+        // Generate an anisotropic 2D dataset with unscaled x1 and shifted y to stress transforms.
         for (std::size_t i = 0; i < n; ++i)
         {
             const double x0 = -1.0 + (2.0 * static_cast<double>(i) / static_cast<double>(n - 1U));
@@ -227,10 +267,14 @@ namespace
         tgt_pipe.then(cxxgpr::transform::StandardizeTarget());
         tgt_pipe.then(cxxgpr::transform::MinMaxTarget::create(0.0, 1.0).value());
 
+        /// @brief Input/target transform configuration pair evaluated in the persistence loop.
         struct TransformCase
         {
+            /// @brief Human-readable transform case label and checkpoint subdirectory name.
             std::string name;
+            /// @brief Unfitted input transform pipeline or leaf.
             std::unique_ptr<cxxgpr::transform::UnfittedInputTransform> in_tf;
+            /// @brief Unfitted target transform pipeline or leaf.
             std::unique_ptr<cxxgpr::transform::UnfittedTargetTransform> tgt_tf;
         };
 
@@ -298,6 +342,15 @@ namespace
         std::filesystem::remove_all(temp_root, ec);
     }
 
+    /// @brief Sweeps all KernelExp, DistanceCachePolicy, and CholeskyBuffer modes for precision P.
+    /// @details Compares posterior predictions from every combination against the Accurate +
+    /// prefer_speed() reference fit within exp_tol.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param spec Kernel specification factored across policy combinations.
+    /// @param x_ref Column-major n x d training input view.
+    /// @param y_train Training target values of length n.
+    /// @param xq_ref Column-major m x d query input view.
+    /// @param exp_tol Prediction tolerance permitted when KernelExp::FastApprox is active.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_exp_and_policy_matrix(
         const cxxgpr::KernelSpec& spec,
@@ -307,6 +360,7 @@ namespace
         double exp_tol
     )
     {
+        // Factor reference model with Accurate exp and prefer_speed() defaults.
         const std::array<cxxgpr::DistanceCachePolicy, 2> cache_policies{
             cxxgpr::DistanceCachePolicy::Cached, cxxgpr::DistanceCachePolicy::Uncached
         };
@@ -348,6 +402,9 @@ namespace
         }
     }
 
+    /// @brief Verifies KernelExp x DistanceCachePolicy x CholeskyBuffer matrix across precisions.
+    /// @details Invokes verify_exp_and_policy_matrix() for DoublePrecision, SinglePrecision, and
+    /// MixedPrecision<PromoteStorage> on a 1D RBF regression problem.
     TEST(PathMatrixTest, KernelExpAndFitPolicyMatrix)
     {
         // Spec: DES-12, DES-15
@@ -367,6 +424,9 @@ namespace
         );
     }
 
+    /// @brief Verifies hybrid DistanceKernel scalar/ARD evaluation and MLL across KernelExp modes.
+    /// @details Compares a combined ScalarDistance + ArdDistance + Linear kernel against coordinate
+    /// apply_points() under Accurate and FastApprox and confirms finite MLL and gradients.
     TEST(PathMatrixTest, DistanceKernelScalarAndArdMatrixAcrossPrecisions)
     {
         // Spec: REQ-05, DES-10, DES-12

@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file exact_bench.cpp
+/// @brief Google Benchmark suite for Exact GPR fit, factor, prediction, kernel exp, and distance paths.
+/// @details Measures build_info overhead, Forrester 1D factorization/L-BFGS/predict_into,
+/// 8D ARD sphere L-BFGS and FSA cached optimization, Accurate vs FastApprox KernelExp evaluation,
+/// and coordinate vs supplied-distance kernel Gram evaluation.
+
 #include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -13,14 +19,25 @@
 namespace
 {
 
+    /// @brief Precomputed 1D Forrester + high-frequency perturbation benchmark dataset.
+    /// @details Generates n_pts uniformly spaced training points on [0, 1] and m_pts shifted
+    /// midpoint query coordinates for Exact GPR factor, fit, and prediction microbenchmarks.
     struct ForresterDataset
     {
+        /// @brief Training input coordinates on [0, 1] of length n.
         std::vector<double> x_train;
+        /// @brief Training target values evaluated at x_train of length n.
         std::vector<double> y_train;
+        /// @brief Query coordinates on (0, 1) of length m.
         std::vector<double> x_query;
+        /// @brief Number of training points.
         std::size_t n;
+        /// @brief Number of query points.
         std::size_t m;
 
+        /// @brief Populates Forrester training targets and midpoint query grid.
+        /// @param n_pts Number of training observations generated on [0, 1].
+        /// @param m_pts Number of query coordinates generated at cell midpoints.
         explicit ForresterDataset(std::size_t n_pts = 256U, std::size_t m_pts = 64U) :
             x_train(n_pts),
             y_train(n_pts),
@@ -28,6 +45,7 @@ namespace
             n(n_pts),
             m(m_pts)
         {
+            // Sample smooth Forrester baseline with small high-frequency cosine perturbation.
             for (std::size_t i = 0; i < n; ++i)
             {
                 const double x = static_cast<double>(i) / static_cast<double>(n - 1U);
@@ -42,19 +60,30 @@ namespace
         }
     };
 
+    /// @brief Precomputed multi-dimensional anisotropic quadratic sphere benchmark dataset.
+    /// @details Synthesizes column-major n_pts x d_dims inputs via deterministic trigonometric
+    /// projections and weighted squared-norm targets for ARD kernel and optimizer benchmarks.
     struct ArdSphereDataset
     {
+        /// @brief Column-major n x d training input matrix.
         std::vector<double> x_train;
+        /// @brief Anisotropic weighted sphere target vector of length n.
         std::vector<double> y_train;
+        /// @brief Number of training points.
         std::size_t n;
+        /// @brief Input feature dimensionality.
         std::size_t d;
 
+        /// @brief Populates deterministic column-major 8D ARD inputs and weighted sphere targets.
+        /// @param n_pts Number of training observations.
+        /// @param d_dims Input feature dimensionality.
         ArdSphereDataset(std::size_t n_pts = 128U, std::size_t d_dims = 8U) :
             x_train(n_pts * d_dims),
             y_train(n_pts),
             n(n_pts),
             d(d_dims)
         {
+            // Generate column-major inputs with dimension-dependent quadratic target curvature.
             for (std::size_t i = 0; i < n; ++i)
             {
                 double s = 0.0;
@@ -69,6 +98,8 @@ namespace
         }
     };
 
+    /// @brief Benchmarks cxxgpr::build_info() metadata lookup overhead.
+    /// @param state Google Benchmark iteration state.
     void bm_build_info(benchmark::State& state)
     {
         for (auto _ : state)
@@ -78,6 +109,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks fixed-hyperparameter Cholesky factorization on n = 256 Forrester data.
+    /// @param state Google Benchmark iteration state.
     void bm_forrester_256_factor_double(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -86,6 +119,7 @@ namespace
             * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
         const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
 
+        // Measure repeated Cholesky factorization without hyperparameter optimization.
         for (auto _ : state)
         {
             auto fit = trainer.factor(x_ref, data.y_train);
@@ -93,6 +127,9 @@ namespace
         }
     }
 
+    /// @brief Benchmarks L-BFGS hyperparameter fitting on n = 256 Forrester data for precision P.
+    /// @tparam P Precision policy type (DoublePrecision or MixedPrecision).
+    /// @param state Google Benchmark iteration state.
     template <cxxgpr::PrecisionPolicyConcept P> void bm_forrester_256_fit_lbfgs(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -105,6 +142,7 @@ namespace
                 .value()
                 .with_prefer_speed();
 
+        // Measure up to 20 L-BFGS steps under prefer_speed() workspace policy.
         for (auto _ : state)
         {
             auto fit = trainer.fit(x_ref, data.y_train);
@@ -112,6 +150,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks zero-allocation predict_into() on n = 256 training and m = 64 query points.
+    /// @param state Google Benchmark iteration state.
     void bm_forrester_256_predict_into_double(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -124,6 +164,7 @@ namespace
                              .value()
                              .factor(x_ref, data.y_train)
                              .value();
+        // Warm up Prediction output buffers outside the timed loop.
         cxxgpr::Prediction<double> pred;
         (void)fit.predict_into(xq_ref, pred);
 
@@ -135,6 +176,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks 8D ARD Constant * RbfArd fitting with L-BFGS on n = 128 points.
+    /// @param state Google Benchmark iteration state.
     void bm_ard_sphere_fit_lbfgs_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -148,6 +191,7 @@ namespace
                 .value()
                 .with_prefer_speed();
 
+        // Measure 9-parameter ARD MLL + gradient optimization via L-BFGS.
         for (auto _ : state)
         {
             auto fit = trainer.fit(x_ref, data.y_train);
@@ -155,6 +199,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks 8D ARD fitting with FastSimulatedAnnealing and incremental LeafCache.
+    /// @param state Google Benchmark iteration state.
     void bm_ard_sphere_fit_fsa_cached(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -169,6 +215,7 @@ namespace
                                  .value()
                                  .with_prefer_speed();
 
+        // Measure seeded FSA steps exploiting LeafCache and cached distances.
         for (auto _ : state)
         {
             auto fit = trainer.fit(x_ref, data.y_train);
@@ -176,6 +223,10 @@ namespace
         }
     }
 
+    /// @brief Benchmarks lower-triangle Gram evaluation for scalar type T and KernelExp mode.
+    /// @tparam T Kernel evaluation scalar type (float or double).
+    /// @tparam ExpMode Exponential implementation policy (Accurate or FastApprox).
+    /// @param state Google Benchmark iteration state.
     template <cxxgpr::KernelScalarConcept T, cxxgpr::KernelExp ExpMode> void bm_kernel_exp_eval(benchmark::State& state)
     {
         constexpr std::size_t n = 256U;
@@ -190,6 +241,7 @@ namespace
         auto ck = spec.compile<T>();
         ck.set_kernel_exp(ExpMode);
 
+        // Preallocate output, scratch, and nested buffers so loop timing isolates kernel math.
         std::vector<T> out(n * n, T{0});
         std::vector<T> scratch(n * n, T{0});
         const auto out_mut = cxxgpr::MatrixMut<T>(out.data(), n, n, n);
@@ -204,6 +256,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks coordinate-based RbfArd + Matern-5/2 lower-triangle Gram evaluation.
+    /// @param state Google Benchmark iteration state.
     void bm_coord_apply_points_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -213,6 +267,7 @@ namespace
         const auto m52 = cxxgpr::MaternKernel::create(1.5, cxxgpr::MaternNu::FiveHalves).value();
         const auto ck = (cxxgpr::KernelSpec(rbf_ard) + cxxgpr::KernelSpec(m52)).compile<double>();
 
+        // Preallocate matrices and nested buffers before timing coordinate evaluation.
         std::vector<double> out(data.n * data.n, 0.0);
         std::vector<double> scratch(data.n * data.n, 0.0);
         const auto out_mut = cxxgpr::MatrixMut<double>(out.data(), data.n, data.n, data.n);
@@ -227,6 +282,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks supplied-distance ARD + scalar DistanceKernel lower-triangle Gram evaluation.
+    /// @param state Google Benchmark iteration state.
     void bm_distance_supply_apply_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -239,6 +296,7 @@ namespace
         const auto dist_spec = a_slot.rbf_ard(rbf_ard).value() + s_slot.matern(m52);
         const auto dist_ck = dist_spec.compile<double>();
 
+        // Precompute scalar and per-dimension squared distances outside the timed region.
         std::vector<double> d_scalar(data.n * data.n, 0.0);
         std::vector<std::vector<double>> d_ard(data.d, std::vector<double>(data.n * data.n, 0.0));
         std::vector<cxxgpr::MatrixRef<double>> ard_refs;
@@ -282,6 +340,8 @@ namespace
         }
     }
 
+    /// @brief Benchmarks supplied-distance scalar-only DistanceKernel lower-triangle Gram evaluation.
+    /// @param state Google Benchmark iteration state.
     void bm_distance_supply_scalar_only_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -292,6 +352,7 @@ namespace
         const auto dist_spec = s_slot.rbf(rbf) + s_slot.matern(m52);
         const auto dist_ck = dist_spec.compile<double>();
 
+        // Precompute scalar squared Euclidean distances once before benchmarking apply().
         std::vector<double> d_scalar(data.n * data.n, 0.0);
         for (std::size_t dim = 0; dim < data.d; ++dim)
         {
@@ -345,8 +406,13 @@ namespace
 
 }  // namespace
 
+/// @brief Initializes Google Benchmark and executes all registered Exact GPR benchmarks.
+/// @param argc Command-line argument count forwarded to benchmark::Initialize().
+/// @param argv Command-line argument vector forwarded to benchmark::Initialize().
+/// @return Zero exit status after benchmark shutdown.
 int main(int argc, char** argv)
 {
+    // Forward CLI flags such as --benchmark_filter and --benchmark_out to Google Benchmark.
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();

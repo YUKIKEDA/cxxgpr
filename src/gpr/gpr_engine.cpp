@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file gpr_engine.cpp
+/// @brief Out-of-line training, optimization objective, mixed-precision refinement, and inference engine.
+/// @details Implements GprObjective (with optional incremental LeafCache evaluation), column-blocked
+/// mixed-precision kernel re-evaluation and refinement, train_or_factor_payload, and fitted inference
+/// routines explicitly instantiated across all four supported precision policies.
+
 #include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/linalg/cholesky.hpp"
@@ -20,11 +26,26 @@ namespace cxxgpr::detail
     namespace
     {
 
+        /// @brief Twice-differentiable negative marginal log-likelihood objective for GPR hyperparameter optimization.
+        /// @details Adapts CompiledKernel, GaussianLikelihood, and FitBuffers to the optimizer::TwiceDifferentiable
+        /// interface, supporting optional incremental LeafCache evaluation on value_at_changes() calls.
+        /// @tparam P Precision policy controlling storage scalar type and buffer allocation.
         template <PrecisionPolicyConcept P> class GprObjective final : public optimizer::TwiceDifferentiable
         {
         public:
+            /// @brief Storage scalar type used for kernel matrices and Cholesky factors.
             using Storage = P::Storage;
 
+            /// @brief Constructs an optimization objective bound to borrowed training buffers and data.
+            /// @details Enables incremental LeafCache evaluation only when requested by the optimizer and when
+            /// buffers retain Cholesky workspace across iterations.
+            /// @param kernel Compiled kernel instance whose hyperparameters are updated per evaluation.
+            /// @param likelihood Gaussian observation noise likelihood updated per evaluation.
+            /// @param x_train Transformed training feature matrix (n x d) in Storage precision.
+            /// @param y_train Transformed training targets of length n in Storage precision.
+            /// @param jitter Cholesky stabilization jitter policy.
+            /// @param buffers Preallocated training workspace buffers.
+            /// @param enable_leaf_cache True if the optimizer supplies changed parameter indices.
             GprObjective(
                 CompiledKernel<Storage>& kernel,
                 GaussianLikelihood& likelihood,
@@ -42,23 +63,34 @@ namespace cxxgpr::detail
                 buffers_(buffers),
                 enable_leaf_cache_(enable_leaf_cache && buffers.buffer_policy == CholeskyBuffer::Retain)
             {
+                // Preallocate per-leaf kernel caches only when incremental updates can retain matrices across steps.
                 if (enable_leaf_cache_)
                 {
                     (void)leaf_cache_.resize(kernel_.num_leaves(), x_train_.rows());
                 }
             }
 
+            /// @brief Returns total unconstrained hyperparameter dimension (kernel params + log noise variance).
+            /// @return Combined parameter vector length.
             [[nodiscard]] std::size_t dim() const noexcept override
             {
                 return kernel_.num_params() + likelihood_.num_params();
             }
 
+            /// @brief Evaluates the negative marginal log-likelihood at params, invalidating any cached leaves.
+            /// @details Updates kernel and likelihood parameters, clears LeafCache if enabled, and runs full
+            /// Cholesky factorization and MLL evaluation.
+            /// @param params Unconstrained hyperparameter vector of length dim().
+            /// @return Negative marginal log-likelihood scalar, or GprError on invalid params or Cholesky failure.
+            /// @retval GprErrorCode::LengthMismatch When params.size() != dim().
+            /// @retval GprErrorCode::CholeskyFailed When matrix factorization fails after jitter retries.
             [[nodiscard]] std::expected<double, GprError> value(std::span<const double> params) override
             {
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
                 }
+                // Full evaluation discards incremental leaf tracking so future change-based calls recompute cleanly.
                 if (enable_leaf_cache_)
                 {
                     leaf_cache_.invalidate();
@@ -66,10 +98,20 @@ namespace cxxgpr::detail
                 return factor_and_mll(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, 0U);
             }
 
+            /// @brief Evaluates negative MLL incrementally when only changed_indices moved since the last step.
+            /// @details Re-evaluates only kernel leaves touched by changed_indices via LeafCache, adds noise
+            /// variance to the diagonal, factors L with jitter, and computes MLL directly.
+            /// @param params Full hyperparameter vector of length dim().
+            /// @param changed_indices Parameter indices modified relative to the cached evaluation.
+            /// @return Negative marginal log-likelihood scalar, or GprError on invalid params or factorization failure.
+            /// @retval GprErrorCode::LengthMismatch When params.size() != dim().
+            /// @retval GprErrorCode::NonFiniteKernelValue When evaluated MLL is non-finite.
+            /// @retval GprErrorCode::CholeskyFailed When factorization fails after exhausting jitter retries.
             [[nodiscard]] std::expected<double, GprError> value_at_changes(
                 std::span<const double> params, std::span<const std::size_t> changed_indices
             ) override
             {
+                // Fall back to full evaluation when LeafCache is disabled (e.g., CholeskyBuffer::Reuse).
                 if (!enable_leaf_cache_)
                 {
                     return value(params);
@@ -79,6 +121,7 @@ namespace cxxgpr::detail
                     return std::unexpected(std::move(set).error());
                 }
 
+                // Recompute only affected kernel leaves and reassemble lower triangle into buffers_.core.k_mut().
                 const DistanceCache<Storage>* dist_ptr = buffers_.dist.has_value() ? &(*buffers_.dist) : nullptr;
                 auto inc = leaf_cache_.evaluate_incremental(
                     kernel_, x_train_, dist_ptr, params, changed_indices, dim(), buffers_.core.k_mut(), Triangle::Lower,
@@ -89,6 +132,7 @@ namespace cxxgpr::detail
                     return std::unexpected(std::move(inc).error());
                 }
 
+                // Add observation noise variance, apply jittered Cholesky, and solve L L^T alpha = y.
                 const std::size_t n = x_train_.rows();
                 const auto noise_var = static_cast<Storage>(likelihood_.noise_variance());
                 if (auto diag = linalg::add_to_diag(buffers_.core.k_mut(), noise_var); !diag.has_value())
@@ -121,6 +165,7 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(y_alpha).error());
                 }
+                // Assemble negative MLL = 0.5 * y^T alpha + sum(log L_ii) + 0.5 * n * log(2 * pi).
                 const double log_2pi = std::log(2.0 * std::numbers::pi);
                 const double mll = (0.5 * (*y_alpha)) + (*half_ld) + (0.5 * static_cast<double>(n) * log_2pi);
                 if (!std::isfinite(mll))
@@ -130,6 +175,10 @@ namespace cxxgpr::detail
                 return mll;
             }
 
+            /// @brief Writes open optimization bounds for kernel and likelihood hyperparameters into out.
+            /// @param out Destination span of length dim().
+            /// @return Empty expected on success, or LengthMismatch when out size differs from dim().
+            /// @retval GprErrorCode::LengthMismatch When out.size() != kernel_.num_params() + 1.
             [[nodiscard]] std::expected<void, GprError> fill_intervals(std::span<Interval> out) const override
             {
                 const std::size_t nk = kernel_.num_params();
@@ -139,6 +188,7 @@ namespace cxxgpr::detail
                         GprError::length_mismatch("interval buffer length must match parameter count")
                     );
                 }
+                // Place kernel parameter bounds first, followed by the single likelihood noise bound.
                 if (auto kb = kernel_.bounds_into(out.subspan(0, nk)); !kb.has_value())
                 {
                     return kb;
@@ -146,6 +196,11 @@ namespace cxxgpr::detail
                 return likelihood_.bounds_into(out.subspan(nk, 1U));
             }
 
+            /// @brief Evaluates the negative MLL gradient into out_grad at params.
+            /// @param params Hyperparameter vector of length dim().
+            /// @param out_grad Output gradient span of length dim().
+            /// @return Empty expected on success, or GprError propagated from value_and_gradient_into().
+            /// @retval GprErrorCode::LengthMismatch When parameter or gradient span lengths mismatch.
             [[nodiscard]] std::expected<void, GprError> gradient_into(
                 std::span<const double> params, std::span<double> out_grad
             ) override
@@ -158,6 +213,12 @@ namespace cxxgpr::detail
                 return {};
             }
 
+            /// @brief Evaluates negative MLL and its exact gradient with respect to params into out_grad.
+            /// @param params Hyperparameter vector of length dim().
+            /// @param out_grad Output gradient span of length dim().
+            /// @return Negative marginal log-likelihood scalar, or GprError on invalid params or Cholesky failure.
+            /// @retval GprErrorCode::LengthMismatch When parameter or gradient span lengths mismatch.
+            /// @retval GprErrorCode::CholeskyFailed When factorization fails after jitter retries.
             [[nodiscard]] std::expected<double, GprError> value_and_gradient_into(
                 std::span<const double> params, std::span<double> out_grad
             ) override
@@ -173,6 +234,12 @@ namespace cxxgpr::detail
                 return mll_and_gradient_into(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, out_grad);
             }
 
+            /// @brief Evaluates the exact Hessian of the negative MLL into out_hess at params.
+            /// @param params Hyperparameter vector of length dim().
+            /// @param out_hess Output column-major Hessian span of length dim() * dim().
+            /// @return Empty expected on success, or GprError on invalid params or Cholesky failure.
+            /// @retval GprErrorCode::LengthMismatch When parameter or Hessian span lengths mismatch.
+            /// @retval GprErrorCode::CholeskyFailed When factorization fails after jitter retries.
             [[nodiscard]] std::expected<void, GprError> hessian_into(
                 std::span<const double> params, std::span<double> out_hess
             ) override
@@ -188,6 +255,13 @@ namespace cxxgpr::detail
                 return cxxgpr::hessian_into(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, out_hess);
             }
 
+            /// @brief Jointly evaluates negative MLL, gradient, and Hessian at params.
+            /// @param params Hyperparameter vector of length dim().
+            /// @param out_grad Output gradient span of length dim().
+            /// @param out_hess Output column-major Hessian span of length dim() * dim().
+            /// @return Negative marginal log-likelihood scalar, or GprError on invalid params or Cholesky failure.
+            /// @retval GprErrorCode::LengthMismatch When parameter, gradient, or Hessian span lengths mismatch.
+            /// @retval GprErrorCode::CholeskyFailed When factorization fails after jitter retries.
             [[nodiscard]] std::expected<double, GprError> value_gradient_hessian_into(
                 std::span<const double> params, std::span<double> out_grad, std::span<double> out_hess
             ) override
@@ -206,6 +280,9 @@ namespace cxxgpr::detail
             }
 
         private:
+            /// @brief Applies kernel and likelihood parameters after validating vector length.
+            /// @param params Combined parameter vector [kernel_params..., log_noise_var].
+            /// @return Empty expected on success, or LengthMismatch / validation GprError.
             [[nodiscard]] std::expected<void, GprError> apply_params(std::span<const double> params)
             {
                 const std::size_t nk = kernel_.num_params();
@@ -215,6 +292,7 @@ namespace cxxgpr::detail
                         GprError::length_mismatch("parameter length must match kernel + noise params")
                     );
                 }
+                // Apply kernel parameters before updating the trailing observation noise parameter.
                 if (auto kp = kernel_.set_params(params.subspan(0, nk)); !kp.has_value())
                 {
                     return kp;
@@ -222,18 +300,37 @@ namespace cxxgpr::detail
                 return likelihood_.set_params(params.subspan(nk, 1U));
             }
 
+            /// @brief Compiled kernel evaluator mutated per optimizer step.
             CompiledKernel<Storage>& kernel_;
+            /// @brief Observation noise likelihood mutated per optimizer step.
             GaussianLikelihood& likelihood_;
+            /// @brief Transformed training feature matrix (n x d) in Storage precision.
             MatrixRef<Storage> x_train_;
+            /// @brief Transformed training targets of length n in Storage precision.
             std::span<const Storage> y_train_;
+            /// @brief Cholesky stabilization jitter policy.
             const JitterPolicy& jitter_;
+            /// @brief Shared training workspace buffers.
             FitBuffers<P>& buffers_;
+            /// @brief True when incremental LeafCache updates are enabled for value_at_changes().
             bool enable_leaf_cache_{false};
+            /// @brief Per-leaf cached kernel blocks supporting incremental parameter evaluation.
             LeafCache<Storage> leaf_cache_;
         };
 
-        // Computes r = y_f64 - B_f64 * w and ||B_f64||_inf using column blocks of width 32 without
-        // materializing the full n x n double matrix.
+        /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
+        /// blocks of width 32 without materializing the full n x n double matrix.
+        /// @details Evaluates cross-kernel slices B_f64(:, col_begin:col_end) in blocks of at most
+        /// refinement_column_block columns, adds diag_offset along the main diagonal, accumulates B_f64 * w
+        /// and row absolute sums, and writes y_f64 - B_f64 * w into out_r.
+        /// @param kernel_f64 Double-precision compiled kernel evaluator.
+        /// @param x_f64 Double-precision transformed training features (n x d).
+        /// @param y_f64 Double-precision transformed training targets of length n.
+        /// @param diag_offset Combined observation noise variance and accepted jitter added to diagonal entries.
+        /// @param w Current candidate solution vector of length n in double precision.
+        /// @param out_r Output double-precision residual vector of length n.
+        /// @return Infinity norm ||B_f64||_inf for backward-error stopping checks, or GprError on evaluation failure.
+        /// @retval GprErrorCode::NonFiniteKernelValue When kernel evaluation produces non-finite entries.
         [[nodiscard]] std::expected<double, GprError> block_reeval_residual(
             const CompiledKernel<double>& kernel_f64,
             MatrixRef<double> x_f64,
@@ -247,6 +344,7 @@ namespace cxxgpr::detail
             const std::size_t d = x_f64.cols();
             const std::size_t block_cols = std::min(refinement_column_block, n);
 
+            // Allocate O(n * block_cols) scratch buffers instead of O(n^2) double storage.
             std::vector<double> x_block(block_cols * d);
             std::vector<double> k_block(n * block_cols);
             std::vector<double> scratch_block(n * block_cols);
@@ -257,6 +355,7 @@ namespace cxxgpr::detail
             for (std::size_t col_begin = 0; col_begin < n; col_begin += block_cols)
             {
                 const std::size_t cols_cur = std::min(block_cols, n - col_begin);
+                // Pack the current block of training points contiguously for column-major cross evaluation.
                 for (std::size_t feat = 0; feat < d; ++feat)
                 {
                     for (std::size_t c = 0; c < cols_cur; ++c)
@@ -271,6 +370,7 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(res).error());
                 }
+                // Accumulate matrix-vector product B_f64 * w and row l1 sums across the block columns.
                 for (std::size_t c = 0; c < cols_cur; ++c)
                 {
                     const std::size_t global_col = col_begin + c;
@@ -288,6 +388,7 @@ namespace cxxgpr::detail
                 }
             }
 
+            // Compute residual r = y_f64 - B_f64 * w and return ||B_f64||_inf.
             for (std::size_t row = 0; row < n; ++row)
             {
                 out_r[row] = y_f64[row] - matvec[row];
@@ -295,9 +396,21 @@ namespace cxxgpr::detail
             return inf_norm(row_abs_sum);
         }
 
+        /// @brief Mixed-precision iterative refinement adapter implementing RefineSystem for GPR solves.
+        /// @details Bridges float Cholesky factor L_f32 (for fast error solves) with either promoted float
+        /// matrix residuals (PromoteStorage) or column-blocked double kernel re-evaluation (ReevaluateKernel).
+        /// @tparam P Mixed-precision policy specifying Residual formula (PromoteStorage or ReevaluateKernel).
         template <PrecisionPolicyConcept P> class GprRefineSystem final : public RefineSystem
         {
         public:
+            /// @brief Constructs the refinement adapter from double data, float Cholesky factor, and matrix A_f32.
+            /// @param spec Fitted kernel specification compiled in double precision for re-evaluation/fallback.
+            /// @param kernel_exp Exponential backend mode matching the fitted model.
+            /// @param x_f64 Double-precision transformed training features (n x d).
+            /// @param y_f64 Double-precision transformed training targets of length n.
+            /// @param l_f32 Single-precision lower-triangular Cholesky factor L (n x n).
+            /// @param a_f32_symm Symmetrized single-precision noisy system matrix A (used by PromoteStorage).
+            /// @param diag_offset Combined observation noise variance and accepted jitter added to diagonal.
             GprRefineSystem(
                 const KernelSpec& spec,
                 KernelExp kernel_exp,
@@ -318,8 +431,17 @@ namespace cxxgpr::detail
                 kernel_f64_.set_kernel_exp(kernel_exp);
             }
 
+            /// @brief Returns the double-precision transformed target vector y_f64 as refinement RHS.
+            /// @return Non-owning span over y_f64_.
             [[nodiscard]] std::span<const double> rhs() const noexcept override { return y_f64_; }
 
+            /// @brief Computes residual r = y_f64 - A * w according to P::Residual and returns matrix norm.
+            /// @details Promotes stored float entries for PromoteStorage, or recomputes double kernel blocks
+            /// of width 32 via block_reeval_residual() for ReevaluateKernel.
+            /// @param w Current double-precision iterate of length n.
+            /// @param r Output double-precision residual buffer of length n.
+            /// @return Infinity norm of the system matrix used for relative residual scaling, or GprError.
+            /// @retval GprErrorCode::NonFiniteKernelValue When kernel re-evaluation yields non-finite entries.
             [[nodiscard]] std::expected<double, GprError> residual(
                 std::span<const double> w, std::span<double> r
             ) override
@@ -334,8 +456,15 @@ namespace cxxgpr::detail
                 }
             }
 
+            /// @brief Applies one iterative refinement update w += (L_f32 L_f32^T)^-1 r.
+            /// @details Casts the double residual r to float, solves via l_f32_, and accumulates the correction
+            /// back into double-precision w.
+            /// @param r Double-precision residual vector of length n.
+            /// @param w In-out double-precision solution vector updated in place.
+            /// @return Empty expected on success, or GprError if triangular solve fails.
             [[nodiscard]] std::expected<void, GprError> correct(std::span<const double> r, std::span<double> w) override
             {
+                // Downcast residual to float for fast L_f32 triangular solves, then accumulate in double.
                 const std::size_t n = r.size();
                 for (std::size_t i = 0; i < n; ++i)
                 {
@@ -352,14 +481,23 @@ namespace cxxgpr::detail
                 return {};
             }
 
+            /// @brief Verifies whether iterate w satisfies relative residual tolerance against the true double system.
+            /// @details ReevaluateKernel already checked the true double residual during residual(); PromoteStorage
+            /// performs an additional block_reeval_residual() check against tol.
+            /// @param w Candidate double-precision iterate of length n.
+            /// @param tol Relative backward-error acceptance threshold.
+            /// @return True if iterate is accepted; false triggers full double-precision fallback().
+            /// @retval GprErrorCode::NonFiniteKernelValue When kernel re-evaluation yields non-finite entries.
             [[nodiscard]] std::expected<bool, GprError> accept(std::span<const double> w, double tol) override
             {
                 if constexpr (std::same_as<typename P::Residual, ReevaluateKernel>)
                 {
+                    // ReevaluateKernel residuals are already computed in double against the exact kernel.
                     return true;
                 }
                 else
                 {
+                    // Verify promoted-storage iterate against the true double-precision kernel residual.
                     std::vector<double> r_true(y_f64_.size());
                     auto b_inf = block_reeval_residual(kernel_f64_, x_f64_, y_f64_, diag_offset_, w, r_true);
                     if (!b_inf.has_value())
@@ -370,8 +508,16 @@ namespace cxxgpr::detail
                 }
             }
 
+            /// @brief Computes an exact double-precision Cholesky solution when iterative refinement diverges or
+            /// stalls.
+            /// @details Materializes the double-precision Gram matrix with diag_offset_, factors it without
+            /// additional jitter retries, and solves directly into w.
+            /// @param w Output double-precision weight vector overwritten with A_f64^-1 y_f64.
+            /// @return Empty expected on success, or GprError if kernel evaluation or Cholesky fails.
+            /// @retval GprErrorCode::CholeskyFailed When double-precision Cholesky factorization fails.
             [[nodiscard]] std::expected<void, GprError> fallback(std::span<double> w) override
             {
+                // Materialize full double Gram matrix + diag_offset_ as a last-resort exact solve.
                 const std::size_t n = x_f64_.rows();
                 std::vector<double> a_f64(n * n);
                 std::vector<double> scratch_f64(n * n);
@@ -396,15 +542,37 @@ namespace cxxgpr::detail
             }
 
         private:
+            /// @brief Double-precision compiled kernel for blocked residual evaluation and fallback solves.
             CompiledKernel<double> kernel_f64_;
+            /// @brief Double-precision transformed training features (n x d).
             MatrixRef<double> x_f64_;
+            /// @brief Double-precision transformed training targets of length n.
             std::span<const double> y_f64_;
+            /// @brief Single-precision Cholesky factor L_f32 retained from the final fit factorization.
             MatrixRef<float> l_f32_;
+            /// @brief Symmetrized float noisy Gram matrix A_f32 used when P::Residual is PromoteStorage.
             MatrixRef<float> a_f32_;
+            /// @brief Combined noise variance and accepted jitter added along the diagonal.
             double diag_offset_{0.0};
+            /// @brief Reusable single-precision residual buffer for triangular L_f32 solves.
             std::vector<float> r_f32_buf_;
         };
 
+        /// @brief Executes mixed-precision iterative refinement starting from the float Cholesky solution.
+        /// @details Copies the initial float weights from buffers.core.rhs, builds symmetrized A_f32 in exp_buf
+        /// when using PromoteStorage, invokes refine_in_place(), and records RefinementSummary.
+        /// @tparam P Mixed-precision policy satisfying P::refines_in_f64.
+        /// @param spec Final fitted kernel specification.
+        /// @param kernel_exp Exponential backend mode.
+        /// @param kernel_f32 Final single-precision compiled kernel evaluator.
+        /// @param x_f64 Double-precision transformed training features (n x d).
+        /// @param x_f32 Single-precision transformed training features (n x d).
+        /// @param y_f64 Double-precision transformed training targets of length n.
+        /// @param buffers Training workspace containing L_f32, initial rhs weights, and scratch matrices.
+        /// @param diag_offset Combined noise variance plus accepted factor jitter.
+        /// @param out_alpha Output refined double-precision weight vector of length n.
+        /// @param out_summary Output optional populated with RefinementSummary diagnostics.
+        /// @return Empty expected on success, or GprError if refinement and fallback both fail.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> run_mixed_precision_refinement(
             const KernelSpec& spec,
@@ -419,6 +587,7 @@ namespace cxxgpr::detail
             std::optional<RefinementSummary>& out_summary
         )
         {
+            // Seed double iterate from the single-precision Cholesky solution stored in buffers.core.rhs.
             const std::size_t n = x_f64.rows();
             out_alpha.resize(n);
             for (std::size_t i = 0; i < n; ++i)
@@ -458,6 +627,16 @@ namespace cxxgpr::detail
             return {};
         }
 
+        /// @brief Copies a possibly strided column-major MatrixRef<double> into a dense contiguous vector while
+        /// checking finiteness.
+        /// @details Rejects empty or null inputs, guards rows * cols multiplication overflow, and checks every
+        /// matrix element for NaN or Inf.
+        /// @param src Source column-major matrix view.
+        /// @param dst Destination contiguous column-major buffer resized to rows * cols.
+        /// @return Empty expected on success, or EmptyInput, SizeOverflow, or NonFiniteInput on invalid data.
+        /// @retval GprErrorCode::EmptyInput When src is empty or has a null data pointer.
+        /// @retval GprErrorCode::SizeOverflow When src.rows() * src.cols() overflows std::size_t.
+        /// @retval GprErrorCode::NonFiniteInput When any matrix entry is NaN or Inf.
         [[nodiscard]] std::expected<void, GprError> copy_double_matrix_col_major(
             MatrixRef<double> src, std::vector<double>& dst
         )
@@ -470,6 +649,7 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::empty_input());
             }
+            // Guard dense allocation size against std::size_t multiplication overflow.
             auto nm = checked_mul(src.rows(), src.cols());
             if (!nm.has_value())
             {
@@ -478,6 +658,7 @@ namespace cxxgpr::detail
             dst.resize(*nm);
             const std::size_t rows = src.rows();
             const std::size_t cols = src.cols();
+            // Copy column-major order while rejecting NaN or +/-Inf training coordinates.
             for (std::size_t col = 0; col < cols; ++col)
             {
                 for (std::size_t row = 0; row < rows; ++row)
@@ -495,6 +676,22 @@ namespace cxxgpr::detail
 
     }  // namespace
 
+    /// @brief Validates training inputs, fits transforms, optimizes or factors hyperparameters, and assembles
+    /// FittedPayload<P>.
+    /// @details Preserves raw (x, y) copies for persistence, fits input/target transforms in double precision,
+    /// allocates FitBuffers<P>, optionally runs optimize_cb, re-factors at the final parameters, and runs
+    /// mixed-precision iterative refinement when P::refines_in_f64 is true.
+    /// @tparam P Precision policy controlling Storage and Refine arithmetic.
+    /// @param cfg Borrowed trainer configuration and transform prototypes.
+    /// @param x Column-major training feature matrix (n x d).
+    /// @param y Training target vector of length n.
+    /// @param optimize_cb Callback invoking the concrete optimizer when cfg.optimize is true.
+    /// @param optimize_ctx Opaque pointer forwarded to optimize_cb.
+    /// @return Populated FittedPayload<P> on success, or GprError on any validation, optimization, or solve error.
+    /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
+    /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
+    /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or Inf.
+    /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
     template <PrecisionPolicyConcept P>
     std::expected<FittedPayload<P>, GprError> train_or_factor_payload(
         const TrainConfig<P>& cfg,
@@ -507,6 +704,7 @@ namespace cxxgpr::detail
         using Storage = P::Storage;
         using Refine = P::Refine;
 
+        // Validate dimensions, column-major feature entries, and target finiteness before mutating workspace.
         if (x.is_empty() || y.empty())
         {
             return std::unexpected(GprError::empty_input());
@@ -532,6 +730,7 @@ namespace cxxgpr::detail
         }
         std::vector<double> y_raw(y.begin(), y.end());
 
+        // Fit and apply input and target transforms in double precision while retaining raw snapshots.
         auto fitted_in = cfg.input_transform.fit(x_f64, n, d);
         if (!fitted_in.has_value())
         {
@@ -553,6 +752,7 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(tf).error());
         }
 
+        // Downcast transformed training tensors to Storage and Refine scalar types for training.
         std::vector<Storage> x_storage(x_f64.size());
         for (std::size_t i = 0; i < x_f64.size(); ++i)
         {
@@ -576,6 +776,7 @@ namespace cxxgpr::detail
         }
         if constexpr (P::refines_in_f64)
         {
+            // PromoteStorage refinement needs kernel_scratch to assemble A_f32 after factorization.
             if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
             {
                 if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
@@ -603,6 +804,7 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(lp).error());
         }
 
+        // Run hyperparameter optimization or perform a single objective evaluation when factor-only.
         optimizer::OptimizerResult opt_res;
         if (cfg.optimize)
         {
@@ -649,6 +851,7 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(sp).error());
         }
 
+        // Snapshot dense column-major Cholesky factor L from workspace k_ref().
         std::vector<Storage> l_copy(n * n);
         for (std::size_t col = 0; col < n; ++col)
         {
@@ -661,6 +864,7 @@ namespace cxxgpr::detail
         std::vector<Refine> alpha_out(n);
         std::optional<RefinementSummary> ref_summary;
 
+        // Refine weights alpha in double precision under MixedPrecision policies, or cast directly otherwise.
         if constexpr (P::refines_in_f64)
         {
             const double diag_offset = likelihood.noise_variance() + buffers->core.factor_jitter;
@@ -706,6 +910,17 @@ namespace cxxgpr::detail
     namespace
     {
 
+        /// @brief Validates, transforms, and casts query coordinates xs into workspace buffers.
+        /// @details Ensures workspace capacity, verifies feature count and finiteness, applies the fitted
+        /// input transform in double precision, and casts transformed features to Storage precision.
+        /// @tparam P Precision policy defining Storage scalar type.
+        /// @param payload Fitted model payload supplying n_train, n_features, compiled_kernel, and input_transform.
+        /// @param xs Column-major query feature matrix (m x d).
+        /// @param workspace Mutable query workspace reused across calls.
+        /// @return Column-major MatrixRef<Storage> backed by workspace.query_x, or GprError on invalid query.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<MatrixRef<typename P::Storage>, GprError> prepare_query_matrix(
             const FittedPayload<P>& payload, MatrixRef<double> xs, QueryWorkspace<P>& workspace
@@ -723,12 +938,14 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
             }
+            // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
             if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
                 !ens.has_value())
             {
                 return std::unexpected(std::move(ens).error());
             }
 
+            // Copy query coordinates column-major into double staging buffer while checking finiteness.
             for (std::size_t col = 0; col < d; ++col)
             {
                 for (std::size_t row = 0; row < m; ++row)
@@ -742,6 +959,7 @@ namespace cxxgpr::detail
                 }
             }
 
+            // Apply fitted input transform in double precision before casting down to Storage.
             if (auto ap = payload.input_transform->apply(workspace.query_xs, m, d); !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
@@ -755,6 +973,14 @@ namespace cxxgpr::detail
             return MatrixRef<Storage>(workspace.query_x.data(), m, d, m);
         }
 
+        /// @brief Applies inverse target transforms to a Prediction<T> using a preallocated double scratch span.
+        /// @details Converts float means/variances to double in buf, invokes target_tf inverse transforms,
+        /// and casts the unscaled outputs back to T without heap allocations.
+        /// @tparam T Prediction scalar type (typically float when using scratch conversion).
+        /// @param target_tf Fitted target transform applied in reverse.
+        /// @param pred In-out Prediction<T> scaled back to the original target units.
+        /// @param buf Preallocated double scratch span of length >= pred.mean.size().
+        /// @return Empty expected on success, or GprError on inverse transform failure.
         template <typename T>
         [[nodiscard]] std::expected<void, GprError> apply_target_inverse_with_buf(
             const transform::FittedTargetTransform& target_tf, Prediction<T>& pred, std::span<double> buf
@@ -785,6 +1011,14 @@ namespace cxxgpr::detail
             return {};
         }
 
+        /// @brief Applies inverse target transforms to Prediction<T> on the original target scale.
+        /// @details Operates directly in-place for T = double, or via scratch_d (or a fallback vector if
+        /// scratch_d is smaller than m) for single-precision predictions.
+        /// @tparam T Prediction scalar type (double or float).
+        /// @param target_tf Fitted target transform applied in reverse.
+        /// @param pred In-out Prediction<T> scaled back to original units.
+        /// @param scratch_d Optional reusable double scratch buffer for zero-allocation float conversion.
+        /// @return Empty expected on success, or GprError on inverse transform failure.
         template <typename T>
         [[nodiscard]] std::expected<void, GprError> apply_target_inverse_prediction(
             const transform::FittedTargetTransform& target_tf, Prediction<T>& pred, std::span<double> scratch_d = {}
@@ -800,6 +1034,7 @@ namespace cxxgpr::detail
             }
             else
             {
+                // Reuse caller scratch buffer (workspace.query_xs) when large enough to avoid allocations.
                 const std::size_t m = pred.mean.size();
                 if (scratch_d.size() >= m)
                 {
@@ -812,6 +1047,17 @@ namespace cxxgpr::detail
 
     }  // namespace
 
+    /// @brief Evaluates posterior prediction into out and applies inverse target transforms.
+    /// @tparam P Precision policy matching payload.
+    /// @param payload Fitted model payload.
+    /// @param xs Column-major query feature matrix (m x d).
+    /// @param options Prediction variance options.
+    /// @param workspace Mutable query workspace reused across calls.
+    /// @param out Destination prediction struct populated on the original target scale.
+    /// @return Empty expected on success, or GprError on validation, prediction, or inverse scaling failure.
+    /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+    /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+    /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> fitted_predict_into(
         const FittedPayload<P>& payload,
@@ -822,6 +1068,7 @@ namespace cxxgpr::detail
     )
     {
         using Storage = P::Storage;
+        // Validate and transform xs into workspace.query_x, then run prediction and inverse scaling.
         auto xq_ref = prepare_query_matrix(payload, xs, workspace);
         if (!xq_ref.has_value())
         {
@@ -842,6 +1089,16 @@ namespace cxxgpr::detail
         return apply_target_inverse_prediction(*payload.target_transform, out, workspace.query_xs);
     }
 
+    /// @brief Evaluates posterior mean and full m x m covariance matrix on the original target scale.
+    /// @tparam P Precision policy matching payload.
+    /// @param payload Fitted model payload.
+    /// @param xs Column-major query feature matrix (m x d).
+    /// @param options Prediction variance options.
+    /// @param workspace Mutable query workspace.
+    /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+    /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+    /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
     template <PrecisionPolicyConcept P>
     std::expected<PredictiveCovariance<typename P::Refine>, GprError> fitted_predict_covariance(
         const FittedPayload<P>& payload,
@@ -870,6 +1127,7 @@ namespace cxxgpr::detail
             return cov;
         }
 
+        // Apply inverse target scaling to mean and covariance in double precision before returning.
         if constexpr (std::same_as<Refine, double>)
         {
             if (auto mr = payload.target_transform->inverse_transform_mean(cov->mean); !mr.has_value())
@@ -905,6 +1163,20 @@ namespace cxxgpr::detail
         return cov;
     }
 
+    /// @brief Draws deterministic posterior function realizations at xs on the original target scale.
+    /// @tparam P Precision policy matching payload.
+    /// @param payload Fitted model payload.
+    /// @param xs Column-major query feature matrix (m x d).
+    /// @param n_draws Number of posterior draws to generate.
+    /// @param seed Deterministic PRNG seed.
+    /// @param options Prediction variance options.
+    /// @param workspace Mutable query workspace.
+    /// @param jitter Optional override jitter policy for predictive covariance factorization.
+    /// @return Column-major sample buffer (m x n_draws) on the original scale, or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+    /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+    /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+    /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
     template <PrecisionPolicyConcept P>
     std::expected<std::vector<typename P::Refine>, GprError> fitted_sample(
         const FittedPayload<P>& payload,
@@ -936,6 +1208,7 @@ namespace cxxgpr::detail
         {
             return samples;
         }
+        // Apply inverse mean transform to each column draw independently.
         const std::size_t m = xs.rows();
         if constexpr (std::same_as<Refine, double>)
         {
@@ -971,6 +1244,12 @@ namespace cxxgpr::detail
         return samples;
     }
 
+    /// @brief Computes closed-form Leave-One-Out predictive moments on the original target scale.
+    /// @tparam P Precision policy matching payload.
+    /// @param payload Fitted model payload.
+    /// @param options Prediction variance options.
+    /// @return Prediction<Refine> on the original target scale, or GprError on failure.
+    /// @retval GprErrorCode::NonFiniteKernelValue When inverse scaling produces non-finite moments.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> fitted_loo_predict(
         const FittedPayload<P>& payload, const PredictOptions& options
@@ -978,6 +1257,7 @@ namespace cxxgpr::detail
     {
         using Storage = P::Storage;
         const MatrixRef<Storage> l_ref(payload.l_factor.data(), payload.n_train, payload.n_train, payload.n_train);
+        // Evaluate LOO in transformed space, then map mean and variance back to the original scale.
         auto loo = loo_predict<P>(payload.likelihood, l_ref, payload.alpha, payload.y_transformed, options);
         if (!loo.has_value())
         {

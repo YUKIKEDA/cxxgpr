@@ -11,7 +11,7 @@ globs: "**/*.hpp,**/*.cpp,CMakeLists.txt,cmake/*.cmake"
 - **公開ヘッダの純潔**：`include/cxxgpr/**/*.hpp` で `<Eigen/*>`、`<nlohmann/*>`、`<omp.h>` や実装内部ヘッダを一切 `#include` しない（`just arch-check`）。ユーザーカスタム拡張点には軽量ビュー `MatrixRef<T>` / `MatrixMut<T>` を使う。
 - **寸法・乗算のオーバーフロー検査**：`n_rows * n_cols`、`n * (n + 1) / 2` は積の前に `checked_mul` でオーバーフローを検査し、`GprError::SizeOverflow` を返す。
 - **警告ゼロと静的解析**：MSVC `/W4 /WX`、GCC/Clang `-Wall -Wextra -Wpedantic -Werror`、`.clang-format`（`just format-check`）、`.clang-tidy` WarningsAsErrors（`just lint`）を全て警告 0 で通す。
-- **Doxygen コメント**：公開ヘッダの要素には簡潔な英語 Doxygen（`///`）を付け、`REQ-`/`DES-`/`FMT-`/`QA-`/`M*-` を含めない（`just doc-check`）。
+- **Doxygen コメントとインラインコメント**：全 C++ ファイル（`include/`・`src/`・`tests/`・`benchmarks/`・`qa/`）で `///` 形式の英語 Doxygen（`@file`・`@brief`・`@details`・`@tparam`・`@param`・`@return`・`@retval`・列挙子・メンバ変数・GoogleTest ケース）とアルゴリズム・検証順を説明する英語インラインコメント（`//`）を記載し、`include/`・`src/` に `REQ-`/`DES-`/`FMT-`/`QA-`/`M*-`/`REL-` を含めない（`just doc-check`）。詳細は `dev-docs.mdc` に従う。
 - **`clang-tidy` 対策（`[modernize-use-std-numbers]`・`[bugprone-exception-escape]`・`[modernize-use-default-member-init]`・`[bugprone-unchecked-optional-access]`）**：PR #7・PR #9・PR #13 の経験に基づき次を守る。
   - 浮動小数点の固定ゴールデン値が数学定数（$1/\pi$ 等）と偶然近く `[modernize-use-std-numbers]` に誤検知される場合は、`double` リテラル（BAD：`constexpr double expected = 0x1.467905d15dbccp-2;`）を避け、`std::uint64_t` ビット列＋`std::bit_cast`（GOOD：`constexpr std::uint64_t expected_bits = 0x3fd467905d15dbccULL;`）で照合する。
   - `GprError` は `std::string` を保持するため、文字列生成や `GprError` コピーを伴う `std::expected<T, GprError>` 返却関数へ `noexcept` を付けない（BAD：`std::expected<void, GprError> check(...) noexcept` 内で `GprError` をコピー、GOOD：非 `noexcept` とし `std::unexpected(std::move(res).error())` で受け渡す）。

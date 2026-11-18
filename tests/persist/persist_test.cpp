@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: FMT-01, FMT-02, FMT-03, FMT-04, FMT-05, FMT-06, FMT-08
+/// @file persist_test.cpp
+/// @brief Unit and integration tests for GPR model persistence, mmap loading, and registry hooks.
+/// @details Verifies save_with_factor() mmap roundtrip and bit-identical predictions/LOO, save()
+/// refactor-on-load parity, into_fitted() precision checks, MixedPrecision<ReevaluateKernel> and
+/// CustomKernel PersistRegistry roundtrips, and negative validation against corrupt or unsupported
+/// config.json and model.safetensors artifacts.
 
 #include "cxxgpr/persist/persist.hpp"
 
@@ -24,10 +30,16 @@
 namespace
 {
 
+    /// @brief RAII temporary directory guard creating an isolated per-test directory under temp_directory_path.
+    /// @details Removes any leftover directory on construction and cleans up recursively on destruction
+    /// so parallel CTest runs never collide on persistence artifacts.
     struct TempDirGuard
     {
+        /// @brief Filesystem path of the managed temporary directory.
         std::filesystem::path path;
 
+        /// @brief Creates a fresh temporary directory named with prefix `cxxgpr_test_`.
+        /// @param name Unique test identifier suffix appended to the directory name.
         explicit TempDirGuard(const std::string& name)
         {
             path = std::filesystem::temp_directory_path() / ("cxxgpr_test_" + name);
@@ -36,6 +48,7 @@ namespace
             std::filesystem::create_directories(path, ec);
         }
 
+        /// @brief Recursively deletes the temporary directory while suppressing cleanup exceptions.
         ~TempDirGuard()
         {
             std::error_code ec;
@@ -50,36 +63,59 @@ namespace
         }
     };
 
+    /// @brief Double-precision custom scaled exponential kernel implementing state JSON persistence.
+    /// @details Evaluates k(d2) = scale_ * exp(-d2) and emits serialized scale_ state via
+    /// persist_state_json() under persist ID `"user.custom_scale"`.
     class CustomScaleKernel final : public cxxgpr::KernelTerm<double>
     {
     public:
+        /// @brief Constructs the double-precision custom kernel with initial scale factor.
+        /// @param scale Positive kernel output scale parameter.
         explicit CustomScaleKernel(double scale) : scale_(scale) {}
 
+        /// @brief Clones this custom kernel preserving its scale_ value.
+        /// @return Owning unique_ptr copy of this CustomScaleKernel.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<double>> clone() const override
         {
             return std::make_unique<CustomScaleKernel>(scale_);
         }
 
+        /// @brief Returns the number of trainable hyperparameters (1 for scale_).
+        /// @return Hyperparameter count (always 1).
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
+        /// @brief Writes log(scale_) into out[0].
+        /// @param out Destination span of length 1 receiving log-transformed scale.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
             out[0] = std::log(scale_);
             return {};
         }
 
+        /// @brief Updates scale_ from log-parameter params[0].
+        /// @param params Input span containing log(scale) at index 0.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
             scale_ = std::exp(params[0]);
             return {};
         }
 
+        /// @brief Populates default positive bounds for the scale parameter.
+        /// @param out Destination Interval span of length 1.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
             out[0] = cxxgpr::Interval::default_positive();
             return {};
         }
 
+        /// @brief Evaluates scale_ * exp(-d2) over the requested square matrix triangle.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param out Output kernel Gram matrix buffer.
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<double> dist, cxxgpr::MatrixMut<double> out, cxxgpr::Triangle uplo
         ) const override
@@ -97,6 +133,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates rectangular cross-covariance scale_ * exp(-d2).
+        /// @param dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param out Output cross-covariance matrix buffer.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<double> dist, cxxgpr::MatrixMut<double> out
         ) const override
@@ -111,12 +151,21 @@ namespace
             return {};
         }
 
+        /// @brief Fills the prior kernel diagonal with scale_.
+        /// @param out Destination diagonal span of length n.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<double> out) const override
         {
             std::ranges::fill(out, scale_);
             return {};
         }
 
+        /// @brief Computes derivative dk / d(log scale), which equals k itself.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param d_k Output gradient matrix buffer.
+        /// @param param_idx Local parameter index (unused because num_params() == 1).
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<double> dist,
             cxxgpr::MatrixMut<double> d_k,
@@ -127,6 +176,13 @@ namespace
             return apply(dist, d_k, uplo);
         }
 
+        /// @brief Computes second derivative d^2 k / d(log scale)^2, which equals k itself.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param d2_k Output Hessian matrix buffer.
+        /// @param i First local parameter index (unused because num_params() == 1).
+        /// @param j Second local parameter index (unused because num_params() == 1).
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<double> dist,
             cxxgpr::MatrixMut<double> d2_k,
@@ -138,47 +194,75 @@ namespace
             return apply(dist, d2_k, uplo);
         }
 
+        /// @brief Returns the persistence identifier matching CustomScaleKernelFloat and PersistRegistry.
+        /// @return Static string view `"user.custom_scale"`.
         [[nodiscard]] std::string_view persist_id() const noexcept override { return "user.custom_scale"; }
 
+        /// @brief Serializes the current scale_ parameter as decimal string state for persistence.
+        /// @return Decimal string representation of scale_.
         [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
         {
             return std::to_string(scale_);
         }
 
     private:
+        /// @brief Positive output scale factor in linear space.
         double scale_;
     };
 
+    /// @brief Single-precision companion of CustomScaleKernel required by CustomKernel::create().
+    /// @details Evaluates float-precision k(d2) = scale_ * exp(-d2) and shares persist ID
+    /// `"user.custom_scale"` with CustomScaleKernel.
     class CustomScaleKernelFloat final : public cxxgpr::KernelTerm<float>
     {
     public:
+        /// @brief Constructs the single-precision custom kernel with initial scale factor.
+        /// @param scale Positive kernel output scale parameter.
         explicit CustomScaleKernelFloat(float scale) : scale_(scale) {}
 
+        /// @brief Clones this float custom kernel preserving its scale_ value.
+        /// @return Owning unique_ptr copy of this CustomScaleKernelFloat.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<float>> clone() const override
         {
             return std::make_unique<CustomScaleKernelFloat>(scale_);
         }
 
+        /// @brief Returns the number of trainable hyperparameters (1 for scale_).
+        /// @return Hyperparameter count (always 1).
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
+        /// @brief Writes log(scale_) cast to double into out[0].
+        /// @param out Destination span of length 1 receiving log-transformed scale.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
             out[0] = std::log(static_cast<double>(scale_));
             return {};
         }
 
+        /// @brief Updates float scale_ from log-parameter params[0].
+        /// @param params Input span containing log(scale) at index 0.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
             scale_ = static_cast<float>(std::exp(params[0]));
             return {};
         }
 
+        /// @brief Populates default positive bounds for the scale parameter.
+        /// @param out Destination Interval span of length 1.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
             out[0] = cxxgpr::Interval::default_positive();
             return {};
         }
 
+        /// @brief Evaluates float scale_ * exp(-d2) over the requested square matrix triangle.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param out Output kernel Gram matrix buffer.
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<float> dist, cxxgpr::MatrixMut<float> out, cxxgpr::Triangle uplo
         ) const override
@@ -196,6 +280,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates float rectangular cross-covariance scale_ * exp(-d2).
+        /// @param dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param out Output cross-covariance matrix buffer.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<float> dist, cxxgpr::MatrixMut<float> out
         ) const override
@@ -210,12 +298,21 @@ namespace
             return {};
         }
 
+        /// @brief Fills the prior float kernel diagonal with scale_.
+        /// @param out Destination diagonal span of length n.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<float> out) const override
         {
             std::ranges::fill(out, scale_);
             return {};
         }
 
+        /// @brief Computes derivative dk / d(log scale) in single precision.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param d_k Output gradient matrix buffer.
+        /// @param param_idx Local parameter index (unused because num_params() == 1).
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<float> dist,
             cxxgpr::MatrixMut<float> d_k,
@@ -226,6 +323,13 @@ namespace
             return apply(dist, d_k, uplo);
         }
 
+        /// @brief Computes second derivative d^2 k / d(log scale)^2 in single precision.
+        /// @param dist Pairwise squared Euclidean distance matrix.
+        /// @param d2_k Output Hessian matrix buffer.
+        /// @param i First local parameter index (unused because num_params() == 1).
+        /// @param j Second local parameter index (unused because num_params() == 1).
+        /// @param uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<float> dist,
             cxxgpr::MatrixMut<float> d2_k,
@@ -237,12 +341,19 @@ namespace
             return apply(dist, d2_k, uplo);
         }
 
+        /// @brief Returns the shared persistence identifier `"user.custom_scale"`.
+        /// @return Static string view `"user.custom_scale"`.
         [[nodiscard]] std::string_view persist_id() const noexcept override { return "user.custom_scale"; }
 
     private:
+        /// @brief Positive output scale factor stored in float precision.
         float scale_;
     };
 
+    /// @brief Verifies save_with_factor() mmap roundtrip and save() refactor-on-load parity.
+    /// @details Saves an L-BFGS model fitted with input/target transforms, checks bit-exact
+    /// mmap predictions/LOO and typed extraction rejection/success, then checks refactor-on-load
+    /// accuracy when saved without factors.
     TEST(PersistModelsTest, SaveWithFactorMmapAndSaveRefactorRoundtrip)
     {
         // Spec: FMT-01, FMT-02, FMT-03, FMT-04, FMT-05
@@ -343,6 +454,10 @@ namespace
         EXPECT_NEAR(typed_nf->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
     }
 
+    /// @brief Verifies MixedPrecision<ReevaluateKernel> and CustomKernel PersistRegistry persistence.
+    /// @details Confirms MixedReevaluate precision metadata and non-mmap load behavior, registry
+    /// validation of empty/reserved/duplicate IDs, UnregisteredId rejection without registry, and
+    /// predictive parity when loaded with a registered CustomKernel factory.
     TEST(PersistModelsTest, PrecisionVariantsAndRegistryRoundtrip)
     {
         // Spec: FMT-05, FMT-06
@@ -429,9 +544,14 @@ namespace
         EXPECT_NEAR(reg_load->predict(xq_ref)->mean[0], c_fit->predict(xq_ref)->mean[0], 1e-12);
     }
 
+    /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.
+    /// @details Checks Io errors on missing directories, Config errors on malformed or deeply nested
+    /// JSON, UnsupportedPersistVersion, WrongModel rejections for sgpr/ldlt/distance configs, and
+    /// Tensor errors on truncated or deeply nested safetensors headers.
     TEST(PersistModelsTest, NegativeControlsRejectCorruptAndUnsupportedFiles)
     {
         // Spec: FMT-01, FMT-02, FMT-08
+        // Ensure loading from a non-existent directory fails with PersistErrorKind::Io.
         const TempDirGuard missing_dir("does_not_exist");
         std::error_code ec;
         std::filesystem::remove_all(missing_dir.path, ec);

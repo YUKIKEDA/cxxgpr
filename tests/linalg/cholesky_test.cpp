@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-06, REQ-11, DES-02, DES-03, DES-04
+/// @file cholesky_test.cpp
+/// @brief Unit tests for lower Cholesky factorization, jitter escalation, triangular solves, and inv_diag.
+/// @details Verifies analytical Cholesky factors, log-determinant, solves, and diagonal inverse
+/// formulas in double precision, float-precision jittered solves, adaptive jitter escalation and
+/// failure diagnostics, zero-allocation execution, and negative validation checks.
+
 #include "cxxgpr/linalg/cholesky.hpp"
 
 #include "cxxgpr/linalg/dense.hpp"
@@ -14,21 +21,35 @@
 
 #include "allocation_audit.hpp"
 
-// Spec: REQ-06, REQ-11, DES-02, DES-03, DES-04
 namespace
 {
 
+    /// @brief Brings CholeskyStage into the anonymous test namespace.
     using cxxgpr::CholeskyStage;
+    /// @brief Brings GprErrorCode into the anonymous test namespace.
     using cxxgpr::GprErrorCode;
+    /// @brief Brings JitterPolicy into the anonymous test namespace.
     using cxxgpr::JitterPolicy;
+    /// @brief Brings mutable MatrixMut view into the anonymous test namespace.
     using cxxgpr::MatrixMut;
+    /// @brief Brings read-only MatrixRef view into the anonymous test namespace.
     using cxxgpr::MatrixRef;
+    /// @brief Brings allocation AuditMode enum into the anonymous test namespace.
     using cxxgpr::test_support::AuditMode;
+    /// @brief Brings RAII NoAllocationScope guard into the anonymous test namespace.
     using cxxgpr::test_support::NoAllocationScope;
 
+    /// @brief Constructs an n x n symmetric RBF Gram matrix with an explicit diagonal shift.
+    /// @details Evaluates exp(-0.5 * ((i - j) * 0.35)^2) across all pairs and adds diag_offset to
+    /// diagonal entries so test systems can tune conditioning across float and double precisions.
+    /// @tparam Scalar Matrix scalar type (float or double).
+    /// @param n Square matrix order.
+    /// @param diag_offset Non-negative diagonal shift added to every diagonal entry.
+    /// @return Column-major n x n SPD Gram matrix stored in a flat vector.
     template <typename Scalar> std::vector<Scalar> make_rbf_gram(std::size_t n, Scalar diag_offset)
     {
         std::vector<Scalar> a(n * n, Scalar{0});
+        // Fill symmetric lower and upper entries using deterministic 1D grid spacing 0.35.
         for (std::size_t j = 0; j < n; ++j)
         {
             for (std::size_t i = j; i < n; ++i)
@@ -47,6 +68,9 @@ namespace
         return a;
     }
 
+    /// @brief Verifies double-precision Cholesky factor, log|A|, LLT solve, and diag(A^-1) against exact math.
+    /// @details Confirms cholesky_lower_in_place() leaves upper-triangle sentinels untouched and matches
+    /// exact closed-form entries for L, log(324), x = [1, -2, 3]^T, and diag(A^-1) = [115/324, 13/81, 1/9].
     TEST(CholeskyLinalgTest, LowerFactorAndSolvesMatchAnalyticalReferenceDouble)
     {
         // 3x3 SPD matrix:
@@ -111,6 +135,9 @@ namespace
         EXPECT_NEAR(inv_diag[2], 1.0 / 9.0, 1e-14);
     }
 
+    /// @brief Verifies single-precision jittered Cholesky factorization and linear solve residual.
+    /// @details Factors a 12x12 float RBF matrix with fixed(0.0) policy, solves A * x = 1, and checks
+    /// forward reconstruction A * x against the original right-hand side.
     TEST(CholeskyLinalgTest, LowerFactorAndSolvesFloatPrecision)
     {
         constexpr std::size_t n = 12;
@@ -118,6 +145,7 @@ namespace
         const auto a_orig = a;
         std::vector<float> backup(n * n);
 
+        // Unjittered factorization (j = 0) should succeed directly on the diagonally shifted RBF matrix.
         const auto policy = JitterPolicy::fixed(0.0);
         ASSERT_TRUE(policy.has_value());
         const auto jitter_res = cxxgpr::linalg::cholesky_lower_with_jitter(
@@ -132,6 +160,7 @@ namespace
             cxxgpr::linalg::solve_llt_in_place(MatrixRef<float>(a.data(), n, n), std::span<float>(b)).has_value()
         );
 
+        // Verify forward residual A_orig * x ≈ b_orig within single-precision tolerance.
         std::vector<float> ax(n, 0.0F);
         ASSERT_TRUE(
             cxxgpr::linalg::matvec_columns(
@@ -145,6 +174,9 @@ namespace
         }
     }
 
+    /// @brief Verifies adaptive jitter escalation, stage metadata, and failure diagnostics on indefinites.
+    /// @details Checks Fixed(0.0) immediate Predict failure, Adaptive escalation succeeding at the third
+    /// step (1e-3), and retry exhaustion reporting the final attempted jitter and Fit stage.
     TEST(CholeskyLinalgTest, JitterEscalatesOnIndefiniteAndPreservesFactorJitter)
     {
         // Rank-1 / singular 2x2 matrix: [1, 1; 1, 1] -> eigenvalues 2 and 0.
@@ -186,6 +218,7 @@ namespace
         );
         ASSERT_FALSE(exhaust_res.has_value());
         EXPECT_EQ(exhaust_res.error().code(), GprErrorCode::CholeskyFailed);
+        // Guard std::optional dereference before inspecting the reported jitter value.
         const auto err_jitter = exhaust_res.error().jitter();
         if (!err_jitter.has_value())
         {
@@ -198,6 +231,9 @@ namespace
         (void)singular;
     }
 
+    /// @brief Verifies Cholesky factorization, solves, inv_diag, and log_det allocate zero heap memory.
+    /// @details Preallocates all n = 32 matrices and buffers before entering AuditMode::CppAndEigen
+    /// NoAllocationScope and asserts delta_allocations() == 0 across every linear-algebra primitive.
     TEST(CholeskyLinalgTest, ZeroHeapAllocationsInPreallocatedWorkspace)
     {
         constexpr std::size_t n = 32;
@@ -210,6 +246,7 @@ namespace
         const auto policy = JitterPolicy::adaptive(1e-8, 10.0, 4, 1e-2);
         ASSERT_TRUE(policy.has_value());
 
+        // Enter allocation audit scope only after all test vectors are sized.
         const NoAllocationScope audit(AuditMode::CppAndEigen);
         const auto jitter_res = cxxgpr::linalg::cholesky_lower_with_jitter(
             MatrixMut<double>(a.data(), n, n), MatrixMut<double>(backup.data(), n, n), *policy
@@ -231,12 +268,16 @@ namespace
         EXPECT_EQ(audit.delta_allocations(), 0U);
     }
 
+    /// @brief Negative controls verifying Cholesky validation errors and strict non-SPD factor checks.
+    /// @details Checks EmptyInput, LengthMismatch on non-square or mismatched backup matrices,
+    /// NonFiniteInput on NaN entries, and NonPositiveDefiniteMatrix on zero-diagonal factors.
     TEST(CholeskyLinalgTest, NegativeValidationAndErrorOrdering)
     {
         std::array<double, 4> mat = {1.0, 0.0, 0.0, 1.0};
         std::array<double, 2> vec = {1.0, 2.0};
         std::array<double, 9> wrong_mat{};
 
+        // Null/empty and non-square/mismatched dimension errors fire before reading matrix entries.
         EXPECT_EQ(
             cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<double>(nullptr, 0, 0)).error().code(),
             GprErrorCode::EmptyInput
@@ -254,12 +295,14 @@ namespace
             GprErrorCode::LengthMismatch
         );
 
+        // NaN inside the lower triangle must return NonFiniteInput.
         mat[1] = std::numeric_limits<double>::quiet_NaN();
         EXPECT_EQ(
             cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<double>(mat.data(), 2, 2)).error().code(),
             GprErrorCode::NonFiniteInput
         );
 
+        // Zero diagonal in a supplied Cholesky factor must fail strict positive-definiteness checks.
         mat = {1.0, 0.0, 0.0, 0.0};
         EXPECT_EQ(
             cxxgpr::linalg::log_det_from_l(MatrixRef<double>(mat.data(), 2, 2)).error().code(),

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file objective.hpp
+/// @brief Abstract hyperparameter optimization objective hierarchy, result types, and traits.
+/// @details Defines Objective, Differentiable, and TwiceDifferentiable operating in log-theta space
+/// alongside open user-space Interval bounds, plus OptimizerResult, RestartConfig, and OptimizerTraits.
 #pragma once
 
 #include "cxxgpr/core/error.hpp"
@@ -10,71 +14,121 @@
 #include <span>
 #include <vector>
 
+/// @brief Hyperparameter optimization interfaces, coordinate transforms, and solver implementations.
 namespace cxxgpr::optimizer
 {
 
-    /// Base optimization objective operating in unconstrained log-theta parameter space, with open
-    /// parameter bounds provided in user space via fill_intervals().
+    /// @brief Base optimization objective operating in log-theta parameter space with user-unit open bounds.
+    /// @details Exposes parameter dimension, scalar objective evaluation, optional incremental evaluation
+    /// for single-coordinate steps, and open parameter intervals via fill_intervals().
     class Objective
     {
     public:
+        /// @brief Default-constructs an objective interface instance.
+        /// @details Provided for derived objective classes.
         Objective() = default;
+        /// @brief Copy-constructs an objective interface instance.
+        /// @details Defaults copy construction for derived objectives.
         Objective(const Objective&) = default;
+        /// @brief Copy-assigns an objective interface instance.
+        /// @details Defaults copy assignment for derived objectives.
+        /// @return Reference to this Objective.
         Objective& operator=(const Objective&) = default;
+        /// @brief Move-constructs an objective interface instance.
+        /// @details Defaults move construction for derived objectives.
         Objective(Objective&&) noexcept = default;
+        /// @brief Move-assigns an objective interface instance.
+        /// @details Defaults move assignment for derived objectives.
+        /// @return Reference to this Objective.
         Objective& operator=(Objective&&) noexcept = default;
+        /// @brief Virtual destructor for polymorphic objective implementations.
+        /// @details Allows safe deletion of derived objective objects via base pointers or references.
         virtual ~Objective() = default;
 
-        /// Returns the number of scalar log-space parameters.
+        /// @brief Returns the number of scalar log-space parameters.
+        /// @details Defines the expected length of parameter, gradient, and interval spans.
+        /// @return Objective parameter count.
         [[nodiscard]] virtual std::size_t dim() const noexcept = 0;
 
-        /// Evaluates the scalar objective at log-space parameter vector params.
+        /// @brief Evaluates the scalar objective at log-space parameter vector params.
+        /// @details Implementations evaluate the negative marginal log-likelihood or custom loss at params.
+        /// @param params Log-space parameter vector of length dim().
+        /// @return Finite objective value on success, or GprError if evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value(std::span<const double> params) = 0;
 
-        /// Evaluates the scalar objective when only changed_indices in params changed relative to
-        /// the previous evaluation; defaults to value(params).
+        /// @brief Evaluates the scalar objective when only changed_indices in params changed since the last step.
+        /// @details Optimizers supporting incremental coordinate proposals (such as FastSimulatedAnnealing)
+        /// supply changed_indices so objectives backed by LeafCache recompute only dirty leaves; defaults
+        /// to calling value(params).
+        /// @param params Candidate log-space parameter vector of length dim().
+        /// @param changed_indices Non-empty list of parameter indices modified relative to the previous call.
+        /// @return Finite objective value on success, or GprError if evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_at_changes(
             std::span<const double> params, [[maybe_unused]] std::span<const std::size_t> changed_indices
         )
         {
+            // Fall back to full objective evaluation when derived classes do not cache per-leaf state.
             return value(params);
         }
 
-        /// Fills out with the open Interval (lo, hi) in user units for each parameter.
+        /// @brief Fills out with the open Interval (lo, hi) in user units for each parameter.
+        /// @details Optimizer LogBounds transforms each interval via (log(lo), log(hi)) into unconstrained
+        /// logit coordinates; implementations must enforce out.size() == dim().
+        /// @param out Destination span of length dim() receiving open user-space parameter intervals.
+        /// @return Empty expected on success, or GprError on length mismatch or invalid bounds.
         [[nodiscard]] virtual std::expected<void, GprError> fill_intervals(std::span<Interval> out) const = 0;
     };
 
-    /// Objective additionally providing exact first-order analytical gradients in log-theta space.
+    /// @brief Objective additionally providing exact first-order analytical gradients in log-theta space.
+    /// @details Required by gradient-based first-order solvers such as Lbfgs.
     class Differentiable : public Objective
     {
     public:
-        /// Writes the gradient wrt log-space params into out_grad.
+        /// @brief Writes the analytical gradient with respect to log-space params into out_grad.
+        /// @details Both params and out_grad must have length dim().
+        /// @param params Log-space parameter vector of length dim().
+        /// @param out_grad Destination span of length dim() receiving d(value)/d(params).
+        /// @return Empty expected on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<void, GprError> gradient_into(
             std::span<const double> params, std::span<double> out_grad
         ) = 0;
 
-        /// Evaluates both objective value and gradient into out_grad in a single pass.
+        /// @brief Evaluates both objective value and gradient into out_grad in a single pass.
+        /// @details Shares the Cholesky factorization between objective value and gradient evaluation.
+        /// @param params Log-space parameter vector of length dim().
+        /// @param out_grad Destination span of length dim() receiving d(value)/d(params).
+        /// @return Scalar objective value on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_and_gradient_into(
             std::span<const double> params, std::span<double> out_grad
         ) = 0;
     };
 
-    /// Differentiable objective additionally providing second-order Hessian matrices in log-theta
-    /// space.
+    /// @brief Differentiable objective additionally providing second-order Hessian matrices in log-theta space.
+    /// @details Required by second-order Newton/trust-region solvers such as TrustRegion.
     class TwiceDifferentiable : public Differentiable
     {
     public:
-        /// Writes the symmetric dim x dim Hessian matrix (row/col-major flattened) into out_hess.
+        /// @brief Writes the symmetric dim x dim Hessian matrix (row/col-major flattened) into out_hess.
+        /// @details Entry (i, j) is stored at (i * dim()) + j (and symmetrically at (j * dim()) + i).
+        /// @param params Log-space parameter vector of length dim().
+        /// @param out_hess Destination span of length dim() * dim() receiving d^2(value)/(dtheta_i dtheta_j).
+        /// @return Empty expected on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<void, GprError> hessian_into(
             std::span<const double> params, std::span<double> out_hess
         ) = 0;
 
-        /// Evaluates value, gradient, and Hessian together; defaults to value_and_gradient_into +
-        /// hessian_into.
+        /// @brief Evaluates value, gradient, and Hessian together; defaults to sequential calls.
+        /// @details Evaluates value_and_gradient_into(params, out_grad) first and then hessian_into(params, out_hess);
+        /// derived GPR objectives override this to reuse a single Cholesky factor across all three outputs.
+        /// @param params Log-space parameter vector of length dim().
+        /// @param out_grad Destination span of length dim() receiving the log-space gradient.
+        /// @param out_hess Destination span of length dim() * dim() receiving the symmetric Hessian.
+        /// @return Scalar objective value on success, or GprError if gradient or Hessian evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_gradient_hessian_into(
             std::span<const double> params, std::span<double> out_grad, std::span<double> out_hess
         )
         {
+            // Default implementation delegates sequentially to value+gradient and Hessian evaluations.
             auto val = value_and_gradient_into(params, out_grad);
             if (!val.has_value())
             {
@@ -88,38 +142,50 @@ namespace cxxgpr::optimizer
         }
     };
 
-    /// Outcome returned by an optimizer run in log-theta space.
+    /// @brief Outcome returned by an optimizer run in log-theta space.
+    /// @details Holds the best feasible log-space parameter vector, corresponding objective value,
+    /// completed iteration count, and convergence status.
     struct OptimizerResult
     {
-        /// Best log-space parameter vector found.
+        /// @brief Best log-space parameter vector found.
         std::vector<double> params;
-        /// Objective value at params.
+        /// @brief Objective value at params.
         double value{0.0};
-        /// Number of optimization iterations performed.
+        /// @brief Number of optimization iterations performed.
         std::size_t iterations{0};
-        /// True if the optimizer satisfied its convergence criterion.
+        /// @brief True if the optimizer satisfied its convergence criterion.
         bool converged{false};
 
-        /// Checks value equality between two OptimizerResult instances.
+        /// @brief Checks value equality between two OptimizerResult instances.
+        /// @details Compares params, value, iterations, and converged.
+        /// @param other OptimizerResult instance to compare against.
+        /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const OptimizerResult& other) const noexcept = default;
     };
 
-    /// Configuration for deterministic multi-start optimization restarts.
+    /// @brief Configuration for deterministic multi-start optimization restarts.
+    /// @details Controls how many extra log-uniform random starting points are explored using
+    /// Xoshiro256PlusPlus seeded from seed.
     struct RestartConfig
     {
-        /// Number of additional random starting points beyond the caller-supplied initial point.
+        /// @brief Number of additional random starting points beyond the caller-supplied initial point.
         std::size_t count{0};
-        /// Seed for Xoshiro256++ deterministic restart point sampling.
+        /// @brief Seed for Xoshiro256++ deterministic restart point sampling.
         std::uint64_t seed{0};
 
-        /// Checks value equality between two RestartConfig instances.
+        /// @brief Checks value equality between two RestartConfig instances.
+        /// @details Compares both count and seed.
+        /// @param other RestartConfig instance to compare against.
+        /// @return True if both restart configuration fields match.
         [[nodiscard]] constexpr bool operator==(const RestartConfig& other) const noexcept = default;
     };
 
-    /// Compile-time traits describing optimizer behavior.
+    /// @brief Compile-time traits describing optimizer behavior.
+    /// @details Reads O::uses_change_indices to report whether optimizer O uses single-coordinate updates.
+    /// @tparam O Optimizer type declaring static constexpr bool uses_change_indices.
     template <typename O> struct OptimizerTraits
     {
-        /// True when the optimizer evaluates single-coordinate proposals via value_at_changes().
+        /// @brief True when the optimizer evaluates single-coordinate proposals via value_at_changes().
         static constexpr bool uses_change_indices = O::uses_change_indices;
     };
 

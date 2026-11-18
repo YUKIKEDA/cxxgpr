@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-03, DES-02
+/// @file checked_test.cpp
+/// @brief Unit tests for overflow-checked index arithmetic and input validation helpers.
+/// @details Verifies checked_add, checked_mul, column_major_len, packed_len, require_count,
+/// require_finite, and the strict validation precedence enforced by validate_training,
+/// validate_distance_targets, validate_query, and validate_matrix.
+
 #include "cxxgpr/core/checked.hpp"
 
 #include <gtest/gtest.h>
@@ -8,31 +15,37 @@
 #include <limits>
 #include <vector>
 
-// Spec: REQ-03, DES-02
 namespace
 {
 
+    /// @brief Verifies overflow detection in checked arithmetic and packed triangular length calculations.
+    /// @details Checks boundary arithmetic at SIZE_MAX, zero-extent rejections in column_major_len, and
+    /// overflow-safe evaluation of n * (n + 1) / 2 for both odd and even SIZE_MAX neighbors.
     TEST(CheckedTest, ArithmeticRejectsOverflowAndHandlesOddEvenPackedLen)
     {
         constexpr std::size_t max_sz = std::numeric_limits<std::size_t>::max();
 
+        // Check checked_add at normal and saturating boundary values.
         EXPECT_EQ(cxxgpr::checked_add(3U, 4U), 7U);
         EXPECT_EQ(cxxgpr::checked_add(max_sz, 0U), max_sz);
         const auto add_ov = cxxgpr::checked_add(max_sz, 1U);
         ASSERT_FALSE(add_ov.has_value());
         EXPECT_EQ(add_ov.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
 
+        // Check checked_mul with zero identity and wrap-around overflow.
         EXPECT_EQ(cxxgpr::checked_mul(3U, 4U), 12U);
         EXPECT_EQ(cxxgpr::checked_mul(max_sz, 0U), 0U);
         const auto mul_ov = cxxgpr::checked_mul(max_sz, 2U);
         ASSERT_FALSE(mul_ov.has_value());
         EXPECT_EQ(mul_ov.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
 
+        // Verify column_major_len rejects zero extents before checking multiplication overflow.
         EXPECT_EQ(cxxgpr::column_major_len(3U, 2U), 6U);
         EXPECT_EQ(cxxgpr::column_major_len(0U, 2U).error().code(), cxxgpr::GprErrorCode::EmptyInput);
         EXPECT_EQ(cxxgpr::column_major_len(3U, 0U).error().code(), cxxgpr::GprErrorCode::EmptyInput);
         EXPECT_EQ(cxxgpr::column_major_len(max_sz, 2U).error().code(), cxxgpr::GprErrorCode::SizeOverflow);
 
+        // Verify packed_len exact values for small sizes.
         EXPECT_EQ(cxxgpr::packed_len(0U), 0U);
         EXPECT_EQ(cxxgpr::packed_len(1U), 1U);
         EXPECT_EQ(cxxgpr::packed_len(2U), 3U);
@@ -45,11 +58,15 @@ namespace
         EXPECT_EQ(cxxgpr::packed_len(max_sz - 1U).error().code(), cxxgpr::GprErrorCode::SizeOverflow);
     }
 
+    /// @brief Verifies require_count diagnostic wording and require_finite acceptance of subnormals.
+    /// @details Confirms exact LengthMismatch error text, acceptance of signed zeros and IEEE 754
+    /// subnormals in float and double, and NonFiniteInput rejection for NaN and +/-Inf.
     TEST(CheckedTest, RequireCountAndFiniteRespectMessagesAndSubnormals)
     {
         const auto count_ok = cxxgpr::require_count(3U, 3U, "kernel parameters");
         EXPECT_TRUE(count_ok.has_value());
 
+        // Check diagnostic message format for parameter count mismatches.
         const auto count_err = cxxgpr::require_count(2U, 3U, "kernel parameters");
         ASSERT_FALSE(count_err.has_value());
         EXPECT_EQ(count_err.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
@@ -70,6 +87,7 @@ namespace
         };
         EXPECT_TRUE(cxxgpr::require_finite(valid_f).has_value());
 
+        // Negative control: NaN, +Inf, and -Inf must trigger NonFiniteInput in both precisions.
         for (const double non_finite :
             {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
                 -std::numeric_limits<double>::infinity()})
@@ -86,9 +104,14 @@ namespace
         EXPECT_EQ(err_f.error().code(), cxxgpr::GprErrorCode::NonFiniteInput);
     }
 
+    /// @brief Verifies validate_training enforces the strict total error precedence order.
+    /// @details Supplies compound-invalid inputs at every tier so higher-priority errors must supersede
+    /// lower-priority ones: EmptyInput > SizeOverflow > LengthMismatch > DimensionMismatch >
+    /// NonFiniteInput > InsufficientData.
     TEST(CheckedTest, ValidateTrainingEnforcesStrictTotalValidationOrder)
     {
         constexpr std::size_t max_sz = std::numeric_limits<std::size_t>::max();
+        // Choosing 2^(bits/2) makes n_rows * n_rows overflow size_t while keeping n_rows * 2 valid.
         constexpr std::size_t gram_overflow_n = std::size_t{1} << (sizeof(std::size_t) * 4U);
         const double nan_val = std::numeric_limits<double>::quiet_NaN();
         const std::array<double, 1> nan_one{nan_val};
@@ -158,6 +181,9 @@ namespace
         EXPECT_TRUE(cxxgpr::validate_training(valid_subnormals, 1U, 2U, finite_one, 2U, 1U).has_value());
     }
 
+    /// @brief Verifies error ordering for validate_distance_targets, validate_query, and validate_matrix.
+    /// @details Tests compound violations for distance-mode target checks, query feature validation, and
+    /// generic column-major matrix validation, plus positive acceptance of valid subnormals.
     TEST(CheckedTest, ValidateDistanceTargetsAndQueryEnforceExactOrdering)
     {
         constexpr std::size_t gram_overflow_n = std::size_t{1} << (sizeof(std::size_t) * 4U);
@@ -204,6 +230,7 @@ namespace
         EXPECT_EQ(cxxgpr::validate_matrix(inf_two, max_sz, 2U).error().code(), cxxgpr::GprErrorCode::SizeOverflow);
         EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 1U, 3U).error().code(), cxxgpr::GprErrorCode::LengthMismatch);
         EXPECT_EQ(cxxgpr::validate_matrix(inf_two, 1U, 2U).error().code(), cxxgpr::GprErrorCode::NonFiniteInput);
+        // Subnormal matrix entries remain valid when all dimensions match.
         const std::array<double, 2> valid_subnormal_mat{
             std::numeric_limits<double>::denorm_min(),
             2.0,

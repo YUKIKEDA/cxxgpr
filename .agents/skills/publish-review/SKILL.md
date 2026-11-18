@@ -45,7 +45,7 @@ Read as a C++23 library user who only sees the repository landing page, build fi
 
 1. **Third-party or internal header leakage**: Any file under `include/cxxgpr/**/*.hpp` includes `<Eigen/...>`, `<nlohmann/...>`, `<omp.h>`, any `detail/` header, or any path under `src/`.
 2. **Internal tracking IDs or local paths exposed**: Public Doxygen comments in `include/cxxgpr/**/*.hpp`, `README.md`, or `README.ja.md` contain internal spec/roadmap/issue identifiers (`REQ-*`, `DES-*`, `FMT-*`, `QA-*`, `M*-*`, `#N`) or hardcoded local filesystem paths (`C:\Users\...`, `/home/...`).
-3. **Missing or non-English Doxygen comments**: Any public type, enum, enumerator, or function under `include/cxxgpr/**/*.hpp` lacks English `///` or `/**` Doxygen documentation, or contains non-English prose in header comments.
+3. **Missing, non-English, or commandless Doxygen comments**: Any C++ file (`include/cxxgpr/**/*.hpp`, `src/**/*.{hpp,cpp}`, `tests/**/*.{hpp,cpp}`, `benchmarks/**/*.cpp`, `qa/**/*.cpp`) lacks `/// @file` / `/// @brief`, any type, enum, enumerator, member, function, or test lacks `///` Doxygen documentation with `@brief` (plus `@tparam`, `@param`, and `@return` where applicable), or any C++ comment contains non-English prose.
 4. **API contract inaccuracy**: Documentation contradicts actual API signatures or contracts, including:
    - Column-major (`column-major`) storage layout for matrices passed via `std::span<const double>` (`x`, `n_rows`, `n_cols`);
    - `Gpr::fit(...)` and `Gpr::factor(...)` being `const` member functions returning `[[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError>` without throwing exceptions across the API boundary and leaving `*this` and output arguments unchanged on failure;

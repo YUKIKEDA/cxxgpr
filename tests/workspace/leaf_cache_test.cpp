@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-08, DES-11
+/// @file leaf_cache_test.cpp
+/// @brief Unit and property tests for LeafCache incremental evaluation and OpenMP determinism.
+/// @details Verifies optimizer_uses_change_indices_v trait detection, strict bitwise parameter
+/// change verification including signed-zero sensitivity, incremental leaf reuse and poisoning
+/// proof under NoAllocationScope, and bitwise thread-count invariance under OpenMP.
 
 #include "cxxgpr/workspace/workspace.hpp"
 
@@ -21,20 +26,27 @@
 namespace
 {
 
+    /// @brief Dummy optimizer tag lacking uses_change_indices for trait verification.
     struct DummyNormalOptimizer
     {
     };
 
+    /// @brief Dummy optimizer tag opting into incremental LeafCache updates via uses_change_indices.
     struct DummyFsaOptimizer
     {
+        /// @brief Opt-in flag enabling change-index tracking in optimizer traits.
         static constexpr bool uses_change_indices = true;
     };
 
     static_assert(!cxxgpr::optimizer_uses_change_indices_v<DummyNormalOptimizer>);
     static_assert(cxxgpr::optimizer_uses_change_indices_v<DummyFsaOptimizer>);
 
+    /// @brief Negative and positive controls for require_change_indices() and bitwise dirty tracking.
+    /// @details Confirms empty/out-of-range/duplicate index rejection, undeclared parameter mutation
+    /// detection (including +0.0 vs -0.0 bit flips), and clean-leaf preservation on likelihood updates.
     TEST(LeafCacheTest, RequireChangeIndicesAndBitwiseChecksRejectInvalidSteps)
     {
+        // Reject empty, out-of-range, and duplicate parameter-change index spans.
         EXPECT_EQ(
             cxxgpr::require_change_indices(std::span<const std::size_t>{}, 3U).error().code(),
             cxxgpr::GprErrorCode::IndexOutOfRange
@@ -87,6 +99,9 @@ namespace
         EXPECT_FALSE(cache.is_leaf_dirty(1U));
     }
 
+    /// @brief Verifies incremental leaf evaluation matches full evaluation with zero allocations.
+    /// @details Runs initial full evaluation, single-leaf update under NoAllocationScope matching
+    /// apply_points(), and a leaf-poisoning mutation proving clean cached leaf Grams are reused.
     TEST(LeafCacheTest, IncrementalEvaluationMatchesFullAndSkipsCleanLeavesZeroAlloc)
     {
         const std::vector<double> x_data{0.0, 0.5, 1.3, -0.4, 0.7, 1.1};
@@ -199,8 +214,12 @@ namespace
         EXPECT_GT(out_inc[0], 50.0);
     }
 
+    /// @brief Verifies OpenMP parallel distance and kernel evaluation is bitwise deterministic.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns across DistanceCache, apply_points(),
+    /// apply_cached(), grad_cached(), and apply_cross_points() between 1 and 4 OpenMP threads.
     TEST(LeafCacheTest, OpenMpColumnParallelEvaluationIsBitwiseDeterministic)
     {
+        // Generate a 72x3 non-trivial point grid to exercise multi-block OpenMP scheduling.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 3U;
         std::vector<double> x_data(n * d);

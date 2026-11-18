@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file optimizer.hpp
+/// @brief Umbrella header aggregating all public cxxgpr hyperparameter optimizer headers.
+/// @details Includes log-space bounds transforms, objective hierarchy, Fixed, FastSimulatedAnnealing,
+/// Lbfgs, NelderMead, and TrustRegion solvers.
 #pragma once
 
 #include "cxxgpr/optimizer/bounds.hpp"

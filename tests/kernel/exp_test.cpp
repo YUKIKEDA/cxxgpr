@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-11, DES-08
+/// @file exp_test.cpp
+/// @brief Unit and property tests for fast exponential approximation and kernel exp jet derivatives.
+/// @details Verifies KernelExp::FastApprox scalar accuracy against Accurate in double and float
+/// across [-50, 0] and extreme values, jet first/second derivative consistency, compiled kernel
+/// FastApprox self-consistency against finite differences, and DistanceKernel support.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -14,10 +19,15 @@
 namespace
 {
 
+    /// @brief Computes a column-major pairwise squared Euclidean distance matrix.
+    /// @details Evaluates ||x_i - x_j||_2^2 for validating DistanceKernel under FastApprox.
+    /// @param x Column-major n x d coordinate matrix.
+    /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {
         const std::size_t n = x.rows();
         std::vector<double> d2(n * n, 0.0);
+        // Accumulate squared differences across all dimensions.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -34,10 +44,16 @@ namespace
         return d2;
     }
 
+    /// @brief Computes a column-major matrix of per-dimension squared coordinate differences.
+    /// @details Evaluates (x_{i,dim} - x_{j,dim})^2 for binding ArdDistance slots in exp tests.
+    /// @param x Column-major n x d coordinate matrix.
+    /// @param dim Zero-based coordinate dimension index.
+    /// @return Column-major n x n vector of single-dimension squared differences.
     std::vector<double> make_dim_sq_diff(cxxgpr::MatrixRef<double> x, std::size_t dim)
     {
         const std::size_t n = x.rows();
         std::vector<double> out(n * n, 0.0);
+        // Store squared difference along the selected feature column.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -51,8 +67,12 @@ namespace
         return out;
     }
 
+    /// @brief Verifies double-precision FastApprox exponential accuracy across [-50, 0] and extremes.
+    /// @details Checks relative error < 1.2e-7 against KernelExp::Accurate and probes exact 0.0,
+    /// underflow (-800), overflow (+800), and quiet NaN IEEE-754 edge inputs.
     TEST(KernelExpTest, FastApproxDoubleAccuracyAndExtremes)
     {
+        // Sweep negative kernel arguments [-50, 0] and check relative error against std::exp oracle.
         for (int i = 0; i <= 500; ++i)
         {
             const double x = -0.1 * static_cast<double>(i);
@@ -63,6 +83,7 @@ namespace
             EXPECT_LT(rel, 1.2e-7) << "x=" << x;
         }
 
+        // Probe IEEE-754 boundary cases: identity at 0, underflow to 0, overflow to +inf, NaN pass-through.
         EXPECT_DOUBLE_EQ(cxxgpr::eval_kernel_exp(0.0, cxxgpr::KernelExp::FastApprox), 1.0);
         EXPECT_DOUBLE_EQ(cxxgpr::eval_kernel_exp(-800.0, cxxgpr::KernelExp::FastApprox), 0.0);
         EXPECT_TRUE(std::isinf(cxxgpr::eval_kernel_exp(800.0, cxxgpr::KernelExp::FastApprox)));
@@ -71,8 +92,11 @@ namespace
         );
     }
 
+    /// @brief Verifies single-precision FastApprox exponential accuracy across [-50, 0] and extremes.
+    /// @details Checks relative error < 1.0e-6F above subnormal range and probes 0, -120, +120, and NaN.
     TEST(KernelExpTest, FastApproxFloatAccuracyAndExtremes)
     {
+        // Sweep [-50, 0] in single precision excluding subnormal underflow regime.
         for (int i = 0; i <= 500; ++i)
         {
             const float x = -0.1F * static_cast<float>(i);
@@ -85,6 +109,7 @@ namespace
             }
         }
 
+        // Probe single-precision edge arguments: 0.0F, underflow, overflow, and quiet NaN.
         EXPECT_FLOAT_EQ(cxxgpr::eval_kernel_exp(0.0F, cxxgpr::KernelExp::FastApprox), 1.0F);
         EXPECT_FLOAT_EQ(cxxgpr::eval_kernel_exp(-120.0F, cxxgpr::KernelExp::FastApprox), 0.0F);
         EXPECT_TRUE(std::isinf(cxxgpr::eval_kernel_exp(120.0F, cxxgpr::KernelExp::FastApprox)));
@@ -93,8 +118,11 @@ namespace
         );
     }
 
+    /// @brief Verifies FastApprox exponential jet first and second derivatives match finite differences.
+    /// @details Checks eval_kernel_exp_jet() d1 and d2 values against central differences of v and d1.
     TEST(KernelExpTest, ExpJetDerivativesMatchFiniteDifferences)
     {
+        // Compare analytical jet derivatives d1 and d2 against central finite differences.
         constexpr double h = 1e-5;
         for (double x : {-12.3, -2.5, -0.37, 0.0})
         {
@@ -108,11 +136,15 @@ namespace
         }
     }
 
+    /// @brief Verifies CompiledKernel FastApprox value parity and analytical derivative consistency.
+    /// @details Evaluates nine built-in exponential kernel families under Accurate and FastApprox,
+    /// checks parameter roundtrip, and compares FastApprox gradients and Hessians to finite differences.
     TEST(KernelExpTest, CompiledKernelFastApproxGradAndHessSelfConsistent)
     {
         const std::vector<double> x_data{0.0, 0.4, 1.2, -0.7, 0.2, 0.9, -0.4, 1.5};
         const cxxgpr::MatrixRef<double> x(x_data.data(), 4, 2, 4);
 
+        // Cover every isotropic and ARD kernel family whose evaluation invokes eval_kernel_exp.
         const std::vector<cxxgpr::KernelSpec> specs{
             cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value()),
             cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array<double, 2>{0.9, 1.4}).value()),
@@ -175,11 +207,13 @@ namespace
             ASSERT_TRUE(ck.set_params(theta_copy).has_value());
             std::vector<double> theta_rt(np);
             ASSERT_TRUE(ck.get_params(theta_rt).has_value());
+            // Verify parameter roundtrip stays bit-exact after setting FastApprox.
             for (std::size_t p = 0; p < np; ++p)
             {
                 EXPECT_DOUBLE_EQ(theta_rt[p], theta[p]);
             }
 
+            // Verify FastApprox gradients and Hessians match central finite differences.
             for (std::size_t p = 0; p < np; ++p)
             {
                 ASSERT_TRUE(ck
@@ -264,6 +298,9 @@ namespace
         }
     }
 
+    /// @brief Verifies DistanceKernel supports FastApprox across scalar and ARD distance slots.
+    /// @details Evaluates a ScalarDistance RBF * ArdDistance RationalQuadratic product under both
+    /// FastApprox and Accurate modes and checks gradient consistency via central finite differences.
     TEST(KernelExpTest, CompiledDistanceKernelFastApproxArdAndScalar)
     {
         const std::vector<double> x_data{0.1, 0.5, 1.3, -0.3, 0.4, 1.1};
@@ -276,6 +313,7 @@ namespace
             cxxgpr::MatrixRef<double>(ard1.data(), 3, 3, 3),
         };
 
+        // Construct a supplied-distance product tree and switch it to FastApprox mode.
         cxxgpr::ScalarDistance sdist;
         auto ard_dist = cxxgpr::ArdDistance::create(2).value();
         auto dk = sdist.rbf(cxxgpr::RbfKernel::create(1.0).value())

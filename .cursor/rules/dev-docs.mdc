@@ -1,7 +1,7 @@
 ---
 description: 文書・図・数式・Doxygen の形式
 alwaysApply: false
-globs: "docs/**/*.md,include/**/*.hpp"
+globs: "docs/**/*.md,include/**/*.hpp,src/**/*.{hpp,cpp},tests/**/*.{hpp,cpp},benchmarks/**/*.cpp,qa/**/*.cpp"
 ---
 
 # 文書と Doxygen の形式
@@ -9,5 +9,44 @@ globs: "docs/**/*.md,include/**/*.hpp"
 - 日本語文書（`docs/`）の図は `mermaid` コードブロックで描き、ASCII アート図を使わない（ディレクトリ木や式ブロックは除く）。
 - 数式は行内 `$...$`、別行 `$$...$$` を使う。`\(` `\[` を使わず、コードブロック内に `$` を入れない。
 - スクリプト等で LaTeX・正規表現を含む文書を書く際は、エスケープ欠落による `\t` / `\f` 等の制御文字混入がないか検証する。
-- 公開ヘッダ（`include/cxxgpr/`）の Doxygen コメント（`///`）は **英語** で書く。`REQ-`・`DES-`・`FMT-`・`QA-`・`M0-`・`M1-` といった内部トラッキング ID を公開 API の Doxygen に書かない（追跡用 ID は `tests/` や検証記録へ置く）。
+- 全 C++ ファイル（`include/`・`src/`・`tests/`・`benchmarks/`・`qa/`）の Doxygen コメントおよびインラインコメントは **英語** で書き、`///` トリプルスラッシュと `@` コマンド（`@file`・`@brief`・`@details`・`@tparam`・`@param`・`@return`・`@retval`・`@note` 等）を使う。
+- 全てのファイル先頭（`// SPDX-License-Identifier: Apache-2.0` 直後）に `/// @file <basename>` と `/// @brief ...` を置く。
+- 名前空間・クラス・構造体・共用体・コンセプト・`using` 別名・定数・列挙型および**全列挙子**・メンバ変数（private 含む）・関数・メソッド・コンストラクタ・デストラクタ・演算子・GoogleTest ケースへ Doxygen コメントを付ける。テンプレートには全 `@tparam`、仮引数のある関数には全 `@param`、非 `void` 関数（コンストラクタ・デストラクタ除く）には `@return`（`std::expected` 返却時は `@retval` も推奨）を揃える。
+- 非自明な関数本体には、検証順・数式・アルゴリズムの段階・ゼロ確保や巻き戻しの不変条件を説明する英語インラインコメント（`// ...`）を書く。
+- `include/cxxgpr/` および `src/` のコメントへ `REQ-`・`DES-`・`FMT-`・`QA-`・`M0-`〜`M6-`・`REL-` といった内部トラッキング ID やローカル絶対パスを書かない（追跡用 ID は `tests/` の `// Spec:` や検証記録へ置く）。
 - 日本語文書は常体で書き、`.agents/skills/natural-japanese/SKILL.md` の基準で確認する。
+
+```cpp
+// BAD: ファイルヘッダ・コマンド・列挙子・メンバ・引数/戻り値・インライン説明が欠落
+/// Error categories.
+enum class GprErrorCode { EmptyInput, SizeOverflow };
+
+// GOOD: /// と @ コマンドを用い、列挙子・メンバ・全引数・戻り値・内部手順を明記する
+/// @file error.hpp
+/// @brief Error category definitions.
+
+/// @brief Error categories returned by public APIs.
+enum class GprErrorCode
+{
+    /// @brief Input matrix or vector is empty.
+    EmptyInput,
+    /// @brief Dimension multiplication overflowed std::size_t.
+    SizeOverflow,
+};
+
+/// @brief Computes scaled element product.
+/// @tparam T Floating-point scalar type.
+/// @param scale Positive multiplier in user units.
+/// @return Scaled result or GprError on invalid input.
+/// @retval GprErrorCode::InvalidHyperparameter When scale <= 0.
+template <typename T>
+std::expected<T, GprError> scale_value(T scale)
+{
+    // Guard against non-finite or non-positive scales before multiplying.
+    if (!std::isfinite(scale) || scale <= T{0})
+    {
+        return std::unexpected(GprError::invalid_hyperparameter("scale must be positive"));
+    }
+    return scale;
+}
+```

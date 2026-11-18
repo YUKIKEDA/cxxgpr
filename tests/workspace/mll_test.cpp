@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-08, DES-13, DES-15, DES-17, DES-20
+/// @file mll_test.cpp
+/// @brief Unit and property tests for MLL, analytical gradients, Hessians, and FitBuffers policies.
+/// @details Verifies workspace buffer sizing and QueryWorkspace zero-alloc reuse, KeepPlan
+/// log-marginal-likelihood and analytical gradient/Hessian parity against central finite
+/// differences across cache and Cholesky buffer policies, Single/MixedPrecision parity, and
+/// bitwise determinism across OpenMP thread counts.
 
 #include "cxxgpr/workspace/workspace.hpp"
 
@@ -21,8 +27,12 @@
 namespace
 {
 
+    /// @brief Verifies FitBuffers/WorkspaceCore sizing policies and QueryWorkspace zero-alloc reuse.
+    /// @details Checks EmptyInput on zero size, Retain vs Reuse W-matrix and distance buffer flags,
+    /// and zero heap allocations on QueryWorkspace::ensure() when capacity is already sufficient.
     TEST(WorkspaceMllTest, BufferSizingAndQueryWorkspaceReuse)
     {
+        // Reject zero training sample count before allocating any workspace buffers.
         EXPECT_EQ(
             cxxgpr::WorkspaceCore<cxxgpr::DoublePrecision>::create(0U).error().code(), cxxgpr::GprErrorCode::EmptyInput
         );
@@ -55,6 +65,10 @@ namespace
         }
     }
 
+    /// @brief Verifies KeepPlan MLL and analytical gradients match finite differences with zero alloc.
+    /// @details Sweeps all four combinations of DistanceCachePolicy and CholeskyBuffer across a
+    /// multi-product composite kernel, verifying factor restoration in Reuse mode, zero-alloc
+    /// re-evaluation under NoAllocationScope, and gradient parity against central finite differences.
     TEST(WorkspaceMllTest, KeepPlanMllAndAnalyticalGradientMatchFiniteDifferences)
     {
         const std::vector<double> x_data{0.0, 0.4, 0.9, 1.4, -0.3, 0.2, 0.8, 1.5, -0.6, 0.1};
@@ -62,6 +76,7 @@ namespace
         constexpr std::size_t n = 5U;
         const cxxgpr::MatrixRef<double> x(x_data.data(), n, 2U, n);
 
+        // Multi-product sum kernel triggering KeepPlan intermediate product caching alongside White noise.
         const auto spec =
             (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.4).value())
                 * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
@@ -173,8 +188,12 @@ namespace
         }
     }
 
+    /// @brief Verifies SinglePrecision and MixedPrecision<PromoteStorage> produce identical MLL and gradients.
+    /// @details Confirms both policies execute mll_and_gradient_into() on identical float training
+    /// data and agree bitwise on MLL and parameter gradient entries when float solves match.
     TEST(WorkspaceMllTest, SingleAndMixedPrecisionSupportMllAndGradient)
     {
+        // Evaluate MLL and gradient in float storage under SinglePrecision and MixedPrecision<PromoteStorage>.
         const std::vector<float> x_data{0.0F, 0.6F, 1.3F, -0.2F, 0.5F, 1.1F};
         const std::vector<float> y{0.4F, 1.0F, 0.2F};
         constexpr std::size_t n = 3U;
@@ -202,8 +221,12 @@ namespace
         }
     }
 
+    /// @brief Verifies MLL and analytical gradients are bit-identical across 1 and 4 OpenMP threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns of every gradient entry and final MLL
+    /// on an n = 72 composite kernel under FastApprox across single- and multi-threaded OpenMP runs.
     TEST(WorkspaceMllTest, MllAndGradientAreBitwiseDeterministicAcrossOpenMpThreads)
     {
+        // Construct an n = 72 2D synthetic dataset exercising OpenMP column reductions.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 2U;
         std::vector<double> x_data(n * d);
@@ -264,8 +287,13 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical MLL Hessian matches finite differences with lazy zero-alloc buffers.
+    /// @details Checks lazy HessianWorkspace allocation for both prefer_speed() and prefer_memory(),
+    /// audits zero-allocation subsequent calls under NoAllocationScope, and confirms symmetry and
+    /// finite-difference parity against mll_and_gradient_into().
     TEST(WorkspaceMllTest, AnalyticalHessianMatchesFiniteDiffAndZeroAllocForSpeedAndMemoryPolicies)
     {
+        // Use a composite Constant * RBF + MaternARD + White system across speed and memory policies.
         const std::vector<double> x_data{0.0, 0.5, 1.1, 1.7, -0.4, 0.2, 0.9, 1.4};
         const std::vector<double> y{0.4, 1.0, 0.7, -0.3};
         constexpr std::size_t n = 4U;
@@ -370,8 +398,12 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical MLL Hessian entries are bit-identical across 1 and 4 OpenMP threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns of the full Hessian matrix between
+    /// 1-thread and 4-thread OpenMP executions on an n = 72 training set.
     TEST(WorkspaceMllTest, AnalyticalHessianIsBitwiseDeterministicAcrossOpenMpThreads)
     {
+        // Evaluate full Hessian on n = 72 points under 1 and 4 threads and compare raw bits.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 2U;
         std::vector<double> x_data(n * d);

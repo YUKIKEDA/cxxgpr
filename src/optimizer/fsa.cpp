@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file fsa.cpp
+/// @brief Implementation of Fast Simulated Annealing with Cauchy proposals and incremental updates.
+/// @details Implements Clamp and Reflect boundary projections, Ingber exponential cooling, Metropolis
+/// acceptance, bit-exact changed-index tracking for Objective::value_at_changes(), and multi-start restarts.
+
 #include "cxxgpr/optimizer/fsa.hpp"
 
 #include "cxxgpr/core/rng.hpp"
@@ -18,6 +23,14 @@ namespace cxxgpr::optimizer
     namespace
     {
 
+        /// @brief Projects a proposed coordinate back into the strict open interval (lo, hi).
+        /// @details Under BoundaryPolicy::Clamp, clamps to [nextafter(lo, hi), nextafter(hi, lo)]; under
+        /// BoundaryPolicy::Reflect, folds excess distance via a period-2*width triangle wave across lo and hi.
+        /// @param val Proposed scalar value in log-theta space.
+        /// @param lo Exclusive lower bound in log-theta space.
+        /// @param hi Exclusive upper bound in log-theta space.
+        /// @param policy Boundary projection strategy (Clamp or Reflect).
+        /// @return Projected coordinate strictly inside (lo, hi).
         [[nodiscard]] double apply_boundary(double val, double lo, double hi, BoundaryPolicy policy) noexcept
         {
             const double lo_bound = std::nextafter(lo, hi);
@@ -26,6 +39,7 @@ namespace cxxgpr::optimizer
             {
                 return std::clamp(val, lo_bound, hi_bound);
             }
+            // Reflect values outside (lo, hi) across boundaries using a periodic triangle wave of period 2 * width.
             const double width = hi - lo;
             if (val > lo && val < hi)
             {
@@ -41,6 +55,20 @@ namespace cxxgpr::optimizer
             return std::clamp(val, lo_bound, hi_bound);
         }
 
+        /// @brief Runs one single-start Fast Simulated Annealing trajectory from initial_theta.
+        /// @details Evaluates initial_theta via obj.value(), cycles through coordinates iter % d proposing
+        /// Cauchy steps temp * tan(pi * (u - 0.5)) under Ingber cooling, detects bit-exact changed indices
+        /// relative to last_eval for Objective::value_at_changes(), and accepts via Metropolis criterion.
+        /// @param obj Objective evaluated in log-theta space (supports value_at_changes()).
+        /// @param bounds Log-space open bounds for boundary projection.
+        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param max_iterations Maximum annealing steps to perform.
+        /// @param initial_temperature Positive starting annealing temperature T_0.
+        /// @param cooling_rate Non-negative Ingber cooling factor c.
+        /// @param seed Deterministic 64-bit PRNG seed for this trajectory.
+        /// @param boundary_policy Out-of-bounds projection policy (Clamp or Reflect).
+        /// @return Best parameters encountered along the trajectory, or GprError if initial eval fails.
+        /// @retval GprErrorCode::NonFiniteInput When initial evaluation yields NaN or +/-Inf.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_fsa_single(
             Objective& obj,
             const LogBounds& bounds,
@@ -68,6 +96,8 @@ namespace cxxgpr::optimizer
             std::vector<double> best_theta = current;
             double best_val = current_val;
 
+            // Track the last parameter vector actually passed to obj so incremental diffs stay exact even on rejected
+            // steps.
             std::vector<double> last_eval = current;
             std::vector<double> candidate(d);
             std::vector<std::size_t> changed_indices;
@@ -81,6 +111,7 @@ namespace cxxgpr::optimizer
             const double inv_max_iter = 1.0 / static_cast<double>(max_iterations);
             for (std::size_t iter = 0; iter < max_iterations; ++iter)
             {
+                // Ingber exponential cooling schedule T(k) = T_0 * exp(-c * (k / K)^(1 / d)) with Cauchy proposal.
                 const double progress = static_cast<double>(iter + 1U) * inv_max_iter;
                 const double temp = initial_temperature * std::exp(-cooling_rate * std::pow(progress, inv_d));
                 const std::size_t coord = iter % d;
@@ -90,6 +121,7 @@ namespace cxxgpr::optimizer
                 std::ranges::copy(current, candidate.begin());
                 candidate[coord] = apply_boundary(current[coord] + step, lo_log[coord], hi_log[coord], boundary_policy);
 
+                // Collect bit-exact differences against last_eval to satisfy LeafCache's change-index contract.
                 changed_indices.clear();
                 for (std::size_t i = 0; i < d; ++i)
                 {
@@ -99,6 +131,7 @@ namespace cxxgpr::optimizer
                     }
                 }
 
+                // Skip objective call if boundary clamping snapped candidate back identically to last_eval.
                 auto cand_res = changed_indices.empty() ? std::expected<double, GprError>(current_val)
                                                         : obj.value_at_changes(candidate, changed_indices);
                 if (!changed_indices.empty())
@@ -110,6 +143,7 @@ namespace cxxgpr::optimizer
                     continue;
                 }
 
+                // Metropolis acceptance criterion: accept all downhill moves and uphill moves with exp(-delta / temp).
                 const double cand_val = *cand_res;
                 const double delta = cand_val - current_val;
                 const bool accept = (delta <= 0.0) || (temp > 0.0 && rng.unit() < std::exp(-delta / temp));
@@ -135,6 +169,17 @@ namespace cxxgpr::optimizer
 
     }  // namespace
 
+    /// @brief Minimizes obj starting from log-space initial_params.
+    /// @details Validates initial_temperature_ > 0 and cooling_rate_ >= 0, then delegates to
+    /// detail::run_with_restarts() incrementing run_seed = seed_ + run_idx per trajectory.
+    /// @param obj Objective evaluated in log-theta space (supports value_at_changes()).
+    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @return Best OptimizerResult across the initial run and restarts, or GprError on invalid config/input.
+    /// @retval GprErrorCode::InvalidConfig When initial_temperature <= 0 or cooling_rate < 0 or non-finite.
+    /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
+    /// @retval GprErrorCode::LengthMismatch When initial_params.size() != obj.dim().
+    /// @retval GprErrorCode::NonFiniteInput When initial_params or initial objective value is non-finite.
+    /// @retval GprErrorCode::InvalidInterval When objective intervals or initial_params are out of bounds.
     std::expected<OptimizerResult, GprError> FastSimulatedAnnealing::optimize(
         Objective& obj, std::span<const double> initial_params
     ) const
@@ -147,6 +192,7 @@ namespace cxxgpr::optimizer
         {
             return std::unexpected(GprError::invalid_config("cooling_rate must be finite and non-negative"));
         }
+        // Offset per-start PRNG seed deterministically so multi-start trajectories explore distinct Cauchy sequences.
         std::size_t run_idx = 0U;
         return detail::run_with_restarts(
             obj, initial_params, restarts_, [&](const LogBounds& bounds, std::span<const double> start_theta)

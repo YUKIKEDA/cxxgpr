@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file distance.cpp
+/// @brief Supplied squared-distance slots, validation/repair stores, and compiled distance kernels.
+/// @details Implements `ScalarDistance`, `ArdDistance`, `DistanceKernel`, `DistanceSource`, `CheckedDistanceStore`,
+/// and `CompiledDistanceKernel`, including single-pass validation and `tidy(rel_tol)` repair, packed ARD lower
+/// triangles, and analytical evaluation, gradients, and Hessians.
+
 #include "cxxgpr/kernel/distance.hpp"
 
 #include "cxxgpr/core/checked.hpp"
@@ -11,14 +17,24 @@
 
 #include "kernel/leaf_eval.hpp"
 
+/// @brief Root namespace for the cxxgpr library.
 namespace cxxgpr
 {
 
     namespace
     {
 
+        /// @brief Process-wide atomic counter generating unique non-zero `SlotId` identifiers.
+        /// @details Incremented with relaxed memory order because slot IDs only need uniqueness across slots, not
+        /// cross-thread memory synchronization.
         std::atomic<std::uint64_t> g_next_slot_id{1};
 
+        /// @brief Computes the column-major packed lower-triangular index for symmetric entry `(row, col)`.
+        /// @details Normalizes `(r, c) = (max(row, col), min(row, col))` and maps to `c*n - c*(c-1)/2 + (r - c)`.
+        /// @param n Square matrix side length.
+        /// @param row Row coordinate.
+        /// @param col Column coordinate.
+        /// @return Zero-based packed lower-triangular offset.
         [[nodiscard]] constexpr std::size_t packed_lower_index(std::size_t n, std::size_t row, std::size_t col) noexcept
         {
             const std::size_t r = std::max(row, col);
@@ -27,6 +43,12 @@ namespace cxxgpr
             return ((c * n) - tri) + (r - c);
         }
 
+        /// @brief Accumulates `dst += src` over the active matrix region `uplo`.
+        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param dst Destination matrix modified in place.
+        /// @param src Summand matrix view.
+        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
             const std::size_t n_rows = dst.rows();
@@ -62,6 +84,12 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Multiplies `dst *= src` element-wise over the active matrix region `uplo`.
+        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param dst Destination matrix scaled in place.
+        /// @param src Multiplier matrix view.
+        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
             const std::size_t n_rows = dst.rows();
@@ -97,6 +125,13 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Visits coordinates `(row, col)` of an `n x n` matrix region in column-major order.
+        /// @details Invokes `fn(row, col)` across `Lower`, `Upper`, or `Full`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @tparam Fn Callable invoked as `fn(row, col)`.
+        /// @param n Square matrix side length.
+        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param fn Element visitor callback.
         template <KernelScalarConcept T, typename Fn> void visit_triangle(std::size_t n, Triangle uplo, Fn&& fn)
         {
             switch (uplo)
@@ -131,6 +166,14 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Validates that `scratch` matches `out` shape and does not alias `out`.
+        /// @details Returns `WorkspaceTooSmall` on dimension mismatch and `InvalidConfig` on pointer aliasing.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param out Reference output matrix view.
+        /// @param scratch Mutable scratch buffer view.
+        /// @return Empty expected on success, or workspace/aliasing error.
+        /// @retval GprErrorCode::WorkspaceTooSmall If `scratch` shape differs from `out`.
+        /// @retval GprErrorCode::InvalidConfig If `scratch.data() == out.data()`.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> require_scratch(MatrixRef<T> out, MatrixMut<T> scratch)
         {
@@ -145,6 +188,10 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Returns the squared Matern radial scaling factor $2\nu$ in `double`.
+        /// @details Maps `OneHalf -> 1.0`, `ThreeHalves -> 3.0`, and `FiveHalves -> 5.0`.
+        /// @param nu Matern smoothness parameter.
+        /// @return Squared radial factor $2\nu$.
         [[nodiscard]] constexpr double matern_scale_sq_d(MaternNu nu) noexcept
         {
             switch (nu)
@@ -159,6 +206,14 @@ namespace cxxgpr
             return 1.0;
         }
 
+        /// @brief Evaluates the scalar Matern radial kernel value at scaled radius $u$.
+        /// @details Returns `1` at $u \le 0$ and evaluates the smoothness polynomial times `eval_kernel_exp(-u,
+        /// exp_mode)` for positive $u$.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param u Scaled radius $u = \sqrt{2\nu\, s^2}$.
+        /// @param nu Matern smoothness parameter.
+        /// @param exp_mode Exponential evaluation backend.
+        /// @return Matern kernel value.
         template <KernelScalarConcept T> [[nodiscard]] T eval_matern_u_d(T u, MaternNu nu, KernelExp exp_mode) noexcept
         {
             if (u <= T{0})
@@ -178,9 +233,18 @@ namespace cxxgpr
             return e;
         }
 
+        /// @brief Evaluates the Matern radial log-lengthscale derivative factor $-u k'(u)$.
+        /// @details Returns `0` for $u \le 0$ (continuous zero-distance limit) and propagates `ExpJet<T>` derivatives
+        /// under `FastApprox`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param u Scaled ARD radius $u = \sqrt{2\nu\, s^2}$.
+        /// @param nu Matern smoothness parameter.
+        /// @param exp_mode Exponential evaluation backend.
+        /// @return Radial gradient factor $-u k'(u)$.
         template <KernelScalarConcept T>
         [[nodiscard]] T eval_matern_grad_g1_d(T u, MaternNu nu, KernelExp exp_mode) noexcept
         {
+            // Zero-distance limit of radial log-lengthscale derivative is 0.
             if (u <= T{0})
             {
                 return T{0};
@@ -199,6 +263,7 @@ namespace cxxgpr
                 }
                 return T{0};
             }
+            // Differentiate polynomial * exp_approx(-u) via ExpJet of exp(-u).
             const ExpJet<T> jet = eval_kernel_exp_jet(-u, exp_mode);
             switch (nu)
             {
@@ -212,6 +277,14 @@ namespace cxxgpr
             return T{0};
         }
 
+        /// @brief Evaluates the ARD Matern second-derivative radial cross coefficient $u^2 k''(u) - u k'(u)$.
+        /// @details Returns `0` for $u \le 0$ and supports both `Accurate` exact closed forms and `FastApprox`
+        /// `ExpJet<T>` propagation.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param u Scaled ARD radius $u = \sqrt{2\nu\, s^2}$.
+        /// @param nu Matern smoothness parameter.
+        /// @param exp_mode Exponential evaluation backend.
+        /// @return Radial cross coefficient for ARD Matern Hessians.
         template <KernelScalarConcept T>
         [[nodiscard]] T eval_matern_ard_cross_d(T u, MaternNu nu, KernelExp exp_mode) noexcept
         {
@@ -233,6 +306,7 @@ namespace cxxgpr
                 }
                 return T{0};
             }
+            // Combine first and second radial derivatives: u^2 * k''(u) - u * k'(u).
             const ExpJet<T> jet = eval_kernel_exp_jet(-u, exp_mode);
             switch (nu)
             {
@@ -256,10 +330,17 @@ namespace cxxgpr
             return T{0};
         }
 
+        /// @brief Fills a full symmetric square squared-distance matrix from point coordinates `x`.
+        /// @details Zeroes the diagonal and mirrors strictly lower entries into the upper triangle for coordinate
+        /// `CustomKernel` leaves mixed inside `DistanceKernel<WithPoints>`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param x Input point matrix of shape `(n, d)`.
+        /// @param dist Output square squared-distance matrix of shape `(n, n)`.
         template <KernelScalarConcept T> void fill_square_sq_dist(MatrixRef<T> x, MatrixMut<T> dist) noexcept
         {
             const std::size_t n = x.rows();
             const std::size_t d = x.cols();
+            // Compute lower triangle once and mirror across the diagonal.
             for (std::size_t col = 0; col < n; ++col)
             {
                 dist(col, col) = T{0};
@@ -279,6 +360,12 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Fills a rectangular cross squared-distance matrix from coordinate matrices `x1` and `x2`.
+        /// @details Iterates in column-major order across all `(row, col)` pairs.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param x1 First point matrix of shape `(n1, d)`.
+        /// @param x2 Second point matrix of shape `(n2, d)`.
+        /// @param dist Output rectangular squared-distance matrix of shape `(n1, n2)`.
         template <KernelScalarConcept T>
         void fill_cross_sq_dist(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> dist) noexcept
         {
@@ -304,45 +391,79 @@ namespace cxxgpr
 
     // --- Internal tree representation for DistanceKernel ---
 
+    /// @brief Distance-kernel AST leaf bound to a `ScalarDistance` slot.
+    /// @details Couples an isotropic or custom `KernelLeaf` to the `SlotId` providing its scalar squared distances.
     struct SuppliedScalarNode
     {
+        /// @brief Identifier of the bound `ScalarDistance` slot.
         SlotId slot;
+        /// @brief Built-in isotropic or custom kernel leaf definition.
         KernelLeaf leaf;
     };
 
+    /// @brief Distance-kernel AST leaf bound to an `ArdDistance` slot.
+    /// @details Couples an ARD `KernelLeaf` to its `SlotId` and validated feature dimensionality `dims`.
     struct SuppliedArdNode
     {
+        /// @brief Identifier of the bound `ArdDistance` slot.
         SlotId slot;
+        /// @brief Expected feature dimensionality of the supplied per-dimension distance blocks.
         std::size_t dims = 0;
+        /// @brief ARD kernel leaf definition (`RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel`).
         KernelLeaf leaf;
     };
 
+    /// @brief Distance-kernel AST leaf evaluated from point coordinates (or parameter-free `Constant`/`White`).
+    /// @details Appears directly in `DistanceOnly` for `ConstantKernel`/`WhiteKernel` and in `WithPoints` for any leaf
+    /// promoted from `KernelSpec`.
     struct CoordLeafNode
     {
+        /// @brief Kernel leaf definition.
         KernelLeaf leaf;
     };
 
+    /// @brief Internal persistent AST node shared immutably by `DistanceKernel<Mode>`.
+    /// @details Holds either a supplied scalar/ARD leaf, a coordinate leaf, or a binary `Sum`/`Product` node.
+    /// @tparam Mode Distance kernel mode tag (`DistanceOnly` or `WithPoints`).
     template <DistanceModeConcept Mode> struct DistanceKernel<Mode>::InternalNode
     {
+        /// @brief Binary addition node combining `lhs + rhs`.
         struct Sum
         {
+            /// @brief Left-hand summand subtree.
             std::shared_ptr<const InternalNode> lhs;
+            /// @brief Right-hand summand subtree.
             std::shared_ptr<const InternalNode> rhs;
         };
 
+        /// @brief Binary multiplication node combining `lhs * rhs`.
         struct Product
         {
+            /// @brief Left-hand factor subtree.
             std::shared_ptr<const InternalNode> lhs;
+            /// @brief Right-hand factor subtree.
             std::shared_ptr<const InternalNode> rhs;
         };
 
+        /// @brief Node payload variant holding a leaf or binary operator.
         std::variant<SuppliedScalarNode, SuppliedArdNode, CoordLeafNode, Sum, Product> data;
     };
 
+    /// @brief Friend helper encapsulating recursive `DistanceKernel<Mode>` AST inspection and transformation.
+    /// @details Isolates internal tree manipulation (`promote_node`, `from_coord_spec`, parameter/bound/slot walks, and
+    /// operator builders) from public header exposure.
     struct DistanceKernelAccess
     {
+        /// @brief Shorthand alias for `DistanceKernel<Mode>::InternalNode`.
+        /// @tparam Mode Distance kernel mode tag (`DistanceOnly` or `WithPoints`).
         template <DistanceModeConcept Mode> using Node = DistanceKernel<Mode>::InternalNode;
 
+        /// @brief Converts a `DistanceOnly` AST node into a `Node<Mode>` tree.
+        /// @details Copies directly when `Mode` is `DistanceOnly` and recursively reconstructs
+        /// `InternalNode<WithPoints>` nodes when promoting to `WithPoints`.
+        /// @tparam Mode Target distance kernel mode tag.
+        /// @param src Source `DistanceOnly` AST node.
+        /// @return Shared immutable pointer to the promoted `Node<Mode>`.
         template <DistanceModeConcept Mode>
         static std::shared_ptr<const Node<Mode>> promote_node(const DistanceKernel<DistanceOnly>::InternalNode& src)
         {
@@ -379,6 +500,10 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Converts a coordinate `KernelSpec` tree into `Node<WithPoints>` coordinate-leaf nodes.
+        /// @details Preserves binary `Sum` and `Product` topology and depth-first left-to-right ordering.
+        /// @param spec Source coordinate-based `KernelSpec`.
+        /// @return Shared immutable pointer to the equivalent `Node<WithPoints>` subtree.
         static std::shared_ptr<const Node<WithPoints>> from_coord_spec(const KernelSpec& spec)
         {
             if (const auto* leaf = std::get_if<KernelLeaf>(&spec.node_))
@@ -399,6 +524,11 @@ namespace cxxgpr
             return std::make_shared<const Node<WithPoints>>(Node<WithPoints>{.data = std::move(pnode)});
         }
 
+        /// @brief Recursively counts total log-space hyperparameters under `node`.
+        /// @details Sums leaf parameter counts in depth-first left-to-right order.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node AST node to inspect.
+        /// @return Total hyperparameter count under `node`.
         template <DistanceModeConcept Mode> static std::size_t count_params(const Node<Mode>& node) noexcept
         {
             if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
@@ -424,6 +554,14 @@ namespace cxxgpr
             return 0;
         }
 
+        /// @brief Recursively writes flattened log-space hyperparameters under `node` into `out`.
+        /// @details Traverses leaves depth-first left-to-right, short-circuiting if `status` records an error.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node AST node to inspect.
+        /// @param out Destination span of log-space hyperparameters.
+        /// @param offset Starting element offset inside `out`.
+        /// @param status Cumulative validation status updated on leaf read errors.
+        /// @return Updated offset after consuming `node`'s hyperparameters.
         template <DistanceModeConcept Mode>
         static std::size_t fill_params(
             const Node<Mode>& node, std::span<double> out, std::size_t offset, std::expected<void, GprError>& status
@@ -465,6 +603,14 @@ namespace cxxgpr
             return offset;
         }
 
+        /// @brief Recursively writes flattened open hyperparameter intervals under `node` into `out`.
+        /// @details Traverses leaves depth-first left-to-right, short-circuiting if `status` records an error.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node AST node to inspect.
+        /// @param out Destination span of `Interval` bounds.
+        /// @param offset Starting element offset inside `out`.
+        /// @param status Cumulative validation status updated on leaf read errors.
+        /// @return Updated offset after consuming `node`'s intervals.
         template <DistanceModeConcept Mode>
         static std::size_t fill_bounds(
             const Node<Mode>& node, std::span<Interval> out, std::size_t offset, std::expected<void, GprError>& status
@@ -506,6 +652,14 @@ namespace cxxgpr
             return offset;
         }
 
+        /// @brief Persistently constructs a new `Node<Mode>` tree with updated log-space parameters.
+        /// @details Clones modified leaf nodes without mutating the existing AST so parameter validation failures leave
+        /// the source kernel untouched.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node Source AST node to rebuild.
+        /// @param params Log-space parameter span for the entire kernel.
+        /// @param offset Running offset advanced across leaves in depth-first left-to-right order.
+        /// @return Newly allocated AST root on success, or bounds/parameter error.
         template <DistanceModeConcept Mode>
         static std::expected<std::shared_ptr<const Node<Mode>>, GprError> with_updated_params(
             const Node<Mode>& node, std::span<const double> params, std::size_t& offset
@@ -580,6 +734,13 @@ namespace cxxgpr
             });
         }
 
+        /// @brief Collects depth-first left-to-right `ParameterBinding` descriptors across `node`.
+        /// @details Assigns monotonically increasing `leaf_id` and global parameter `index` values.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node AST node to traverse.
+        /// @param next_leaf_id Running leaf counter incremented at each leaf.
+        /// @param next_param_idx Running global parameter index counter.
+        /// @param out Output vector receiving `ParameterBinding` entries.
         template <DistanceModeConcept Mode>
         static void collect_bindings(
             const Node<Mode>& node,
@@ -630,6 +791,14 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Collects unique supplied distance slots in depth-first first-appearance order.
+        /// @details Deduplicates shared `SlotId` references and assigns consecutive per-kind `at` indices separately
+        /// for scalar and ARD slots.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node AST node to traverse.
+        /// @param out Output list of unique `SlotDescriptor` entries.
+        /// @param next_scalar Running scalar slot index incremented on first appearance of a scalar slot.
+        /// @param next_ard Running ARD slot index incremented on first appearance of an ARD slot.
         template <DistanceModeConcept Mode>
         static void collect_slots(
             const Node<Mode>& node, std::vector<SlotDescriptor>& out, std::size_t& next_scalar, std::size_t& next_ard
@@ -637,6 +806,7 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
             {
+                // Deduplicate repeated bindings of the same slot so one table serves multiple leaves.
                 for (const auto& existing : out)
                 {
                     if (existing.id == s->slot)
@@ -672,6 +842,12 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Constructs an additive `DistanceKernel<Mode>` combining `lhs + rhs`.
+        /// @details Wraps `lhs.root_` and `rhs.root_` in an immutable `Sum` node.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param lhs Left-hand distance kernel summand.
+        /// @param rhs Right-hand distance kernel summand.
+        /// @return Composite additive `DistanceKernel<Mode>`.
         template <DistanceModeConcept Mode>
         static DistanceKernel<Mode> make_sum(DistanceKernel<Mode> lhs, DistanceKernel<Mode> rhs)
         {
@@ -680,6 +856,12 @@ namespace cxxgpr
             }));
         }
 
+        /// @brief Constructs a multiplicative `DistanceKernel<Mode>` combining `lhs * rhs`.
+        /// @details Wraps `lhs.root_` and `rhs.root_` in an immutable `Product` node.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param lhs Left-hand distance kernel factor.
+        /// @param rhs Right-hand distance kernel factor.
+        /// @return Composite multiplicative `DistanceKernel<Mode>`.
         template <DistanceModeConcept Mode>
         static DistanceKernel<Mode> make_product(DistanceKernel<Mode> lhs, DistanceKernel<Mode> rhs)
         {
@@ -691,8 +873,14 @@ namespace cxxgpr
 
     // --- ScalarDistance & ArdDistance ---
 
+    /// @brief Creates a new `ScalarDistance` slot with a process-unique identifier.
+    /// @details Atomically increments `g_next_slot_id`.
     ScalarDistance::ScalarDistance() : id_(SlotId(g_next_slot_id.fetch_add(1U, std::memory_order_relaxed))) {}
 
+    /// @brief Binds an isotropic `RbfKernel` leaf to this scalar squared-distance slot.
+    /// @details Produces a `DistanceOnly` kernel expression reading scalar slot `id_`.
+    /// @param leaf Isotropic RBF kernel definition.
+    /// @return `DistanceKernel<DistanceOnly>` node bound to this slot.
     DistanceKernel<DistanceOnly> ScalarDistance::rbf(RbfKernel leaf) const
     {
         return DistanceKernel<DistanceOnly>(std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
@@ -702,6 +890,10 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds an isotropic `MaternKernel` leaf to this scalar squared-distance slot.
+    /// @details Produces a `DistanceOnly` kernel expression reading scalar slot `id_`.
+    /// @param leaf Isotropic Matern kernel definition.
+    /// @return `DistanceKernel<DistanceOnly>` node bound to this slot.
     DistanceKernel<DistanceOnly> ScalarDistance::matern(MaternKernel leaf) const
     {
         return DistanceKernel<DistanceOnly>(std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
@@ -711,6 +903,10 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds an isotropic `PeriodicKernel` leaf to this scalar squared-distance slot.
+    /// @details Produces a `DistanceOnly` kernel expression reading scalar slot `id_`.
+    /// @param leaf Isotropic periodic kernel definition.
+    /// @return `DistanceKernel<DistanceOnly>` node bound to this slot.
     DistanceKernel<DistanceOnly> ScalarDistance::periodic(PeriodicKernel leaf) const
     {
         return DistanceKernel<DistanceOnly>(std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
@@ -720,6 +916,10 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds an isotropic `RationalQuadraticKernel` leaf to this scalar squared-distance slot.
+    /// @details Produces a `DistanceOnly` kernel expression reading scalar slot `id_`.
+    /// @param leaf Isotropic rational-quadratic kernel definition.
+    /// @return `DistanceKernel<DistanceOnly>` node bound to this slot.
     DistanceKernel<DistanceOnly> ScalarDistance::rational_quadratic(RationalQuadraticKernel leaf) const
     {
         return DistanceKernel<DistanceOnly>(std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
@@ -729,6 +929,10 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds a user-defined `CustomKernel` leaf to this scalar squared-distance slot.
+    /// @details Produces a `DistanceOnly` kernel expression passing scalar slot `id_` to `CustomKernel`.
+    /// @param leaf Custom kernel wrapper.
+    /// @return `DistanceKernel<DistanceOnly>` node bound to this slot.
     DistanceKernel<DistanceOnly> ScalarDistance::custom(CustomKernel leaf) const
     {
         return DistanceKernel<DistanceOnly>(std::make_shared<const DistanceKernel<DistanceOnly>::InternalNode>(
@@ -738,6 +942,11 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Creates an `ArdDistance` slot expecting `dims` per-dimension distance blocks.
+    /// @details Rejects `dims == 0` with `GprErrorCode::EmptyInput`.
+    /// @param dims Number of ARD distance dimensions (`>= 1`).
+    /// @return Constructed `ArdDistance` slot or `GprErrorCode::EmptyInput`.
+    /// @retval GprErrorCode::EmptyInput If `dims == 0`.
     std::expected<ArdDistance, GprError> ArdDistance::create(std::size_t dims)
     {
         if (dims == 0U)
@@ -747,6 +956,11 @@ namespace cxxgpr
         return ArdDistance(SlotId(g_next_slot_id.fetch_add(1U, std::memory_order_relaxed)), dims);
     }
 
+    /// @brief Binds an `RbfArdKernel` leaf whose lengthscale count matches `dims()`.
+    /// @details Returns `GprErrorCode::DimensionMismatch` if `leaf.num_params() != dims_`.
+    /// @param leaf ARD RBF kernel leaf definition.
+    /// @return `DistanceKernel<DistanceOnly>` bound to this ARD slot, or dimension mismatch error.
+    /// @retval GprErrorCode::DimensionMismatch If `leaf.num_params() != dims()`.
     std::expected<DistanceKernel<DistanceOnly>, GprError> ArdDistance::rbf_ard(RbfArdKernel leaf) const
     {
         if (leaf.num_params() != dims_)
@@ -760,6 +974,11 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds a `MaternArdKernel` leaf whose lengthscale count matches `dims()`.
+    /// @details Returns `GprErrorCode::DimensionMismatch` if `leaf.num_params() != dims_`.
+    /// @param leaf ARD Matern kernel leaf definition.
+    /// @return `DistanceKernel<DistanceOnly>` bound to this ARD slot, or dimension mismatch error.
+    /// @retval GprErrorCode::DimensionMismatch If `leaf.num_params() != dims()`.
     std::expected<DistanceKernel<DistanceOnly>, GprError> ArdDistance::matern_ard(MaternArdKernel leaf) const
     {
         if (leaf.num_params() != dims_)
@@ -773,6 +992,11 @@ namespace cxxgpr
         ));
     }
 
+    /// @brief Binds a `RationalQuadraticArdKernel` leaf whose lengthscale count matches `dims()`.
+    /// @details Returns `GprErrorCode::DimensionMismatch` if `leaf.lengthscales().size() != dims_`.
+    /// @param leaf ARD rational-quadratic kernel leaf definition.
+    /// @return `DistanceKernel<DistanceOnly>` bound to this ARD slot, or dimension mismatch error.
+    /// @retval GprErrorCode::DimensionMismatch If `leaf.lengthscales().size() != dims()`.
     std::expected<DistanceKernel<DistanceOnly>, GprError> ArdDistance::rational_quadratic_ard(
         RationalQuadraticArdKernel leaf
     ) const
@@ -791,18 +1015,30 @@ namespace cxxgpr
 
     // --- DistanceKernel<Mode> ---
 
+    /// @brief Constructs a `DistanceKernel<Mode>` wrapping a `ConstantKernel` leaf.
+    /// @details Constant leaves read neither supplied distances nor coordinates.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @param leaf Constant kernel amplitude leaf.
     template <DistanceModeConcept Mode>
     DistanceKernel<Mode>::DistanceKernel(ConstantKernel leaf) :
         root_(std::make_shared<const InternalNode>(InternalNode{.data = CoordLeafNode{.leaf = leaf}}))
     {
     }
 
+    /// @brief Constructs a `DistanceKernel<Mode>` wrapping a `WhiteKernel` leaf.
+    /// @details White-noise leaves contribute only to square training Gram diagonals.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @param leaf White-noise kernel leaf.
     template <DistanceModeConcept Mode>
     DistanceKernel<Mode>::DistanceKernel(WhiteKernel leaf) :
         root_(std::make_shared<const InternalNode>(InternalNode{.data = CoordLeafNode{.leaf = leaf}}))
     {
     }
 
+    /// @brief Promotes a `DistanceKernel<DistanceOnly>` into a `DistanceKernel<WithPoints>` tree.
+    /// @details Recursively rebuilds the shared AST using `WithPoints` nodes.
+    /// @tparam Mode Target mode tag (constrained to `WithPoints`).
+    /// @param other Source `DistanceOnly` kernel expression.
     template <DistanceModeConcept Mode>
     DistanceKernel<Mode>::DistanceKernel(const DistanceKernel<DistanceOnly>& other)
         requires std::same_as<Mode, WithPoints>
@@ -810,6 +1046,10 @@ namespace cxxgpr
     {
     }
 
+    /// @brief Constructs a `DistanceKernel<WithPoints>` from a coordinate-based `KernelSpec`.
+    /// @details Converts all leaves into `CoordLeafNode` entries evaluated from point coordinates.
+    /// @tparam Mode Target mode tag (constrained to `WithPoints`).
+    /// @param coord_spec Source coordinate `KernelSpec` expression tree.
     template <DistanceModeConcept Mode>
     DistanceKernel<Mode>::DistanceKernel(const KernelSpec& coord_spec)
         requires std::same_as<Mode, WithPoints>
@@ -817,6 +1057,10 @@ namespace cxxgpr
     {
     }
 
+    /// @brief Returns a `DistanceKernel<WithPoints>` view or promotion of `*this`.
+    /// @details Copies directly when already `WithPoints`, or invokes the promotion constructor when `DistanceOnly`.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Equivalent `DistanceKernel<WithPoints>`.
     template <DistanceModeConcept Mode> DistanceKernel<WithPoints> DistanceKernel<Mode>::with_points() const
     {
         if constexpr (std::same_as<Mode, WithPoints>)
@@ -829,11 +1073,21 @@ namespace cxxgpr
         }
     }
 
+    /// @brief Returns the total number of log-space hyperparameters in the expression tree.
+    /// @details Sums leaf parameter counts via `DistanceKernelAccess::count_params`.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Total hyperparameter count.
     template <DistanceModeConcept Mode> std::size_t DistanceKernel<Mode>::num_params() const noexcept
     {
         return DistanceKernelAccess::count_params<Mode>(*root_);
     }
 
+    /// @brief Writes flattened log-space hyperparameters in depth-first left-to-right order into `out`.
+    /// @details Validates `out.size() == num_params()` before walking the tree.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @param out Destination hyperparameter span.
+    /// @return Empty expected on success, or length mismatch error.
+    /// @retval GprErrorCode::LengthMismatch If `out.size() != num_params()`.
     template <DistanceModeConcept Mode>
     std::expected<void, GprError> DistanceKernel<Mode>::get_params(std::span<double> out) const
     {
@@ -846,6 +1100,13 @@ namespace cxxgpr
         return status;
     }
 
+    /// @brief Atomically updates all leaf parameters from log-space `params`.
+    /// @details Constructs an updated persistent AST first and commits `root_` only when every leaf validates.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @param params Log-space hyperparameter span of length `num_params()`.
+    /// @return Empty expected on success, or length/bounds error leaving `*this` unchanged.
+    /// @retval GprErrorCode::LengthMismatch If `params.size() != num_params()`.
+    /// @retval GprErrorCode::InvalidHyperparameter If any value lies outside its open parameter interval.
     template <DistanceModeConcept Mode>
     std::expected<void, GprError> DistanceKernel<Mode>::set_params(std::span<const double> params)
     {
@@ -863,6 +1124,12 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Writes open hyperparameter intervals in depth-first left-to-right order into `out`.
+    /// @details Validates `out.size() == num_params()` before collecting intervals.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @param out Destination span of `Interval` bounds.
+    /// @return Empty expected on success, or length mismatch error.
+    /// @retval GprErrorCode::LengthMismatch If `out.size() != num_params()`.
     template <DistanceModeConcept Mode>
     std::expected<void, GprError> DistanceKernel<Mode>::bounds_into(std::span<Interval> out) const
     {
@@ -875,6 +1142,10 @@ namespace cxxgpr
         return status;
     }
 
+    /// @brief Returns flattened parameter-to-leaf bindings in depth-first left-to-right order.
+    /// @details Walks the immutable AST via `DistanceKernelAccess::collect_bindings`.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Vector of `ParameterBinding` descriptors.
     template <DistanceModeConcept Mode> std::vector<ParameterBinding> DistanceKernel<Mode>::parameter_bindings() const
     {
         std::vector<ParameterBinding> out;
@@ -885,6 +1156,10 @@ namespace cxxgpr
         return out;
     }
 
+    /// @brief Returns unique distance slot descriptors referenced by this tree in depth-first first-appearance order.
+    /// @details Assigns separate sequential `at` indices for scalar and ARD slots.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Vector of unique `SlotDescriptor` records.
     template <DistanceModeConcept Mode> std::vector<SlotDescriptor> DistanceKernel<Mode>::slots() const
     {
         std::vector<SlotDescriptor> out;
@@ -894,6 +1169,10 @@ namespace cxxgpr
         return out;
     }
 
+    /// @brief Returns the count of unique `ScalarDistance` slots referenced by this tree.
+    /// @details Filters `slots()` entries with `!ard_dims.has_value()`.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Number of scalar distance slots.
     template <DistanceModeConcept Mode> std::size_t DistanceKernel<Mode>::num_scalar_slots() const
     {
         std::size_t count = 0;
@@ -907,6 +1186,10 @@ namespace cxxgpr
         return count;
     }
 
+    /// @brief Returns the count of unique `ArdDistance` slots referenced by this tree.
+    /// @details Filters `slots()` entries with `ard_dims.has_value()`.
+    /// @tparam Mode Distance kernel mode tag.
+    /// @return Number of ARD distance slots.
     template <DistanceModeConcept Mode> std::size_t DistanceKernel<Mode>::num_ard_slots() const
     {
         std::size_t count = 0;
@@ -920,41 +1203,81 @@ namespace cxxgpr
         return count;
     }
 
+    /// @brief Combines two `DistanceOnly` kernels by addition.
+    /// @details Builds a composite `Sum` node in `DistanceOnly` mode.
+    /// @param lhs Left-hand summand kernel.
+    /// @param rhs Right-hand summand kernel.
+    /// @return Additive `DistanceKernel<DistanceOnly>`.
     DistanceKernel<DistanceOnly> operator+(DistanceKernel<DistanceOnly> lhs, DistanceKernel<DistanceOnly> rhs)
     {
         return DistanceKernelAccess::make_sum<DistanceOnly>(std::move(lhs), std::move(rhs));
     }
 
+    /// @brief Combines two `DistanceOnly` kernels by multiplication.
+    /// @details Builds a composite `Product` node in `DistanceOnly` mode.
+    /// @param lhs Left-hand factor kernel.
+    /// @param rhs Right-hand factor kernel.
+    /// @return Multiplicative `DistanceKernel<DistanceOnly>`.
     DistanceKernel<DistanceOnly> operator*(DistanceKernel<DistanceOnly> lhs, DistanceKernel<DistanceOnly> rhs)
     {
         return DistanceKernelAccess::make_product<DistanceOnly>(std::move(lhs), std::move(rhs));
     }
 
+    /// @brief Combines two `WithPoints` kernels by addition.
+    /// @details Builds a composite `Sum` node in `WithPoints` mode.
+    /// @param lhs Left-hand summand kernel.
+    /// @param rhs Right-hand summand kernel.
+    /// @return Additive `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator+(DistanceKernel<WithPoints> lhs, DistanceKernel<WithPoints> rhs)
     {
         return DistanceKernelAccess::make_sum<WithPoints>(std::move(lhs), std::move(rhs));
     }
 
+    /// @brief Combines two `WithPoints` kernels by multiplication.
+    /// @details Builds a composite `Product` node in `WithPoints` mode.
+    /// @param lhs Left-hand factor kernel.
+    /// @param rhs Right-hand factor kernel.
+    /// @return Multiplicative `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator*(DistanceKernel<WithPoints> lhs, DistanceKernel<WithPoints> rhs)
     {
         return DistanceKernelAccess::make_product<WithPoints>(std::move(lhs), std::move(rhs));
     }
 
+    /// @brief Combines a `DistanceOnly` kernel and a coordinate `KernelSpec` by addition in `WithPoints` mode.
+    /// @details Promotes `lhs` and wraps `rhs` before summing.
+    /// @param lhs Supplied-distance summand kernel.
+    /// @param rhs Coordinate-based summand specification.
+    /// @return Composite `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator+(const DistanceKernel<DistanceOnly>& lhs, const KernelSpec& rhs)
     {
         return DistanceKernel<WithPoints>(lhs) + DistanceKernel<WithPoints>(rhs);
     }
 
+    /// @brief Combines a coordinate `KernelSpec` and a `DistanceOnly` kernel by addition in `WithPoints` mode.
+    /// @details Wraps `lhs` and promotes `rhs` before summing.
+    /// @param lhs Coordinate-based summand specification.
+    /// @param rhs Supplied-distance summand kernel.
+    /// @return Composite `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator+(const KernelSpec& lhs, const DistanceKernel<DistanceOnly>& rhs)
     {
         return DistanceKernel<WithPoints>(lhs) + DistanceKernel<WithPoints>(rhs);
     }
 
+    /// @brief Combines a `DistanceOnly` kernel and a coordinate `KernelSpec` by multiplication in `WithPoints` mode.
+    /// @details Promotes `lhs` and wraps `rhs` before multiplying.
+    /// @param lhs Supplied-distance factor kernel.
+    /// @param rhs Coordinate-based factor specification.
+    /// @return Composite `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator*(const DistanceKernel<DistanceOnly>& lhs, const KernelSpec& rhs)
     {
         return DistanceKernel<WithPoints>(lhs) * DistanceKernel<WithPoints>(rhs);
     }
 
+    /// @brief Combines a coordinate `KernelSpec` and a `DistanceOnly` kernel by multiplication in `WithPoints` mode.
+    /// @details Wraps `lhs` and promotes `rhs` before multiplying.
+    /// @param lhs Coordinate-based factor specification.
+    /// @param rhs Supplied-distance factor kernel.
+    /// @return Composite `DistanceKernel<WithPoints>`.
     DistanceKernel<WithPoints> operator*(const KernelSpec& lhs, const DistanceKernel<DistanceOnly>& rhs)
     {
         return DistanceKernel<WithPoints>(lhs) * DistanceKernel<WithPoints>(rhs);
@@ -962,12 +1285,23 @@ namespace cxxgpr
 
     // --- DistanceSource ---
 
+    /// @brief Appends a scalar squared-distance table binding for `slot`.
+    /// @details Validation of slot compatibility, duplicates, shapes, and values occurs during `prepare_square` or
+    /// `prepare_cross`.
+    /// @param slot Scalar slot identifier.
+    /// @param d2 Supplied squared-distance matrix view (`n x n` for square, `n x m` for cross).
+    /// @return Reference to `*this` for fluent chaining.
     DistanceSource& DistanceSource::bind_scalar(SlotId slot, MatrixRef<double> d2)
     {
         scalars_.push_back(ScalarEntry{.slot = slot, .d2 = d2});
         return *this;
     }
 
+    /// @brief Appends per-dimension ARD squared-distance tables for `slot`.
+    /// @details Copies the span of `MatrixRef<double>` views; validation and packing occur during `prepare_*`.
+    /// @param slot ARD slot identifier.
+    /// @param d2_per_dim Span of per-dimension squared-distance matrix views.
+    /// @return Reference to `*this` for fluent chaining.
     DistanceSource& DistanceSource::bind_ard(SlotId slot, std::span<const MatrixRef<double>> d2_per_dim)
     {
         ards_.push_back(
@@ -976,6 +1310,11 @@ namespace cxxgpr
         return *this;
     }
 
+    /// @brief Enables repair of minor negative, non-zero diagonal, and asymmetry violations within `rel_tol`.
+    /// @details Stores `rel_tol` for scaling against `max_abs` in `DistanceStoreBuilder`; negative or non-finite values
+    /// are rejected when building a `CheckedDistanceStore`.
+    /// @param rel_tol Non-negative relative tolerance threshold.
+    /// @return Reference to `*this` for fluent chaining.
     DistanceSource& DistanceSource::tidy(double rel_tol)
     {
         tidy_rel_tol_ = rel_tol;
@@ -984,33 +1323,60 @@ namespace cxxgpr
 
     // --- CheckedDistanceStore<T> ---
 
+    /// @brief Internal storage backing a validated (and optionally repaired) `CheckedDistanceStore<T>`.
+    /// @details Holds slot metadata, shape flags, dense scalar squared-distance tables, and packed lower-triangular
+    /// (for square) or dense column-major (for cross) per-dimension ARD blocks.
+    /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> struct CheckedDistanceStore<T>::Impl
     {
+        /// @brief Ordered slot descriptors of the `CompiledDistanceKernel` that built this store.
         std::vector<SlotDescriptor> kernel_slots;
+        /// @brief Row count of every stored distance block.
         std::size_t n_rows = 0;
+        /// @brief Column count of every stored distance block.
         std::size_t n_cols = 0;
+        /// @brief True for square training distance stores, false for rectangular cross stores.
         bool square = true;
         // Per scalar slot: dense n_rows x n_cols column-major data.
+        /// @brief Dense column-major squared-distance tables indexed by scalar slot `at`.
         std::vector<std::vector<T>> scalar_tables;
         // Per ARD slot (when square): packed lower triangles m * per_dim + p.
         // Per ARD slot (when cross): dims * n_rows * n_cols dense blocks.
+        /// @brief Feature dimensionality stored per ARD slot indexed by ARD slot `at`.
         std::vector<std::size_t> ard_dims;
+        /// @brief Packed lower-triangular (square) or dense block (cross) ARD squared-distance arrays.
         std::vector<std::vector<T>> ard_data;
     };
 
+    /// @brief Constructs a `CheckedDistanceStore<T>` from its validated internal state.
+    /// @details Internal constructor called by `DistanceStoreBuilder::build`.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param impl Owning pointer to validated distance store state.
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>::CheckedDistanceStore(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))
     {
     }
 
+    /// @brief Destroys the `CheckedDistanceStore<T>` and its internal buffers.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> CheckedDistanceStore<T>::~CheckedDistanceStore() = default;
 
+    /// @brief Copy-constructs a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
+    /// @details Duplicates `Impl` vectors including scalar and ARD tables.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param other Store instance to copy.
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>::CheckedDistanceStore(const CheckedDistanceStore& other) :
         impl_(std::make_unique<Impl>(*other.impl_))
     {
     }
 
+    /// @brief Copy-assigns a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
+    /// @details Guards against self-assignment before cloning `other.impl_`.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param other Store instance to copy.
+    /// @return Reference to `*this`.
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(const CheckedDistanceStore& other)
     {
@@ -1021,16 +1387,28 @@ namespace cxxgpr
         return *this;
     }
 
+    /// @brief Returns the row count of each stored squared-distance block.
+    /// @details Equals training point count for square stores or first point set size for cross stores.
+    /// @tparam T Storage floating-point scalar type.
+    /// @return Row count `n_rows`.
     template <KernelScalarConcept T> std::size_t CheckedDistanceStore<T>::rows() const noexcept
     {
         return impl_->n_rows;
     }
 
+    /// @brief Returns the column count of each stored squared-distance block.
+    /// @details Equals training point count for square stores or query point set size for cross stores.
+    /// @tparam T Storage floating-point scalar type.
+    /// @return Column count `n_cols`.
     template <KernelScalarConcept T> std::size_t CheckedDistanceStore<T>::cols() const noexcept
     {
         return impl_->n_cols;
     }
 
+    /// @brief Returns true if this store holds square training distance blocks.
+    /// @details Distinguishes `prepare_square` outputs from rectangular `prepare_cross` outputs.
+    /// @tparam T Storage floating-point scalar type.
+    /// @return True when square training store, false when rectangular cross store.
     template <KernelScalarConcept T> bool CheckedDistanceStore<T>::is_square() const noexcept
     {
         return impl_->square;
@@ -1038,61 +1416,102 @@ namespace cxxgpr
 
     // --- CompiledDistanceKernel<T>::Impl ---
 
+    /// @brief PIMPL state for a compiled mixed supplied-distance and coordinate kernel.
+    /// @details Stores flattened additive and multiplicative AST nodes, parameter bindings, distance slot descriptors,
+    /// and cached ARD lengthscales to support zero-allocation evaluation, gradients, and Hessians.
+    /// @tparam T Scalar type (@c double or @c float).
     template <KernelScalarConcept T> struct CompiledDistanceKernel<T>::Impl
     {
+        /// @brief Compiled reference to a scalar supplied-distance leaf.
         struct SuppliedScalarRef
         {
+            /// @brief Index of this leaf in @c Impl::leaves and @c Impl::cached_ls.
             std::size_t leaf_idx = 0;
+            /// @brief Packed slot index inside a @c CheckedDistanceStore scalar slab array.
             std::size_t slot_at = 0;
+            /// @brief Inclusive start index in the flattened hyperparameter vector.
             std::size_t param_begin = 0;
+            /// @brief Number of hyperparameters owned by this leaf.
             std::size_t param_count = 0;
         };
 
+        /// @brief Compiled reference to a per-dimension supplied-ARD-distance leaf.
         struct SuppliedArdRef
         {
+            /// @brief Index of this leaf in @c Impl::leaves and @c Impl::cached_ls.
             std::size_t leaf_idx = 0;
+            /// @brief Packed slot index inside a @c CheckedDistanceStore ARD slab array.
             std::size_t slot_at = 0;
+            /// @brief Number of ARD dimensions required by this slot and leaf.
             std::size_t dims = 0;
+            /// @brief Inclusive start index in the flattened hyperparameter vector.
             std::size_t param_begin = 0;
+            /// @brief Number of hyperparameters owned by this leaf.
             std::size_t param_count = 0;
         };
 
+        /// @brief Compiled reference to a coordinate-only kernel leaf.
         struct CoordLeafRef
         {
+            /// @brief Index of this leaf in @c Impl::leaves and @c Impl::cached_ls.
             std::size_t leaf_idx = 0;
+            /// @brief Inclusive start index in the flattened hyperparameter vector.
             std::size_t param_begin = 0;
+            /// @brief Number of hyperparameters owned by this leaf.
             std::size_t param_count = 0;
         };
 
+        /// @brief Forward declaration of a compiled additive term node.
         struct SumTerm;
+        /// @brief Forward declaration of a compiled multiplicative term node.
         struct ProductTerm;
+        /// @brief Recursive variant representing any leaf reference or composite sum/product term.
         using Term = std::variant<SuppliedScalarRef, SuppliedArdRef, CoordLeafRef, SumTerm, ProductTerm>;
 
+        /// @brief Flattened additive node summing its child terms.
         struct SumTerm
         {
+            /// @brief Child subterms summed together.
             std::vector<Term> terms;
+            /// @brief Inclusive start index of parameters contained anywhere inside this sum subtree.
             std::size_t param_begin = 0;
+            /// @brief Exclusive end index of parameters contained anywhere inside this sum subtree.
             std::size_t param_end = 0;
         };
 
+        /// @brief Flattened multiplicative node multiplying its child terms.
         struct ProductTerm
         {
+            /// @brief Child subterms multiplied together.
             std::vector<Term> terms;
+            /// @brief Inclusive start index of parameters contained anywhere inside this product subtree.
             std::size_t param_begin = 0;
+            /// @brief Exclusive end index of parameters contained anywhere inside this product subtree.
             std::size_t param_end = 0;
         };
 
+        /// @brief Flattened leaf kernel instances ordered by pre-order AST traversal.
         std::vector<KernelLeaf> leaves;
+        /// @brief Per-leaf cached ARD lengthscale vectors (empty for non-ARD leaves) to avoid allocation in loops.
         std::vector<std::vector<double>> cached_ls;
+        /// @brief Mapping from flattened hyperparameter indices to leaf index and local parameter offset.
         std::vector<ParameterBinding> bindings;
+        /// @brief Deduplicated supplied-distance slot descriptors required by this compiled kernel.
         std::vector<SlotDescriptor> slots;
+        /// @brief Count of distinct scalar distance slots referenced by the kernel.
         std::size_t num_scalar_slots = 0;
+        /// @brief Count of distinct ARD distance slots referenced by the kernel.
         std::size_t num_ard_slots = 0;
+        /// @brief Root term of the compiled and associatively flattened kernel expression tree.
         Term root;
+        /// @brief True when at least one coordinate-dependent leaf requires non-null input point matrices.
         bool has_coord_points = false;
+        /// @brief Maximum scratch nesting depth required when evaluating nested sums and products.
         std::size_t nested_depth = 0;
+        /// @brief Exponential evaluation precision mode shared by @c Rbf, @c Matern52, and @c Matern32 terms.
         KernelExp exp_mode = KernelExp::Accurate;
 
+        /// @brief Synchronizes @c cached_ls with the current ARD lengthscale vectors stored in @c leaves.
         void refresh_cached_ls()
         {
             cached_ls.resize(leaves.size());
@@ -1117,6 +1536,9 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Returns the half-open global parameter index range @c [begin, end) owned by @p term.
+        /// @param term Compiled AST term to inspect.
+        /// @return Pair @c {begin, end} of flattened hyperparameter indices.
         static std::pair<std::size_t, std::size_t> param_range(const Term& term) noexcept
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
@@ -1142,18 +1564,29 @@ namespace cxxgpr
             return {0, 0};
         }
 
+        /// @brief Checks whether flattened hyperparameter index @p param_idx belongs to @p term.
+        /// @param term Compiled AST term to inspect.
+        /// @param param_idx Global flattened parameter index.
+        /// @return @c true if @p param_idx lies inside @p term's half-open parameter range.
         static bool contains_param(const Term& term, std::size_t param_idx) noexcept
         {
             const auto [begin, end] = param_range(term);
             return param_idx >= begin && param_idx < end;
         }
 
+        /// @brief Reports whether @p term represents a leaf node rather than a composite sum or product.
+        /// @param term Compiled AST term to test.
+        /// @return @c true if @p term is a supplied-scalar, supplied-ARD, or coordinate leaf reference.
         static bool is_leaf_term(const Term& term) noexcept
         {
             return std::holds_alternative<SuppliedScalarRef>(term) || std::holds_alternative<SuppliedArdRef>(term)
                 || std::holds_alternative<CoordLeafRef>(term);
         }
 
+        /// @brief Computes the nested temporary-buffer stack depth needed to evaluate @p term.
+        /// @details Leaf terms evaluate directly into the destination buffer and require zero nested depth.
+        /// @param term Compiled AST term to analyze.
+        /// @return Minimum scratch buffer depth required for nested evaluation of @p term.
         static std::size_t compute_nested_depth(const Term& term) noexcept
         {
             const std::vector<Term>* children = nullptr;
@@ -1180,6 +1613,10 @@ namespace cxxgpr
             return max_child;
         }
 
+        /// @brief Looks up the packed @c at index assigned to supplied-distance slot @p id.
+        /// @param slot_list Kernel slot descriptors sorted by scalar/ARD packing order.
+        /// @param id Slot identifier to locate.
+        /// @return Packed slab offset @c desc.at, or zero if not found.
         static std::size_t find_slot_at(const std::vector<SlotDescriptor>& slot_list, SlotId id) noexcept
         {
             for (const auto& desc : slot_list)
@@ -1192,6 +1629,14 @@ namespace cxxgpr
             return 0;
         }
 
+        /// @brief Compiles a symbolic @c DistanceKernel node into flattened @c Term IR and parameter bindings.
+        /// @details Traverses leaves left-to-right so each leaf receives a contiguous hyperparameter range
+        /// @c [param_begin, param_begin + param_count), and associatively flattens nested sums and products.
+        /// @tparam Mode Distance kernel mode tag (@c DistanceOnly or @c WithPoints).
+        /// @param node Symbolic AST node to compile.
+        /// @param out Target @c Impl receiving appended leaves, bindings, and @c has_coord_points flag.
+        /// @param next_param_idx Running global parameter counter incremented as leaves are visited.
+        /// @return Compiled @c Term corresponding to @p node.
         template <DistanceModeConcept Mode>
         static Term compile_node(const DistanceKernel<Mode>::InternalNode& node, Impl& out, std::size_t& next_param_idx)
         {
@@ -1241,6 +1686,8 @@ namespace cxxgpr
                 const std::size_t p_begin = next_param_idx;
                 const std::size_t p_count = detail::leaf_num_params(c->leaf);
                 out.leaves.push_back(c->leaf);
+                // Constant/White leaves do not access coordinates even in WithPoints trees;
+                // only point-reading coordinate leaves require non-null X matrices at runtime.
                 const CoordMode leaf_mode = detail::leaf_coord_mode(c->leaf);
                 if (leaf_mode != CoordMode::Either)
                 {
@@ -1256,17 +1703,25 @@ namespace cxxgpr
             }
             if (std::holds_alternative<typename Node::Sum>(node.data))
             {
+                // Associatively flatten nested Sum chains into a single SumTerm with contiguous params.
                 std::vector<Term> flat;
                 const std::size_t p_begin = next_param_idx;
                 collect_sum<Mode>(node, flat, out, next_param_idx);
                 return SumTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
             }
+            // Associatively flatten nested Product chains into a single ProductTerm with contiguous params.
             std::vector<Term> flat;
             const std::size_t p_begin = next_param_idx;
             collect_product<Mode>(node, flat, out, next_param_idx);
             return ProductTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
         }
 
+        /// @brief Recursively flattens nested binary @c Sum nodes into @p out_terms in left-to-right order.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node Current AST node to flatten or compile.
+        /// @param out_terms Output vector appending non-sum compiled child terms.
+        /// @param out Target @c Impl receiving leaf state and bindings.
+        /// @param next_param_idx Running global hyperparameter counter.
         template <DistanceModeConcept Mode>
         static void collect_sum(
             const DistanceKernel<Mode>::InternalNode& node,
@@ -1285,6 +1740,12 @@ namespace cxxgpr
             out_terms.push_back(compile_node<Mode>(node, out, next_param_idx));
         }
 
+        /// @brief Recursively flattens nested binary @c Product nodes into @p out_terms in left-to-right order.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param node Current AST node to flatten or compile.
+        /// @param out_terms Output vector appending non-product compiled child terms.
+        /// @param out Target @c Impl receiving leaf state and bindings.
+        /// @param next_param_idx Running global hyperparameter counter.
         template <DistanceModeConcept Mode>
         static void collect_product(
             const DistanceKernel<Mode>::InternalNode& node,
@@ -1305,6 +1766,11 @@ namespace cxxgpr
 
         // --- Validation helpers for evaluation ---
 
+        /// @brief Validates that @p store matches this kernel's slot descriptors, square/cross mode, and output shape.
+        /// @param store Pre-validated supplied-distance store.
+        /// @param expect_square @c true when requiring a square training store, @c false for a cross store.
+        /// @param out Output matrix whose row and column counts must match @p store.
+        /// @return Empty expected value on success, or a structured @c GprError describing the mismatch.
         [[nodiscard]] std::expected<void, GprError> validate_store(
             const CheckedDistanceStore<T>& store, bool expect_square, MatrixRef<T> out
         ) const
@@ -1335,6 +1801,11 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Checks that coordinate ARD leaves match the feature dimension @p x_dim.
+        /// @details Supplied-ARD leaves are intentionally skipped because their dimension counts correspond to their
+        /// dedicated @c CheckedDistanceStore slot rather than coordinate columns.
+        /// @param x_dim Number of columns in the supplied coordinate matrix.
+        /// @return Empty expected value on success, or @c GprError::dimension_mismatch on mismatch.
         [[nodiscard]] std::expected<void, GprError> validate_ard_coord_dims(std::size_t x_dim) const
         {
             for (std::size_t idx = 0; idx < leaves.size(); ++idx)
@@ -1365,6 +1836,10 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Reports whether leaf index @p target_idx is bound to a coordinate leaf node in @p term.
+        /// @param term Compiled AST subtree to search.
+        /// @param target_idx Leaf index inside @c Impl::leaves.
+        /// @return @c true if @p target_idx appears as a @c CoordLeafRef inside @p term.
         static bool is_coord_leaf_idx(const Term& term, std::size_t target_idx) noexcept
         {
             if (const auto* c = std::get_if<CoordLeafRef>(&term))
@@ -1394,6 +1869,13 @@ namespace cxxgpr
             return false;
         }
 
+        /// @brief Validates optional coordinate matrix @p x against kernel requirements and @p expected_rows.
+        /// @details When @c has_coord_points is false, @p x may be omitted; if provided, its shape is still checked.
+        /// When @c has_coord_points is true, @p x is mandatory, non-empty, row-matched, ARD-dimension checked, and
+        /// finite.
+        /// @param x Optional coordinate matrix passed to evaluation/differentiation.
+        /// @param expected_rows Row (or column) count dictated by the paired distance store.
+        /// @return Empty expected value on success, or an error describing missing, mismatched, or non-finite input.
         [[nodiscard]] std::expected<void, GprError> validate_optional_points(
             std::optional<MatrixRef<T>> x, std::size_t expected_rows
         ) const
@@ -1448,6 +1930,15 @@ namespace cxxgpr
 
         // --- ARD supplied evaluation / grad / hess ---
 
+        /// @brief Computes the ARD-scaled squared distance sum for pair @c (row, col) from packed lower-triangle slabs.
+        /// @details Evaluates $s^2 = \sum_m d_m^2 / \ell_m^2$ using packed symmetric storage of stride @p per_dim.
+        /// @param packed Packed lower-triangular per-dimension squared distance buffer.
+        /// @param n Square matrix order.
+        /// @param per_dim Number of packed entries per dimension (@c n*(n+1)/2).
+        /// @param ls ARD lengthscales $\ell_m$.
+        /// @param row Matrix row index.
+        /// @param col Matrix column index.
+        /// @return Total ARD-weighted squared distance $s^2$.
         [[nodiscard]] static T ard_scaled_sq_square(
             std::span<const T> packed,
             std::size_t n,
@@ -1467,6 +1958,15 @@ namespace cxxgpr
             return acc;
         }
 
+        /// @brief Computes the ARD-scaled squared distance sum for pair @c (row, col) from rectangular cross blocks.
+        /// @details Evaluates $s^2 = \sum_m d_m^2 / \ell_m^2$ over contiguous column-major per-dimension slabs.
+        /// @param blocks Column-major per-dimension rectangular squared distance blocks.
+        /// @param n_rows Number of rows per block.
+        /// @param n_cols Number of columns per block.
+        /// @param ls ARD lengthscales $\ell_m$.
+        /// @param row Matrix row index.
+        /// @param col Matrix column index.
+        /// @return Total ARD-weighted squared distance $s^2$.
         [[nodiscard]] static T ard_scaled_sq_cross(
             std::span<const T> blocks,
             std::size_t n_rows,
@@ -1487,6 +1987,11 @@ namespace cxxgpr
             return acc;
         }
 
+        /// @brief Evaluates a supplied-ARD leaf over the specified triangle of a square @c CheckedDistanceStore.
+        /// @param ref Compiled supplied-ARD leaf reference.
+        /// @param store Pre-validated square supplied-distance store containing packed ARD slabs.
+        /// @param out Output matrix receiving kernel entries on @p uplo.
+        /// @param uplo Triangle mode specifying which entries to populate.
         void eval_supplied_ard_square(
             const SuppliedArdRef& ref, const CheckedDistanceStore<T>& store, MatrixMut<T> out, Triangle uplo
         ) const
@@ -1533,6 +2038,10 @@ namespace cxxgpr
             );
         }
 
+        /// @brief Evaluates a supplied-ARD leaf over a rectangular cross @c CheckedDistanceStore.
+        /// @param ref Compiled supplied-ARD leaf reference.
+        /// @param store Pre-validated cross supplied-distance store containing per-dimension blocks.
+        /// @param out Output matrix receiving cross-covariance values.
         void eval_supplied_ard_cross(
             const SuppliedArdRef& ref, const CheckedDistanceStore<T>& store, MatrixMut<T> out
         ) const
@@ -1582,6 +2091,14 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Computes the first log-parameter derivative of a supplied-ARD leaf over @p uplo.
+        /// @details Differentiates with respect to $\theta_p = \log \ell_p$ (or $\log \alpha$ for
+        /// @c RationalQuadraticArdKernel when @p local_idx equals the lengthscale count).
+        /// @param ref Compiled supplied-ARD leaf reference.
+        /// @param store Pre-validated square supplied-distance store.
+        /// @param d_k Output matrix receiving the log-theta derivative on @p uplo.
+        /// @param local_idx Leaf-local parameter index.
+        /// @param uplo Triangle mode specifying which entries to write.
         void eval_supplied_ard_grad(
             const SuppliedArdRef& ref,
             const CheckedDistanceStore<T>& store,
@@ -1597,6 +2114,7 @@ namespace cxxgpr
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
             {
+                // For RBF ARD k = exp(-0.5 * sum_m s_m^2), d k / d(log l_p) = s_p^2 * d(exp(-0.5 * s^2)).
                 const T ell_p = static_cast<T>(ls[local_idx]);
                 const T inv_l2 = T{1} / (ell_p * ell_p);
                 visit_triangle<T>(
@@ -1612,6 +2130,8 @@ namespace cxxgpr
             }
             if (const auto* mat = std::get_if<MaternArdKernel>(&leaf))
             {
+                // Write u = sqrt(c * s^2) and w_p = (c * s_p^2) / u^2; then d u / d(log l_p) = -u * w_p,
+                // so d k / d(log l_p) = g1(u) * w_p where g1(u) = -u * dk/du absorbs the 1/u singularity.
                 const T c = static_cast<T>(matern_scale_sq_d(mat->nu()));
                 const MaternNu nu = mat->nu();
                 const T ell_p = static_cast<T>(ls[local_idx]);
@@ -1646,18 +2166,29 @@ namespace cxxgpr
                 const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
                 if (local_idx < alpha_idx)
                 {
+                    // d(-alpha * log(1 + w)) / d(log l_p) = s_p^2 / (1 + w).
                     const T ell_p = static_cast<T>(ls[local_idx]);
                     const T sp2 = packed[(local_idx * per_dim) + p] / (ell_p * ell_p);
                     d_k(row, col) = (sp2 / b) * d1_exp;
                 }
                 else
                 {
+                    // d(-alpha * log(1 + w)) / d(log alpha) = alpha * (w / (1 + w) - log(1 + w)).
                     d_k(row, col) = alpha * ((w / b) - std::log1p(w)) * d1_exp;
                 }
             }
             );
         }
 
+        /// @brief Computes the second log-parameter derivative of a supplied-ARD leaf over @p uplo.
+        /// @details Evaluates exact mixed or diagonal Hessians with respect to leaf-local log-parameters (@p i, @p j)
+        /// using the exponential derivative jet @c ExpJet for consistent @c KernelExp precision.
+        /// @param ref Compiled supplied-ARD leaf reference.
+        /// @param store Pre-validated square supplied-distance store.
+        /// @param d2_k Output matrix receiving $\partial^2 K / \partial \theta_i \partial \theta_j$ on @p uplo.
+        /// @param i First leaf-local parameter index.
+        /// @param j Second leaf-local parameter index.
+        /// @param uplo Triangle mode specifying which entries to write.
         void eval_supplied_ard_hess(
             const SuppliedArdRef& ref,
             const CheckedDistanceStore<T>& store,
@@ -1685,6 +2216,7 @@ namespace cxxgpr
                     const T si2 = packed[(i * per_dim) + p] * inv_li2;
                     if (i == j)
                     {
+                        // Diagonal second derivative includes -2*s_i^2*jet.d1 from d(s_i^2)/d(log l_i) = -2*s_i^2.
                         d2_k(row, col) = (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
                     }
                     else
@@ -1715,6 +2247,7 @@ namespace cxxgpr
                     const T u = std::sqrt(u2);
                     const T wi = (c * packed[(i * per_dim) + p] * inv_li2) / u2;
                     const T wj = (c * packed[(j * per_dim) + p] * inv_lj2) / u2;
+                    // Mixed Matérn ARD Hessian splits into cross-dimension term plus diagonal -2*g1(u)*w_i.
                     T val = eval_matern_ard_cross_d(u, nu, exp_mode) * wi * wj;
                     if (i == j)
                     {
@@ -1739,11 +2272,13 @@ namespace cxxgpr
                 const T g_alpha = alpha * ((w / b) - std::log1p(w));
                 if (i == alpha_idx && j == alpha_idx)
                 {
+                    // d^2 f / d(log alpha)^2 = g_alpha + alpha * w^2 / b^2, chained through exp_jet.
                     d2_k(row, col) =
                         ((g_alpha * g_alpha) * jet.d2) + ((g_alpha + ((alpha * w * w) / (b * b))) * jet.d1);
                 }
                 else if (i == alpha_idx || j == alpha_idx)
                 {
+                    // Mixed (log alpha, log l_k) derivative: df/d(log l_k) * d_alpha(f) + w*df/(b*b).
                     const std::size_t ls_idx = (i == alpha_idx) ? j : i;
                     const T ell_ls = static_cast<T>(ls[ls_idx]);
                     const T s_ls2 = packed[(ls_idx * per_dim) + p] / (ell_ls * ell_ls);
@@ -1751,6 +2286,7 @@ namespace cxxgpr
                 }
                 else
                 {
+                    // Lengthscale-lengthscale Hessian mixes outer chain, 1/alpha term, and diagonal -2*s_i^2/b.
                     const T ell_i = static_cast<T>(ls[i]);
                     const T ell_j = static_cast<T>(ls[j]);
                     const T si2 = packed[(i * per_dim) + p] / (ell_i * ell_i);
@@ -1769,6 +2305,12 @@ namespace cxxgpr
 
         // --- Recursive tree evaluation ---
 
+        /// @brief Verifies that @p nested holds at least @p level_idx + 1 buffers sized at least @p rows by @p cols.
+        /// @param nested Preallocated nested evaluation scratch pool.
+        /// @param level_idx Zero-based nesting level requested.
+        /// @param rows Required row count.
+        /// @param cols Required column count.
+        /// @return Empty expected value on success, or @c GprError::workspace_too_small if capacity is insufficient.
         [[nodiscard]] std::expected<void, GprError> ensure_nested(
             NestedBuffers<T>& nested, std::size_t level_idx, std::size_t rows, std::size_t cols
         ) const
@@ -1780,6 +2322,18 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Recursively evaluates compiled term @p term on a square @c CheckedDistanceStore over @p uplo.
+        /// @details Leaf terms write directly using @p scratch without advancing @p level_idx; composite subterms
+        /// acquire a temporary buffer at @p level_idx from @p nested and recurse at @p level_idx + 1.
+        /// @param term Compiled AST node to evaluate.
+        /// @param store Pre-validated square supplied-distance store.
+        /// @param x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
+        /// @param out Destination matrix populated on @p uplo.
+        /// @param uplo Triangle mode specifying which entries to compute.
+        /// @param scratch Leaf scratch matrix swapped during binary combination.
+        /// @param nested Multi-level workspace for nested composite nodes and @c CustomKernel distance buffers.
+        /// @param level_idx Current recursion depth into @p nested.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_term_square(
             const Term& term,
             const CheckedDistanceStore<T>& store,
@@ -1808,6 +2362,7 @@ namespace cxxgpr
                     const KernelLeaf& kl = leaves[c->leaf_idx];
                     if (const auto* custom = std::get_if<CustomKernel>(&kl))
                     {
+                        // Materialize pairwise Euclidean squared distances before calling CustomKernel.
                         if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows()); !ok.has_value())
                         {
                             return ok;
@@ -1849,6 +2404,7 @@ namespace cxxgpr
             {
                 if (is_leaf_term(terms[k]))
                 {
+                    // Leaf children write directly into scratch without consuming a nested level.
                     if (auto res = eval_term_square(terms[k], store, x, scratch, uplo, out, nested, level_idx);
                         !res.has_value())
                     {
@@ -1865,6 +2421,7 @@ namespace cxxgpr
                 }
                 else
                 {
+                    // Composite children need their own nested accumulator so out stays intact.
                     if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
                     {
                         return ok;
@@ -1888,6 +2445,18 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Recursively evaluates compiled term @p term on a rectangular cross @c CheckedDistanceStore.
+        /// @details Evaluates supplied-distance leaves from cross slabs, @c CoordLeafRef nodes from @p x1 and @p x2
+        /// (with zero matrix for coordinate-free @c WhiteKernel cross blocks), and composite sums/products.
+        /// @param term Compiled AST node to evaluate.
+        /// @param store Pre-validated cross supplied-distance store.
+        /// @param x1 Optional left coordinate matrix for coordinate-based leaves.
+        /// @param x2 Optional right coordinate matrix for coordinate-based leaves.
+        /// @param out Destination @c rows x cols matrix receiving cross-covariance values.
+        /// @param scratch Leaf scratch matrix used for sibling leaf accumulation.
+        /// @param nested Multi-level workspace for nested composite subtrees and @c CustomKernel distances.
+        /// @param level_idx Current recursion depth into @p nested.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross(
             const Term& term,
             const CheckedDistanceStore<T>& store,
@@ -1926,6 +2495,7 @@ namespace cxxgpr
                     }
                     return detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode);
                 }
+                // Without point coordinates, only Constant (broadcast constant) and White (zero cross) can appear.
                 const T val = std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx])
                     ? static_cast<T>(std::get<ConstantKernel>(leaves[c->leaf_idx]).constant())
                     : T{0};
@@ -1991,6 +2561,16 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Recursively evaluates the self-variance diagonal vector $\mathrm{diag}(K(X, X))$ for @p term.
+        /// @details Supplied-distance leaves have zero self-distance and therefore unit diagonal; coordinate leaves
+        /// dispatch to @c leaf_fill_diag when @p x is supplied or emit constant/white scalars directly.
+        /// @param term Compiled AST node to evaluate along the diagonal.
+        /// @param n Number of points (unused beyond caller validation; matches @p out length).
+        /// @param x Optional coordinate matrix for coordinate-based leaves.
+        /// @param out Output diagonal span of length @p n.
+        /// @param scratch_vec Flat scratch vector partitioned by @p level_idx * @p out.size() for composite subterms.
+        /// @param level_idx Current recursion depth into @p scratch_vec.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
             const Term& term,
             std::size_t n,
@@ -2002,6 +2582,7 @@ namespace cxxgpr
         {
             if (std::holds_alternative<SuppliedScalarRef>(term) || std::holds_alternative<SuppliedArdRef>(term))
             {
+                // Stationary supplied-distance kernels evaluate k(d=0) = 1 along every diagonal entry.
                 std::fill(out.begin(), out.end(), T{1});
                 return {};
             }
@@ -2061,6 +2642,20 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Recursively computes the first log-parameter derivative matrix $\partial K / \partial \theta_p$.
+        /// @details Dispatches to the unique child term owning @p param_idx and applies the sum or product rule across
+        /// sibling factor matrices evaluated into @p scratch_a using @p scratch_b.
+        /// @param term Compiled AST node containing @p param_idx.
+        /// @param store Pre-validated square supplied-distance store.
+        /// @param x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
+        /// @param d_k Output derivative matrix populated on @p uplo.
+        /// @param param_idx Global flattened hyperparameter index.
+        /// @param uplo Triangle mode specifying which entries to compute.
+        /// @param scratch_a First @c n x n scratch matrix for sibling product factors.
+        /// @param scratch_b Second @c n x n scratch matrix passed to recursive evaluation calls.
+        /// @param nested Multi-level workspace for composite subterms and @c CustomKernel distance buffers.
+        /// @param level_idx Current recursion depth into @p nested.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_grad(
             const Term& term,
             const CheckedDistanceStore<T>& store,
@@ -2122,6 +2717,7 @@ namespace cxxgpr
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
+                // Linearity of differentiation: only the single addend owning param_idx contributes.
                 for (const auto& child : s->terms)
                 {
                     if (contains_param(child, param_idx))
@@ -2147,6 +2743,7 @@ namespace cxxgpr
             {
                 return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
             }
+            // Product rule: differentiate the owning factor and scale by all other factor values.
             if (auto res =
                     eval_grad(p.terms[owner], store, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx);
                 !res.has_value())
@@ -2169,6 +2766,24 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Recursively computes the second log-parameter derivative matrix
+        /// $\partial^2 K / (\partial \theta_i \partial \theta_j)$.
+        /// @details Handles same-addend vs zero cross-addend Hessians in @c SumTerm nodes, and splits @c ProductTerm
+        /// Hessians into same-factor second derivatives (@c owner_i == owner_j) or mixed first-derivative products
+        /// (@c owner_i != owner_j) multiplied by all remaining non-differentiated factor matrices.
+        /// @param term Compiled AST node containing @p i and @p j.
+        /// @param store Pre-validated square supplied-distance store.
+        /// @param x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
+        /// @param d2_k Output second-derivative matrix populated on @p uplo.
+        /// @param i First global flattened hyperparameter index.
+        /// @param j Second global flattened hyperparameter index.
+        /// @param uplo Triangle mode specifying which entries to compute.
+        /// @param scratch_a First @c n x n scratch matrix for mixed gradient factors.
+        /// @param scratch_b Second @c n x n scratch matrix for factor evaluation.
+        /// @param scratch_c Third @c n x n scratch matrix forwarded to sub-calls.
+        /// @param nested Multi-level workspace for composite subterms and @c CustomKernel distance buffers.
+        /// @param level_idx Current recursion depth into @p nested.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_hess(
             const Term& term,
             const CheckedDistanceStore<T>& store,
@@ -2246,6 +2861,7 @@ namespace cxxgpr
                     }
                     if (has_i || has_j)
                     {
+                        // Distinct addends in a sum depend on disjoint parameters, so mixed second partials vanish.
                         visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
                             d2_k(row, col) = T{0};
                         });
@@ -2274,6 +2890,7 @@ namespace cxxgpr
             }
             if (owner_i == owner_j)
             {
+                // Both parameters belong to one factor: compute factor Hessian and multiply all sibling values.
                 if (auto res = eval_hess(
                         p.terms[owner_i], store, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx
                     );
@@ -2297,6 +2914,7 @@ namespace cxxgpr
                 }
                 return {};
             }
+            // Mixed product-rule: (d factor_i / d theta_i) * (d factor_j / d theta_j) * prod_{m != i,j} factor_m.
             MatrixMut<T> grad_rhs = scratch_a;
             MatrixMut<T> work_a = scratch_b;
             MatrixMut<T> work_b = scratch_c;
@@ -2330,10 +2948,22 @@ namespace cxxgpr
 
     // --- DistanceStoreBuilder ---
 
+    /// @brief Internal helper aggregating validation, tidy repair, and packed allocation for @c CheckedDistanceStore.
+    /// @details Enforces slot correspondence, finiteness, strict or @c tidy_rel_tol_-bounded non-negativity and
+    /// symmetry, overflow-checked scalar narrowing to @c T, and cache-friendly packing.
     struct DistanceStoreBuilder
     {
+        /// @brief Tile dimension (rows and columns per block) used during pairwise symmetry validation.
         static constexpr std::size_t k_pair_tile = 64U;
 
+        /// @brief Narrows finite @c double value @p val to @p T and reports overflow with coordinates on failure.
+        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @param val Repaired non-negative squared distance value to cast.
+        /// @param slot Optional packed slot index for diagnostic error context.
+        /// @param dim Optional ARD dimension index for diagnostic error context.
+        /// @param row Matrix row index where @p val resides.
+        /// @param col Matrix column index where @p val resides.
+        /// @return Cast value of type @p T on success, or @c GprError::invalid_distance on non-finite overflow.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<T, GprError> checked_cast(
             double val,
@@ -2353,6 +2983,20 @@ namespace cxxgpr
             return cast;
         }
 
+        /// @brief Validates a square pairwise squared-distance matrix and appends it (packed or full) to @p dst.
+        /// @details Performs a finiteness and max-magnitude scan to set @c tol = *tidy_tol * max_abs when tidy mode is
+        /// enabled, validates diagonal-zero, non-negativity, and symmetry in @c k_pair_tile blocks, repairs
+        /// tiny negative or asymmetric entries via midpoint averaging and zero clamping, and writes either packed
+        /// lower-triangular storage (@p pack_lower = @c true) or mirrored column-major storage (@p pack_lower =
+        /// @c false).
+        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @param src Input square squared-distance matrix view.
+        /// @param tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
+        /// @param slot_idx Packed slot index for error diagnostics.
+        /// @param dim_idx Optional ARD dimension index for error diagnostics.
+        /// @param pack_lower If @c true, append packed lower triangle; otherwise resize and mirror full @c n x n.
+        /// @param dst Destination storage vector populated with validated scalar entries.
+        /// @return Empty expected value on success, or @c GprError describing the invalid entry or overflow.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<void, GprError> validate_and_pack_square_block(
             MatrixRef<double> src,
@@ -2364,6 +3008,7 @@ namespace cxxgpr
         )
         {
             const std::size_t n = src.rows();
+            // Pass 1: verify finiteness across all n*n entries and capture max_abs to scale tidy_tol.
             double max_abs = 0.0;
             for (std::size_t col = 0; col < n; ++col)
             {
@@ -2384,7 +3029,7 @@ namespace cxxgpr
 
             if (!tidy_tol.has_value())
             {
-                // Strict 1-pass check.
+                // Strict mode: require exact zero diagonal, exact non-negativity, and bitwise symmetry a == b.
                 for (std::size_t col = 0; col < n; ++col)
                 {
                     const double diag = src(col, col);
@@ -2401,6 +3046,7 @@ namespace cxxgpr
                         );
                     }
                 }
+                // Walk strict lower triangle in k_pair_tile x k_pair_tile blocks for cache-local transpose reads.
                 for (std::size_t j0 = 0; j0 < n; j0 += k_pair_tile)
                 {
                     const std::size_t j1 = std::min(j0 + k_pair_tile, n);
@@ -2445,7 +3091,7 @@ namespace cxxgpr
             }
             else
             {
-                // Tidy tolerance check: track worst violation or first out-of-tolerance violation.
+                // Tidy mode: reject violations larger than tol = tidy_rel_tol * max_abs before clamping/symmetrizing.
                 for (std::size_t col = 0; col < n; ++col)
                 {
                     for (std::size_t row = 0; row < n; ++row)
@@ -2494,6 +3140,8 @@ namespace cxxgpr
                 }
             }
 
+            // Force diagonal to zero, average off-diagonal pairs a + 0.5*(b - a) for midpoint accuracy,
+            // and clamp any values in [-tol, 0) up to 0 before checked narrowing cast to T.
             if (pack_lower)
             {
                 const auto per_dim_exp = packed_len(n);
@@ -2553,6 +3201,16 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Validates a rectangular cross squared-distance block and appends its column-major entries to @p dst.
+        /// @details Enforces finiteness across all entries and checks non-negativity strictly or within
+        /// @c -(*tidy_tol * max_abs), clamping tiny negative values to zero before narrowing to @p T.
+        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @param src Input rectangular squared-distance matrix view.
+        /// @param tidy_tol Optional relative tolerance permitting clamping of tiny negative entries.
+        /// @param slot_idx Packed slot index for error diagnostics.
+        /// @param dim_idx Optional ARD dimension index for error diagnostics.
+        /// @param dst Destination column-major buffer to which validated entries are appended.
+        /// @return Empty expected value on success, or @c GprError describing invalid entries or overflow.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<void, GprError> validate_and_copy_rect_block(
             MatrixRef<double> src,
@@ -2564,6 +3222,7 @@ namespace cxxgpr
         {
             const std::size_t n_rows = src.rows();
             const std::size_t n_cols = src.cols();
+            // Pass 1: check finiteness across all entries and record max_abs for relative tidy tolerance.
             double max_abs = 0.0;
             for (std::size_t col = 0; col < n_cols; ++col)
             {
@@ -2588,6 +3247,7 @@ namespace cxxgpr
                 return std::unexpected(std::move(len_exp).error());
             }
             dst.resize(base_offset + *len_exp);
+            // Pass 2: validate non-negativity (strict or within -tol), clamp [-tol, 0) to 0, and narrow to T.
             for (std::size_t col = 0; col < n_cols; ++col)
             {
                 for (std::size_t row = 0; row < n_rows; ++row)
@@ -2619,6 +3279,15 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Validates @p source against @p kernel's slot descriptors and constructs a @c CheckedDistanceStore.
+        /// @details Checks @c tidy_rel_tol_, verifies exact bijective correspondence between provided scalar/ARD
+        /// slots and @p kernel's slot list (catching foreign, scalar/ARD-mismatched, duplicate, and missing slots),
+        /// verifies consistent non-empty shapes (plus squareness when @p is_square is true), and packs every block.
+        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @param kernel Compiled mixed distance kernel defining expected slot signatures.
+        /// @param source Unchecked builder source supplying pairwise scalar and per-dimension ARD blocks.
+        /// @param is_square @c true for training square distance stores, @c false for rectangular cross stores.
+        /// @return Immutable @c CheckedDistanceStore on success, or a structured @c GprError explaining the failure.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build(
             const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
@@ -2705,7 +3374,7 @@ namespace cxxgpr
                 return std::unexpected(GprError::unsupported_kernel_operation("kernel has no supplied distance slots"));
             }
 
-            // Determine shape from the first slot entry.
+            // Determine common matrix shape from the first provided slot and verify consistency across all slots.
             std::size_t n_rows = 0;
             std::size_t n_cols = 0;
             if (!source.scalars_.empty())
@@ -2780,6 +3449,7 @@ namespace cxxgpr
                     return std::unexpected(GprError::dimension_mismatch(entry.d2_per_dim.size(), expected_dims));
                 }
                 impl->ard_dims[desc->at] = expected_dims;
+                // Pre-reserve contiguous ARD slabs (packed lower triangle for square, column-major for cross).
                 if (is_square)
                 {
                     const auto per_dim_exp = packed_len(n_rows);
@@ -2844,19 +3514,31 @@ namespace cxxgpr
 
     // --- CompiledDistanceKernel<T> ---
 
+    /// @brief Constructs a @c CompiledDistanceKernel from its compiled PIMPL state.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param impl Ownership handle to compiled kernel state.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>::CompiledDistanceKernel(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))
     {
     }
 
+    /// @brief Destroys the @c CompiledDistanceKernel instance.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
     template <KernelScalarConcept T> CompiledDistanceKernel<T>::~CompiledDistanceKernel() = default;
 
+    /// @brief Deep-copies a @c CompiledDistanceKernel by cloning its compiled PIMPL state.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param other Compiled kernel instance to copy.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>::CompiledDistanceKernel(const CompiledDistanceKernel& other) :
         impl_(std::make_unique<Impl>(*other.impl_))
     {
     }
 
+    /// @brief Assigns this compiled kernel by deep-copying @p other's PIMPL state.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param other Compiled kernel instance to copy from.
+    /// @return Reference to @c *this.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>& CompiledDistanceKernel<T>::operator=(const CompiledDistanceKernel& other)
     {
@@ -2867,6 +3549,13 @@ namespace cxxgpr
         return *this;
     }
 
+    /// @brief Compiles this symbolic distance-kernel expression into flattened evaluation IR.
+    /// @details Collects slot descriptors, assigns contiguous leaf hyperparameter bindings via pre-order traversal,
+    /// computes required nested scratch depth (adding one level if any coordinate @c CustomKernel leaf needs
+    /// materialized squared distances), and caches ARD lengthscale vectors.
+    /// @tparam Mode Distance mode tag (@c DistanceOnly or @c WithPoints).
+    /// @tparam T Target scalar evaluation precision (@c double or @c float).
+    /// @return Immutable-topology @c CompiledDistanceKernel ready for workspace-reusing evaluation.
     template <DistanceModeConcept Mode>
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T> DistanceKernel<Mode>::compile() const
@@ -2877,6 +3566,7 @@ namespace cxxgpr
         impl->num_ard_slots = num_ard_slots();
         std::size_t next_param = 0;
         impl->root = CompiledDistanceKernel<T>::Impl::template compile_node<Mode>(*root_, *impl, next_param);
+        // A coordinate CustomKernel materializes an n x n squared-distance matrix in the deepest nested buffer.
         bool has_custom_coord = false;
         if (impl->has_coord_points)
         {
@@ -2895,42 +3585,69 @@ namespace cxxgpr
         return CompiledDistanceKernel<T>(std::move(impl));
     }
 
+    /// @brief Returns the exponential evaluation mode configured on this compiled kernel.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Active @c KernelExp precision mode.
     template <KernelScalarConcept T> KernelExp CompiledDistanceKernel<T>::kernel_exp() const noexcept
     {
         return impl_->exp_mode;
     }
 
+    /// @brief Sets the exponential evaluation mode applied to @c Rbf, @c Matern52, and @c Matern32 leaves.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param mode New @c KernelExp evaluation precision mode.
     template <KernelScalarConcept T> void CompiledDistanceKernel<T>::set_kernel_exp(KernelExp mode) noexcept
     {
         impl_->exp_mode = mode;
     }
 
+    /// @brief Returns the total number of flattened hyperparameters across all kernel leaves.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Total hyperparameter count.
     template <KernelScalarConcept T> std::size_t CompiledDistanceKernel<T>::num_params() const noexcept
     {
         return impl_->bindings.size();
     }
 
+    /// @brief Returns the number of flattened leaf kernels in this compiled expression.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Total leaf count.
     template <KernelScalarConcept T> std::size_t CompiledDistanceKernel<T>::num_leaves() const noexcept
     {
         return impl_->leaves.size();
     }
 
+    /// @brief Reports whether evaluation requires non-null point coordinate matrices.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return @c true when coordinate-dependent leaves are present (excluding @c Constant and @c White).
     template <KernelScalarConcept T> bool CompiledDistanceKernel<T>::requires_points() const noexcept
     {
         return impl_->has_coord_points;
     }
 
+    /// @brief Returns the minimum @c NestedBuffers depth needed for allocation-free evaluation.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Required nested scratch matrix count.
     template <KernelScalarConcept T> std::size_t CompiledDistanceKernel<T>::nested_depth() const noexcept
     {
         return impl_->nested_depth;
     }
 
+    /// @brief Allocates a reusable @c NestedBuffers scratch pool sized for matrices up to @p rows by @p cols.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param rows Maximum row capacity needed per scratch buffer.
+    /// @param cols Maximum column capacity needed per scratch buffer.
+    /// @return Pre-sized @c NestedBuffers workspace matching @c nested_depth().
     template <KernelScalarConcept T>
     NestedBuffers<T> CompiledDistanceKernel<T>::make_nested_buffers(std::size_t rows, std::size_t cols) const
     {
         return NestedBuffers<T>(impl_->nested_depth, rows, cols);
     }
 
+    /// @brief Copies all flattened leaf hyperparameters in @c parameter_bindings() order into @p out.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param out Destination span of length equal to @c num_params().
+    /// @return Empty expected value on success, or @c GprError on length mismatch.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::get_params(std::span<double> out) const
     {
@@ -2951,6 +3668,12 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Atomically validates and updates all leaf hyperparameters from @p params.
+    /// @details Applies updates to a temporary leaf vector before committing so invalid values leave @c *this
+    /// unchanged, then refreshes cached ARD lengthscales.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param params Input parameter span of length equal to @c num_params().
+    /// @return Empty expected value on success, or @c GprError on length mismatch or out-of-domain parameters.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::set_params(std::span<const double> params)
     {
@@ -2958,6 +3681,7 @@ namespace cxxgpr
         {
             return cnt;
         }
+        // Copy-validate all leaves before committing so validation errors preserve strong exception/state safety.
         std::vector<KernelLeaf> updated = impl_->leaves;
         std::size_t offset = 0;
         for (auto& leaf : updated)
@@ -2974,6 +3698,10 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Writes per-parameter optimization interval bounds in @c parameter_bindings() order into @p out.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param out Destination span of @c Interval bounds of length @c num_params().
+    /// @return Empty expected value on success, or @c GprError on span length mismatch.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::bounds_into(std::span<Interval> out) const
     {
@@ -2994,18 +3722,28 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Returns metadata binding each global hyperparameter index to its leaf and local index.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Const reference to the ordered parameter binding vector.
     template <KernelScalarConcept T>
     const std::vector<ParameterBinding>& CompiledDistanceKernel<T>::parameter_bindings() const noexcept
     {
         return impl_->bindings;
     }
 
+    /// @brief Returns the supplied-distance slot descriptors required by this compiled kernel.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @return Const reference to the kernel's slot descriptors.
     template <KernelScalarConcept T>
     const std::vector<SlotDescriptor>& CompiledDistanceKernel<T>::slots() const noexcept
     {
         return impl_->slots;
     }
 
+    /// @brief Validates and packs square training distance matrices in @p source into a @c CheckedDistanceStore.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param source Unchecked supplied-distance matrices matching this kernel's slots.
+    /// @return Validated square @c CheckedDistanceStore on success, or @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<CheckedDistanceStore<T>, GprError> CompiledDistanceKernel<T>::prepare_square(
         const DistanceSource& source
@@ -3014,6 +3752,10 @@ namespace cxxgpr
         return DistanceStoreBuilder::build<T>(*this, source, true);
     }
 
+    /// @brief Validates and copies rectangular cross distance matrices in @p source into a @c CheckedDistanceStore.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param source Unchecked cross supplied-distance matrices matching this kernel's slots.
+    /// @return Validated rectangular @c CheckedDistanceStore on success, or @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<CheckedDistanceStore<T>, GprError> CompiledDistanceKernel<T>::prepare_cross(
         const DistanceSource& source
@@ -3022,6 +3764,15 @@ namespace cxxgpr
         return DistanceStoreBuilder::build<T>(*this, source, false);
     }
 
+    /// @brief Evaluates the symmetric Gram matrix over @p uplo using caller-supplied workspace buffers.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param out Output @c n x n Gram matrix view populated on @p uplo.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch Non-aliasing @c n x n temporary buffer matching @p out shape.
+    /// @param nested Caller-owned nested evaluation scratch pool.
+    /// @return Empty expected value on success, or a structured @c GprError on shape/workspace/point mismatch.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::apply(
         const CheckedDistanceStore<T>& store,
@@ -3047,6 +3798,14 @@ namespace cxxgpr
         return impl_->eval_term_square(impl_->root, store, x, out, uplo, scratch, nested, 0);
     }
 
+    /// @brief Evaluates the symmetric Gram matrix over @p uplo using an internally allocated @c NestedBuffers pool.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param out Output @c n x n Gram matrix view populated on @p uplo.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch Non-aliasing @c n x n temporary buffer matching @p out shape.
+    /// @return Empty expected value on success, or a structured @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::apply(
         const CheckedDistanceStore<T>& store,
@@ -3060,6 +3819,15 @@ namespace cxxgpr
         return apply(store, x, out, uplo, scratch, nested);
     }
 
+    /// @brief Evaluates the rectangular cross-covariance matrix using caller-supplied workspace buffers.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated rectangular cross @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x1 Optional left coordinate matrix of row count @c store.rows().
+    /// @param x2 Optional right coordinate matrix of row count @c store.cols().
+    /// @param out Output @c store.rows() x @c store.cols() matrix view receiving kernel entries.
+    /// @param scratch Non-aliasing temporary matrix matching @p out shape.
+    /// @param nested Caller-owned nested evaluation scratch pool.
+    /// @return Empty expected value on success, or @c GprError on dimension, shape, or workspace mismatch.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::apply_cross(
         const CheckedDistanceStore<T>& store,
@@ -3093,6 +3861,14 @@ namespace cxxgpr
         return impl_->eval_term_cross(impl_->root, store, x1, x2, out, scratch, nested, 0);
     }
 
+    /// @brief Evaluates the rectangular cross-covariance matrix using an internally allocated @c NestedBuffers pool.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated rectangular cross @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x1 Optional left coordinate matrix of row count @c store.rows().
+    /// @param x2 Optional right coordinate matrix of row count @c store.cols().
+    /// @param out Output @c store.rows() x @c store.cols() matrix view receiving kernel entries.
+    /// @param scratch Non-aliasing temporary matrix matching @p out shape.
+    /// @return Empty expected value on success, or @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::apply_cross(
         const CheckedDistanceStore<T>& store,
@@ -3106,6 +3882,12 @@ namespace cxxgpr
         return apply_cross(store, x1, x2, out, scratch, nested);
     }
 
+    /// @brief Evaluates the kernel diagonal vector $\mathrm{diag}(K(X, X))$ for @p n points.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param n Number of diagonal entries to compute (must be non-zero).
+    /// @param x Optional point coordinate matrix of @p n rows when coordinate leaves require it.
+    /// @param out Destination span of length @p n receiving self-kernel variances.
+    /// @return Empty expected value on success, or @c GprError on empty input, shape mismatch, or missing points.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::fill_diag(
         std::size_t n, std::optional<MatrixRef<T>> x, std::span<T> out
@@ -3127,6 +3909,17 @@ namespace cxxgpr
         return impl_->eval_fill_diag(impl_->root, n, x, out, scratch_vec, 0);
     }
 
+    /// @brief Computes the first log-hyperparameter derivative matrix over @p uplo using caller workspace.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param d_k Output @c n x n derivative matrix populated on @p uplo.
+    /// @param param_idx Global flattened hyperparameter index to differentiate with respect to.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch_a First non-aliasing @c n x n temporary buffer.
+    /// @param scratch_b Second non-aliasing @c n x n temporary buffer distinct from @p scratch_a.
+    /// @param nested Caller-owned nested evaluation scratch pool.
+    /// @return Empty expected value on success, or @c GprError on aliasing, range, or validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::grad(
         const CheckedDistanceStore<T>& store,
@@ -3166,6 +3959,16 @@ namespace cxxgpr
         return impl_->eval_grad(impl_->root, store, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, 0);
     }
 
+    /// @brief Computes the first log-hyperparameter derivative matrix using an internally allocated nested pool.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param d_k Output @c n x n derivative matrix populated on @p uplo.
+    /// @param param_idx Global flattened hyperparameter index to differentiate with respect to.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch_a First non-aliasing @c n x n temporary buffer.
+    /// @param scratch_b Second non-aliasing @c n x n temporary buffer distinct from @p scratch_a.
+    /// @return Empty expected value on success, or @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::grad(
         const CheckedDistanceStore<T>& store,
@@ -3181,6 +3984,21 @@ namespace cxxgpr
         return grad(store, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested);
     }
 
+    /// @brief Computes the second log-hyperparameter derivative matrix over @p uplo using caller workspace.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param d2_k Output @c n x n Hessian entry matrix populated on @p uplo.
+    /// @param i First global flattened hyperparameter index.
+    /// @param j Second global flattened hyperparameter index.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch_a First non-aliasing @c n x n temporary buffer.
+    /// @param scratch_b Second non-aliasing @c n x n temporary buffer pairwise disjoint from @p scratch_a and
+    /// @p scratch_c.
+    /// @param scratch_c Third non-aliasing @c n x n temporary buffer pairwise disjoint from @p scratch_a and
+    /// @p scratch_b.
+    /// @param nested Caller-owned nested evaluation scratch pool.
+    /// @return Empty expected value on success, or @c GprError on aliasing, range, or validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::hess(
         const CheckedDistanceStore<T>& store,
@@ -3227,6 +4045,18 @@ namespace cxxgpr
         return impl_->eval_hess(impl_->root, store, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, 0);
     }
 
+    /// @brief Computes the second log-hyperparameter derivative matrix using an internally allocated nested pool.
+    /// @tparam T Scalar evaluation type (@c double or @c float).
+    /// @param store Pre-validated square @c CheckedDistanceStore matching this kernel's slots.
+    /// @param x Optional point coordinate matrix (required when @c requires_points() is true).
+    /// @param d2_k Output @c n x n Hessian entry matrix populated on @p uplo.
+    /// @param i First global flattened hyperparameter index.
+    /// @param j Second global flattened hyperparameter index.
+    /// @param uplo Triangle selection controlling written matrix entries.
+    /// @param scratch_a First non-aliasing @c n x n temporary buffer.
+    /// @param scratch_b Second non-aliasing @c n x n temporary buffer.
+    /// @param scratch_c Third non-aliasing @c n x n temporary buffer.
+    /// @return Empty expected value on success, or @c GprError on validation failure.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::hess(
         const CheckedDistanceStore<T>& store,

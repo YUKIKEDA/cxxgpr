@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-05, REQ-08, REQ-09, REQ-11, DES-01, DES-05, DES-11, DES-15, DES-16, DES-17
+/// @file gpr_test.cpp
+/// @brief Unit and integration tests for Gpr and FittedGpr compile-time state separation and workflows.
+/// @details Verifies compile-time concept rejection of predict/loo_predict on unfitted Gpr,
+/// end-to-end fit/factor/predict/covariance/sample/LOO/refit across all five optimizer policies
+/// with input and target preprocessing, MixedPrecision iterative refinement parity, zero-alloc
+/// predict_into(), and immutable parent state preservation on negative inputs.
 
 #include "cxxgpr/gpr/gpr.hpp"
 
@@ -20,9 +26,13 @@
 namespace
 {
 
+    /// @brief Compile-time trait checking whether a model type exposes const predict(MatrixRef).
+    /// @tparam T Candidate GPR model type (unfitted Gpr vs FittedGpr).
     template <typename T>
     concept HasPredict = requires(const T& m, cxxgpr::MatrixRef<double> xs) { m.predict(xs); };
 
+    /// @brief Compile-time trait checking whether a model type exposes const loo_predict().
+    /// @tparam T Candidate GPR model type (unfitted Gpr vs FittedGpr).
     template <typename T>
     concept HasLooPredict = requires(const T& m) { m.loo_predict(); };
 
@@ -31,9 +41,14 @@ namespace
     static_assert(HasPredict<cxxgpr::FittedGpr<>>);
     static_assert(HasLooPredict<cxxgpr::FittedGpr<>>);
 
+    /// @brief Verifies fit/factor/predict/LOO/refit across all five optimizers and preprocessing transforms.
+    /// @details Fits 1D sinusoidal data with StandardizeInput and StandardizeTarget using L-BFGS,
+    /// audits zero-alloc predict_into() under NoAllocationScope, checks covariance/sample/LOO/refit
+    /// parity, and exercises TrustRegion, NelderMead, FastSimulatedAnnealing, and Fixed::factor().
     TEST(GprModelsTest, FitPredictLooAndTransformsWithAllOptimizers)
     {
         // Spec: REQ-01, REQ-09, DES-01, DES-11, DES-16
+        // Generate 10 training samples from y = 10 + 3*sin(x) + 0.2*x on [-2, 2].
         const std::size_t n = 10;
         const std::size_t d = 1;
         std::vector<double> x_train(n);
@@ -139,9 +154,13 @@ namespace
         EXPECT_EQ(fit_fixed->optimizer_result().iterations, 0U);
     }
 
+    /// @brief Verifies MixedPrecision iterative refinement parity with DoublePrecision and zero-alloc predict.
+    /// @details Compares PromoteStorage and ReevaluateKernel dual coefficients alpha against
+    /// DoublePrecision, confirms refinement_summary() presence, and audits predict_into() under NoAllocationScope.
     TEST(GprModelsTest, MixedPrecisionIterativeRefinementAndZeroAllocPredict)
     {
         // Spec: REQ-05, REQ-11, DES-05
+        // Construct an 8-point smooth 1D regression dataset for Double vs MixedPrecision comparison.
         const std::size_t n = 8;
         const std::size_t d = 1;
         std::vector<double> x_train(n);
@@ -184,6 +203,7 @@ namespace
             EXPECT_NEAR(mp_reev->alpha()[i], f64->alpha()[i], 1e-6);
         }
 
+        // Verify zero heap allocations during repeated predict_into calls under ReevaluateKernel.
         cxxgpr::Prediction<double> out_mp;
         ASSERT_TRUE(mp_reev->predict_into(xq_ref, out_mp).has_value());
         {
@@ -192,12 +212,16 @@ namespace
         }
     }
 
+    /// @brief Negative controls verifying failed builder, fit, factor, and predict calls keep state intact.
+    /// @details Confirms InvalidNoiseVariance, EmptyInput, LengthMismatch, NonFiniteInput, and
+    /// DimensionMismatch rejections leave the parent Gpr and FittedGpr reusable afterwards.
     TEST(GprModelsTest, NegativeControlsLeaveParentUnchanged)
     {
         // Spec: DES-01, DES-02
         const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
         const cxxgpr::Gpr<> gpr(spec);
 
+        // Reject negative noise variance before checking training dimensions.
         EXPECT_EQ(gpr.with_noise_variance(-1.0).error().code(), cxxgpr::GprErrorCode::InvalidNoiseVariance);
 
         const std::vector<double> empty_x;

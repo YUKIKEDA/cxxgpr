@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, DES-07
+/// @file leaves_test.cpp
+/// @brief Unit tests for all ten built-in kernel leaves, interval validation, and atomic parameters.
+/// @details Verifies construction and default positive intervals across all ten kernel leaf classes,
+/// rejection of non-positive/NaN parameters, invalid intervals, and empty ARD vectors, and atomic
+/// log-parameter get/set roundtrips.
 
 #include "cxxgpr/kernel/leaves.hpp"
 
@@ -13,8 +18,12 @@
 namespace
 {
 
+    /// @brief Verifies construction and parameter counts of all ten built-in kernel leaves.
+    /// @details Confirms default positive bounds, parameter counts, lengthscale getters, and Matern nu
+    /// accessors across isotropic, ARD, Periodic, RationalQuadratic, Constant, Linear, and White leaves.
     TEST(KernelLeavesTest, ConstructsAllTenBuiltInLeavesWithDefaultPositiveBounds)
     {
+        // Construct every built-in leaf family using default positive parameter intervals.
         const auto rbf = cxxgpr::RbfKernel::create(1.5);
         const auto rbf_ard = cxxgpr::RbfArdKernel::create(std::array<double, 2>{1.0, 2.0});
         const auto matern = cxxgpr::MaternKernel::create(1.2, cxxgpr::MaternNu::ThreeHalves);
@@ -55,8 +64,12 @@ namespace
         EXPECT_EQ(matern_ard->nu(), cxxgpr::MaternNu::FiveHalves);
     }
 
+    /// @brief Negative controls verifying leaf constructors reject invalid scales, intervals, and ARD spans.
+    /// @details Confirms InvalidInterval for zero/negative/NaN scalars or non-positive bounds, and
+    /// EmptyInput for empty ARD lengthscale spans.
     TEST(KernelLeavesTest, RejectsInvalidValuesIntervalsAndEmptyArd)
     {
+        // Reject non-positive and non-finite scalar hyperparameters.
         EXPECT_EQ(cxxgpr::RbfKernel::create(0.0).error().code(), cxxgpr::GprErrorCode::InvalidInterval);
         EXPECT_EQ(cxxgpr::RbfKernel::create(-1.0).error().code(), cxxgpr::GprErrorCode::InvalidInterval);
         EXPECT_EQ(
@@ -83,11 +96,15 @@ namespace
         );
     }
 
+    /// @brief Verifies log-parameter roundtrip and atomic rollback on partial interval violation.
+    /// @details Reads log-parameters from RationalQuadraticArdKernel, asserts an out-of-bounds third
+    /// parameter leaves the first two unchanged, and confirms valid log-updates apply accurately.
     TEST(KernelLeavesTest, SetParamsIsAtomicAndLogsRoundTrip)
     {
         auto rq_ard = cxxgpr::RationalQuadraticArdKernel::create(std::array<double, 2>{1.0, 2.0}, 1.5);
         ASSERT_TRUE(rq_ard.has_value());
 
+        // Verify log-space parameter serialization order [log(ls_0), log(ls_1), log(alpha)].
         std::array<double, 3> theta{};
         ASSERT_TRUE(rq_ard->get_params(theta).has_value());
         EXPECT_DOUBLE_EQ(theta[0], std::log(1.0));

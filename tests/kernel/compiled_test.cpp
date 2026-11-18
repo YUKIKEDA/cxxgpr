@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-11, DES-06, DES-07
+/// @file compiled_test.cpp
+/// @brief Unit and property tests for compiled kernel evaluation, derivatives, and validation.
+/// @details Verifies compiled composite kernels over all ten leaf families against squared-distance
+/// and point-coordinate evaluation, central finite-difference gradients and Hessians, single-precision
+/// zero-allocation execution, and error precedence across invalid inputs and aliased buffers.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -15,10 +20,16 @@
 namespace
 {
 
+    /// @brief Computes a dense column-major pairwise squared Euclidean distance matrix.
+    /// @details Evaluates ||x_i - x_j||_2^2 for all pairs (i, j) so compiled distance-based
+    /// kernel evaluation can be cross-checked directly against coordinate evaluation.
+    /// @param x Column-major n x d coordinate matrix.
+    /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {
         const std::size_t n = x.rows();
         std::vector<double> d2(n * n, 0.0);
+        // Accumulate squared coordinate differences per column-major output entry.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -35,13 +46,19 @@ namespace
         return d2;
     }
 
+    /// @brief Verifies distance vs coordinate Gram parity, triangle masking, and White cross-covariance.
+    /// @details Evaluates a composite Sum/Product tree via apply() and apply_points() with
+    /// Triangle::Lower, confirms strict upper sentinels stay unmodified, and checks WhiteKernel
+    /// yields exact zeros on cross-covariance queries.
     TEST(CompiledKernelTest, MatchesDistAndPointsAndRespectsTriangles)
     {
+        // Build a 3x2 point cloud and its explicit pairwise squared-distance matrix.
         const std::array<double, 6> x_buf{0.0, 1.0, 2.5, -0.5, 0.5, 1.5};
         const cxxgpr::MatrixRef<double> x_ref(x_buf.data(), 3, 2);
         const auto d2_buf = make_sq_dist(x_ref);
         const cxxgpr::MatrixRef<double> d2_ref(d2_buf.data(), 3, 3);
 
+        // Compose a mixed isotropic tree covering Constant, RBF, Matern-5/2, Periodic, RQ, and White.
         const auto c = cxxgpr::ConstantKernel::create(1.8);
         const auto rbf = cxxgpr::RbfKernel::create(1.3);
         const auto m52 = cxxgpr::MaternKernel::create(0.9, cxxgpr::MaternNu::FiveHalves);
@@ -55,6 +72,7 @@ namespace
                 + cxxgpr::KernelSpec(*white));
         const auto compiled = spec.compile<double>();
 
+        // Pre-fill outputs with sentinel -999.0 to verify Triangle::Lower preserves strict upper entries.
         std::vector<double> out_dist(9, -999.0);
         std::vector<double> out_pts(9, -999.0);
         std::vector<double> scratch(9, 0.0);
@@ -107,6 +125,10 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical gradients and Hessians of all leaf families against finite differences.
+    /// @details Exercises a nested Product/Sum composite spanning all ten kernel leaf variants
+    /// including coincident points (row 0 == row 1) and checks every parameter derivative and
+    /// cross-Hessian against central finite differences.
     TEST(CompiledKernelTest, AllLeavesAnalyticalGradAndHessMatchFiniteDifferences)
     {
         const std::array<double, 6> x_buf{0.2, 0.2, 1.7, -0.4, -0.4, 0.9};
@@ -167,6 +189,7 @@ namespace
                     .has_value());
         };
 
+        // Check analytical first-order log-parameter gradients against central differences.
         std::vector<double> kp(9, 0.0);
         std::vector<double> km(9, 0.0);
         for (std::size_t i = 0; i < np; ++i)
@@ -203,6 +226,7 @@ namespace
                     .has_value());
         };
 
+        // Check analytical second-order log-parameter Hessians against central differences of gradients.
         for (std::size_t i = 0; i < np; ++i)
         {
             for (std::size_t j = 0; j < np; ++j)
@@ -231,6 +255,9 @@ namespace
         (void)k_mat;
     }
 
+    /// @brief Verifies single-precision kernel evaluation and zero-allocation hot-path compliance.
+    /// @details Compiles a composite Constant * RBF + White kernel to float and asserts zero heap
+    /// allocations inside NoAllocationScope across apply(), grad(), and hess().
     TEST(CompiledKernelTest, SinglePrecisionAndZeroAllocationHotPathWork)
     {
         const auto c = cxxgpr::ConstantKernel::create(2.0);
@@ -282,12 +309,17 @@ namespace
         }
     }
 
+    /// @brief Negative controls verifying invalid inputs, aliased buffers, and DES-02 error ordering.
+    /// @details Checks UnsupportedKernelOperation for coordinate-only kernels or invalid cross-Hessians,
+    /// InvalidConfig on aliased scratch/output buffers, NonFiniteInput on NaN distances, ARD dimension
+    /// mismatches, nested fill_diag() accuracy, and EmptyInput -> LengthMismatch -> DimensionMismatch order.
     TEST(CompiledKernelTest, RejectsInvalidInputsAndAliasedBuffers)
     {
         const auto rbf = cxxgpr::RbfKernel::create(1.0);
         const auto lin = cxxgpr::LinearKernel::create(1.0);
         ASSERT_TRUE(rbf && lin);
 
+        // Coordinate-only LinearKernel rejects distance-only apply().
         const auto lin_c = cxxgpr::KernelSpec(*lin).compile<double>();
         std::array<double, 4> d2{0.0, 1.0, 1.0, 0.0};
         std::array<double, 4> out{};
