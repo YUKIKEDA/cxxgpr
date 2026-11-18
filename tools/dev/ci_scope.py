@@ -140,22 +140,26 @@ def test_scope(paths: list[str], *, full: bool = False) -> dict[str, str]:
 
     cpp_roots = ("include/", "src/", "tests/", "qa/", "benchmarks/")
     tu_roots = ("src/", "tests/", "qa/")
+    normalized_paths = [raw_path.replace("\\", "/") for raw_path in paths]
     cpp_files = sorted(
-        {
-            path.replace("\\", "/")
-            for path in paths
-            if _is_cpp_source(path) and path.startswith(cpp_roots)
-        }
+        {path for path in normalized_paths if _is_cpp_source(path) and path.startswith(cpp_roots)}
     )
     tu_files = [path for path in cpp_files if path.endswith(".cpp") and path.startswith(tu_roots)]
-    format_str = " ".join(cpp_files)
-    cpp_str = " ".join(tu_files) if len(tu_files) == len(cpp_files) and cpp_files else ""
+    force_all_format = ".clang-format" in normalized_paths
+    force_all_cpp = any(
+        path in BUILD_ROOT_FILES or path.startswith("cmake/") for path in normalized_paths
+    )
+    format_str = "" if force_all_format else " ".join(cpp_files)
+    cpp_str = (
+        " ".join(tu_files)
+        if not force_all_cpp and len(tu_files) == len(cpp_files) and cpp_files
+        else ""
+    )
 
     # Until per-module suites grow, narrow CTest only for single-module tests/ edits.
     modules: set[str] = set()
     run_all = False
-    for raw_path in paths:
-        path = raw_path.replace("\\", "/")
+    for path in normalized_paths:
         if path.startswith("tests/"):
             parts = Path(path).parts
             if len(parts) >= 3 and parts[1] != "support":

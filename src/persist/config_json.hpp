@@ -19,28 +19,31 @@
 #include <optional>
 #include <string>
 
-namespace cxxgpr::persist::detail {
+namespace cxxgpr::persist::detail
+{
 
-struct ParsedConfig {
-    std::size_t n{0};
-    std::size_t d{0};
-    bool has_factor{false};
-    double factor_jitter{0.0};
-    PersistPrecisionKind precision_kind{PersistPrecisionKind::Double};
-    KernelExp kernel_exp{KernelExp::Accurate};
-    DistanceCachePolicy distance_cache{DistanceCachePolicy::Cached};
-    std::optional<KernelSpec> kernel_spec;
-    std::optional<GaussianLikelihood> likelihood;
-    JitterPolicy jitter;
-    std::unique_ptr<transform::UnfittedInputTransform> x_unfitted;
-    std::unique_ptr<transform::FittedInputTransform> x_transform;
-    std::unique_ptr<transform::UnfittedTargetTransform> y_unfitted;
-    std::unique_ptr<transform::FittedTargetTransform> y_transform;
-};
+    struct ParsedConfig
+    {
+        std::size_t n{0};
+        std::size_t d{0};
+        bool has_factor{false};
+        double factor_jitter{0.0};
+        PersistPrecisionKind precision_kind{PersistPrecisionKind::Double};
+        KernelExp kernel_exp{KernelExp::Accurate};
+        DistanceCachePolicy distance_cache{DistanceCachePolicy::Cached};
+        std::optional<KernelSpec> kernel_spec;
+        std::optional<GaussianLikelihood> likelihood;
+        JitterPolicy jitter;
+        std::unique_ptr<transform::UnfittedInputTransform> x_unfitted;
+        std::unique_ptr<transform::FittedInputTransform> x_transform;
+        std::unique_ptr<transform::UnfittedTargetTransform> y_unfitted;
+        std::unique_ptr<transform::FittedTargetTransform> y_transform;
+    };
 
-[[nodiscard]] std::expected<std::string, GprError> serialize_config_json(const SaveInput& input);
+    [[nodiscard]] std::expected<std::string, GprError> serialize_config_json(const SaveInput& input);
 
-[[nodiscard]] std::expected<ParsedConfig, GprError>
-parse_config_json(const std::filesystem::path& path, const PersistRegistry& registry);
+    [[nodiscard]] std::expected<ParsedConfig, GprError> parse_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    );
 
-} // namespace cxxgpr::persist::detail
+}  // namespace cxxgpr::persist::detail
