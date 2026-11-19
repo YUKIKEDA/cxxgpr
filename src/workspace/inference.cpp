@@ -158,9 +158,21 @@ namespace cxxgpr
             for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
             {
                 const auto j = static_cast<std::size_t>(col_idx);
-                const Storage* col_ptr = k_star_ptr + j * n_local;
-                Refine acc{0};
-                for (std::size_t i = 0; i < n_local; ++i)
+                const Storage* col_ptr = k_star_ptr + (j * n_local);
+                Refine acc0{0};
+                Refine acc1{0};
+                Refine acc2{0};
+                Refine acc3{0};
+                std::size_t i = 0U;
+                for (; i + 4U <= n_local; i += 4U)
+                {
+                    acc0 += static_cast<Refine>(col_ptr[i]) * alpha_ptr[i];
+                    acc1 += static_cast<Refine>(col_ptr[i + 1U]) * alpha_ptr[i + 1U];
+                    acc2 += static_cast<Refine>(col_ptr[i + 2U]) * alpha_ptr[i + 2U];
+                    acc3 += static_cast<Refine>(col_ptr[i + 3U]) * alpha_ptr[i + 3U];
+                }
+                Refine acc = (acc0 + acc1) + (acc2 + acc3);
+                for (; i < n_local; ++i)
                 {
                     acc += static_cast<Refine>(col_ptr[i]) * alpha_ptr[i];
                 }
@@ -248,9 +260,25 @@ namespace cxxgpr
         for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
         {
             const auto j = static_cast<std::size_t>(col_idx);
-            const Storage* v_col = v_ptr + j * n;
-            Refine sq_norm{0};
-            for (std::size_t i = 0; i < n; ++i)
+            const Storage* v_col = v_ptr + (j * n);
+            Refine sq0{0};
+            Refine sq1{0};
+            Refine sq2{0};
+            Refine sq3{0};
+            std::size_t i = 0U;
+            for (; i + 4U <= n; i += 4U)
+            {
+                const auto v0 = static_cast<Refine>(v_col[i]);
+                const auto v1 = static_cast<Refine>(v_col[i + 1U]);
+                const auto v2 = static_cast<Refine>(v_col[i + 2U]);
+                const auto v3 = static_cast<Refine>(v_col[i + 3U]);
+                sq0 += v0 * v0;
+                sq1 += v1 * v1;
+                sq2 += v2 * v2;
+                sq3 += v3 * v3;
+            }
+            Refine sq_norm = (sq0 + sq1) + (sq2 + sq3);
+            for (; i < n; ++i)
             {
                 const auto val = static_cast<Refine>(v_col[i]);
                 sq_norm += val * val;

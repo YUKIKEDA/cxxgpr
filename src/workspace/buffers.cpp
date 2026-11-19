@@ -142,13 +142,19 @@ namespace cxxgpr
             return std::unexpected(std::move(n2).error());
         }
 
-        // Pre-allocate primary n x n and length-n buffers; derivative scratch remains lazy.
+        auto cp_len = checked_mul(n, std::size_t{3});
+        if (!cp_len.has_value())
+        {
+            return std::unexpected(std::move(cp_len).error());
+        }
+
+        // Pre-allocate primary n x n and length-n/3*n reduction buffers; derivative scratch remains lazy.
         WorkspaceCore<P> core;
         core.order_ = n;
         core.k_matrix.assign(*n2, Storage{0});
         core.exp_buf.assign(*n2, Storage{0});
         core.rhs.assign(n, Storage{0});
-        core.col_partials.assign(n, 0.0);
+        core.col_partials.assign(*cp_len, 0.0);
         return core;
     }
 

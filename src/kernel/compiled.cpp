@@ -156,6 +156,31 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Validates that every entry of a column-major matrix view is finite using branchless SSE2 scans.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] mat Matrix view whose entries are inspected in column-major order.
+        /// @return Empty expected when all entries are finite, or `GprErrorCode::NonFiniteInput`.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> require_matrix_finite_simd(MatrixRef<T> mat)
+        {
+            if (mat.is_contiguous())
+            {
+                if (!detail::all_finite_slice(mat.data(), mat.rows() * mat.cols()))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                return {};
+            }
+            for (std::size_t col = 0; col < mat.cols(); ++col)
+            {
+                if (!detail::all_finite_slice(mat.col(col).data(), mat.rows()))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+            }
+            return {};
+        }
+
         /// @brief Validates that a scratch matrix matches `out` shape and does not alias `out`.
         /// @details Returns `WorkspaceTooSmall` if dimensions differ and `InvalidConfig` on pointer aliasing.
         /// @tparam T Storage floating-point scalar type.
@@ -279,7 +304,8 @@ namespace cxxgpr
         }
 
         /// @brief Multiplies the lower triangle (including diagonal) of `dst` by scalar `scale`.
-        /// @details Uses area-balanced `linalg::parallel_for_lower_blocks` (`n >= 384U`).
+        /// @details Uses vectorized `scale_set_slice` per contiguous column slice and area-balanced OpenMP (`n >=
+        /// 384U`).
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] dst Square matrix whose lower triangle is scaled in place.
         /// @param[in] scale Scalar multiplier.
@@ -290,10 +316,8 @@ namespace cxxgpr
             {
                 for (std::size_t col = col_begin; col < col_end; ++col)
                 {
-                    for (std::size_t row = col; row < n; ++row)
-                    {
-                        dst(row, col) *= scale;
-                    }
+                    T* const col_ptr = &dst(col, col);
+                    detail::scale_set_slice(col_ptr, col_ptr, scale, n - col);
                 }
             };
             if (n >= 384U)
@@ -303,6 +327,77 @@ namespace cxxgpr
             else
             {
                 run_range(0U, n);
+            }
+        }
+
+        /// @brief Scales all active entries in `dst` over `uplo` by scalar `scale` in place.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in,out] dst Target matrix view scaled in place.
+        /// @param[in] scale Scalar multiplier (returns immediately when `scale == 1`).
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void scale_region(MatrixMut<T> dst, T scale, Triangle uplo) noexcept
+        {
+            if (scale == T{1})
+            {
+                return;
+            }
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                scale_lower(dst, scale);
+                return;
+            }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 384U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                T* const col_ptr = &dst(0U, col);
+                detail::scale_set_slice(col_ptr, col_ptr, scale, len);
+            }
+        }
+
+        /// @brief Populates all active entries in `dst` over `uplo` with scalar constant `val`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[out] dst Destination matrix view populated in place.
+        /// @param[in] val Constant fill scalar.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void fill_region(MatrixMut<T> dst, T val, Triangle uplo) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
+                {
+                    for (std::size_t col = col_begin; col < col_end; ++col)
+                    {
+                        std::fill_n(&dst(col, col), n_rows - col, val);
+                    }
+                };
+                if (n_cols >= 384U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
+                }
+                return;
+            }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 384U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                std::fill_n(&dst(0U, col), len, val);
             }
         }
 
@@ -825,16 +920,21 @@ namespace cxxgpr
             }
             const std::size_t n_rows = dist.rows();
             const std::size_t n_cols = dist.cols();
+            if (!square && dist.is_contiguous())
+            {
+                if (!detail::all_finite_slice(dist.data(), n_rows * n_cols))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                return {};
+            }
             for (std::size_t col = 0; col < n_cols; ++col)
             {
                 const std::size_t row_begin = (square && uplo == Triangle::Lower) ? col : 0U;
                 const std::size_t row_end = (square && uplo == Triangle::Upper) ? (col + 1U) : n_rows;
-                for (std::size_t row = row_begin; row < row_end; ++row)
+                if (!detail::all_finite_slice(&dist(row_begin, col), row_end - row_begin))
                 {
-                    if (!std::isfinite(dist(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -863,17 +963,7 @@ namespace cxxgpr
             {
                 return ard;
             }
-            for (std::size_t col = 0; col < x.cols(); ++col)
-            {
-                for (std::size_t row = 0; row < x.rows(); ++row)
-                {
-                    if (!std::isfinite(x(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                }
-            }
-            return {};
+            return require_matrix_finite_simd(x);
         }
 
         /// @brief Validates point matrices `x1` and `x2` and rectangular output `out` for cross-covariance evaluation.
@@ -906,27 +996,11 @@ namespace cxxgpr
             {
                 return ard;
             }
-            for (std::size_t col = 0; col < x1.cols(); ++col)
+            if (auto f1 = require_matrix_finite_simd(x1); !f1.has_value())
             {
-                for (std::size_t row = 0; row < x1.rows(); ++row)
-                {
-                    if (!std::isfinite(x1(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                }
+                return f1;
             }
-            for (std::size_t col = 0; col < x2.cols(); ++col)
-            {
-                for (std::size_t row = 0; row < x2.rows(); ++row)
-                {
-                    if (!std::isfinite(x2(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                }
-            }
-            return {};
+            return require_matrix_finite_simd(x2);
         }
 
         // --- Evaluation helpers ---
@@ -950,9 +1024,124 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Folds child terms of a sum or product AST node using caller-supplied child evaluation callback.
+        /// @details For products containing `ConstantKernel` scalars, skips full-matrix constant fills, evaluates only
+        /// spatially varying factors first into `out` and `scratch`/`nested`, and scales `out` once by their product.
+        /// @tparam EvalFn Callable invoked as `eval_child(const Term& child, MatrixMut<T> dst, MatrixMut<T>
+        /// sub_scratch, std::size_t sub_level)`.
+        /// @param[in] is_sum True for `SumTerm`, false for `ProductTerm`.
+        /// @param[in] terms Ordered child terms of the composite AST node.
+        /// @param[out] out Destination matrix view receiving the composite evaluation.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in,out] scratch Reusable matrix view for sibling leaf evaluation.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for composite siblings.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] eval_child Callback evaluating a single child term.
+        /// @return Empty expected on success, or unsupported/workspace/evaluation error.
+        template <typename EvalFn>
+        [[nodiscard]] std::expected<void, GprError> eval_composite_terms(
+            bool is_sum,
+            std::span<const Term> terms,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            EvalFn&& eval_child
+        ) const
+        {
+            if (terms.empty())
+            {
+                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+            }
+            if (!is_sum)
+            {
+                // Fold all ConstantKernel scalars out of products and evaluate varying factors first.
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (auto res = eval_child(child, out, scratch, level_idx); !res.has_value())
+                        {
+                            return res;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (std::holds_alternative<LeafRef>(child))
+                    {
+                        if (auto res = eval_child(child, scratch, out, level_idx); !res.has_value())
+                        {
+                            return res;
+                        }
+                        mul_into(out, scratch.as_ref(), uplo);
+                    }
+                    else
+                    {
+                        if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
+                        {
+                            return ok;
+                        }
+                        auto buf = nested.level(level_idx, out.rows(), out.cols());
+                        if (auto res = eval_child(child, buf, scratch, level_idx + 1U); !res.has_value())
+                        {
+                            return res;
+                        }
+                        mul_into(out, buf.as_ref(), uplo);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, uplo);
+                    return {};
+                }
+                if (scale != T{1})
+                {
+                    scale_region(out, scale, uplo);
+                }
+                return {};
+            }
+
+            // SumTerm: evaluate first summand directly into `out`, then accumulate remaining summands.
+            if (auto res = eval_child(terms[0], out, scratch, level_idx); !res.has_value())
+            {
+                return res;
+            }
+            for (std::size_t k = 1U; k < terms.size(); ++k)
+            {
+                if (std::holds_alternative<LeafRef>(terms[k]))
+                {
+                    if (auto res = eval_child(terms[k], scratch, out, level_idx); !res.has_value())
+                    {
+                        return res;
+                    }
+                    add_into(out, scratch.as_ref(), uplo);
+                }
+                else
+                {
+                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
+                    {
+                        return ok;
+                    }
+                    auto buf = nested.level(level_idx, out.rows(), out.cols());
+                    if (auto res = eval_child(terms[k], buf, scratch, level_idx + 1U); !res.has_value())
+                    {
+                        return res;
+                    }
+                    add_into(out, buf.as_ref(), uplo);
+                }
+            }
+            return {};
+        }
+
         /// @brief Recursively evaluates a compiled `Term` into `out` from squared Euclidean distances.
-        /// @details Evaluates the first child directly into `out`, folds subsequent leaf children through `scratch`,
-        /// and folds nested composite children through `nested.level(level_idx, ...)`.
+        /// @details Evaluates leaf terms directly and delegates sums/products to `eval_composite_terms`.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] dist Square squared-distance matrix.
         /// @param[out] out Destination Gram matrix view.
@@ -977,57 +1166,11 @@ namespace cxxgpr
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            // Evaluate the first child directly into `out`, then fold remaining siblings into `out`.
-            if (auto res = eval_term_dist(terms[0], dist, out, uplo, scratch, nested, level_idx); !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (std::holds_alternative<LeafRef>(terms[k]))
-                {
-                    if (auto res = eval_term_dist(terms[k], dist, scratch, uplo, out, nested, level_idx);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_dist(terms[k], dist, buf, uplo, scratch, nested, level_idx + 1);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), uplo);
-                    }
-                    continue;
-                }
-                if (is_sum)
-                {
-                    add_into(out, scratch.as_ref(), uplo);
-                }
-                else
-                {
-                    mul_into(out, scratch.as_ref(), uplo);
-                }
-            }
-            return {};
+            return eval_composite_terms(
+                is_sum, terms, out, uplo, scratch, nested, level_idx,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
+            { return eval_term_dist(child, dist, target, uplo, aux, nested, depth); }
+            );
         }
 
         /// @brief Evaluates a single compiled leaf at `leaf_idx` using caches when available.
@@ -1218,60 +1361,15 @@ namespace cxxgpr
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            if (auto res = eval_term_points(terms[0], x, out, uplo, scratch, nested, level_idx, cache);
-                !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (std::holds_alternative<LeafRef>(terms[k]))
-                {
-                    if (auto res = eval_term_points(terms[k], x, scratch, uplo, out, nested, level_idx, cache);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), uplo);
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_points(terms[k], x, buf, uplo, scratch, nested, level_idx + 1, cache);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), uplo);
-                    }
-                }
-            }
-            return {};
+            return eval_composite_terms(
+                is_sum, terms, out, uplo, scratch, nested, level_idx,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
+            { return eval_term_points(child, x, target, uplo, aux, nested, depth, cache); }
+            );
         }
 
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from rectangular squared distances.
-        /// @details Always evaluates full rectangular matrices (`Triangle::Full`) using `scratch` and `nested`.
+        /// @details Always evaluates full rectangular matrices (`Triangle::Full`) via `eval_composite_terms`.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] dist Rectangular squared-distance matrix.
         /// @param[out] out Destination cross-covariance matrix view.
@@ -1294,60 +1392,16 @@ namespace cxxgpr
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            if (auto res = eval_term_cross_dist(terms[0], dist, out, scratch, nested, level_idx); !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (std::holds_alternative<LeafRef>(terms[k]))
-                {
-                    if (auto res = eval_term_cross_dist(terms[k], dist, scratch, out, nested, level_idx);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_cross_dist(terms[k], dist, buf, scratch, nested, level_idx + 1);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                }
-            }
-            return {};
+            return eval_composite_terms(
+                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
+            { return eval_term_cross_dist(child, dist, target, aux, nested, depth); }
+            );
         }
 
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from two point coordinate matrices.
-        /// @details Uses `nested` to materialize cross squared distances for `CustomKernel` leaves and combines child
-        /// cross-covariances across sums and products.
+        /// @details Uses `nested` to materialize cross squared distances for `CustomKernel` leaves and delegates child
+        /// composition to `eval_composite_terms`.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] x1 First point matrix of shape `(n1, d)`.
         /// @param[in] x2 Second point matrix of shape `(n2, d)`.
@@ -1383,55 +1437,11 @@ namespace cxxgpr
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            if (auto res = eval_term_cross_points(terms[0], x1, x2, out, scratch, nested, level_idx); !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (std::holds_alternative<LeafRef>(terms[k]))
-                {
-                    if (auto res = eval_term_cross_points(terms[k], x1, x2, scratch, out, nested, level_idx);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_cross_points(terms[k], x1, x2, buf, scratch, nested, level_idx + 1);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                }
-            }
-            return {};
+            return eval_composite_terms(
+                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
+            { return eval_term_cross_points(child, x1, x2, target, aux, nested, depth); }
+            );
         }
 
         /// @brief Recursively evaluates the self-covariance diagonal $k(x_i, x_i)$ of a compiled `Term`.
@@ -2058,7 +2068,7 @@ namespace cxxgpr
         /// @details Returns `T{1}` when no constant leaf appears directly in `terms`.
         /// @param[in] terms Child factors of a `ProductTerm`.
         /// @return Combined scalar constant multiplier cast to `T`.
-        [[nodiscard]] T constant_scale(const std::vector<Term>& terms) const noexcept
+        [[nodiscard]] T constant_scale(std::span<const Term> terms) const noexcept
         {
             T scale = T{1};
             for (const auto& t : terms)
@@ -2498,6 +2508,16 @@ namespace cxxgpr
                         need_value, exp_mode
                     );
                 }
+                if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
+                    || std::holds_alternative<PeriodicKernel>(kl) || std::holds_alternative<RationalQuadraticKernel>(kl)
+                    || std::holds_alternative<LinearKernel>(kl))
+                {
+                    const MatrixRef<T> dist_view =
+                        (cache != nullptr && cache->has_dist()) ? cache->dist_view() : MatrixRef<T>{};
+                    return detail::leaf_iso_weighted_grads(
+                        kl, x, dist_view, weight, kernel_scratch, col_partials, out_grads, need_value, exp_mode
+                    );
+                }
                 for (std::size_t p = 0; p < leaf->param_count; ++p)
                 {
                     if (auto res =
@@ -2541,16 +2561,9 @@ namespace cxxgpr
 
             if (varying == 1U)
             {
-                // Single varying factor scaled by constant_scale; request its contracted value if constants exist
-                // because <scale * W, f_var>_F equals d/d(log c_k) <W, scale * f_var>_F for every constant factor.
+                // Single varying factor scaled by constant_scale: push linear scaling past contraction to avoid an n x
+                // n weight copy and matrix scale pass.
                 double val = 0.0;
-                if (has_const)
-                {
-                    if (auto ok = ensure_nested(weighted_bufs, walk_cursor, n, n); !ok.has_value())
-                    {
-                        return std::unexpected(std::move(ok).error());
-                    }
-                }
                 std::size_t p_off = 0;
                 for (const auto& f : p.terms)
                 {
@@ -2558,27 +2571,24 @@ namespace cxxgpr
                     const std::size_t count = fe - fb;
                     if (!is_constant_term(f))
                     {
-                        MatrixRef<T> eff_w = weight;
-                        if (has_const)
-                        {
-                            auto w_buf = weighted_bufs.level(walk_cursor, n, n);
-                            copy_into(w_buf, weight, Triangle::Lower);
-                            if (scale != T{1})
-                            {
-                                scale_lower(w_buf, scale);
-                            }
-                            eff_w = w_buf.as_ref();
-                        }
                         auto res = walk_weighted(
-                            f, x, cache, eff_w, out_grads.subspan(p_off, count), kernel_scratch, nested, weighted_bufs,
-                            0, 0, false, has_const ? (walk_cursor + 1U) : walk_cursor, col_partials,
-                            need_value || has_const
+                            f, x, cache, weight, out_grads.subspan(p_off, count), kernel_scratch, nested, weighted_bufs,
+                            0, 0, false, walk_cursor, col_partials, need_value || has_const
                         );
                         if (!res.has_value())
                         {
                             return res;
                         }
                         val = *res;
+                        if (has_const && scale != T{1})
+                        {
+                            const auto scale_d = static_cast<double>(scale);
+                            val *= scale_d;
+                            for (double& g : out_grads.subspan(p_off, count))
+                            {
+                                g *= scale_d;
+                            }
+                        }
                     }
                     p_off += count;
                 }
@@ -3175,15 +3185,9 @@ namespace cxxgpr
         {
             return std::unexpected(GprError::length_mismatch("diagonal evaluation scratch buffer is too small"));
         }
-        for (std::size_t col = 0; col < x.cols(); ++col)
+        if (auto fin = require_matrix_finite_simd(x); !fin.has_value())
         {
-            for (std::size_t row = 0; row < x.rows(); ++row)
-            {
-                if (!std::isfinite(x(row, col)))
-                {
-                    return std::unexpected(GprError::non_finite_input());
-                }
-            }
+            return fin;
         }
         return impl_->eval_fill_diag(impl_->root, x, out, scratch, 0);
     }

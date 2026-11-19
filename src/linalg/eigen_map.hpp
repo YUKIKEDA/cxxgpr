@@ -14,9 +14,14 @@
 #include <Eigen/Core>
 
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <expected>
 #include <span>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#    include <emmintrin.h>
+#endif
 
 /// @brief Internal Eigen adapters and validation utilities for linear algebra implementations.
 namespace cxxgpr::linalg::detail
@@ -101,8 +106,91 @@ namespace cxxgpr::linalg::detail
         return {};
     }
 
+    /// @brief Checks whether every entry in a contiguous scalar slice `ptr[0..len)` is finite.
+    /// @details Uses branchless 4-way unrolled SSE2 exponent-mask checks on x86_64 with scalar `std::isfinite`
+    /// fallback so normal, zero, and subnormal values pass while NaN and +/-Inf return false.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] ptr Pointer to the start of the contiguous slice.
+    /// @param[in] len Number of contiguous elements to inspect.
+    /// @return True iff every element in `ptr[0..len)` is finite.
+    template <KernelScalarConcept T>
+    [[nodiscard]] inline bool all_finite_contiguous(const T* ptr, std::size_t len) noexcept
+    {
+        if (len == 0U)
+        {
+            return true;
+        }
+        std::size_t i = 0U;
+#if defined(_M_X64) || defined(__x86_64__)
+        if constexpr (std::same_as<T, double>)
+        {
+            const __m128i exp_mask = _mm_set_epi32(0x7FF00000, 0, 0x7FF00000, 0);
+            const __m128i exp_target = _mm_set_epi32(0x7FF00000, -1, 0x7FF00000, -1);
+            __m128i bad0 = _mm_setzero_si128();
+            __m128i bad1 = _mm_setzero_si128();
+            for (; i + 8U <= len; i += 8U)
+            {
+                const __m128i v0 = _mm_castpd_si128(_mm_loadu_pd(ptr + i));
+                const __m128i v1 = _mm_castpd_si128(_mm_loadu_pd(ptr + i + 2U));
+                const __m128i v2 = _mm_castpd_si128(_mm_loadu_pd(ptr + i + 4U));
+                const __m128i v3 = _mm_castpd_si128(_mm_loadu_pd(ptr + i + 6U));
+                bad0 = _mm_or_si128(bad0, _mm_cmpeq_epi32(_mm_and_si128(v0, exp_mask), exp_target));
+                bad1 = _mm_or_si128(bad1, _mm_cmpeq_epi32(_mm_and_si128(v1, exp_mask), exp_target));
+                bad0 = _mm_or_si128(bad0, _mm_cmpeq_epi32(_mm_and_si128(v2, exp_mask), exp_target));
+                bad1 = _mm_or_si128(bad1, _mm_cmpeq_epi32(_mm_and_si128(v3, exp_mask), exp_target));
+            }
+            __m128i bad = _mm_or_si128(bad0, bad1);
+            for (; i + 2U <= len; i += 2U)
+            {
+                const __m128i v = _mm_castpd_si128(_mm_loadu_pd(ptr + i));
+                bad = _mm_or_si128(bad, _mm_cmpeq_epi32(_mm_and_si128(v, exp_mask), exp_target));
+            }
+            if (_mm_movemask_epi8(bad) != 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            const __m128i exp_mask = _mm_set1_epi32(0x7F800000);
+            __m128i bad0 = _mm_setzero_si128();
+            __m128i bad1 = _mm_setzero_si128();
+            for (; i + 16U <= len; i += 16U)
+            {
+                const __m128i v0 = _mm_castps_si128(_mm_loadu_ps(ptr + i));
+                const __m128i v1 = _mm_castps_si128(_mm_loadu_ps(ptr + i + 4U));
+                const __m128i v2 = _mm_castps_si128(_mm_loadu_ps(ptr + i + 8U));
+                const __m128i v3 = _mm_castps_si128(_mm_loadu_ps(ptr + i + 12U));
+                bad0 = _mm_or_si128(bad0, _mm_cmpeq_epi32(_mm_and_si128(v0, exp_mask), exp_mask));
+                bad1 = _mm_or_si128(bad1, _mm_cmpeq_epi32(_mm_and_si128(v1, exp_mask), exp_mask));
+                bad0 = _mm_or_si128(bad0, _mm_cmpeq_epi32(_mm_and_si128(v2, exp_mask), exp_mask));
+                bad1 = _mm_or_si128(bad1, _mm_cmpeq_epi32(_mm_and_si128(v3, exp_mask), exp_mask));
+            }
+            __m128i bad = _mm_or_si128(bad0, bad1);
+            for (; i + 4U <= len; i += 4U)
+            {
+                const __m128i v = _mm_castps_si128(_mm_loadu_ps(ptr + i));
+                bad = _mm_or_si128(bad, _mm_cmpeq_epi32(_mm_and_si128(v, exp_mask), exp_mask));
+            }
+            if (_mm_movemask_epi8(bad) != 0)
+            {
+                return false;
+            }
+        }
+#endif
+        for (; i < len; ++i)
+        {
+            if (!std::isfinite(ptr[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// @brief Verifies that all entries in the lower triangle (including diagonal) of mat are finite.
-    /// @details Sweeps column by column with row >= col so uninitialized upper-triangular entries are ignored.
+    /// @details Sweeps column by column with row >= col using SIMD slice checks so uninitialized upper entries are
+    /// ignored.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] mat Validated square read-only matrix view.
     /// @return Empty expected when all lower-triangular elements are finite, or GprError otherwise.
@@ -114,19 +202,16 @@ namespace cxxgpr::linalg::detail
         const std::size_t n = mat.rows();
         for (std::size_t col = 0; col < n; ++col)
         {
-            for (std::size_t row = col; row < n; ++row)
+            if (!all_finite_contiguous(&mat(col, col), n - col))
             {
-                if (!std::isfinite(mat(row, col)))
-                {
-                    return std::unexpected(GprError::non_finite_input());
-                }
+                return std::unexpected(GprError::non_finite_input());
             }
         }
         return {};
     }
 
     /// @brief Verifies that every entry in mat is finite.
-    /// @details Scans all rows across every column in column-major order.
+    /// @details Scans all contiguous data in a single SSE2 pass when packed, or column by column otherwise.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] mat Validated read-only matrix view.
     /// @return Empty expected when all elements are finite, or GprError otherwise.
@@ -134,17 +219,21 @@ namespace cxxgpr::linalg::detail
     template <KernelScalarConcept T>
     [[nodiscard]] inline std::expected<void, GprError> require_matrix_finite(MatrixRef<T> mat)
     {
-        // Sweep column-major so adjacent rows stay contiguous in memory.
         const std::size_t rows = mat.rows();
         const std::size_t cols = mat.cols();
+        if (mat.is_contiguous())
+        {
+            if (!all_finite_contiguous(mat.data(), rows * cols))
+            {
+                return std::unexpected(GprError::non_finite_input());
+            }
+            return {};
+        }
         for (std::size_t col = 0; col < cols; ++col)
         {
-            for (std::size_t row = 0; row < rows; ++row)
+            if (!all_finite_contiguous(mat.col(col).data(), rows))
             {
-                if (!std::isfinite(mat(row, col)))
-                {
-                    return std::unexpected(GprError::non_finite_input());
-                }
+                return std::unexpected(GprError::non_finite_input());
             }
         }
         return {};
@@ -160,12 +249,9 @@ namespace cxxgpr::linalg::detail
     [[nodiscard]] inline std::expected<void, GprError> require_span_finite(std::span<const T> values)
     {
         // Reject NaN/Inf entries while preserving subnormal finite values.
-        for (const T v : values)
+        if (!all_finite_contiguous(values.data(), values.size()))
         {
-            if (!std::isfinite(v))
-            {
-                return std::unexpected(GprError::non_finite_input());
-            }
+            return std::unexpected(GprError::non_finite_input());
         }
         return {};
     }

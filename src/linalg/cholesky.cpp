@@ -273,16 +273,20 @@ namespace cxxgpr::linalg
             Llt,
         };
 
-        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
-        /// @details Parallelizes independent right-hand side column slices across OpenMP threads when work is
-        /// large enough to amortize team synchronization.
+        /// @brief Dispatches triangular solve over packed or strided L and B views, optionally column-parallel.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[in] l Square read-only lower Cholesky factor matrix view.
-        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
+        /// @tparam LMap Eigen matrix or map type representing lower factor L.
+        /// @tparam RhsMap Eigen matrix or map type representing mutable right-hand side B.
+        /// @param[in] l_map Eigen view over lower Cholesky factor L.
+        /// @param[in,out] rhs_map Eigen view over mutable right-hand side B.
+        /// @param[in] n_rows Row count of L and B.
+        /// @param[in] n_cols Column count of B.
         /// @param[in] mode Triangular substitution direction or combined LLT solve.
-        template <KernelScalarConcept T> void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode)
+        template <KernelScalarConcept T, typename LMap, typename RhsMap>
+        void dispatch_tri_solve(
+            const LMap& l_map, RhsMap&& rhs_map, std::size_t n_rows, std::size_t n_cols, TriSolveMode mode
+        )
         {
-            const auto l_map = detail::to_eigen_map(l);
             auto solve_slice = [&l_map, mode](auto&& rhs_slice)
             {
                 if (mode == TriSolveMode::Forward)
@@ -300,12 +304,11 @@ namespace cxxgpr::linalg
                 }
             };
 
-            const std::size_t n_rows = l.rows();
-            const std::size_t n_cols = rhs.cols();
 #ifdef _OPENMP
-            if (n_cols >= 4U && (n_rows * n_cols) >= 32768U && openmp_max_threads() > 1U)
+            const double approx_flops =
+                static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
+            if (n_cols >= 4U && approx_flops >= 16777216.0 && openmp_max_threads() > 1U)
             {
-                auto rhs_map = detail::to_eigen_map(rhs);
 #    pragma omp parallel shared(rhs_map, n_cols, solve_slice)
                 {
                     const auto tid = static_cast<std::size_t>(omp_get_thread_num());
@@ -326,9 +329,34 @@ namespace cxxgpr::linalg
             (void)n_rows;
             (void)n_cols;
 #endif
-
-            auto rhs_map = detail::to_eigen_map(rhs);
             solve_slice(rhs_map);
+        }
+
+        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
+        /// @details Uses unit-stride Eigen::Map views when both L and B are contiguous and parallelizes independent
+        /// right-hand side column slices across OpenMP threads when n_rows^2 * n_cols >= 2^24.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
+        /// @param[in] mode Triangular substitution direction or combined LLT solve.
+        template <KernelScalarConcept T> void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode)
+        {
+            const std::size_t n_rows = l.rows();
+            const std::size_t n_cols = rhs.cols();
+            if (l.is_contiguous() && rhs.is_contiguous())
+            {
+                const Eigen::Map<const detail::ColMajorDynamic<T>> l_map(
+                    l.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_rows)
+                );
+                Eigen::Map<detail::ColMajorDynamic<T>> rhs_map(
+                    rhs.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_cols)
+                );
+                dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
+                return;
+            }
+            const auto l_map = detail::to_eigen_map(l);
+            auto rhs_map = detail::to_eigen_map(rhs);
+            dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
         }
 
         /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.

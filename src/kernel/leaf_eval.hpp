@@ -432,4 +432,37 @@ namespace cxxgpr::detail
         KernelExp exp_mode = KernelExp::Accurate
     );
 
+    /// @brief Contracts all hyperparameters of an isotropic or linear leaf against `weight` in one lower-triangle pass.
+    /// @details Evaluates value-and-gradient jets once per pair `(row, col)` across OpenMP workers for
+    /// `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, and `LinearKernel`, accumulating both
+    /// `out_grads` and optional $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ deterministically via
+    /// `col_partials`.
+    /// @tparam T Kernel evaluation scalar type (double or float).
+    /// @param[in] leaf Isotropic or linear kernel leaf variant to contract.
+    /// @param[in] x Column-major n x d training coordinate matrix (used for `LinearKernel` or when `dist` is empty).
+    /// @param[in] dist Precomputed n x n squared-distance matrix, or empty view to compute slices from `x`.
+    /// @param[in] weight Symmetric n x n adjoint weight matrix (lower triangle read).
+    /// @param[in,out] scratch Reusable n x n square scratch matrix used for uncached/linear column slices.
+    /// @param[in,out] col_partials Per-column partial sum buffer (length >= n; >= 3*n enables parallel multi-term).
+    /// @param[out] out_grads Destination span of length leaf_num_params(leaf) receiving <weight, dK/dtheta_p>_F.
+    /// @param[in] need_value True when <weight, K_leaf>_F must also be evaluated and returned.
+    /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @return <weight, K_leaf>_F when `need_value` is true (otherwise 0.0), or GprError on invalid inputs/buffers.
+    /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not isotropic-distance or `LinearKernel`.
+    /// @retval GprErrorCode::EmptyInput When `weight`, required `x`, or supplied `dist` is empty/null.
+    /// @retval GprErrorCode::LengthMismatch When matrix shapes or `out_grads.size()` disagree with n/leaf.
+    /// @retval GprErrorCode::WorkspaceTooSmall When `scratch` or `col_partials` is undersized.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<double, GprError> leaf_iso_weighted_grads(
+        const KernelLeaf& leaf,
+        MatrixRef<T> x,
+        MatrixRef<T> dist,
+        MatrixRef<T> weight,
+        MatrixMut<T> scratch,
+        std::span<double> col_partials,
+        std::span<double> out_grads,
+        bool need_value,
+        KernelExp exp_mode = KernelExp::Accurate
+    );
+
 }  // namespace cxxgpr::detail

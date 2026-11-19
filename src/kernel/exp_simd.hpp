@@ -113,6 +113,22 @@ namespace cxxgpr::detail
 
 #endif
 
+    /// @brief Checks whether every binary64 entry in contiguous slice `ptr[0..len)` is finite.
+    /// @details Uses 4-way unrolled branchless SSE2 exponent-mask checks with IEEE 754 `std::isfinite` tail
+    /// handling so normal, zero, and subnormal values pass while NaN and +/-Inf return false.
+    /// @param[in] ptr Pointer to the start of the contiguous binary64 slice (may be nullptr only when `len == 0`).
+    /// @param[in] len Number of contiguous elements to inspect.
+    /// @return True iff all elements in `ptr[0..len)` are finite.
+    [[nodiscard]] bool all_finite_slice(const double* ptr, std::size_t len) noexcept;
+
+    /// @brief Checks whether every binary32 entry in contiguous slice `ptr[0..len)` is finite.
+    /// @details Uses 4-way unrolled branchless SSE2 exponent-mask checks with IEEE 754 `std::isfinite` tail
+    /// handling so normal, zero, and subnormal values pass while NaN and +/-Inf return false.
+    /// @param[in] ptr Pointer to the start of the contiguous binary32 slice (may be nullptr only when `len == 0`).
+    /// @param[in] len Number of contiguous elements to inspect.
+    /// @return True iff all elements in `ptr[0..len)` are finite.
+    [[nodiscard]] bool all_finite_slice(const float* ptr, std::size_t len) noexcept;
+
     /// @brief Assigns `dst[k] = src[k] * weight` across a contiguous slice of length `len`.
     /// @tparam T Storage floating-point scalar type (`double` or `float`).
     /// @param[out] dst Output buffer of length at least `len`.

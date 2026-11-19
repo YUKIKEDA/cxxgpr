@@ -202,7 +202,7 @@ namespace cxxgpr
         std::vector<Storage> rhs;
         /// @brief Scratch parameter vector for rollback on failed factorizations.
         std::vector<double> theta;
-        /// @brief Per-column partial sums for deterministic OpenMP reductions (length n).
+        /// @brief Per-column partial sums for deterministic OpenMP reductions (length 3 * n).
         std::vector<double> col_partials;
         /// @brief Pre-allocated nested intermediate buffers for tree evaluation.
         NestedBuffers<Storage> nested;

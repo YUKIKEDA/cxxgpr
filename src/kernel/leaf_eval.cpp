@@ -290,12 +290,9 @@ namespace cxxgpr::detail
             {
                 const std::size_t r_begin = (uplo == Triangle::Lower) ? col : 0U;
                 const std::size_t r_end = (uplo == Triangle::Upper) ? (col + 1U) : n;
-                for (std::size_t row = r_begin; row < r_end; ++row)
+                if (!detail::all_finite_slice(&dist(r_begin, col), r_end - r_begin))
                 {
-                    if (!std::isfinite(dist(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -322,14 +319,19 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
             }
+            if (dist.is_contiguous())
+            {
+                if (!detail::all_finite_slice(dist.data(), dist.rows() * dist.cols()))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                return {};
+            }
             for (std::size_t col = 0; col < dist.cols(); ++col)
             {
-                for (std::size_t row = 0; row < dist.rows(); ++row)
+                if (!detail::all_finite_slice(dist.col(col).data(), dist.rows()))
                 {
-                    if (!std::isfinite(dist(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -348,15 +350,20 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::empty_input());
             }
+            if (x.is_contiguous())
+            {
+                if (!detail::all_finite_slice(x.data(), x.rows() * x.cols()))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                return {};
+            }
             // Scan in column-major order matching MatrixRef storage layout.
             for (std::size_t col = 0; col < x.cols(); ++col)
             {
-                for (std::size_t row = 0; row < x.rows(); ++row)
+                if (!detail::all_finite_slice(x.col(col).data(), x.rows()))
                 {
-                    if (!std::isfinite(x(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -3963,7 +3970,7 @@ namespace cxxgpr::detail
                     }
                 }
             };
-            if (n >= 384U)
+            if (n >= 128U)
             {
                 linalg::parallel_for_lower_blocks(n, 0U, radial_cols);
             }
@@ -4104,6 +4111,398 @@ namespace cxxgpr::detail
         std::span<const double>,
         MatrixRef<float>,
         std::span<const float>,
+        MatrixRef<float>,
+        MatrixMut<float>,
+        std::span<double>,
+        std::span<double>,
+        bool,
+        KernelExp
+    );
+
+    /// @brief Evaluates all hyperparameters and optional value contraction of an isotropic or linear leaf in one pass.
+    /// @details Shares distance/radial/exponential evaluations across gradient parameters and optional value
+    /// contraction over disjoint columns, parallelizing when `col_partials.size() >= 3 * n` and `n >= 128`, then
+    /// summing column partials in strict ascending order for OpenMP thread-count determinism.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf Isotropic-distance or `LinearKernel` leaf variant.
+    /// @param[in] x Column-major `(n, d)` coordinate matrix (required for `LinearKernel` or empty `dist`).
+    /// @param[in] dist Optional precomputed `(n, n)` squared-distance matrix.
+    /// @param[in] weight Symmetric `(n, n)` adjoint matrix (lower triangle read).
+    /// @param[in,out] scratch Reusable `(n, n)` scratch buffer for columnwise coordinate distances or dot products.
+    /// @param[in,out] col_partials Reduction buffer (`>= 3 * n` enables multi-term OpenMP column reductions).
+    /// @param[out] out_grads Output span sized to `leaf_num_params(leaf)`.
+    /// @param[in] need_value True to also return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$.
+    /// @param[in] exp_mode Exponential evaluation backend (`Accurate` or `FastApprox`).
+    /// @return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ if `need_value`, else `0.0`, or validation error.
+    /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not isotropic-distance or `LinearKernel`.
+    /// @retval GprErrorCode::EmptyInput When `weight`, required `x`, or supplied `dist` is empty or null.
+    /// @retval GprErrorCode::LengthMismatch When shapes or `out_grads.size()` mismatch.
+    /// @retval GprErrorCode::WorkspaceTooSmall When `scratch` or `col_partials` is undersized.
+    template <KernelScalarConcept T>
+    std::expected<double, GprError> leaf_iso_weighted_grads(
+        const KernelLeaf& leaf,
+        MatrixRef<T> x,
+        MatrixRef<T> dist,
+        MatrixRef<T> weight,
+        MatrixMut<T> scratch,
+        std::span<double> col_partials,
+        std::span<double> out_grads,
+        bool need_value,
+        KernelExp exp_mode
+    )
+    {
+        const auto* rbf = std::get_if<RbfKernel>(&leaf);
+        const auto* mat = std::get_if<MaternKernel>(&leaf);
+        const auto* per = std::get_if<PeriodicKernel>(&leaf);
+        const auto* rq = std::get_if<RationalQuadraticKernel>(&leaf);
+        const auto* lin = std::get_if<LinearKernel>(&leaf);
+        if (rbf == nullptr && mat == nullptr && per == nullptr && rq == nullptr && lin == nullptr)
+        {
+            return std::unexpected(
+                GprError::unsupported_kernel_operation("leaf is not supported by single-pass isotropic contraction")
+            );
+        }
+        if (weight.is_empty() || weight.data() == nullptr)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
+        const std::size_t n = weight.rows();
+        if (weight.cols() != n)
+        {
+            return std::unexpected(GprError::length_mismatch("weight matrix must be square"));
+        }
+        const std::size_t np = leaf_num_params(leaf);
+        if (out_grads.size() != np)
+        {
+            return std::unexpected(GprError::length_mismatch("gradient output span length mismatch"));
+        }
+        if (scratch.rows() != n || scratch.cols() != n || col_partials.size() < n)
+        {
+            return std::unexpected(GprError::workspace_too_small());
+        }
+        const bool use_dist = (lin == nullptr) && !dist.is_empty();
+        if (use_dist)
+        {
+            if (dist.data() == nullptr)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (dist.rows() != n || dist.cols() != n)
+            {
+                return std::unexpected(GprError::length_mismatch("distance matrix dimension mismatch"));
+            }
+        }
+        else
+        {
+            if (x.is_empty() || x.data() == nullptr)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (x.rows() != n)
+            {
+                return std::unexpected(GprError::length_mismatch("point matrix row count mismatch"));
+            }
+        }
+
+        // Precompute leaf constants outside column loops.
+        const T rbf_l2 = (rbf != nullptr) ? static_cast<T>(rbf->lengthscale() * rbf->lengthscale()) : T{1};
+        const T mat_scale = (mat != nullptr) ? (matern_scale<T>(mat->nu()) / static_cast<T>(mat->lengthscale())) : T{1};
+        const MaternNu mat_nu = (mat != nullptr) ? mat->nu() : MaternNu::OneHalf;
+        const T per_l2 = (per != nullptr) ? static_cast<T>(per->lengthscale() * per->lengthscale()) : T{1};
+        const T per_pi_p = (per != nullptr) ? (std::numbers::pi_v<T> / static_cast<T>(per->period())) : T{1};
+        const T rq_alpha = (rq != nullptr) ? static_cast<T>(rq->alpha()) : T{1};
+        const T rq_denom =
+            (rq != nullptr) ? (T{2} * rq_alpha * static_cast<T>(rq->lengthscale() * rq->lengthscale())) : T{1};
+        const T lin_var = (lin != nullptr) ? static_cast<T>(lin->variance()) : T{1};
+        const std::size_t n_dims = use_dist ? 0U : x.cols();
+        const bool has_param1 = (np >= 2U);
+
+        // Process column `col` independently, reading either cached `dist` or computing slices in `scratch`.
+        auto process_col = [&](std::size_t col, double& out_g0, double& out_g1, double& out_val) noexcept
+        {
+            const std::size_t len = n - col;
+            const T* const w_col = &weight(0U, col);
+            if (lin != nullptr)
+            {
+                T* const dot_col = &scratch(col, col);
+                detail::set_dot_slice(dot_col, x.col(0U).data() + col, x(col, 0U), len);
+                for (std::size_t dim = 1U; dim < n_dims; ++dim)
+                {
+                    const auto col_vec = x.col(dim);
+                    detail::add_dot_slice(dot_col, col_vec.data() + col, col_vec[col], len);
+                }
+                const double g_diag = static_cast<double>(w_col[col]) * static_cast<double>(dot_col[0] * lin_var);
+                double g_off = 0.0;
+                for (std::size_t r = 1U; r < len; ++r)
+                {
+                    g_off += static_cast<double>(w_col[col + r]) * static_cast<double>(dot_col[r] * lin_var);
+                }
+                out_g0 = g_diag + (2.0 * g_off);
+                out_g1 = 0.0;
+                out_val = need_value ? out_g0 : 0.0;
+                return;
+            }
+
+            const T* d2_col = nullptr;
+            if (use_dist)
+            {
+                d2_col = &dist(0U, col);
+            }
+            else
+            {
+                T* const dist_slice = &scratch(col, col);
+                detail::set_scaled_sq_diff_slice(dist_slice, x.col(0U).data() + col, x(col, 0U), T{1}, len);
+                for (std::size_t dim = 1U; dim < n_dims; ++dim)
+                {
+                    const auto col_vec = x.col(dim);
+                    detail::add_scaled_sq_diff_slice(dist_slice, col_vec.data() + col, col_vec[col], T{1}, len);
+                }
+                scratch(col, col) = T{0};
+                d2_col = &scratch(0U, col);
+            }
+
+            // Evaluate the diagonal entry explicitly only if caller-supplied `dist` contains positive diagonal d^2.
+            const auto w_diag = static_cast<double>(w_col[col]);
+            double val_acc = (need_value && !use_dist) ? w_diag : 0.0;
+            double g0_diag = 0.0;
+            double g1_diag = 0.0;
+            double g0_off = 0.0;
+            double g1_off = 0.0;
+            double val_off = 0.0;
+
+            if (rbf != nullptr)
+            {
+                const T inv_2l2 = T{1} / (T{2} * rbf_l2);
+                if (use_dist)
+                {
+                    const T d2_0 = d2_col[col];
+                    if (d2_0 > T{0})
+                    {
+                        const T z0 = d2_0 * inv_2l2;
+                        const ExpJet<T> j0 = eval_kernel_exp_jet(-z0, exp_mode);
+                        g0_diag = w_diag * static_cast<double>((T{2} * z0) * j0.d1);
+                        if (need_value)
+                        {
+                            val_acc = w_diag * static_cast<double>(j0.v);
+                        }
+                    }
+                    else if (need_value)
+                    {
+                        val_acc = w_diag;
+                    }
+                }
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    const T d2 = d2_col[row];
+                    const T clamped = d2 < T{0} ? T{0} : d2;
+                    const T z = clamped * inv_2l2;
+                    const ExpJet<T> jet = eval_kernel_exp_jet(-z, exp_mode);
+                    const auto w_rc = static_cast<double>(w_col[row]);
+                    g0_off += w_rc * static_cast<double>((T{2} * z) * jet.d1);
+                    if (need_value)
+                    {
+                        val_off += w_rc * static_cast<double>(jet.v);
+                    }
+                }
+            }
+            else if (mat != nullptr)
+            {
+                if (use_dist)
+                {
+                    const T d2_0 = d2_col[col];
+                    if (d2_0 > T{0})
+                    {
+                        const MaternJetVals<T> m0 = eval_matern_jet_vals(mat_scale * std::sqrt(d2_0), mat_nu, exp_mode);
+                        g0_diag = w_diag * static_cast<double>(m0.g1);
+                        if (need_value)
+                        {
+                            val_acc = w_diag * static_cast<double>(m0.val);
+                        }
+                    }
+                    else if (need_value)
+                    {
+                        val_acc = w_diag;
+                    }
+                }
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    const T d2 = d2_col[row];
+                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                    const MaternJetVals<T> mj = eval_matern_jet_vals(mat_scale * r, mat_nu, exp_mode);
+                    const auto w_rc = static_cast<double>(w_col[row]);
+                    g0_off += w_rc * static_cast<double>(mj.g1);
+                    if (need_value)
+                    {
+                        val_off += w_rc * static_cast<double>(mj.val);
+                    }
+                }
+            }
+            else if (per != nullptr)
+            {
+                if (use_dist)
+                {
+                    const T d2_0 = d2_col[col];
+                    if (d2_0 > T{0})
+                    {
+                        const T phi0 = per_pi_p * std::sqrt(d2_0);
+                        const T s0 = std::sin(phi0);
+                        const T c0 = std::cos(phi0);
+                        const ExpJet<T> j0 = eval_kernel_exp_jet(-(T{2} * s0 * s0) / per_l2, exp_mode);
+                        g0_diag = w_diag * static_cast<double>(((T{4} * s0 * s0) / per_l2) * j0.d1);
+                        g1_diag = w_diag * static_cast<double>(((T{4} * phi0 * s0 * c0) / per_l2) * j0.d1);
+                        if (need_value)
+                        {
+                            val_acc = w_diag * static_cast<double>(j0.v);
+                        }
+                    }
+                    else if (need_value)
+                    {
+                        val_acc = w_diag;
+                    }
+                }
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    const T d2 = d2_col[row];
+                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                    const T phi = per_pi_p * r;
+                    const T s = std::sin(phi);
+                    const T c = std::cos(phi);
+                    const ExpJet<T> jet = eval_kernel_exp_jet(-(T{2} * s * s) / per_l2, exp_mode);
+                    const auto w_rc = static_cast<double>(w_col[row]);
+                    g0_off += w_rc * static_cast<double>(((T{4} * s * s) / per_l2) * jet.d1);
+                    g1_off += w_rc * static_cast<double>(((T{4} * phi * s * c) / per_l2) * jet.d1);
+                    if (need_value)
+                    {
+                        val_off += w_rc * static_cast<double>(jet.v);
+                    }
+                }
+            }
+            else
+            {
+                if (use_dist)
+                {
+                    const T d2_0 = d2_col[col];
+                    if (d2_0 > T{0})
+                    {
+                        const T w0 = d2_0 / rq_denom;
+                        const T b0 = T{1} + w0;
+                        const T l0 = std::log1p(w0);
+                        const ExpJet<T> j0 = eval_kernel_exp_jet(-rq_alpha * l0, exp_mode);
+                        g0_diag = w_diag * static_cast<double>(((T{2} * rq_alpha * w0) / b0) * j0.d1);
+                        g1_diag = w_diag * static_cast<double>((rq_alpha * ((w0 / b0) - l0)) * j0.d1);
+                        if (need_value)
+                        {
+                            val_acc = w_diag * static_cast<double>(j0.v);
+                        }
+                    }
+                    else if (need_value)
+                    {
+                        val_acc = w_diag;
+                    }
+                }
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    const T d2 = d2_col[row];
+                    const T clamped = d2 < T{0} ? T{0} : d2;
+                    const T w = clamped / rq_denom;
+                    const T b = T{1} + w;
+                    const T l1p = std::log1p(w);
+                    const ExpJet<T> jet = eval_kernel_exp_jet(-rq_alpha * l1p, exp_mode);
+                    const auto w_rc = static_cast<double>(w_col[row]);
+                    g0_off += w_rc * static_cast<double>(((T{2} * rq_alpha * w) / b) * jet.d1);
+                    g1_off += w_rc * static_cast<double>((rq_alpha * ((w / b) - l1p)) * jet.d1);
+                    if (need_value)
+                    {
+                        val_off += w_rc * static_cast<double>(jet.v);
+                    }
+                }
+            }
+
+            out_g0 = g0_diag + (2.0 * g0_off);
+            out_g1 = g1_diag + (2.0 * g1_off);
+            out_val = val_acc + (2.0 * val_off);
+        };
+
+        double sum_g0 = 0.0;
+        double sum_g1 = 0.0;
+        double sum_val = 0.0;
+        if (col_partials.size() >= 3U * n)
+        {
+            double* const g0_part = col_partials.data();
+            double* const g1_part = col_partials.data() + n;
+            double* const val_part = col_partials.data() + (2U * n);
+            auto run_range = [&](std::size_t col_begin, std::size_t col_end)
+            {
+                for (std::size_t col = col_begin; col < col_end; ++col)
+                {
+                    process_col(col, g0_part[col], g1_part[col], val_part[col]);
+                }
+            };
+            if (n >= 128U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, run_range);
+            }
+            else
+            {
+                run_range(0U, n);
+            }
+            // Fold per-column partials in ascending order so OpenMP results remain bit-identical across threads.
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                sum_g0 += g0_part[col];
+                if (has_param1)
+                {
+                    sum_g1 += g1_part[col];
+                }
+                if (need_value)
+                {
+                    sum_val += val_part[col];
+                }
+            }
+        }
+        else
+        {
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                double c0 = 0.0;
+                double c1 = 0.0;
+                double cv = 0.0;
+                process_col(col, c0, c1, cv);
+                sum_g0 += c0;
+                if (has_param1)
+                {
+                    sum_g1 += c1;
+                }
+                if (need_value)
+                {
+                    sum_val += cv;
+                }
+            }
+        }
+
+        out_grads[0] = sum_g0;
+        if (has_param1)
+        {
+            out_grads[1] = sum_g1;
+        }
+        return need_value ? sum_val : 0.0;
+    }
+
+    template std::expected<double, GprError> leaf_iso_weighted_grads<double>(
+        const KernelLeaf&,
+        MatrixRef<double>,
+        MatrixRef<double>,
+        MatrixRef<double>,
+        MatrixMut<double>,
+        std::span<double>,
+        std::span<double>,
+        bool,
+        KernelExp
+    );
+    template std::expected<double, GprError> leaf_iso_weighted_grads<float>(
+        const KernelLeaf&,
+        MatrixRef<float>,
+        MatrixRef<float>,
         MatrixRef<float>,
         MatrixMut<float>,
         std::span<double>,

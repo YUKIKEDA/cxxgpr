@@ -836,7 +836,8 @@ namespace cxxgpr::detail
         auto compiled = std::make_shared<CompiledKernel<Storage>>(CompiledKernel<Storage>::from_spec(cfg.kernel_spec));
         compiled->set_kernel_exp(cfg.kernel_exp);
 
-        auto buffers = FitBuffers<P>::create(n, cfg.fit_policy);
+        const FitPolicy effective_fit_policy = cfg.optimize ? cfg.fit_policy : FitPolicy::prefer_memory();
+        auto buffers = FitBuffers<P>::create(n, effective_fit_policy);
         if (!buffers.has_value())
         {
             return std::unexpected(std::move(buffers).error());
