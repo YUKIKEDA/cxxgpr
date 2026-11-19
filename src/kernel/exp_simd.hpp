@@ -85,7 +85,7 @@ namespace cxxgpr::detail
 
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on eight packed non-positive binary64 lanes in AVX-512 registers.
     /// @details Clamps arguments below `-708.0` and zero-masks underflow lanes via opmask without branches or libm
-    /// calls. Assumes finite `vx_raw <= 0`.
+    /// calls while propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Eight packed non-positive binary64 exponents.
     /// @return Eight packed binary64 exponentials matching scalar `fast_exp_f64`.
     [[nodiscard]] inline __m512d fast_exp_nonpos_avx512_f64(__m512d vx_raw) noexcept
@@ -106,8 +106,9 @@ namespace cxxgpr::detail
         const __m512d vc0 = _mm512_set1_pd(k_taylor_f64[0]);
         const __m512i v1023 = _mm512_set1_epi64(1023LL);
 
-        const __mmask8 vmask = _mm512_cmp_pd_mask(vx_raw, vmin_x, _CMP_GE_OQ);
-        const __m512d vx = _mm512_max_pd(vx_raw, vmin_x);
+        // _CMP_NLT_UQ keeps NaN unmasked, and putting vmin_x first in max_pd preserves NaN in src2.
+        const __mmask8 vmask = _mm512_cmp_pd_mask(vx_raw, vmin_x, _CMP_NLT_UQ);
+        const __m512d vx = _mm512_max_pd(vmin_x, vx_raw);
         const __m512d vd_int = simd_fmadd_pd(vx, vlog2e, vmagic);
         const __m512d vn = _mm512_sub_pd(vd_int, vmagic);
         const __m512d vg = simd_fnmadd_pd(vn, vln2_lo, simd_fnmadd_pd(vn, vln2_hi, vx));
@@ -128,7 +129,7 @@ namespace cxxgpr::detail
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on sixteen packed non-positive binary32 lanes in AVX-512
     /// registers.
     /// @details Clamps arguments below `-87.0F` and zero-masks underflow lanes via opmask without branches or libm
-    /// calls. Assumes finite `vx_raw <= 0`.
+    /// calls while propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Sixteen packed non-positive binary32 exponents.
     /// @return Sixteen packed binary32 exponentials matching scalar `fast_exp_f32`.
     [[nodiscard]] inline __m512 fast_exp_nonpos_avx512_f32(__m512 vx_raw) noexcept
@@ -148,8 +149,8 @@ namespace cxxgpr::detail
         const __m512 vc0 = _mm512_set1_ps(k_taylor_f32[0]);
         const __m512i v127 = _mm512_set1_epi32(127);
 
-        const __mmask16 vmask = _mm512_cmp_ps_mask(vx_raw, vmin_x, _CMP_GE_OQ);
-        const __m512 vx = _mm512_max_ps(vx_raw, vmin_x);
+        const __mmask16 vmask = _mm512_cmp_ps_mask(vx_raw, vmin_x, _CMP_NLT_UQ);
+        const __m512 vx = _mm512_max_ps(vmin_x, vx_raw);
         const __m512 vd_int = simd_fmadd_ps(vx, vlog2e, vmagic);
         const __m512 vn = _mm512_sub_ps(vd_int, vmagic);
         const __m512 vg = simd_fnmadd_ps(vn, vln2_lo, simd_fnmadd_ps(vn, vln2_hi, vx));
@@ -228,8 +229,8 @@ namespace cxxgpr::detail
     }
 
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on four packed non-positive binary64 lanes in AVX2+FMA registers.
-    /// @details Clamps arguments below `-708.0` and masks underflow lanes to zero without branches or libm calls.
-    /// Assumes finite `vx_raw <= 0`.
+    /// @details Clamps arguments below `-708.0` and masks underflow lanes to zero without branches or libm calls while
+    /// propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Four packed non-positive binary64 exponents.
     /// @return Four packed binary64 exponentials matching scalar `fast_exp_f64`.
     [[nodiscard]] inline __m256d fast_exp_nonpos_avx2_f64(__m256d vx_raw) noexcept
@@ -250,8 +251,8 @@ namespace cxxgpr::detail
         const __m256d vc0 = _mm256_set1_pd(k_taylor_f64[0]);
         const __m256i v1023 = _mm256_set1_epi64x(1023LL);
 
-        const __m256d vmask = _mm256_cmp_pd(vx_raw, vmin_x, _CMP_GE_OQ);
-        const __m256d vx = _mm256_max_pd(vx_raw, vmin_x);
+        const __m256d vmask = _mm256_cmp_pd(vx_raw, vmin_x, _CMP_NLT_UQ);
+        const __m256d vx = _mm256_max_pd(vmin_x, vx_raw);
         const __m256d vd_int = simd_fmadd_pd(vx, vlog2e, vmagic);
         const __m256d vn = _mm256_sub_pd(vd_int, vmagic);
         const __m256d vg = simd_fnmadd_pd(vn, vln2_lo, simd_fnmadd_pd(vn, vln2_hi, vx));
@@ -270,8 +271,8 @@ namespace cxxgpr::detail
     }
 
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on eight packed non-positive binary32 lanes in AVX2+FMA registers.
-    /// @details Clamps arguments below `-87.0F` and masks underflow lanes to zero without branches or libm calls.
-    /// Assumes finite `vx_raw <= 0`.
+    /// @details Clamps arguments below `-87.0F` and masks underflow lanes to zero without branches or libm calls while
+    /// propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Eight packed non-positive binary32 exponents.
     /// @return Eight packed binary32 exponentials matching scalar `fast_exp_f32`.
     [[nodiscard]] inline __m256 fast_exp_nonpos_avx2_f32(__m256 vx_raw) noexcept
@@ -291,8 +292,8 @@ namespace cxxgpr::detail
         const __m256 vc0 = _mm256_set1_ps(k_taylor_f32[0]);
         const __m256i v127 = _mm256_set1_epi32(127);
 
-        const __m256 vmask = _mm256_cmp_ps(vx_raw, vmin_x, _CMP_GE_OQ);
-        const __m256 vx = _mm256_max_ps(vx_raw, vmin_x);
+        const __m256 vmask = _mm256_cmp_ps(vx_raw, vmin_x, _CMP_NLT_UQ);
+        const __m256 vx = _mm256_max_ps(vmin_x, vx_raw);
         const __m256 vd_int = simd_fmadd_ps(vx, vlog2e, vmagic);
         const __m256 vn = _mm256_sub_ps(vd_int, vmagic);
         const __m256 vg = simd_fnmadd_ps(vn, vln2_lo, simd_fnmadd_ps(vn, vln2_hi, vx));
@@ -316,7 +317,7 @@ namespace cxxgpr::detail
 
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on two packed non-positive binary64 lanes in SSE2 registers.
     /// @details Clamps arguments below `-708.0` cleanly and masks underflow lanes to zero without branches or libm
-    /// calls. Assumes finite `vx_raw <= 0`.
+    /// calls while propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Two packed non-positive binary64 exponents.
     /// @return Two packed binary64 exponentials matching scalar `fast_exp_f64`.
     [[nodiscard]] inline __m128d fast_exp_nonpos_sse2_f64(__m128d vx_raw) noexcept
@@ -337,9 +338,9 @@ namespace cxxgpr::detail
         const __m128d vc0 = _mm_set1_pd(k_taylor_f64[0]);
         const __m128i v1023 = _mm_set1_epi64x(1023LL);
 
-        // Mask lanes below normal threshold -708.0 to +0.0 after clamping so mul+magic stay finite.
-        const __m128d vmask = _mm_cmpge_pd(vx_raw, vmin_x);
-        const __m128d vx = _mm_max_pd(vx_raw, vmin_x);
+        // cmpnlt keeps NaN unmasked, and putting vmin_x first in max_pd preserves NaN in src2.
+        const __m128d vmask = _mm_cmpnlt_pd(vx_raw, vmin_x);
+        const __m128d vx = _mm_max_pd(vmin_x, vx_raw);
         const __m128d vd_int = _mm_add_pd(_mm_mul_pd(vx, vlog2e), vmagic);
         const __m128d vn = _mm_sub_pd(vd_int, vmagic);
         const __m128d vg = _mm_sub_pd(_mm_sub_pd(vx, _mm_mul_pd(vn, vln2_hi)), _mm_mul_pd(vn, vln2_lo));
@@ -359,7 +360,7 @@ namespace cxxgpr::detail
 
     /// @brief Evaluates degree-7 FastApprox `exp(x)` on four packed non-positive binary32 lanes in SSE2 registers.
     /// @details Clamps arguments below `-87.0F` cleanly and masks underflow lanes to zero without branches or libm
-    /// calls. Assumes finite `vx_raw <= 0`.
+    /// calls while propagating NaN lanes cleanly. Assumes finite `vx_raw <= 0` or NaN.
     /// @param[in] vx_raw Four packed non-positive binary32 exponents.
     /// @return Four packed binary32 exponentials matching scalar `fast_exp_f32`.
     [[nodiscard]] inline __m128 fast_exp_nonpos_sse2_f32(__m128 vx_raw) noexcept
@@ -379,8 +380,8 @@ namespace cxxgpr::detail
         const __m128 vc0 = _mm_set1_ps(k_taylor_f32[0]);
         const __m128i v127 = _mm_set1_epi32(127);
 
-        const __m128 vmask = _mm_cmpge_ps(vx_raw, vmin_x);
-        const __m128 vx = _mm_max_ps(vx_raw, vmin_x);
+        const __m128 vmask = _mm_cmpnlt_ps(vx_raw, vmin_x);
+        const __m128 vx = _mm_max_ps(vmin_x, vx_raw);
         const __m128 vd_int = _mm_add_ps(_mm_mul_ps(vx, vlog2e), vmagic);
         const __m128 vn = _mm_sub_ps(vd_int, vmagic);
         const __m128 vg = _mm_sub_ps(_mm_sub_ps(vx, _mm_mul_ps(vn, vln2_hi)), _mm_mul_ps(vn, vln2_lo));
@@ -820,7 +821,8 @@ namespace cxxgpr::detail
     /// @brief Evaluates `out[k] = exp(neg_scale * max(out[k], 0))` in place across a contiguous slice.
     /// @details Dispatches outside the inner loop on `exp_mode`: under `KernelExp::FastApprox`, uses branchless
     /// AVX-512 / AVX2+FMA / SSE2 magic-bias range reduction (`1.5 * 2^52` / `1.5 * 2^23`), Cody-Waite subtraction,
-    /// degree-7 Horner polynomial evaluation, and bit-shifted powers of two with clean underflow masking.
+    /// degree-7 Horner polynomial evaluation, and bit-shifted powers of two with clean underflow masking while
+    /// propagating NaN entries identically to the scalar path.
     /// @tparam T Storage floating-point scalar type (`double` or `float`).
     /// @param[in,out] buf Buffer containing non-negative values overwritten with kernel exponentials.
     /// @param[in] len Number of contiguous entries to transform.
@@ -839,7 +841,7 @@ namespace cxxgpr::detail
             return;
         }
 
-        // FastApprox path: clamp negative noise to 0 so x = d * neg_scale <= 0, then vectorize across SIMD tiers.
+        // Clamp negative noise to 0 with vzero as src1 so NaN in src2 passes through instead of becoming 0.
         std::size_t k = 0U;
         if constexpr (std::same_as<T, double>)
         {
@@ -850,7 +852,7 @@ namespace cxxgpr::detail
                 const __m512d vscale_in = _mm512_set1_pd(neg_scale);
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m512d vd = _mm512_max_pd(_mm512_loadu_pd(buf + k), vzero);
+                    const __m512d vd = _mm512_max_pd(vzero, _mm512_loadu_pd(buf + k));
                     _mm512_storeu_pd(buf + k, fast_exp_nonpos_avx512_f64(_mm512_mul_pd(vd, vscale_in)));
                 }
             }
@@ -862,7 +864,7 @@ namespace cxxgpr::detail
                 const __m256d vscale_in = _mm256_set1_pd(neg_scale);
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m256d vd = _mm256_max_pd(_mm256_loadu_pd(buf + k), vzero);
+                    const __m256d vd = _mm256_max_pd(vzero, _mm256_loadu_pd(buf + k));
                     _mm256_storeu_pd(buf + k, fast_exp_nonpos_avx2_f64(_mm256_mul_pd(vd, vscale_in)));
                 }
             }
@@ -874,7 +876,7 @@ namespace cxxgpr::detail
                 const __m128d vscale_in = _mm_set1_pd(neg_scale);
                 for (; k + 2U <= len; k += 2U)
                 {
-                    const __m128d vd = _mm_max_pd(_mm_loadu_pd(buf + k), vzero);
+                    const __m128d vd = _mm_max_pd(vzero, _mm_loadu_pd(buf + k));
                     _mm_storeu_pd(buf + k, fast_exp_nonpos_sse2_f64(_mm_mul_pd(vd, vscale_in)));
                 }
             }
@@ -889,7 +891,7 @@ namespace cxxgpr::detail
                 const __m512 vscale_in = _mm512_set1_ps(neg_scale);
                 for (; k + 16U <= len; k += 16U)
                 {
-                    const __m512 vd = _mm512_max_ps(_mm512_loadu_ps(buf + k), vzero);
+                    const __m512 vd = _mm512_max_ps(vzero, _mm512_loadu_ps(buf + k));
                     _mm512_storeu_ps(buf + k, fast_exp_nonpos_avx512_f32(_mm512_mul_ps(vd, vscale_in)));
                 }
             }
@@ -901,7 +903,7 @@ namespace cxxgpr::detail
                 const __m256 vscale_in = _mm256_set1_ps(neg_scale);
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m256 vd = _mm256_max_ps(_mm256_loadu_ps(buf + k), vzero);
+                    const __m256 vd = _mm256_max_ps(vzero, _mm256_loadu_ps(buf + k));
                     _mm256_storeu_ps(buf + k, fast_exp_nonpos_avx2_f32(_mm256_mul_ps(vd, vscale_in)));
                 }
             }
@@ -913,7 +915,7 @@ namespace cxxgpr::detail
                 const __m128 vscale_in = _mm_set1_ps(neg_scale);
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m128 vd = _mm_max_ps(_mm_loadu_ps(buf + k), vzero);
+                    const __m128 vd = _mm_max_ps(vzero, _mm_loadu_ps(buf + k));
                     _mm_storeu_ps(buf + k, fast_exp_nonpos_sse2_f32(_mm_mul_ps(vd, vscale_in)));
                 }
             }
@@ -927,6 +929,8 @@ namespace cxxgpr::detail
     }
 
     /// @brief Evaluates FastApprox binary64 Matern values across AVX-512, AVX2+FMA, SSE2, and scalar tail.
+    /// @details Guards `poly * exp(-u)` against `(+Inf) * 0 = NaN` when `scale_sq * s^2` overflows while preserving
+    /// any input NaN lanes cleanly.
     /// @param[in,out] buf Buffer holding non-negative distance-squared values overwritten with Matern values.
     /// @param[in] len Number of contiguous entries to transform.
     /// @param[in] scale_sq Positive radial scaling factor `(2 * nu)` or `(2 * nu / ell^2)`.
@@ -945,7 +949,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(_mm512_loadu_pd(buf + k), vzero), vc);
+                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(vzero, _mm512_loadu_pd(buf + k)), vc);
                     const __m512d vu = _mm512_sqrt_pd(vu2);
                     _mm512_storeu_pd(buf + k, fast_exp_nonpos_avx512_f64(_mm512_sub_pd(vzero, vu)));
                 }
@@ -954,21 +958,23 @@ namespace cxxgpr::detail
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(_mm512_loadu_pd(buf + k), vzero), vc);
+                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(vzero, _mm512_loadu_pd(buf + k)), vc);
                     const __m512d vu = _mm512_sqrt_pd(vu2);
                     const __m512d ve = fast_exp_nonpos_avx512_f64(_mm512_sub_pd(vzero, vu));
-                    _mm512_storeu_pd(buf + k, _mm512_mul_pd(_mm512_add_pd(vone, vu), ve));
+                    const __mmask8 ve_nz = _mm512_cmp_pd_mask(ve, vzero, _CMP_NEQ_UQ);
+                    _mm512_storeu_pd(buf + k, _mm512_maskz_mul_pd(ve_nz, _mm512_add_pd(vone, vu), ve));
                 }
             }
             else
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(_mm512_loadu_pd(buf + k), vzero), vc);
+                    const __m512d vu2 = _mm512_mul_pd(_mm512_max_pd(vzero, _mm512_loadu_pd(buf + k)), vc);
                     const __m512d vu = _mm512_sqrt_pd(vu2);
                     const __m512d ve = fast_exp_nonpos_avx512_f64(_mm512_sub_pd(vzero, vu));
+                    const __mmask8 ve_nz = _mm512_cmp_pd_mask(ve, vzero, _CMP_NEQ_UQ);
                     const __m512d vpoly = simd_fmadd_pd(vu2, vinv3, _mm512_add_pd(vone, vu));
-                    _mm512_storeu_pd(buf + k, _mm512_mul_pd(vpoly, ve));
+                    _mm512_storeu_pd(buf + k, _mm512_maskz_mul_pd(ve_nz, vpoly, ve));
                 }
             }
         }
@@ -984,7 +990,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(_mm256_loadu_pd(buf + k), vzero), vc);
+                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(vzero, _mm256_loadu_pd(buf + k)), vc);
                     const __m256d vu = _mm256_sqrt_pd(vu2);
                     _mm256_storeu_pd(buf + k, fast_exp_nonpos_avx2_f64(_mm256_sub_pd(vzero, vu)));
                 }
@@ -993,21 +999,23 @@ namespace cxxgpr::detail
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(_mm256_loadu_pd(buf + k), vzero), vc);
+                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(vzero, _mm256_loadu_pd(buf + k)), vc);
                     const __m256d vu = _mm256_sqrt_pd(vu2);
                     const __m256d ve = fast_exp_nonpos_avx2_f64(_mm256_sub_pd(vzero, vu));
-                    _mm256_storeu_pd(buf + k, _mm256_mul_pd(_mm256_add_pd(vone, vu), ve));
+                    const __m256d ve_nz = _mm256_cmp_pd(ve, vzero, _CMP_NEQ_UQ);
+                    _mm256_storeu_pd(buf + k, _mm256_and_pd(_mm256_mul_pd(_mm256_add_pd(vone, vu), ve), ve_nz));
                 }
             }
             else
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(_mm256_loadu_pd(buf + k), vzero), vc);
+                    const __m256d vu2 = _mm256_mul_pd(_mm256_max_pd(vzero, _mm256_loadu_pd(buf + k)), vc);
                     const __m256d vu = _mm256_sqrt_pd(vu2);
                     const __m256d ve = fast_exp_nonpos_avx2_f64(_mm256_sub_pd(vzero, vu));
+                    const __m256d ve_nz = _mm256_cmp_pd(ve, vzero, _CMP_NEQ_UQ);
                     const __m256d vpoly = simd_fmadd_pd(vu2, vinv3, _mm256_add_pd(vone, vu));
-                    _mm256_storeu_pd(buf + k, _mm256_mul_pd(vpoly, ve));
+                    _mm256_storeu_pd(buf + k, _mm256_and_pd(_mm256_mul_pd(vpoly, ve), ve_nz));
                 }
             }
         }
@@ -1023,7 +1031,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 2U <= len; k += 2U)
                 {
-                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(_mm_loadu_pd(buf + k), vzero), vc);
+                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(vzero, _mm_loadu_pd(buf + k)), vc);
                     const __m128d vu = _mm_sqrt_pd(vu2);
                     _mm_storeu_pd(buf + k, fast_exp_nonpos_sse2_f64(_mm_sub_pd(vzero, vu)));
                 }
@@ -1032,29 +1040,32 @@ namespace cxxgpr::detail
             {
                 for (; k + 2U <= len; k += 2U)
                 {
-                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(_mm_loadu_pd(buf + k), vzero), vc);
+                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(vzero, _mm_loadu_pd(buf + k)), vc);
                     const __m128d vu = _mm_sqrt_pd(vu2);
                     const __m128d ve = fast_exp_nonpos_sse2_f64(_mm_sub_pd(vzero, vu));
-                    _mm_storeu_pd(buf + k, _mm_mul_pd(_mm_add_pd(vone, vu), ve));
+                    const __m128d ve_nz = _mm_cmpneq_pd(ve, vzero);
+                    _mm_storeu_pd(buf + k, _mm_and_pd(_mm_mul_pd(_mm_add_pd(vone, vu), ve), ve_nz));
                 }
             }
             else
             {
                 for (; k + 2U <= len; k += 2U)
                 {
-                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(_mm_loadu_pd(buf + k), vzero), vc);
+                    const __m128d vu2 = _mm_mul_pd(_mm_max_pd(vzero, _mm_loadu_pd(buf + k)), vc);
                     const __m128d vu = _mm_sqrt_pd(vu2);
                     const __m128d ve = fast_exp_nonpos_sse2_f64(_mm_sub_pd(vzero, vu));
+                    const __m128d ve_nz = _mm_cmpneq_pd(ve, vzero);
                     const __m128d vpoly = _mm_add_pd(_mm_add_pd(vone, vu), _mm_mul_pd(vu2, vinv3));
-                    _mm_storeu_pd(buf + k, _mm_mul_pd(vpoly, ve));
+                    _mm_storeu_pd(buf + k, _mm_and_pd(_mm_mul_pd(vpoly, ve), ve_nz));
                 }
             }
         }
 #endif
         for (; k < len; ++k)
         {
-            const double u2 = buf[k] > 0.0 ? (scale_sq * buf[k]) : 0.0;
-            if (u2 <= 0.0)
+            const double clamped = buf[k] < 0.0 ? 0.0 : buf[k];
+            const double u2 = scale_sq * clamped;
+            if (u2 == 0.0)
             {
                 buf[k] = 1.0;
                 continue;
@@ -1064,6 +1075,10 @@ namespace cxxgpr::detail
             if (nu == MaternNu::OneHalf)
             {
                 buf[k] = e;
+            }
+            else if (e == 0.0)
+            {
+                buf[k] = 0.0;
             }
             else if (nu == MaternNu::ThreeHalves)
             {
@@ -1077,6 +1092,8 @@ namespace cxxgpr::detail
     }
 
     /// @brief Evaluates FastApprox binary32 Matern values across AVX-512, AVX2+FMA, SSE2, and scalar tail.
+    /// @details Guards `poly * exp(-u)` against `(+Inf) * 0 = NaN` when `scale_sq * s^2` overflows while preserving
+    /// any input NaN lanes cleanly.
     /// @param[in,out] buf Buffer holding non-negative distance-squared values overwritten with Matern values.
     /// @param[in] len Number of contiguous entries to transform.
     /// @param[in] scale_sq Positive radial scaling factor `(2 * nu)` or `(2 * nu / ell^2)`.
@@ -1095,7 +1112,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 16U <= len; k += 16U)
                 {
-                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(_mm512_loadu_ps(buf + k), vzero), vc);
+                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(vzero, _mm512_loadu_ps(buf + k)), vc);
                     const __m512 vu = _mm512_sqrt_ps(vu2);
                     _mm512_storeu_ps(buf + k, fast_exp_nonpos_avx512_f32(_mm512_sub_ps(vzero, vu)));
                 }
@@ -1104,21 +1121,23 @@ namespace cxxgpr::detail
             {
                 for (; k + 16U <= len; k += 16U)
                 {
-                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(_mm512_loadu_ps(buf + k), vzero), vc);
+                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(vzero, _mm512_loadu_ps(buf + k)), vc);
                     const __m512 vu = _mm512_sqrt_ps(vu2);
                     const __m512 ve = fast_exp_nonpos_avx512_f32(_mm512_sub_ps(vzero, vu));
-                    _mm512_storeu_ps(buf + k, _mm512_mul_ps(_mm512_add_ps(vone, vu), ve));
+                    const __mmask16 ve_nz = _mm512_cmp_ps_mask(ve, vzero, _CMP_NEQ_UQ);
+                    _mm512_storeu_ps(buf + k, _mm512_maskz_mul_ps(ve_nz, _mm512_add_ps(vone, vu), ve));
                 }
             }
             else
             {
                 for (; k + 16U <= len; k += 16U)
                 {
-                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(_mm512_loadu_ps(buf + k), vzero), vc);
+                    const __m512 vu2 = _mm512_mul_ps(_mm512_max_ps(vzero, _mm512_loadu_ps(buf + k)), vc);
                     const __m512 vu = _mm512_sqrt_ps(vu2);
                     const __m512 ve = fast_exp_nonpos_avx512_f32(_mm512_sub_ps(vzero, vu));
+                    const __mmask16 ve_nz = _mm512_cmp_ps_mask(ve, vzero, _CMP_NEQ_UQ);
                     const __m512 vpoly = simd_fmadd_ps(vu2, vinv3, _mm512_add_ps(vone, vu));
-                    _mm512_storeu_ps(buf + k, _mm512_mul_ps(vpoly, ve));
+                    _mm512_storeu_ps(buf + k, _mm512_maskz_mul_ps(ve_nz, vpoly, ve));
                 }
             }
         }
@@ -1134,7 +1153,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(_mm256_loadu_ps(buf + k), vzero), vc);
+                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(vzero, _mm256_loadu_ps(buf + k)), vc);
                     const __m256 vu = _mm256_sqrt_ps(vu2);
                     _mm256_storeu_ps(buf + k, fast_exp_nonpos_avx2_f32(_mm256_sub_ps(vzero, vu)));
                 }
@@ -1143,21 +1162,23 @@ namespace cxxgpr::detail
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(_mm256_loadu_ps(buf + k), vzero), vc);
+                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(vzero, _mm256_loadu_ps(buf + k)), vc);
                     const __m256 vu = _mm256_sqrt_ps(vu2);
                     const __m256 ve = fast_exp_nonpos_avx2_f32(_mm256_sub_ps(vzero, vu));
-                    _mm256_storeu_ps(buf + k, _mm256_mul_ps(_mm256_add_ps(vone, vu), ve));
+                    const __m256 ve_nz = _mm256_cmp_ps(ve, vzero, _CMP_NEQ_UQ);
+                    _mm256_storeu_ps(buf + k, _mm256_and_ps(_mm256_mul_ps(_mm256_add_ps(vone, vu), ve), ve_nz));
                 }
             }
             else
             {
                 for (; k + 8U <= len; k += 8U)
                 {
-                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(_mm256_loadu_ps(buf + k), vzero), vc);
+                    const __m256 vu2 = _mm256_mul_ps(_mm256_max_ps(vzero, _mm256_loadu_ps(buf + k)), vc);
                     const __m256 vu = _mm256_sqrt_ps(vu2);
                     const __m256 ve = fast_exp_nonpos_avx2_f32(_mm256_sub_ps(vzero, vu));
+                    const __m256 ve_nz = _mm256_cmp_ps(ve, vzero, _CMP_NEQ_UQ);
                     const __m256 vpoly = simd_fmadd_ps(vu2, vinv3, _mm256_add_ps(vone, vu));
-                    _mm256_storeu_ps(buf + k, _mm256_mul_ps(vpoly, ve));
+                    _mm256_storeu_ps(buf + k, _mm256_and_ps(_mm256_mul_ps(vpoly, ve), ve_nz));
                 }
             }
         }
@@ -1173,7 +1194,7 @@ namespace cxxgpr::detail
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(_mm_loadu_ps(buf + k), vzero), vc);
+                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(vzero, _mm_loadu_ps(buf + k)), vc);
                     const __m128 vu = _mm_sqrt_ps(vu2);
                     _mm_storeu_ps(buf + k, fast_exp_nonpos_sse2_f32(_mm_sub_ps(vzero, vu)));
                 }
@@ -1182,29 +1203,32 @@ namespace cxxgpr::detail
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(_mm_loadu_ps(buf + k), vzero), vc);
+                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(vzero, _mm_loadu_ps(buf + k)), vc);
                     const __m128 vu = _mm_sqrt_ps(vu2);
                     const __m128 ve = fast_exp_nonpos_sse2_f32(_mm_sub_ps(vzero, vu));
-                    _mm_storeu_ps(buf + k, _mm_mul_ps(_mm_add_ps(vone, vu), ve));
+                    const __m128 ve_nz = _mm_cmpneq_ps(ve, vzero);
+                    _mm_storeu_ps(buf + k, _mm_and_ps(_mm_mul_ps(_mm_add_ps(vone, vu), ve), ve_nz));
                 }
             }
             else
             {
                 for (; k + 4U <= len; k += 4U)
                 {
-                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(_mm_loadu_ps(buf + k), vzero), vc);
+                    const __m128 vu2 = _mm_mul_ps(_mm_max_ps(vzero, _mm_loadu_ps(buf + k)), vc);
                     const __m128 vu = _mm_sqrt_ps(vu2);
                     const __m128 ve = fast_exp_nonpos_sse2_f32(_mm_sub_ps(vzero, vu));
+                    const __m128 ve_nz = _mm_cmpneq_ps(ve, vzero);
                     const __m128 vpoly = _mm_add_ps(_mm_add_ps(vone, vu), _mm_mul_ps(vu2, vinv3));
-                    _mm_storeu_ps(buf + k, _mm_mul_ps(vpoly, ve));
+                    _mm_storeu_ps(buf + k, _mm_and_ps(_mm_mul_ps(vpoly, ve), ve_nz));
                 }
             }
         }
 #endif
         for (; k < len; ++k)
         {
-            const float u2 = buf[k] > 0.0F ? (scale_sq * buf[k]) : 0.0F;
-            if (u2 <= 0.0F)
+            const float clamped = buf[k] < 0.0F ? 0.0F : buf[k];
+            const float u2 = scale_sq * clamped;
+            if (u2 == 0.0F)
             {
                 buf[k] = 1.0F;
                 continue;
@@ -1214,6 +1238,10 @@ namespace cxxgpr::detail
             if (nu == MaternNu::OneHalf)
             {
                 buf[k] = e;
+            }
+            else if (e == 0.0F)
+            {
+                buf[k] = 0.0F;
             }
             else if (nu == MaternNu::ThreeHalves)
             {
@@ -1228,7 +1256,8 @@ namespace cxxgpr::detail
 
     /// @brief Evaluates the Matern kernel in place over a contiguous buffer holding `u^2 = scale_sq * max(s^2, 0)`.
     /// @details Dispatches `nu` and `exp_mode` once outside the slice loop; uses hardware AVX-512 / AVX2+FMA / SSE2
-    /// `sqrt` and FastApprox exp under `KernelExp::FastApprox` with zero branches per element.
+    /// `sqrt` and FastApprox exp under `KernelExp::FastApprox` with zero branches per element, and masks `poly * 0`
+    /// underflows to `0` while keeping NaN inputs intact.
     /// @tparam T Storage floating-point scalar type (`double` or `float`).
     /// @param[in,out] buf Buffer holding non-negative distance-squared values overwritten with Matern kernel values.
     /// @param[in] len Number of contiguous entries to transform.
@@ -1244,23 +1273,26 @@ namespace cxxgpr::detail
             {
                 for (std::size_t k = 0U; k < len; ++k)
                 {
-                    const T u2 = buf[k] > T{0} ? (scale_sq * buf[k]) : T{0};
-                    buf[k] = u2 > T{0} ? std::exp(-std::sqrt(u2)) : T{1};
+                    const T clamped = buf[k] < T{0} ? T{0} : buf[k];
+                    const T u2 = scale_sq * clamped;
+                    buf[k] = (u2 == T{0}) ? T{1} : std::exp(-std::sqrt(u2));
                 }
             }
             else if (nu == MaternNu::ThreeHalves)
             {
                 for (std::size_t k = 0U; k < len; ++k)
                 {
-                    const T u2 = buf[k] > T{0} ? (scale_sq * buf[k]) : T{0};
-                    if (u2 <= T{0})
+                    const T clamped = buf[k] < T{0} ? T{0} : buf[k];
+                    const T u2 = scale_sq * clamped;
+                    if (u2 == T{0})
                     {
                         buf[k] = T{1};
                     }
                     else
                     {
                         const T u = std::sqrt(u2);
-                        buf[k] = (T{1} + u) * std::exp(-u);
+                        const T e = std::exp(-u);
+                        buf[k] = (e == T{0}) ? T{0} : (T{1} + u) * e;
                     }
                 }
             }
@@ -1268,15 +1300,17 @@ namespace cxxgpr::detail
             {
                 for (std::size_t k = 0U; k < len; ++k)
                 {
-                    const T u2 = buf[k] > T{0} ? (scale_sq * buf[k]) : T{0};
-                    if (u2 <= T{0})
+                    const T clamped = buf[k] < T{0} ? T{0} : buf[k];
+                    const T u2 = scale_sq * clamped;
+                    if (u2 == T{0})
                     {
                         buf[k] = T{1};
                     }
                     else
                     {
                         const T u = std::sqrt(u2);
-                        buf[k] = (T{1} + u + (u2 / T{3})) * std::exp(-u);
+                        const T e = std::exp(-u);
+                        buf[k] = (e == T{0}) ? T{0} : (T{1} + u + (u2 / T{3})) * e;
                     }
                 }
             }

@@ -13,13 +13,19 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <vector>
 
 #include "allocation_audit.hpp"
+
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
 
 namespace
 {
@@ -314,6 +320,146 @@ namespace
                 .code(),
             GprErrorCode::NonPositiveDefiniteMatrix
         );
+    }
+
+    /// @brief Verifies blocked Cholesky (n * sizeof(T) >= 2048) stays bit-identical across 1/2/4 threads with zero
+    /// allocs.
+    /// @details Factors n = 260 double and n = 520 float SPD RBF matrices under omp_set_num_threads(1), (2), and (4)
+    /// inside NoAllocationScope(AuditMode::CppAndEigen) and checks exact bit equality across all lower-triangle
+    /// entries.
+    TEST(CholeskyLinalgTest, ParallelBlockedCholeskyBitwiseDeterministicAndZeroAlloc)
+    {
+        auto check_blocked = []<typename Scalar>(std::size_t n, Scalar shift)
+        {
+            const auto src = make_rbf_gram<Scalar>(n, shift);
+            auto run_factor = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                std::vector<Scalar> work = src;
+                {
+                    const NoAllocationScope audit(AuditMode::CppAndEigen);
+                    EXPECT_TRUE(
+                        cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<Scalar>(work.data(), n, n)).has_value()
+                    );
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+                return work;
+            };
+
+#ifdef _OPENMP
+            const int saved_threads = omp_get_max_threads();
+#endif
+            const auto r1 = run_factor(1);
+            const auto r2 = run_factor(2);
+            const auto r4 = run_factor(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved_threads);
+#endif
+
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    const std::size_t idx = (col * n) + row;
+                    if constexpr (std::same_as<Scalar, double>)
+                    {
+                        EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r2[idx]));
+                        EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r4[idx]));
+                    }
+                    else
+                    {
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(r1[idx]), std::bit_cast<std::uint32_t>(r2[idx]));
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(r1[idx]), std::bit_cast<std::uint32_t>(r4[idx]));
+                    }
+                }
+            }
+        };
+
+        check_blocked.template operator()<double>(260U, 1e-2);
+        check_blocked.template operator()<float>(520U, 5e-2F);
+    }
+
+    /// @brief Verifies parallel fixed-block triangular solves (n^2 * m >= 2^24) stay bit-identical across 1/2/4
+    /// threads.
+    /// @details Factors a 256 x 256 double SPD matrix and solves 256 right-hand side columns across Forward, Backward,
+    /// and Llt modes under 1, 2, and 4 OpenMP threads with zero heap allocations and exact residual accuracy.
+    TEST(CholeskyLinalgTest, ParallelTriSolveFixedBlockBitwiseDeterministicAndZeroAlloc)
+    {
+        constexpr std::size_t n = 256U;
+        constexpr std::size_t m = 256U;
+        const auto gram = make_rbf_gram<double>(n, 1e-2);
+        std::vector<double> l_buf = gram;
+        ASSERT_TRUE(cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<double>(l_buf.data(), n, n)).has_value());
+        const MatrixRef<double> l_ref(l_buf.data(), n, n);
+
+        std::vector<double> rhs_init(n * m, 0.0);
+        for (std::size_t c = 0U; c < m; ++c)
+        {
+            for (std::size_t r = 0U; r < n; ++r)
+            {
+                rhs_init[(c * n) + r] =
+                    std::sin((0.13 * static_cast<double>(r + 1U)) + (0.07 * static_cast<double>(c)));
+            }
+        }
+
+        auto run_solves = [&](int threads)
+        {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+            std::vector<double> fwd = rhs_init;
+            std::vector<double> bwd = rhs_init;
+            std::vector<double> llt = rhs_init;
+            {
+                const NoAllocationScope audit(AuditMode::CppAndEigen);
+                EXPECT_TRUE(
+                    cxxgpr::linalg::solve_lower_in_place(l_ref, MatrixMut<double>(fwd.data(), n, m)).has_value()
+                );
+                EXPECT_TRUE(
+                    cxxgpr::linalg::solve_lower_transpose_in_place(l_ref, MatrixMut<double>(bwd.data(), n, m))
+                        .has_value()
+                );
+                EXPECT_TRUE(cxxgpr::linalg::solve_llt_in_place(l_ref, MatrixMut<double>(llt.data(), n, m)).has_value());
+                EXPECT_EQ(audit.delta_allocations(), 0U);
+            }
+            return std::array<std::vector<double>, 3>{std::move(fwd), std::move(bwd), std::move(llt)};
+        };
+
+#ifdef _OPENMP
+        const int saved_threads = omp_get_max_threads();
+#endif
+        const auto s1 = run_solves(1);
+        const auto s2 = run_solves(2);
+        const auto s4 = run_solves(4);
+#ifdef _OPENMP
+        omp_set_num_threads(saved_threads);
+#endif
+
+        for (std::size_t mode = 0U; mode < 3U; ++mode)
+        {
+            for (std::size_t idx = 0U; idx < n * m; ++idx)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1[mode][idx]), std::bit_cast<std::uint64_t>(s2[mode][idx]));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1[mode][idx]), std::bit_cast<std::uint64_t>(s4[mode][idx]));
+            }
+        }
+
+        // Spot-check A * x = b residual on the first column of LLT solve.
+        for (std::size_t row = 0U; row < n; ++row)
+        {
+            double ax = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                ax += gram[(col * n) + row] * s1[2][col];
+            }
+            EXPECT_NEAR(ax, rhs_init[row], 1e-11);
+        }
     }
 
 }  // namespace

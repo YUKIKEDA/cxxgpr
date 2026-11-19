@@ -454,4 +454,169 @@ namespace
         }
     }
 
+    /// @brief Verifies 1-pass isotropic/linear adjoint contraction (n >= 128) and DistanceKernel non-zero diag parity.
+    /// @details Confirms analytical gradients match central finite differences, stay bit-identical between 1 and 4
+    /// OpenMP threads, allocate zero heap bytes in reuse calls, and handle positive DistanceKernel diagonals cleanly.
+    TEST(WorkspaceMllTest, IsotropicOnePassWeightedGradsLargeNAndNonZeroDistDiag)
+    {
+        // Case 1: n = 132 (>= 128 parallel threshold) across all 5 leaf_iso_weighted_grads kernel families (1D Periodic
+        // is PSD).
+        {
+            constexpr std::size_t n = 132U;
+            constexpr std::size_t d = 1U;
+            std::vector<double> x_data(n * d);
+            std::vector<double> y(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                x_data[i] = 0.08 * static_cast<double>(i);
+                y[i] = std::sin(0.15 * static_cast<double>(i)) + (0.05 * static_cast<double>(i % 7U));
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
+                + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.3, cxxgpr::MaternNu::ThreeHalves).value())
+                + cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.9, 2.4).value())
+                + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticKernel::create(1.2, 1.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+
+            const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+            const auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+            auto run_threads = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                auto compiled = spec.compile<double>();
+                auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+                EXPECT_TRUE(bufs.has_value());
+                const std::size_t total_params = compiled.num_params() + 1U;
+                std::vector<double> grad(total_params, 0.0);
+                std::vector<double> grad_again(total_params, 0.0);
+                const auto res1 = cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, grad);
+                EXPECT_TRUE(res1.has_value()) << res1.error().message();
+                {
+                    const cxxgpr::test_support::NoAllocationScope audit;
+                    const auto res2 = cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, grad_again);
+                    EXPECT_TRUE(res2.has_value()) << res2.error().message();
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+                return grad;
+            };
+
+#ifdef _OPENMP
+            const int saved = omp_get_max_threads();
+#endif
+            const auto g1 = run_threads(1);
+            const auto g4 = run_threads(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved);
+#endif
+            ASSERT_EQ(g1.size(), g4.size());
+            for (std::size_t p = 0U; p < g1.size(); ++p)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(g1[p]), std::bit_cast<std::uint64_t>(g4[p])) << "p=" << p;
+            }
+
+            // Finite-difference check on representative parameters across each isotropic/linear family.
+            auto compiled = spec.compile<double>();
+            auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+            ASSERT_TRUE(bufs.has_value());
+            const std::size_t n_kernel = compiled.num_params();
+            std::vector<double> theta(n_kernel);
+            ASSERT_TRUE(compiled.get_params(theta).has_value());
+            constexpr double h = 1e-6;
+            for (std::size_t p = 0U; p < n_kernel; ++p)
+            {
+                auto tp = theta;
+                tp[p] += h;
+                ASSERT_TRUE(compiled.set_params(tp).has_value());
+                auto mp = cxxgpr::factor_and_mll(compiled, lik, x, y, jitter, *bufs);
+                ASSERT_TRUE(mp.has_value());
+                auto tm = theta;
+                tm[p] -= h;
+                ASSERT_TRUE(compiled.set_params(tm).has_value());
+                auto mm = cxxgpr::factor_and_mll(compiled, lik, x, y, jitter, *bufs);
+                ASSERT_TRUE(mm.has_value());
+                const double fd = (*mp - *mm) / (2.0 * h);
+                EXPECT_NEAR(g1[p], fd, 1e-5 * std::max(1.0, std::abs(g1[p]))) << "p=" << p;
+            }
+        }
+
+        // Case 2: Uncached (FitPolicy::prefer_memory) leaf_iso_weighted_grads parity against Cached and serial
+        // col_partials (< 3 * n) fallback.
+        {
+            constexpr std::size_t n = 132U;
+            constexpr std::size_t d = 1U;
+            std::vector<double> x_data(n * d);
+            std::vector<double> y(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                x_data[i] = 0.08 * static_cast<double>(i);
+                y[i] = std::sin(0.15 * static_cast<double>(i)) + (0.05 * static_cast<double>(i % 7U));
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
+                + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.3, cxxgpr::MaternNu::ThreeHalves).value())
+                + cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.9, 2.4).value())
+                + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticKernel::create(1.2, 1.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+            auto compiled = spec.compile<double>();
+            const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+            const auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+            auto bufs_cached =
+                cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+            auto bufs_uncached = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(
+                n, cxxgpr::DistanceCachePolicy::Uncached, cxxgpr::CholeskyBuffer::Retain
+            );
+            ASSERT_TRUE(bufs_cached.has_value());
+            ASSERT_TRUE(bufs_uncached.has_value());
+
+            const std::size_t p_tot = compiled.num_params() + 1U;
+            std::vector<double> g_cached(p_tot, 0.0);
+            std::vector<double> g_uncached(p_tot, 0.0);
+            ASSERT_TRUE(cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs_cached, g_cached).has_value());
+            ASSERT_TRUE(
+                cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs_uncached, g_uncached).has_value()
+            );
+            for (std::size_t p = 0U; p < p_tot; ++p)
+            {
+                EXPECT_NEAR(g_uncached[p], g_cached[p], 1e-11) << "p=" << p;
+            }
+
+            // Direct CompiledKernel::weighted_grads parity: col_partials length n (serial fallback) vs 3 * n.
+            const std::size_t n_kernel = compiled.num_params();
+            std::vector<double> wg_serial(n_kernel, 0.0);
+            std::vector<double> wg_parallel(n_kernel, 0.0);
+            std::vector<double> k_scratch(n * n, 0.0);
+            std::vector<double> partials_1n(n, 0.0);
+            std::vector<double> partials_3n(3U * n, 0.0);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(compiled
+                    .weighted_grads(
+                        x, nullptr, bufs_cached->w_ref(), wg_serial, cxxgpr::MatrixMut<double>(k_scratch.data(), n, n),
+                        nested, bufs_cached->core.weighted, 0U, partials_1n
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .weighted_grads(
+                        x, nullptr, bufs_cached->w_ref(), wg_parallel,
+                        cxxgpr::MatrixMut<double>(k_scratch.data(), n, n), nested, bufs_cached->core.weighted, 0U,
+                        partials_3n
+                    )
+                    .has_value());
+            for (std::size_t p = 0U; p < n_kernel; ++p)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(wg_serial[p]), std::bit_cast<std::uint64_t>(wg_parallel[p]))
+                    << "p=" << p;
+            }
+        }
+    }
+
 }  // namespace

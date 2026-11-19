@@ -307,27 +307,37 @@ namespace cxxgpr::linalg
 #ifdef _OPENMP
             const double approx_flops =
                 static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
-            if (n_cols >= 4U && approx_flops >= 16777216.0 && openmp_max_threads() > 1U)
+            if (n_cols >= 4U && approx_flops >= 16777216.0)
             {
-#    pragma omp parallel shared(rhs_map, n_cols, solve_slice)
+                // Use fixed column-block width so rounding order is invariant to OpenMP thread count.
+                constexpr std::size_t col_block = 4U;
+                const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
+#    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U) shared(rhs_map, n_cols, solve_slice)
+                for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(n_blocks); ++b)
                 {
-                    const auto tid = static_cast<std::size_t>(omp_get_thread_num());
-                    const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
-                    const std::size_t col_begin = (n_cols * tid) / nthreads;
-                    const std::size_t col_end = (n_cols * (tid + 1U)) / nthreads;
-                    if (col_begin < col_end)
-                    {
-                        auto slice = rhs_map.middleCols(
-                            static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_end - col_begin)
-                        );
-                        solve_slice(slice);
-                    }
+                    const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
+                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
+                    auto slice =
+                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
+                    solve_slice(slice);
                 }
                 return;
             }
 #else
-            (void)n_rows;
-            (void)n_cols;
+            const double approx_flops =
+                static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
+            if (n_cols >= 4U && approx_flops >= 16777216.0)
+            {
+                constexpr std::size_t col_block = 4U;
+                for (std::size_t col_begin = 0U; col_begin < n_cols; col_begin += col_block)
+                {
+                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
+                    auto slice =
+                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
+                    solve_slice(slice);
+                }
+                return;
+            }
 #endif
             solve_slice(rhs_map);
         }
@@ -389,11 +399,11 @@ namespace cxxgpr::linalg
             return true;
         }
 
-        /// @brief Executes Eigen::LLT or parallel blocked Cholesky in place on the lower triangle of a.
-        /// @details Uses a single persistent OpenMP region with blocked panel/rank-32 updates and Eigen::LLT
-        /// subblock tail finishing when row byte size n * sizeof(T) >= 2048 (n >= 256 for double, n >= 512 for float)
-        /// and multiple threads are active; otherwise runs Eigen::LLT strictly in place (using a tightly packed map
-        /// whenever a is contiguous) and verifies positive finite pivots.
+        /// @brief Executes Eigen::LLT or deterministic blocked Cholesky in place on the lower triangle of a.
+        /// @details Uses blocked panel/rank-32 updates with Eigen::LLT subblock tail finishing whenever row byte size
+        /// `n * sizeof(T) >= 2048` (`n >= 256` for `double`, `n >= 512` for `float`), running inside a single
+        /// persistent OpenMP region when multiple threads are active so 1-thread and multi-thread runs stay
+        /// bit-identical. For smaller matrices runs Eigen::LLT strictly in place and verifies positive finite pivots.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
         /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
@@ -403,14 +413,14 @@ namespace cxxgpr::linalg
         [[nodiscard]] std::expected<void, GprError> run_eigen_llt_in_place(MatrixMut<T> a, CholeskyStage stage)
         {
             const std::size_t n = a.rows();
-#ifdef _OPENMP
-            if ((n * sizeof(T)) >= 2048U && openmp_max_threads() > 1U)
+            if ((n * sizeof(T)) >= 2048U)
             {
                 bool failed = false;
                 constexpr std::size_t panel_block = 32U;
                 constexpr std::size_t tail_cutoff = 64U;
                 constexpr std::size_t row_granule = 16U;
-#    pragma omp parallel shared(a, failed, n)
+#ifdef _OPENMP
+#    pragma omp parallel if (openmp_max_threads() > 1U) shared(a, failed, n)
                 {
                     const auto tid = static_cast<std::size_t>(omp_get_thread_num());
                     const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
@@ -458,13 +468,37 @@ namespace cxxgpr::linalg
 #    pragma omp barrier
                     }
                 }
+#else
+                for (std::size_t k = 0; k < n; k += panel_block)
+                {
+                    const std::size_t rem = n - k;
+                    if (rem <= tail_cutoff)
+                    {
+                        if (!factor_subblock_eigen(a, k, rem))
+                        {
+                            failed = true;
+                        }
+                        break;
+                    }
+                    const std::size_t bs = std::min(panel_block, rem);
+                    if (!factor_unblocked_panel_diag(a, k, bs))
+                    {
+                        failed = true;
+                        break;
+                    }
+                    const std::size_t row_start = k + bs;
+                    const std::size_t tail = n - row_start;
+                    (void)row_granule;
+                    solve_panel_rows(a, k, bs, row_start, n);
+                    rank_k_lower_update(a, k, bs, row_start, row_start + tail, n);
+                }
+#endif
                 if (failed)
                 {
                     return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
                 }
                 return {};
             }
-#endif
 
             // Wrap caller storage via Eigen::Ref (tightly packed when contiguous) so Eigen overwrites in place.
             bool ok = false;

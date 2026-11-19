@@ -3262,8 +3262,9 @@ namespace cxxgpr::detail
                     const double old_w = 1.0 / (old_ell * old_ell);
                     const double new_w = 1.0 / (new_ell * new_ell);
                     const double ratio = new_w / old_w;
-                    // Guard against catastrophic cancellation on large trial jumps by forcing a full rebuild.
-                    if (ratio < k_min_w_ratio || ratio > k_max_w_ratio)
+                    // Guard against underflowed weights or catastrophic cancellation on large jumps.
+                    if (!std::isfinite(old_w) || !std::isfinite(new_w)
+                        || !(ratio >= k_min_w_ratio && ratio <= k_max_w_ratio))
                     {
                         can_increment = false;
                         break;
