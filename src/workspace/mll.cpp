@@ -236,10 +236,31 @@ namespace cxxgpr
                     const T* const z_row = z_scratch.col(row).data();
                     const T* const z_col = z_scratch.col(col_idx).data();
                     const T acc = detail::dot_1x1_simd(z_row + row, z_col + row, n - row);
-                    w_out.col(col_idx)[row] = (alpha[row] * alpha[col_idx]) - acc;
+                    w_out.col(col_idx)[row] = detail::scalar_fmadd(alpha[row], alpha[col_idx], -acc);
                 };
 
-                auto eval_4x1 = [n, &alpha, &z_scratch, &w_out](std::size_t row, std::size_t col_idx) noexcept
+                auto finish_4rows = [&alpha](
+                                        T* w_col, const T* z0, const T* z1, const T* z2, const T* zj, std::size_t i0,
+                                        T alpha_j, T tail0, T tail1, T tail2, T tail3
+                                    ) noexcept
+                {
+                    const std::size_t i1 = i0 + 1U;
+                    const std::size_t i2 = i0 + 2U;
+                    const std::size_t i3 = i0 + 3U;
+                    const T sum0 = detail::scalar_fmadd(
+                        z0[i0], zj[i0],
+                        detail::scalar_fmadd(z0[i1], zj[i1], detail::scalar_fmadd(z0[i2], zj[i2], tail0))
+                    );
+                    const T sum1 = detail::scalar_fmadd(z1[i1], zj[i1], detail::scalar_fmadd(z1[i2], zj[i2], tail1));
+                    const T sum2 = detail::scalar_fmadd(z2[i2], zj[i2], tail2);
+                    w_col[i0] = detail::scalar_fmadd(alpha[i0], alpha_j, -sum0);
+                    w_col[i1] = detail::scalar_fmadd(alpha[i1], alpha_j, -sum1);
+                    w_col[i2] = detail::scalar_fmadd(alpha[i2], alpha_j, -sum2);
+                    w_col[i3] = detail::scalar_fmadd(alpha[i3], alpha_j, -tail3);
+                };
+
+                auto eval_4x1 =
+                    [n, &alpha, &z_scratch, &w_out, &finish_4rows](std::size_t row, std::size_t col_idx) noexcept
                 {
                     const std::size_t i0 = row;
                     const std::size_t i1 = row + 1U;
@@ -252,15 +273,10 @@ namespace cxxgpr
                     const T* const zj = z_scratch.col(col_idx).data();
                     std::array<T, 4> tail_dots{};
                     detail::dot_4x1_simd(z0 + i3, z1 + i3, z2 + i3, z3 + i3, zj + i3, n - i3, tail_dots);
-                    const T lead0 = ((z0[i0] * zj[i0]) + (z0[i1] * zj[i1])) + (z0[i2] * zj[i2]);
-                    const T lead1 = (z1[i1] * zj[i1]) + (z1[i2] * zj[i2]);
-                    const T lead2 = z2[i2] * zj[i2];
-                    const T alpha_j = alpha[col_idx];
-                    T* const w_col = w_out.col(col_idx).data();
-                    w_col[i0] = (alpha[i0] * alpha_j) - (lead0 + tail_dots[0]);
-                    w_col[i1] = (alpha[i1] * alpha_j) - (lead1 + tail_dots[1]);
-                    w_col[i2] = (alpha[i2] * alpha_j) - (lead2 + tail_dots[2]);
-                    w_col[i3] = (alpha[i3] * alpha_j) - tail_dots[3];
+                    finish_4rows(
+                        w_out.col(col_idx).data(), z0, z1, z2, zj, i0, alpha[col_idx], tail_dots[0], tail_dots[1],
+                        tail_dots[2], tail_dots[3]
+                    );
                 };
 
                 std::size_t j = col_begin;
@@ -320,23 +336,14 @@ namespace cxxgpr
                             z0 + i3, z1 + i3, z2 + i3, z3 + i3, z_j0 + i3, z_j1 + i3, n - i3, tail_dots
                         );
 
-                        const T lead0_0 = ((z0[i0] * z_j0[i0]) + (z0[i1] * z_j0[i1])) + (z0[i2] * z_j0[i2]);
-                        const T lead1_0 = (z1[i1] * z_j0[i1]) + (z1[i2] * z_j0[i2]);
-                        const T lead2_0 = z2[i2] * z_j0[i2];
-
-                        const T lead0_1 = ((z0[i0] * z_j1[i0]) + (z0[i1] * z_j1[i1])) + (z0[i2] * z_j1[i2]);
-                        const T lead1_1 = (z1[i1] * z_j1[i1]) + (z1[i2] * z_j1[i2]);
-                        const T lead2_1 = z2[i2] * z_j1[i2];
-
-                        w_col0[i0] = (alpha[i0] * alpha_j0) - (lead0_0 + tail_dots[0][0]);
-                        w_col0[i1] = (alpha[i1] * alpha_j0) - (lead1_0 + tail_dots[1][0]);
-                        w_col0[i2] = (alpha[i2] * alpha_j0) - (lead2_0 + tail_dots[2][0]);
-                        w_col0[i3] = (alpha[i3] * alpha_j0) - tail_dots[3][0];
-
-                        w_col1[i0] = (alpha[i0] * alpha_j1) - (lead0_1 + tail_dots[0][1]);
-                        w_col1[i1] = (alpha[i1] * alpha_j1) - (lead1_1 + tail_dots[1][1]);
-                        w_col1[i2] = (alpha[i2] * alpha_j1) - (lead2_1 + tail_dots[2][1]);
-                        w_col1[i3] = (alpha[i3] * alpha_j1) - tail_dots[3][1];
+                        finish_4rows(
+                            w_col0, z0, z1, z2, z_j0, i0, alpha_j0, tail_dots[0][0], tail_dots[1][0], tail_dots[2][0],
+                            tail_dots[3][0]
+                        );
+                        finish_4rows(
+                            w_col1, z0, z1, z2, z_j1, i0, alpha_j1, tail_dots[0][1], tail_dots[1][1], tail_dots[2][1],
+                            tail_dots[3][1]
+                        );
                     }
                     for (; row < n; ++row)
                     {

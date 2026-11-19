@@ -572,8 +572,9 @@ namespace cxxgpr::linalg
                 // Use fixed 4-column blocks so forward/backward SIMD grouping stays invariant to thread count.
                 constexpr std::size_t col_block = 4U;
                 const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
+                const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U)
-                for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(n_blocks); ++b)
+                for (std::ptrdiff_t b = 0; b < n_blocks_s; ++b)
                 {
                     const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
                     const std::size_t col_end = std::min(col_begin + col_block, n_cols);
