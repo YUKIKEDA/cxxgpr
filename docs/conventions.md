@@ -48,5 +48,6 @@ M0 でリポジトリ基盤とビルド・QA 基盤を構築し、M1 以降で�
 - **CMake ターゲット**：`cxxgpr`（静的ライブラリ）、試験ヘルパ `cxxgpr_add_test(<module>.<topic> ...)`。
 - **名前空間**：`cxxgpr`（`cxxgpr::kernel`、`cxxgpr::transform`、`cxxgpr::persist`）。内部詳細は `cxxgpr::detail`。
 - **C++ 識別子**：型名 `PascalCase`、関数・メソッド・ローカル変数・定数 `snake_case`、private メンバ末尾 `_`、マクロ接頭辞 `CXXGPR_`。
+- **Doxygen コメント規約**：全 C++ ファイルで英語 `///` Doxygen と `@file`・`@defgroup`/`@ingroup`・`@brief`・`@details`・`@tparam`・`@param[in]`/`@param[out]`/`@param[in,out]`・`@return`・`@retval`・`@pre`・`@post`・`@note`・`@warning`・`@attention`・`@code`/`@endcode`・`@see` を用いる（詳細は [dev-docs 規則](../.cursor/rules/dev-docs.mdc) を正本とし、`@param` には必ず `[in]`/`[out]`/`[in,out]` を付ける）。
 - **ロードマップ行 ID**：`M0-1` 〜 `M5-4`、`REL-1` 〜 `REL-2`。
 - **仕様・品質 ID**：要求 `REQ-01`〜`REQ-12`、設計決定 `DES-01`〜`DES-20`、永続化 `FMT-01`〜`FMT-08`、品質 `QA-01`〜`QA-10`。

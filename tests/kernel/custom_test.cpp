@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-10, DES-06, DES-07, DES-10
+/// @file custom_test.cpp
+/// @brief Unit and property tests for user-defined CustomKernel implementations.
+/// @details Verifies precision-pair validation, value copy semantics, atomic log-parameter
+/// updates, KernelSpec composition and finite-difference gradient/Hessian parity, DistanceKernel
+/// slot binding, and zero-allocation hot-path execution.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -15,19 +20,31 @@
 namespace
 {
 
-    // Inverse-quadratic kernel: k(d2) = (1 + d2 / ell^2)^(-1)
+    /// @brief User-defined inverse-quadratic kernel k(d2) = (1 + d2 / ell^2)^(-1) for CustomKernel tests.
+    /// @details Implements KernelTerm<T> with a single log-transformed lengthscale parameter constrained
+    /// to [0.05, 50.0] and analytical first and second derivatives with respect to log(ell).
+    /// @tparam T Kernel evaluation scalar type (float or double).
     template <cxxgpr::KernelScalarConcept T> class InvQuadTerm final : public cxxgpr::KernelTerm<T>
     {
     public:
+        /// @brief Constructs an inverse-quadratic kernel term with the given lengthscale.
+        /// @param[in] ell Initial positive lengthscale parameter.
         explicit InvQuadTerm(double ell = 1.0) : ell_(ell) {}
 
+        /// @brief Clones this custom kernel term preserving its lengthscale.
+        /// @return Owning unique_ptr copy of this InvQuadTerm instance.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override
         {
             return std::make_unique<InvQuadTerm<T>>(ell_);
         }
 
+        /// @brief Returns the number of trainable log-hyperparameters (1 for ell).
+        /// @return Hyperparameter count (always 1).
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
+        /// @brief Writes log(ell_) into the caller-provided parameter buffer.
+        /// @param[out] out Destination span of size 1 receiving log-transformed hyperparameters.
+        /// @return Empty expected on success, or LengthMismatch when out.size() != 1.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
             if (out.size() != 1U)
@@ -38,6 +55,9 @@ namespace
             return {};
         }
 
+        /// @brief Validates and applies a new log-lengthscale in [0.05, 50.0].
+        /// @param[in] params Input span of size 1 containing log(ell).
+        /// @return Empty expected on success, or LengthMismatch/NonFiniteInput/InvalidConfig on failure.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
             if (params.size() != 1U)
@@ -57,6 +77,9 @@ namespace
             return {};
         }
 
+        /// @brief Populates parameter bounds [0.05, 50.0] into the provided Interval span.
+        /// @param[out] out Destination span of size 1 receiving the hyperparameter bounds.
+        /// @return Empty expected on success, or LengthMismatch/interval error on failure.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
             if (out.size() != 1U)
@@ -72,11 +95,17 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates the square Gram matrix (1 + d2 / ell^2)^(-1) over the requested triangle.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output kernel Gram matrix buffer.
+        /// @param[in] uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
         ) const override
         {
             const T inv_l2 = T{1} / static_cast<T>(ell_ * ell_);
+            // Clamp negative rounding noise on distances and populate only the requested triangle.
             for (std::size_t col = 0; col < dist.cols(); ++col)
             {
                 for (std::size_t row = 0; row < dist.rows(); ++row)
@@ -96,6 +125,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates the rectangular cross-covariance Gram matrix between two point sets.
+        /// @param[in] dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output cross-covariance matrix buffer.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
         ) const override
@@ -103,12 +136,21 @@ namespace
             return apply(dist, out, cxxgpr::Triangle::Full);
         }
 
+        /// @brief Fills the prior kernel diagonal with ones since k(0) == 1.
+        /// @param[out] out Output diagonal span of length n.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
         {
             std::fill(out.begin(), out.end(), T{1});
             return {};
         }
 
+        /// @brief Computes analytical derivative dk / d(log ell) over the requested triangle.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d_k Output gradient matrix buffer.
+        /// @param[in] param_idx Zero-based local parameter index (must be 0).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success, or IndexOutOfRange if param_idx != 0.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
         ) const override
@@ -140,6 +182,13 @@ namespace
             return {};
         }
 
+        /// @brief Computes analytical second derivative d^2 k / d(log ell)^2 over the requested triangle.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d2_k Output Hessian matrix buffer.
+        /// @param[in] i First local parameter index (must be 0).
+        /// @param[in] j Second local parameter index (must be 0).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
+        /// @return Empty expected on success, or IndexOutOfRange if i != 0 or j != 0.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
         ) const override
@@ -171,16 +220,24 @@ namespace
             return {};
         }
 
+        /// @brief Returns the persistence identifier for this test custom kernel.
+        /// @return Static string view `"inv_quad"`.
         [[nodiscard]] std::string_view persist_id() const noexcept override { return "inv_quad"; }
 
     private:
+        /// @brief Positive lengthscale parameter stored in linear space.
         double ell_;
     };
 
+    /// @brief Computes a dense column-major pairwise squared Euclidean distance matrix.
+    /// @details Evaluates ||x_i - x_j||_2^2 for all pairs (i, j) for CustomKernel distance checks.
+    /// @param[in] x Column-major n x d coordinate matrix.
+    /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {
         const std::size_t n = x.rows();
         std::vector<double> d2(n * n, 0.0);
+        // Accumulate squared differences across all feature dimensions.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -197,8 +254,12 @@ namespace
         return d2;
     }
 
+    /// @brief Verifies CustomKernel factory validation, value copy semantics, and atomic set_params.
+    /// @details Confirms null precision term rejection with InvalidConfig, deep value-copy equality,
+    /// persistence ID reporting, rollback on out-of-bounds set_params, and log-parameter roundtrip.
     TEST(CustomKernelTest, ValidationAndValueSemantics)
     {
+        // Reject missing double precision term even when float term is valid.
         auto bad_null = cxxgpr::CustomKernel::create(nullptr, std::make_unique<InvQuadTerm<float>>());
         EXPECT_FALSE(bad_null.has_value());
         EXPECT_EQ(bad_null.error().code(), cxxgpr::GprErrorCode::InvalidConfig);
@@ -233,6 +294,9 @@ namespace
         EXPECT_DOUBLE_EQ(b_params[0], std::log(2.5));
     }
 
+    /// @brief Verifies KernelSpec composition with CustomKernel and analytical derivatives.
+    /// @details Composes Constant * Custom + White, asserts apply_points() matches apply(), and
+    /// compares analytical gradients and Hessians against central finite differences.
     TEST(CustomKernelTest, SpecCompositionAndFiniteDifferenceChecks)
     {
         auto ck_res = cxxgpr::make_custom_kernel<InvQuadTerm>(1.3);
@@ -242,6 +306,7 @@ namespace
             return;
         }
 
+        // Compose CustomKernel into a Product + Sum tree alongside built-in Constant and White leaves.
         auto spec =
             cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(2.0).value()) * cxxgpr::KernelSpec::custom(*ck_res)
             + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.1).value());
@@ -281,6 +346,7 @@ namespace
             EXPECT_NEAR(k_pts[idx], k_dist[idx], 1e-14);
         }
 
+        // Check first-order gradient of all 3 composite parameters via central differences.
         constexpr double h = 1e-5;
         std::vector<double> theta(3);
         ASSERT_TRUE(compiled.get_params(theta).has_value());
@@ -357,6 +423,9 @@ namespace
         }
     }
 
+    /// @brief Verifies CustomKernel works inside DistanceKernel with zero heap allocations.
+    /// @details Binds CustomKernel to a ScalarDistance slot, validates prepared square distances,
+    /// and audits apply/grad/hess on both CompiledKernel and DistanceKernel under NoAllocationScope.
     TEST(CustomKernelTest, DistanceKernelAndZeroAllocationHotPath)
     {
         auto ck_res = cxxgpr::make_custom_kernel<InvQuadTerm>(1.2);
@@ -366,6 +435,7 @@ namespace
             return;
         }
 
+        // Bind CustomKernel onto a ScalarDistance slot and combine with WhiteKernel.
         cxxgpr::ScalarDistance sdist;
         auto dk = sdist.custom(*ck_res)
             + cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.05).value());
@@ -396,6 +466,7 @@ namespace
         auto nested = compiled.make_nested_buffers(n, n);
         auto d_nested = d_compiled.make_nested_buffers(n, n);
 
+        // Audit hot-path evaluation and derivative calls for zero heap allocations.
         {
             const cxxgpr::test_support::NoAllocationScope audit;
             ASSERT_TRUE(compiled

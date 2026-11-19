@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-05, DES-10
+/// @file distance_test.cpp
+/// @brief Unit and property tests for supplied-distance kernels, slots, tidy repair, and parity.
+/// @details Verifies ScalarDistance/ArdDistance slot creation and deduplication, atomic set_params,
+/// DistanceSource error handling and symmetric tidy() repair, numerical parity of DistanceKernel
+/// against coordinate kernels for values/cross-covariance/gradients/Hessians, and zero allocations.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -16,9 +21,15 @@
 namespace
 {
 
+    /// @brief Computes a column-major rectangular pairwise squared Euclidean distance matrix.
+    /// @details Evaluates ||x1_i - x2_j||_2^2 for cross-covariance and square distance tests.
+    /// @param[in] x1 Left point matrix of shape n1 x d.
+    /// @param[in] x2 Right point matrix of shape n2 x d.
+    /// @return Column-major n1 x n2 vector of squared Euclidean distances.
     std::vector<double> make_sq_dist_rect(cxxgpr::MatrixRef<double> x1, cxxgpr::MatrixRef<double> x2)
     {
         std::vector<double> d2(x1.rows() * x2.rows(), 0.0);
+        // Accumulate squared differences across all feature coordinates per pair.
         for (std::size_t col = 0; col < x2.rows(); ++col)
         {
             for (std::size_t row = 0; row < x1.rows(); ++row)
@@ -35,6 +46,12 @@ namespace
         return d2;
     }
 
+    /// @brief Computes per-dimension pairwise squared coordinate differences (x1_{i,dim} - x2_{j,dim})^2.
+    /// @details Produces one column-major n1 x n2 difference slice for binding into an ArdDistance slot.
+    /// @param[in] x1 Left point matrix of shape n1 x d.
+    /// @param[in] x2 Right point matrix of shape n2 x d.
+    /// @param[in] dim Zero-based feature dimension index.
+    /// @return Column-major n1 x n2 vector of single-dimension squared differences.
     std::vector<double> make_dim_sq_diff_rect(
         cxxgpr::MatrixRef<double> x1, cxxgpr::MatrixRef<double> x2, std::size_t dim
     )
@@ -52,8 +69,12 @@ namespace
         return d2;
     }
 
+    /// @brief Verifies distance slot creation, slot deduplication, and atomic set_params rollback.
+    /// @details Checks EmptyInput for zero-dimension ArdDistance, DimensionMismatch on mismatched ARD
+    /// leaf dimensions, unique slot merging across repeated scalar slot uses, and rollback on failure.
     TEST(DistanceKernelTest, SlotsBindingsAndAtomicSetParamsWork)
     {
+        // Reject zero-dimension ARD slot construction and mismatched leaf dimensions.
         EXPECT_EQ(cxxgpr::ArdDistance::create(0U).error().code(), cxxgpr::GprErrorCode::EmptyInput);
 
         const cxxgpr::ScalarDistance s_slot;
@@ -100,6 +121,9 @@ namespace
         }
     }
 
+    /// @brief Negative controls for invalid slots/distances and positive check for tidy() repair.
+    /// @details Confirms missing slot, foreign slot, duplicate slot, strict rejection of asymmetry or
+    /// nonzero diagonals, tidy() tolerance acceptance/rejection, and invalid tidy tolerance checks.
     TEST(DistanceKernelTest, RejectsInvalidDistancesSlotMismatchesAndSupportsTidyRepair)
     {
         const cxxgpr::ScalarDistance s1;
@@ -154,8 +178,13 @@ namespace
         EXPECT_EQ(compiled.prepare_square(bad_tol_src).error().code(), cxxgpr::GprErrorCode::InvalidConfig);
     }
 
+    /// @brief Verifies hybrid DistanceKernel + LinearKernel parity and zero-allocation hot path.
+    /// @details Compares square Gram, cross-covariance, all parameter gradients, and all Hessians
+    /// between a WithPoints supplied-distance composite and an equivalent coordinate tree, then
+    /// audits zero heap allocations under NoAllocationScope.
     TEST(DistanceKernelTest, MatchesCoordinateKernelValuesGradHessAndZeroAllocHotPath)
     {
+        // Build 3x2 training and 2x2 query point sets along with scalar and per-dim squared distances.
         const std::array<double, 6> x_buf{0.1, 1.2, 2.3, -0.4, 0.7, 1.5};
         const std::array<double, 4> x2_buf{0.5, 1.8, 0.2, -0.3};
         const cxxgpr::MatrixRef<double> x_ref(x_buf.data(), 3, 2);

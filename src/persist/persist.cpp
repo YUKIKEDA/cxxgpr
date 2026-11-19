@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file persist.cpp
+/// @brief Implementation of PersistRegistry, LoadedGpr checkpoint loading/inference, and atomic model saving.
+/// @details Implements persist_id validation, factory registry lookups, config.json + model.safetensors
+/// loading with zero-copy mmap for F64 Cholesky factors or factor reconstruction when has_factor is false,
+/// double-promoted inference methods, typed FittedPayload extraction, and staged atomic persistence writes.
+
 #include "cxxgpr/persist/persist.hpp"
 
 #include "cxxgpr/core/checked.hpp"
@@ -25,8 +31,14 @@
 namespace cxxgpr::persist
 {
 
+    /// @brief Validates a custom persist_id against empty and reserved prefix rules.
+    /// @details Rejects empty strings and identifiers beginning with RESERVED_PREFIX ("cxxgpr.").
+    /// @param[in] persist_id Candidate custom extension identifier.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on violation.
+    /// @retval GprErrorCode::PersistFailed When persist_id is empty or starts with "cxxgpr.".
     std::expected<void, GprError> validate_persist_id(std::string_view persist_id)
     {
+        // Reject empty identifiers and reserved library prefixes before registration or serialization.
         if (persist_id.empty())
         {
             return std::unexpected(
@@ -45,6 +57,13 @@ namespace cxxgpr::persist
     namespace
     {
 
+        /// @brief Validates persist_id and inserts factory into map if not already registered.
+        /// @tparam MapT Associative container mapping std::string to factory function.
+        /// @tparam FnT Factory callable type matching MapT::mapped_type.
+        /// @param[in,out] map Registry map receiving the new entry.
+        /// @param[in] persist_id Candidate unique extension identifier.
+        /// @param[in] factory Factory callable stored under persist_id.
+        /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on error or duplicate key.
         template <typename MapT, typename FnT>
         [[nodiscard]] std::expected<void, GprError> register_impl(MapT& map, std::string persist_id, FnT factory)
         {
@@ -62,6 +81,12 @@ namespace cxxgpr::persist
             return {};
         }
 
+        /// @brief Looks up persist_id in map and invokes the registered factory with state_json.
+        /// @tparam MapT Associative container mapping std::string to factory function.
+        /// @param[in] map Registry map queried for persist_id.
+        /// @param[in] persist_id Extension identifier read from config.json.
+        /// @param[in] state_json Serialized JSON state passed to the factory.
+        /// @return Factory return expected, or PersistFailed(UnregisteredId) if missing.
         template <typename MapT>
         [[nodiscard]] auto create_impl(const MapT& map, std::string_view persist_id, std::string_view state_json)
             -> decltype(map.begin()->second(state_json))
@@ -76,28 +101,61 @@ namespace cxxgpr::persist
             return it->second(state_json);
         }
 
+        /// @brief Reinterprets a contiguous typed read-only span as raw byte view for Safetensors output.
+        /// @tparam T Element scalar type.
+        /// @param[in] s Typed read-only span.
+        /// @return Non-owning byte span covering s.
         template <typename T> [[nodiscard]] std::span<const std::byte> as_bytes(std::span<const T> s) noexcept
         {
             return std::as_bytes(s);
         }
 
+        /// @brief Precision-typed runtime inference state held inside LoadedGpr::Impl.
+        /// @details Stores compiled kernel, transformed training tensors, Cholesky factor L view (zero-copy
+        /// mmap when F64 and has_factor, owned otherwise), weights alpha, and reusable query workspace.
+        /// @tparam P Precision policy defining Storage and Refine scalar types.
         template <typename P> struct LoadedTypedState
         {
+            /// @brief Storage scalar type for training coordinates and Cholesky factor L.
             using Storage = P::Storage;
+            /// @brief Refinement and output scalar type for transformed targets and weights alpha.
             using Refine = P::Refine;
 
+            /// @brief Compiled kernel evaluator configured with restored kernel_spec and kernel_exp.
             std::shared_ptr<const CompiledKernel<Storage>> compiled_kernel;
+            /// @brief Transformed column-major training features cast to Storage precision (n * d).
             std::vector<Storage> x_train;
+            /// @brief Transformed training targets cast to Refine precision (n).
             std::vector<Refine> y_transformed;
+            /// @brief Owned Cholesky factor L storage (empty when zero-copy mmap backs l_view).
             std::vector<Storage> l_owned;
+            /// @brief Active read-only view of L (pointing to mmap for F64 has_factor, or l_owned otherwise).
             std::span<const Storage> l_view;
+            /// @brief Owned copy of refined prediction weights alpha (n).
             std::vector<Refine> alpha_owned;
+            /// @brief Active read-only span over alpha_owned (n).
             std::span<const Refine> alpha_view;
+            /// @brief Negative log marginal likelihood computed from loaded or reconstructed factor.
             double log_marginal_likelihood{0.0};
+            /// @brief Mutable reusable query scratch buffers avoiding allocations on repeated predict_into().
             mutable QueryWorkspace<P> query_ws;
+            /// @brief Temporary typed prediction buffer used to promote SinglePrecision outputs to double.
             mutable Prediction<Refine> tmp_pred;
         };
 
+        /// @brief Constructs LoadedTypedState<P> from parsed config and mapped safetensors.
+        /// @details Applies restored transforms to raw (x, y), checks finiteness, and either binds zero-copy
+        /// mmap F64 / owned F32 factors when has_factor is true or reconstructs L and alpha via factor_and_mll()
+        /// when has_factor is false.
+        /// @tparam P Target precision policy matching cfg.precision_kind.
+        /// @param[in] cfg Parsed checkpoint metadata and cloned transforms.
+        /// @param[in] st Validated MappedSafetensors handle keeping mapped memory alive.
+        /// @param[in] x_raw Raw column-major training features in double precision (n * d).
+        /// @param[in] y_raw Raw training targets in double precision (n).
+        /// @param[out] out_is_mmap Output flag set true iff L is backed directly by zero-copy mmap.
+        /// @return Constructed LoadedTypedState<P> on success, or GprError on transform, tensor, or factor failure.
+        /// @retval GprErrorCode::PersistFailed When transforms fail, tensor validation fails, or L_ii <= 0.
+        /// @retval GprErrorCode::CholeskyFailed When factor reconstruction fails when has_factor is false.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<LoadedTypedState<P>, GprError> build_typed_state(
             const detail::ParsedConfig& cfg,
@@ -119,6 +177,7 @@ namespace cxxgpr::persist
                 );
             }
 
+            // Re-apply fitted input and target transforms to raw double tensors and verify finiteness.
             std::vector<double> x_trans(x_raw.begin(), x_raw.end());
             if (auto ap = cfg.x_transform->apply(x_trans, n, d); !ap.has_value())
             {
@@ -173,6 +232,7 @@ namespace cxxgpr::persist
 
             if (cfg.has_factor)
             {
+                // Bind persisted factor L directly via zero-copy mmap for F64 Storage, or copy F32 Storage.
                 const std::array<std::size_t, 2> l_shape{n, n};
                 const std::array<std::size_t, 1> a_shape{n};
                 if constexpr (std::same_as<Storage, double>)
@@ -216,6 +276,7 @@ namespace cxxgpr::persist
                     state.alpha_owned.assign(a_sp->begin(), a_sp->end());
                     state.alpha_view = state.alpha_owned;
                 }
+                // Validate positive Cholesky diagonal entries and compute MLL for extracted payloads.
                 double quad = 0.0;
                 double log_det = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
@@ -252,6 +313,7 @@ namespace cxxgpr::persist
                 y_storage[i] = static_cast<Storage>(y_trans[i]);
             }
             const MatrixRef<Storage> x_ref(state.x_train.data(), n, d, n);
+            // Replay exact recorded factor_jitter when positive so reconstructed L matches original save state.
             auto jitter_to_use = cfg.jitter;
             if (cfg.factor_jitter > 0.0)
             {
@@ -287,6 +349,20 @@ namespace cxxgpr::persist
             return state;
         }
 
+        /// @brief Evaluates double-promoted posterior mean and variance on a loaded precision state.
+        /// @details Validates xs, applies in_tf, casts to Storage, invokes predict_into<P>(), promotes float
+        /// outputs to double when Refine is float, and applies tgt_tf inverse mean and variance transforms.
+        /// @tparam P Precision policy active in st.
+        /// @param[in] st Loaded typed precision state owning compiled kernel, factor view, and query workspace.
+        /// @param[in] lik Restored Gaussian observation noise likelihood.
+        /// @param[in] in_tf Restored fitted input feature transform.
+        /// @param[in] tgt_tf Restored fitted target transform.
+        /// @param[in] n Training sample count n.
+        /// @param[in] d Training feature dimension d.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] options Prediction variance controls.
+        /// @param[out] out Destination double-precision Prediction struct populated on the original target scale.
+        /// @return Empty expected on success, or GprError on query validation or transform failure.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> loaded_predict_typed(
             const LoadedTypedState<P>& st,
@@ -316,6 +392,7 @@ namespace cxxgpr::persist
             {
                 return ens;
             }
+            // Copy query coordinates column-major while checking finiteness before applying input transform.
             for (std::size_t col = 0; col < d; ++col)
             {
                 for (std::size_t row = 0; row < m; ++row)
@@ -340,6 +417,7 @@ namespace cxxgpr::persist
             const MatrixRef<Storage> l_ref(st.l_view.data(), n, n, n);
             const MatrixRef<Storage> xq_ref(st.query_ws.query_x.data(), m, d, m);
 
+            // Predict directly into out for double Refine, or promote via tmp_pred for SinglePrecision.
             if constexpr (std::same_as<Refine, double>)
             {
                 if (auto pr = predict_into<P>(
@@ -378,11 +456,19 @@ namespace cxxgpr::persist
 
     }  // namespace
 
+    /// @brief Registers a custom kernel factory under persist_id.
+    /// @param[in] persist_id Unique extension identifier outside the reserved prefix.
+    /// @param[in] factory Deserialization callback constructing CustomKernel from JSON state.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId).
     std::expected<void, GprError> PersistRegistry::register_kernel(std::string persist_id, CustomKernelFactory factory)
     {
         return register_impl(kernels_, std::move(persist_id), std::move(factory));
     }
 
+    /// @brief Registers a custom unfitted input transform factory under persist_id.
+    /// @param[in] persist_id Unique extension identifier outside the reserved prefix.
+    /// @param[in] factory Deserialization callback constructing UnfittedInputTransform from JSON state.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId).
     std::expected<void, GprError> PersistRegistry::register_unfitted_input(
         std::string persist_id, UnfittedInputFactory factory
     )
@@ -390,6 +476,10 @@ namespace cxxgpr::persist
         return register_impl(unfitted_inputs_, std::move(persist_id), std::move(factory));
     }
 
+    /// @brief Registers a custom fitted input transform factory under persist_id.
+    /// @param[in] persist_id Unique extension identifier outside the reserved prefix.
+    /// @param[in] factory Deserialization callback constructing FittedInputTransform from JSON state.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId).
     std::expected<void, GprError> PersistRegistry::register_fitted_input(
         std::string persist_id, FittedInputFactory factory
     )
@@ -397,6 +487,10 @@ namespace cxxgpr::persist
         return register_impl(fitted_inputs_, std::move(persist_id), std::move(factory));
     }
 
+    /// @brief Registers a custom unfitted target transform factory under persist_id.
+    /// @param[in] persist_id Unique extension identifier outside the reserved prefix.
+    /// @param[in] factory Deserialization callback constructing UnfittedTargetTransform from JSON state.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId).
     std::expected<void, GprError> PersistRegistry::register_unfitted_target(
         std::string persist_id, UnfittedTargetFactory factory
     )
@@ -404,6 +498,10 @@ namespace cxxgpr::persist
         return register_impl(unfitted_targets_, std::move(persist_id), std::move(factory));
     }
 
+    /// @brief Registers a custom fitted target transform factory under persist_id.
+    /// @param[in] persist_id Unique extension identifier outside the reserved prefix.
+    /// @param[in] factory Deserialization callback constructing FittedTargetTransform from JSON state.
+    /// @return Empty expected on success, or PersistFailed(InvalidPersistId).
     std::expected<void, GprError> PersistRegistry::register_fitted_target(
         std::string persist_id, FittedTargetFactory factory
     )
@@ -411,6 +509,10 @@ namespace cxxgpr::persist
         return register_impl(fitted_targets_, std::move(persist_id), std::move(factory));
     }
 
+    /// @brief Looks up and invokes a registered custom kernel factory by persist_id.
+    /// @param[in] persist_id Custom kernel identifier from config.json.
+    /// @param[in] state_json Serialized JSON state string passed to the factory.
+    /// @return Constructed CustomKernel or PersistFailed(UnregisteredId) / factory error.
     std::expected<CustomKernel, GprError> PersistRegistry::create_kernel(
         std::string_view persist_id, std::string_view state_json
     ) const
@@ -418,6 +520,10 @@ namespace cxxgpr::persist
         return create_impl(kernels_, persist_id, state_json);
     }
 
+    /// @brief Looks up and invokes a registered custom unfitted input transform factory by persist_id.
+    /// @param[in] persist_id Custom transform identifier from config.json.
+    /// @param[in] state_json Serialized JSON state string passed to the factory.
+    /// @return Constructed UnfittedInputTransform or PersistFailed(UnregisteredId) / factory error.
     std::expected<std::unique_ptr<transform::UnfittedInputTransform>, GprError> PersistRegistry::create_unfitted_input(
         std::string_view persist_id, std::string_view state_json
     ) const
@@ -425,6 +531,10 @@ namespace cxxgpr::persist
         return create_impl(unfitted_inputs_, persist_id, state_json);
     }
 
+    /// @brief Looks up and invokes a registered custom fitted input transform factory by persist_id.
+    /// @param[in] persist_id Custom transform identifier from config.json.
+    /// @param[in] state_json Serialized JSON state string passed to the factory.
+    /// @return Constructed FittedInputTransform or PersistFailed(UnregisteredId) / factory error.
     std::expected<std::unique_ptr<transform::FittedInputTransform>, GprError> PersistRegistry::create_fitted_input(
         std::string_view persist_id, std::string_view state_json
     ) const
@@ -432,12 +542,20 @@ namespace cxxgpr::persist
         return create_impl(fitted_inputs_, persist_id, state_json);
     }
 
+    /// @brief Looks up and invokes a registered custom unfitted target transform factory by persist_id.
+    /// @param[in] persist_id Custom transform identifier from config.json.
+    /// @param[in] state_json Serialized JSON state string passed to the factory.
+    /// @return Constructed UnfittedTargetTransform or PersistFailed(UnregisteredId) / factory error.
     std::expected<std::unique_ptr<transform::UnfittedTargetTransform>, GprError> PersistRegistry::
         create_unfitted_target(std::string_view persist_id, std::string_view state_json) const
     {
         return create_impl(unfitted_targets_, persist_id, state_json);
     }
 
+    /// @brief Looks up and invokes a registered custom fitted target transform factory by persist_id.
+    /// @param[in] persist_id Custom transform identifier from config.json.
+    /// @param[in] state_json Serialized JSON state string passed to the factory.
+    /// @return Constructed FittedTargetTransform or PersistFailed(UnregisteredId) / factory error.
     std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError> PersistRegistry::create_fitted_target(
         std::string_view persist_id, std::string_view state_json
     ) const
@@ -445,37 +563,69 @@ namespace cxxgpr::persist
         return create_impl(fitted_targets_, persist_id, state_json);
     }
 
+    /// @brief Immutable checkpoint implementation shared across LoadedGpr copies.
+    /// @details Owns restored configuration, transforms, mapped Safetensors handle, raw training data,
+    /// and the single populated precision-typed state optional matching precision_kind.
     struct LoadedGpr::Impl
     {
+        /// @brief Number of training samples n.
         std::size_t n{0};
+        /// @brief Number of training feature dimensions d.
         std::size_t d{0};
+        /// @brief True if checkpoint included serialized l and alpha tensors.
         bool has_factor{false};
+        /// @brief True if the active F64 Cholesky factor is directly backed by read-only mmap.
         bool has_mmap_factor{false};
+        /// @brief Accepted diagonal jitter offset recorded during factorization.
         double factor_jitter{0.0};
+        /// @brief Active precision policy tag restored from config.json.
         PersistPrecisionKind precision_kind{PersistPrecisionKind::Double};
+        /// @brief Restored exponential evaluation backend.
         KernelExp kernel_exp{KernelExp::Accurate};
+        /// @brief Restored training distance cache policy.
         DistanceCachePolicy distance_cache{DistanceCachePolicy::Cached};
+        /// @brief Restored kernel specification and hyperparameters.
         KernelSpec kernel_spec;
+        /// @brief Restored Gaussian observation noise likelihood.
         GaussianLikelihood likelihood;
+        /// @brief Restored Cholesky jitter policy.
         JitterPolicy jitter;
+        /// @brief Restored unfitted input transform prototype for extract_payload().
         std::unique_ptr<transform::UnfittedInputTransform> x_unfitted;
+        /// @brief Restored fitted input transform for query preprocessing.
         std::unique_ptr<transform::FittedInputTransform> x_transform;
+        /// @brief Restored unfitted target transform prototype for extract_payload().
         std::unique_ptr<transform::UnfittedTargetTransform> y_unfitted;
+        /// @brief Restored fitted target transform for inverse prediction scaling.
         std::unique_ptr<transform::FittedTargetTransform> y_transform;
+        /// @brief Shared memory-mapped Safetensors archive keeping F64 mmap spans valid.
         std::shared_ptr<const detail::MappedSafetensors> safetensors;
+        /// @brief Owned raw column-major double training features (n * d).
         std::vector<double> x_raw;
+        /// @brief Owned raw double training targets (n).
         std::vector<double> y_raw;
+        /// @brief Active typed state when precision_kind == Double.
         std::optional<LoadedTypedState<DoublePrecision>> double_state;
+        /// @brief Active typed state when precision_kind == Single.
         std::optional<LoadedTypedState<SinglePrecision>> single_state;
+        /// @brief Active typed state when precision_kind == MixedPromote.
         std::optional<LoadedTypedState<MixedPrecision<PromoteStorage>>> mixed_promote_state;
+        /// @brief Active typed state when precision_kind == MixedReevaluate.
         std::optional<LoadedTypedState<MixedPrecision<ReevaluateKernel>>> mixed_reeval_state;
     };
 
+    /// @brief Destroys LoadedGpr out-of-line where LoadedGpr::Impl is complete.
     LoadedGpr::~LoadedGpr() = default;
 
     namespace
     {
 
+        /// @brief Visits the active LoadedTypedState<P> inside impl matching impl.precision_kind.
+        /// @tparam ImplT LoadedGpr::Impl type.
+        /// @tparam Fn Polymorphic callable accepting const LoadedTypedState<P>&.
+        /// @param[in] impl Immutable LoadedGpr implementation instance.
+        /// @param[in] fn Generic visitor invoked with the active typed state optional.
+        /// @return Result returned by fn, or PersistFailed(Config) if the expected typed state is unset.
         template <typename ImplT, typename Fn> [[nodiscard]] auto with_typed_state(const ImplT& impl, Fn&& fn)
         {
             using Ret = decltype(fn(*impl.double_state));
@@ -489,6 +639,7 @@ namespace cxxgpr::persist
                 }
                 return fn(*opt);
             };
+            // Dispatch dynamically on precision_kind to the single populated typed state optional.
             switch (impl.precision_kind)
             {
                 case PersistPrecisionKind::Double:
@@ -509,10 +660,21 @@ namespace cxxgpr::persist
 
     }  // namespace
 
+    /// @brief Loads and validates a persisted Exact GPR directory (config.json and model.safetensors).
+    /// @details Parses config.json, memory-maps model.safetensors, verifies raw x and y F64 tensors,
+    /// and initializes the active LoadedTypedState (via zero-copy mmap for F64 factors or Cholesky
+    /// reconstruction when has_factor is false).
+    /// @param[in] dir Directory containing config.json and model.safetensors.
+    /// @param[in] registry Extension registry providing factories for custom kernels and transforms.
+    /// @return LoadedGpr handle on success, or GprError on I/O, schema, version, tensor, or factor failure.
+    /// @retval GprErrorCode::PersistFailed When config, safetensors, or registry resolution fails.
+    /// @retval GprErrorCode::UnsupportedPersistVersion When artifact format_version != FORMAT_VERSION.
+    /// @retval GprErrorCode::CholeskyFailed When factor reconstruction fails when has_factor is false.
     std::expected<LoadedGpr, GprError> LoadedGpr::load(
         const std::filesystem::path& dir, const PersistRegistry& registry
     )
     {
+        // Load and validate config.json schema before memory-mapping model.safetensors.
         auto cfg = detail::parse_config_json(dir / "config.json", registry);
         if (!cfg.has_value())
         {
@@ -524,6 +686,7 @@ namespace cxxgpr::persist
             return std::unexpected(std::move(st).error());
         }
 
+        // Validate mandatory raw F64 training tensors x (n x d) and y (n).
         const std::array<std::size_t, 2> x_shape{cfg->n, cfg->d};
         const std::array<std::size_t, 1> y_shape{cfg->n};
         auto x_sp = (*st)->read_f64("x", x_shape);
@@ -586,6 +749,7 @@ namespace cxxgpr::persist
             .y_transform = impl->y_transform->clone(),
         };
 
+        // Construct only the precision-typed state matching precision_kind.
         switch (impl->precision_kind)
         {
             case PersistPrecisionKind::Double:
@@ -639,61 +803,88 @@ namespace cxxgpr::persist
         return LoadedGpr(std::move(impl));
     }
 
+    /// @brief Returns the number of training samples n.
+    /// @return Training sample count n.
     std::size_t LoadedGpr::n() const noexcept
     {
         return impl_->n;
     }
 
+    /// @brief Returns the number of training features d.
+    /// @return Training feature dimension d.
     std::size_t LoadedGpr::d() const noexcept
     {
         return impl_->d;
     }
 
+    /// @brief Returns the persisted precision policy tag.
+    /// @return Active PersistPrecisionKind.
     PersistPrecisionKind LoadedGpr::precision_kind() const noexcept
     {
         return impl_->precision_kind;
     }
 
+    /// @brief Returns true if checkpoint tensors l and alpha were loaded from disk.
+    /// @return True when config.json recorded has_factor == true.
     bool LoadedGpr::has_factor() const noexcept
     {
         return impl_->has_factor;
     }
 
+    /// @brief Returns true if the Cholesky factor is backed directly by a read-only mmap view.
+    /// @return True for DoublePrecision checkpoints loaded with has_factor == true.
     bool LoadedGpr::has_mmap_factor() const noexcept
     {
         return impl_->has_mmap_factor;
     }
 
+    /// @brief Returns the accepted Cholesky diagonal jitter offset.
+    /// @return Recorded diagonal jitter scalar.
     double LoadedGpr::factor_jitter() const noexcept
     {
         return impl_->factor_jitter;
     }
 
+    /// @brief Returns the restored kernel specification.
+    /// @return Constant reference to KernelSpec.
     const KernelSpec& LoadedGpr::kernel_spec() const noexcept
     {
         return impl_->kernel_spec;
     }
 
+    /// @brief Returns the restored Gaussian observation noise likelihood.
+    /// @return Constant reference to GaussianLikelihood.
     const GaussianLikelihood& LoadedGpr::likelihood() const noexcept
     {
         return impl_->likelihood;
     }
 
+    /// @brief Returns the restored Cholesky stabilization jitter policy.
+    /// @return Constant reference to JitterPolicy.
     const JitterPolicy& LoadedGpr::jitter() const noexcept
     {
         return impl_->jitter;
     }
 
+    /// @brief Returns the restored exponential evaluation backend.
+    /// @return Configured KernelExp mode.
     KernelExp LoadedGpr::kernel_exp() const noexcept
     {
         return impl_->kernel_exp;
     }
 
+    /// @brief Returns the restored distance matrix caching policy.
+    /// @return Configured DistanceCachePolicy.
     DistanceCachePolicy LoadedGpr::distance_cache_policy() const noexcept
     {
         return impl_->distance_cache;
     }
 
+    /// @brief Computes double-promoted posterior mean and variance into out.
+    /// @param[in] xs Column-major query feature matrix (m x d).
+    /// @param[out] out Destination double-precision Prediction struct.
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Empty expected on success, or GprError on query validation or transform failure.
     std::expected<void, GprError> LoadedGpr::predict_into(
         MatrixRef<double> xs, Prediction<double>& out, const PredictOptions& options
     ) const
@@ -708,6 +899,10 @@ namespace cxxgpr::persist
         );
     }
 
+    /// @brief Allocates and computes double-promoted posterior mean and diagonal variance.
+    /// @param[in] xs Column-major query feature matrix (m x d).
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Double-precision Prediction on the original target scale, or GprError on failure.
     std::expected<Prediction<double>, GprError> LoadedGpr::predict(
         MatrixRef<double> xs, const PredictOptions& options
     ) const
@@ -720,6 +915,10 @@ namespace cxxgpr::persist
         return out;
     }
 
+    /// @brief Computes double-promoted posterior mean and full m x m covariance matrix.
+    /// @param[in] xs Column-major query feature matrix (m x d).
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Double-precision PredictiveCovariance on the original target scale, or GprError on failure.
     std::expected<PredictiveCovariance<double>, GprError> LoadedGpr::predict_covariance(
         MatrixRef<double> xs, const PredictOptions& options
     ) const
@@ -743,6 +942,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(std::move(ens).error());
             }
+            // Validate finiteness and stage column-major query coordinates before applying x_transform.
             for (std::size_t col = 0; col < impl_->d; ++col)
             {
                 for (std::size_t row = 0; row < m; ++row)
@@ -773,6 +973,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(std::move(cov_res).error());
             }
+            // Promote results to double and apply inverse target transforms on the original scale.
             PredictiveCovariance<double> out{
                 .mean = std::vector<double>(cov_res->mean.begin(), cov_res->mean.end()),
                 .covariance = std::vector<double>(cov_res->covariance.begin(), cov_res->covariance.end()),
@@ -793,6 +994,13 @@ namespace cxxgpr::persist
         return with_typed_state(*impl_, to_fitted_cov);
     }
 
+    /// @brief Draws deterministic posterior samples promoted to double precision on the original target scale.
+    /// @param[in] xs Column-major query feature matrix (m x d).
+    /// @param[in] n_draws Number of posterior draws to generate.
+    /// @param[in] seed Deterministic PRNG seed.
+    /// @param[in] options Optional prediction variance controls.
+    /// @param[in] jitter Optional predictive covariance jitter override.
+    /// @return Column-major double sample matrix (m x n_draws), or GprError on validation or Cholesky failure.
     std::expected<std::vector<double>, GprError> LoadedGpr::sample(
         MatrixRef<double> xs,
         std::size_t n_draws,
@@ -850,6 +1058,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(std::move(raw_draws).error());
             }
+            // Promote draws to double and apply inverse mean transform per column draw.
             std::vector<double> out(raw_draws->begin(), raw_draws->end());
             for (std::size_t draw = 0; draw < n_draws; ++draw)
             {
@@ -865,6 +1074,9 @@ namespace cxxgpr::persist
         return with_typed_state(*impl_, sample_typed);
     }
 
+    /// @brief Computes double-promoted closed-form Leave-One-Out predictive moments on the original scale.
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Double-precision LOO Prediction on the original target scale, or GprError on failure.
     std::expected<Prediction<double>, GprError> LoadedGpr::loo_predict(const PredictOptions& options) const
     {
         auto loo_typed =
@@ -877,6 +1089,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(std::move(loo).error());
             }
+            // Promote LOO outputs to double before inverse target scaling.
             Prediction<double> out{
                 .mean = std::vector<double>(loo->mean.begin(), loo->mean.end()),
                 .variance = std::vector<double>(loo->variance.begin(), loo->variance.end()),
@@ -896,6 +1109,11 @@ namespace cxxgpr::persist
         return with_typed_state(*impl_, loo_typed);
     }
 
+    /// @brief Copies restored state into an owned FittedPayload<P> decoupled from mmap lifetimes.
+    /// @tparam P Target precision policy matching impl_->precision_kind.
+    /// @param[out] out_unfitted_in Output pointer populated with cloned unfitted input transform.
+    /// @param[out] out_unfitted_tgt Output pointer populated with cloned unfitted target transform.
+    /// @return Owned FittedPayload<P> populated from impl_.
     template <PrecisionPolicyConcept P>
     std::expected<cxxgpr::detail::FittedPayload<P>, GprError> LoadedGpr::extract_payload(
         std::unique_ptr<transform::UnfittedInputTransform>& out_unfitted_in,
@@ -905,6 +1123,7 @@ namespace cxxgpr::persist
         out_unfitted_in = impl_->x_unfitted->clone();
         out_unfitted_tgt = impl_->y_unfitted->clone();
 
+        // Select the typed state matching P after precision_kind() check in into_fitted().
         const auto& st = [&]() -> const LoadedTypedState<P>&
         {
             if constexpr (std::same_as<P, DoublePrecision>)
@@ -925,6 +1144,7 @@ namespace cxxgpr::persist
             }
         }();
 
+        // Copy l_view and alpha_view into owned vectors so FittedGpr has no dependency on mapped memory.
         return cxxgpr::detail::FittedPayload<P>{
             .kernel_spec = impl_->kernel_spec,
             .likelihood = impl_->likelihood,
@@ -966,6 +1186,17 @@ namespace cxxgpr::persist
     namespace detail
     {
 
+        /// @brief Validates inputs and atomically writes config.json and model.safetensors into dir.
+        /// @details Checks dimensions and tensor finiteness, serializes config.json, builds aligned tensor
+        /// descriptors, writes temporary staging files model.safetensors.tmp and config.json.tmp inside dir,
+        /// and atomically renames them into final checkpoint paths with cleanup on failure.
+        /// @param[in] input Borrowed configuration and raw/factor spans for serialization.
+        /// @param[in] dir Destination directory path created if needed.
+        /// @param[in] registry Unused extension registry parameter kept for API symmetry.
+        /// @return Empty expected on success, or GprError on validation, serialization, or I/O failure.
+        /// @retval GprErrorCode::EmptyInput When n_train or n_features is zero.
+        /// @retval GprErrorCode::NonFiniteInput When factor_jitter or any persisted tensor element is non-finite.
+        /// @retval GprErrorCode::PersistFailed When config serialization, directory creation, writes, or renames fail.
         std::expected<void, GprError> save_model_impl(
             const SaveInput& input, const std::filesystem::path& dir, [[maybe_unused]] const PersistRegistry& registry
         )
@@ -978,6 +1209,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(GprError::non_finite_input());
             }
+            // Verify finiteness across all raw and optional factor/alpha spans before creating directories.
             auto check_finite_span = [](auto sp) -> std::expected<void, GprError>
             {
                 for (const auto v : sp)
@@ -1031,6 +1263,7 @@ namespace cxxgpr::persist
                 );
             }
 
+            // Assemble raw F64 tensors and optional L / alpha tensors matching precision_kind.
             std::vector<TensorWriteView> tensors;
             tensors.push_back(
                 TensorWriteView{
@@ -1096,6 +1329,7 @@ namespace cxxgpr::persist
                 }
             }
 
+            // Write staged temporary files inside dir, then atomically rename into final targets.
             const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
             const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
 
@@ -1128,6 +1362,7 @@ namespace cxxgpr::persist
                 }
             }
 
+            // Replace model.safetensors and config.json atomically and clean up leftover temporary files on error.
             std::filesystem::rename(tmp_st, dir / "model.safetensors", ec);
             if (ec)
             {

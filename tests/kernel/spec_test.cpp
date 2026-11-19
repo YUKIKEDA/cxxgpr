@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, DES-06
+/// @file spec_test.cpp
+/// @brief Unit tests for KernelSpec AST composition, parameter bindings, and atomic updates.
+/// @details Verifies depth-first parameter index assignment and CoordMode classification across
+/// Sum/Product kernel compositions, compilation parity, and atomic set_params rollback on both
+/// KernelSpec and CompiledKernel.
 
 #include "cxxgpr/kernel/spec.hpp"
 
@@ -15,6 +20,9 @@
 namespace
 {
 
+    /// @brief Verifies depth-first parameter bindings and CoordMode classification on KernelSpec trees.
+    /// @details Confirms Either, Dist, Points, and Mixed classification across leaf/composite nodes and
+    /// verifies compiled kernels preserve parameter count, leaf count, and parameter bindings.
     TEST(KernelSpecTest, AssignsDepthFirstBindingsAndClassifiesCoordModes)
     {
         const auto c = cxxgpr::ConstantKernel::create(2.0);
@@ -26,6 +34,7 @@ namespace
         ASSERT_TRUE(white.has_value());
         ASSERT_TRUE(linear.has_value());
 
+        // Verify CoordMode propagation from Either/Dist/Points leaves into composite nodes.
         EXPECT_EQ(cxxgpr::KernelSpec(*c).coord_mode(), cxxgpr::CoordMode::Either);
         EXPECT_EQ((cxxgpr::KernelSpec(*c) * cxxgpr::KernelSpec(*rbf)).coord_mode(), cxxgpr::CoordMode::Dist);
         EXPECT_EQ((cxxgpr::KernelSpec(*c) + cxxgpr::KernelSpec(*linear)).coord_mode(), cxxgpr::CoordMode::Points);
@@ -50,6 +59,9 @@ namespace
         EXPECT_GE(compiled.nested_depth(), 1U);
     }
 
+    /// @brief Verifies atomic parameter updates and interval queries across KernelSpec and CompiledKernel.
+    /// @details Confirms failing on the last parameter preserves all earlier leaves on both KernelSpec
+    /// and CompiledKernel, and validates successful updates and bounds_into() extraction.
     TEST(KernelSpecTest, SetParamsIsAtomicAcrossSpecAndCompiled)
     {
         const auto rbf = cxxgpr::RbfKernel::create(1.0);

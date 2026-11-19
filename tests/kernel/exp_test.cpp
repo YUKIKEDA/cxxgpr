@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-11, DES-08
+/// @file exp_test.cpp
+/// @brief Unit and property tests for fast exponential approximation and kernel exp jet derivatives.
+/// @details Verifies KernelExp::FastApprox scalar accuracy against Accurate in double and float
+/// across [-50, 0] and extreme values, jet first/second derivative consistency, compiled kernel
+/// FastApprox self-consistency against finite differences, and DistanceKernel support.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -14,10 +19,15 @@
 namespace
 {
 
+    /// @brief Computes a column-major pairwise squared Euclidean distance matrix.
+    /// @details Evaluates ||x_i - x_j||_2^2 for validating DistanceKernel under FastApprox.
+    /// @param[in] x Column-major n x d coordinate matrix.
+    /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {
         const std::size_t n = x.rows();
         std::vector<double> d2(n * n, 0.0);
+        // Accumulate squared differences across all dimensions.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -34,10 +44,16 @@ namespace
         return d2;
     }
 
+    /// @brief Computes a column-major matrix of per-dimension squared coordinate differences.
+    /// @details Evaluates (x_{i,dim} - x_{j,dim})^2 for binding ArdDistance slots in exp tests.
+    /// @param[in] x Column-major n x d coordinate matrix.
+    /// @param[in] dim Zero-based coordinate dimension index.
+    /// @return Column-major n x n vector of single-dimension squared differences.
     std::vector<double> make_dim_sq_diff(cxxgpr::MatrixRef<double> x, std::size_t dim)
     {
         const std::size_t n = x.rows();
         std::vector<double> out(n * n, 0.0);
+        // Store squared difference along the selected feature column.
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -51,8 +67,12 @@ namespace
         return out;
     }
 
+    /// @brief Verifies double-precision FastApprox exponential accuracy across [-50, 0] and extremes.
+    /// @details Checks relative error < 1.2e-7 against KernelExp::Accurate and probes exact 0.0,
+    /// underflow (-800), overflow (+800), and quiet NaN IEEE-754 edge inputs.
     TEST(KernelExpTest, FastApproxDoubleAccuracyAndExtremes)
     {
+        // Sweep negative kernel arguments [-50, 0] and check relative error against std::exp oracle.
         for (int i = 0; i <= 500; ++i)
         {
             const double x = -0.1 * static_cast<double>(i);
@@ -63,6 +83,7 @@ namespace
             EXPECT_LT(rel, 1.2e-7) << "x=" << x;
         }
 
+        // Probe IEEE-754 boundary cases: identity at 0, underflow to 0, overflow to +inf, NaN pass-through.
         EXPECT_DOUBLE_EQ(cxxgpr::eval_kernel_exp(0.0, cxxgpr::KernelExp::FastApprox), 1.0);
         EXPECT_DOUBLE_EQ(cxxgpr::eval_kernel_exp(-800.0, cxxgpr::KernelExp::FastApprox), 0.0);
         EXPECT_TRUE(std::isinf(cxxgpr::eval_kernel_exp(800.0, cxxgpr::KernelExp::FastApprox)));
@@ -71,8 +92,11 @@ namespace
         );
     }
 
+    /// @brief Verifies single-precision FastApprox exponential accuracy across [-50, 0] and extremes.
+    /// @details Checks relative error < 1.0e-6F above subnormal range and probes 0, -120, +120, and NaN.
     TEST(KernelExpTest, FastApproxFloatAccuracyAndExtremes)
     {
+        // Sweep [-50, 0] in single precision excluding subnormal underflow regime.
         for (int i = 0; i <= 500; ++i)
         {
             const float x = -0.1F * static_cast<float>(i);
@@ -85,6 +109,7 @@ namespace
             }
         }
 
+        // Probe single-precision edge arguments: 0.0F, underflow, overflow, and quiet NaN.
         EXPECT_FLOAT_EQ(cxxgpr::eval_kernel_exp(0.0F, cxxgpr::KernelExp::FastApprox), 1.0F);
         EXPECT_FLOAT_EQ(cxxgpr::eval_kernel_exp(-120.0F, cxxgpr::KernelExp::FastApprox), 0.0F);
         EXPECT_TRUE(std::isinf(cxxgpr::eval_kernel_exp(120.0F, cxxgpr::KernelExp::FastApprox)));
@@ -93,8 +118,11 @@ namespace
         );
     }
 
+    /// @brief Verifies FastApprox exponential jet first and second derivatives match finite differences.
+    /// @details Checks eval_kernel_exp_jet() d1 and d2 values against central differences of v and d1.
     TEST(KernelExpTest, ExpJetDerivativesMatchFiniteDifferences)
     {
+        // Compare analytical jet derivatives d1 and d2 against central finite differences.
         constexpr double h = 1e-5;
         for (double x : {-12.3, -2.5, -0.37, 0.0})
         {
@@ -108,11 +136,15 @@ namespace
         }
     }
 
+    /// @brief Verifies CompiledKernel FastApprox value parity and analytical derivative consistency.
+    /// @details Evaluates nine built-in exponential kernel families under Accurate and FastApprox,
+    /// checks parameter roundtrip, and compares FastApprox gradients and Hessians to finite differences.
     TEST(KernelExpTest, CompiledKernelFastApproxGradAndHessSelfConsistent)
     {
         const std::vector<double> x_data{0.0, 0.4, 1.2, -0.7, 0.2, 0.9, -0.4, 1.5};
         const cxxgpr::MatrixRef<double> x(x_data.data(), 4, 2, 4);
 
+        // Cover every isotropic and ARD kernel family whose evaluation invokes eval_kernel_exp.
         const std::vector<cxxgpr::KernelSpec> specs{
             cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value()),
             cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array<double, 2>{0.9, 1.4}).value()),
@@ -175,11 +207,13 @@ namespace
             ASSERT_TRUE(ck.set_params(theta_copy).has_value());
             std::vector<double> theta_rt(np);
             ASSERT_TRUE(ck.get_params(theta_rt).has_value());
+            // Verify parameter roundtrip stays bit-exact after setting FastApprox.
             for (std::size_t p = 0; p < np; ++p)
             {
                 EXPECT_DOUBLE_EQ(theta_rt[p], theta[p]);
             }
 
+            // Verify FastApprox gradients and Hessians match central finite differences.
             for (std::size_t p = 0; p < np; ++p)
             {
                 ASSERT_TRUE(ck
@@ -264,6 +298,9 @@ namespace
         }
     }
 
+    /// @brief Verifies DistanceKernel supports FastApprox across scalar and ARD distance slots.
+    /// @details Evaluates a ScalarDistance RBF * ArdDistance RationalQuadratic product under both
+    /// FastApprox and Accurate modes and checks gradient consistency via central finite differences.
     TEST(KernelExpTest, CompiledDistanceKernelFastApproxArdAndScalar)
     {
         const std::vector<double> x_data{0.1, 0.5, 1.3, -0.3, 0.4, 1.1};
@@ -276,6 +313,7 @@ namespace
             cxxgpr::MatrixRef<double>(ard1.data(), 3, 3, 3),
         };
 
+        // Construct a supplied-distance product tree and switch it to FastApprox mode.
         cxxgpr::ScalarDistance sdist;
         auto ard_dist = cxxgpr::ArdDistance::create(2).value();
         auto dk = sdist.rbf(cxxgpr::RbfKernel::create(1.0).value())
@@ -373,6 +411,201 @@ namespace
         for (std::size_t idx = 0; idx < g_mat.size(); ++idx)
         {
             EXPECT_NEAR(g_mat[idx], (k_plus[idx] - k_minus[idx]) / (2.0 * h), 5e-6);
+        }
+    }
+
+    /// @brief Verifies Matern ThreeHalves and FiveHalves return 0.0 (not NaN) when scale_sq * d^2 overflows.
+    /// @details Probes extreme squared distances and coordinates in both double and float across Accurate and
+    /// FastApprox modes so (+Inf) * 0.0 never yields NaN while d^2 = 0.0 retains 1.0.
+    TEST(KernelExpTest, MaternOverflowReturnsZeroNotNaN)
+    {
+        // Cover non-multiple SIMD lengths (n = 19) to exercise AVX2/AVX-512, SSE2, and scalar tails.
+        constexpr std::size_t n = 19U;
+        for (const auto nu : {cxxgpr::MaternNu::OneHalf, cxxgpr::MaternNu::ThreeHalves, cxxgpr::MaternNu::FiveHalves})
+        {
+            for (const auto mode : {cxxgpr::KernelExp::Accurate, cxxgpr::KernelExp::FastApprox})
+            {
+                // Double precision via DistanceKernel with d^2 = 1e300.
+                {
+                    cxxgpr::ScalarDistance sdist;
+                    auto dk = sdist.matern(cxxgpr::MaternKernel::create(1e-4, nu).value());
+                    auto compiled = dk.compile<double>();
+                    compiled.set_kernel_exp(mode);
+
+                    std::vector<double> d2(n * n, 1e300);
+                    for (std::size_t i = 0U; i < n; ++i)
+                    {
+                        d2[(i * n) + i] = 0.0;
+                    }
+                    cxxgpr::DistanceSource src;
+                    src.bind_scalar(sdist.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n, n));
+                    auto checked = compiled.prepare_square(src);
+                    ASSERT_TRUE(checked.has_value());
+
+                    std::vector<double> out(n * n, -1.0);
+                    std::vector<double> scratch(n * n, 0.0);
+                    ASSERT_TRUE(compiled
+                            .apply(
+                                *checked, std::nullopt, cxxgpr::MatrixMut<double>(out.data(), n, n, n),
+                                cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+                    for (std::size_t c = 0U; c < n; ++c)
+                    {
+                        for (std::size_t r = 0U; r < n; ++r)
+                        {
+                            const double v = out[(c * n) + r];
+                            EXPECT_FALSE(std::isnan(v));
+                            EXPECT_DOUBLE_EQ(v, (r == c) ? 1.0 : 0.0);
+                        }
+                    }
+                }
+
+                // Single precision via DistanceKernel with d^2 = 1e36 (u^2 overflows float max ~3.4e38).
+                {
+                    cxxgpr::ScalarDistance sdist;
+                    auto dk = sdist.matern(cxxgpr::MaternKernel::create(1e-4, nu).value());
+                    auto compiled = dk.compile<float>();
+                    compiled.set_kernel_exp(mode);
+
+                    std::vector<double> d2(n * n, 1e36);
+                    for (std::size_t i = 0U; i < n; ++i)
+                    {
+                        d2[(i * n) + i] = 0.0;
+                    }
+                    cxxgpr::DistanceSource src;
+                    src.bind_scalar(sdist.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n, n));
+                    auto checked = compiled.prepare_square(src);
+                    ASSERT_TRUE(checked.has_value());
+
+                    std::vector<float> out(n * n, -1.0F);
+                    std::vector<float> scratch(n * n, 0.0F);
+                    ASSERT_TRUE(compiled
+                            .apply(
+                                *checked, std::nullopt, cxxgpr::MatrixMut<float>(out.data(), n, n, n),
+                                cxxgpr::Triangle::Full, cxxgpr::MatrixMut<float>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+                    for (std::size_t c = 0U; c < n; ++c)
+                    {
+                        for (std::size_t r = 0U; r < n; ++r)
+                        {
+                            const float v = out[(c * n) + r];
+                            EXPECT_FALSE(std::isnan(v));
+                            EXPECT_FLOAT_EQ(v, (r == c) ? 1.0F : 0.0F);
+                        }
+                    }
+                }
+
+                // Single precision point coordinates with ~1e20F separation.
+                {
+                    auto spec = cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1e-4, nu).value());
+                    auto compiled = spec.compile<float>();
+                    compiled.set_kernel_exp(mode);
+
+                    std::vector<float> x_data(n, 0.0F);
+                    x_data[1] = 1e20F;
+                    x_data[n - 1U] = -1e20F;
+                    std::vector<float> out(n * n, -1.0F);
+                    std::vector<float> scratch(n * n, 0.0F);
+                    ASSERT_TRUE(compiled
+                            .apply_points(
+                                cxxgpr::MatrixRef<float>(x_data.data(), n, 1U, n),
+                                cxxgpr::MatrixMut<float>(out.data(), n, n, n), cxxgpr::Triangle::Full,
+                                cxxgpr::MatrixMut<float>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+                    for (const float v : out)
+                    {
+                        EXPECT_FALSE(std::isnan(v));
+                        EXPECT_TRUE(std::isfinite(v));
+                    }
+                    EXPECT_FLOAT_EQ(out[1], 0.0F);
+                    EXPECT_FLOAT_EQ(out[0], 1.0F);
+                }
+            }
+        }
+    }
+
+    /// @brief Verifies SIMD finiteness checks across boundary lengths, positions, infinities, NaNs, and subnormals.
+    /// @details Exercises contiguous slices of length n^2 across {1, 2, 4, 7, 8, 15, 16, 31, 32, 33, 64, 65}
+    /// with non-finite entries at first, middle, and last lanes, and confirms subnormal values remain valid.
+    TEST(KernelExpTest, SimdFinitenessBoundariesAndPositions)
+    {
+        for (const std::size_t n : {1U, 2U, 4U, 7U, 8U, 15U, 16U, 31U, 32U, 33U, 64U, 65U})
+        {
+            const std::array<std::size_t, 3> probe_cols{0U, n / 2U, n - 1U};
+            // Double precision finite subnormal control + non-finite injections.
+            {
+                auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+                auto ck = spec.compile<double>();
+                std::vector<double> out(n * n);
+                std::vector<double> scratch(n * n);
+                std::vector<double> x_sub(n, std::numeric_limits<double>::denorm_min());
+                ASSERT_TRUE(ck
+                        .apply_points(
+                            cxxgpr::MatrixRef<double>(x_sub.data(), n, 1U, n),
+                            cxxgpr::MatrixMut<double>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n)
+                        )
+                        .has_value());
+
+                for (const double bad : {
+                         std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity(),
+                         -std::numeric_limits<double>::infinity(),
+                     })
+                {
+                    for (const std::size_t col : probe_cols)
+                    {
+                        std::vector<double> x_bad(n, 0.25);
+                        x_bad[col] = bad;
+                        const auto res = ck.apply_points(
+                            cxxgpr::MatrixRef<double>(x_bad.data(), n, 1U, n),
+                            cxxgpr::MatrixMut<double>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n)
+                        );
+                        ASSERT_FALSE(res.has_value());
+                        EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::NonFiniteInput);
+                    }
+                }
+            }
+
+            // Single precision finite subnormal control + non-finite injections.
+            {
+                auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+                auto ck = spec.compile<float>();
+                std::vector<float> out(n * n);
+                std::vector<float> scratch(n * n);
+                std::vector<float> x_sub(n, std::numeric_limits<float>::denorm_min());
+                ASSERT_TRUE(ck
+                        .apply_points(
+                            cxxgpr::MatrixRef<float>(x_sub.data(), n, 1U, n),
+                            cxxgpr::MatrixMut<float>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<float>(scratch.data(), n, n, n)
+                        )
+                        .has_value());
+
+                for (const float bad : {
+                         std::numeric_limits<float>::quiet_NaN(),
+                         std::numeric_limits<float>::infinity(),
+                         -std::numeric_limits<float>::infinity(),
+                     })
+                {
+                    for (const std::size_t col : probe_cols)
+                    {
+                        std::vector<float> x_bad(n, 0.25F);
+                        x_bad[col] = bad;
+                        const auto res = ck.apply_points(
+                            cxxgpr::MatrixRef<float>(x_bad.data(), n, 1U, n),
+                            cxxgpr::MatrixMut<float>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<float>(scratch.data(), n, n, n)
+                        );
+                        ASSERT_FALSE(res.has_value());
+                        EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::NonFiniteInput);
+                    }
+                }
+            }
         }
     }
 

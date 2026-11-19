@@ -50,7 +50,7 @@
 
 ## QA-06 来歴（Provenance）
 
-`cxxgpr::build_info()`（M0-2 で実装）が、バージョン、Git commit SHA、`uncommitted_changes` フラグ、コンパイラ名とバージョン、ターゲット OS／アーキテクチャ、ビルド構成（Debug / Release / Sanitize）、浮動小数点ポリシー（`/fp:strict` 等）、依存パッケージ固定版を機械可読で返す。基準結果採取は原則 `uncommitted_changes == false` のツリーで行う。
+`cxxgpr::build_info()`（M0-2 で実装）が、バージョン、Git commit SHA、`uncommitted_changes` フラグ、コンパイラ名とバージョン、ターゲット OS／アーキテクチャ、ビルド構成（Debug / Release / Sanitize）、浮動小数点ポリシー（`/fp:precise` 等）、依存パッケージ固定版を機械可読で返す。基準結果採取は原則 `uncommitted_changes == false` のツリーで行う。
 
 ## QA-07 環境の認定
 

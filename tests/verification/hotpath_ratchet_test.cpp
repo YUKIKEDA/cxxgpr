@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-05, REQ-11, DES-05, DES-10, DES-13, DES-14, DES-15, DES-16, DES-17
+/// @file hotpath_ratchet_test.cpp
+/// @brief Verification ratchet tests enforcing zero hot-path allocations and supplied-distance parity.
+/// @details Audits zero heap allocations under NoAllocationScope for factor_and_mll(),
+/// mll_and_gradient_into(), value_gradient_hessian_into(), FittedGpr::predict_into(),
+/// LoadedGpr::predict_into(), and DistanceKernel apply()/grad(), and enforces a median latency
+/// ratio ratchet comparing supplied-distance evaluation against coordinate evaluation.
 
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -22,6 +28,15 @@
 namespace
 {
 
+    /// @brief Audits zero heap allocations across MLL, gradient, and Hessian evaluations after warmup.
+    /// @details Warms up FitBuffers under both prefer_speed() and prefer_memory() policies for
+    /// precision P and asserts delta_allocations() == 0 inside NoAllocationScope.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] spec Kernel AST specification under audit.
+    /// @param[in] n Number of training samples.
+    /// @param[in] d Feature dimensionality.
+    /// @param[in] x_raw Flattened column-major n x d training inputs in double precision.
+    /// @param[in] y_raw Training target vector of length n in double precision.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_mll_grad_hess_zero_alloc(
         const cxxgpr::KernelSpec& spec,
@@ -32,6 +47,7 @@ namespace
     )
     {
         using Storage = P::Storage;
+        // Convert double test inputs into precision P's storage representation prior to auditing.
         std::vector<Storage> x_s(x_raw.size());
         for (std::size_t i = 0; i < x_raw.size(); ++i)
         {
@@ -64,6 +80,7 @@ namespace
             ASSERT_TRUE(cxxgpr::mll_and_gradient_into(ck, lik, x_ref, y_s, jitter, *buf, grad).has_value());
             ASSERT_TRUE(cxxgpr::value_gradient_hessian_into(ck, lik, x_ref, y_s, jitter, *buf, grad, hess).has_value());
 
+            // Audit warmed-up factor, gradient, and Hessian paths individually for zero allocations.
             {
                 const cxxgpr::test_support::NoAllocationScope no_alloc;
                 auto mll1 = cxxgpr::factor_and_mll(ck, lik, x_ref, y_s, jitter, *buf, 0U);
@@ -71,6 +88,7 @@ namespace
                 ASSERT_TRUE(mll1.has_value());
                 EXPECT_EQ(d1, 0U) << "factor_and_mll";
             }
+            // Audit warmed-up factor, gradient, and Hessian paths individually for zero allocations.
             {
                 const cxxgpr::test_support::NoAllocationScope no_alloc;
                 auto mll2 = cxxgpr::mll_and_gradient_into(ck, lik, x_ref, y_s, jitter, *buf, grad);
@@ -78,6 +96,7 @@ namespace
                 ASSERT_TRUE(mll2.has_value());
                 EXPECT_EQ(d2, 0U) << "mll_and_gradient_into";
             }
+            // Audit warmed-up factor, gradient, and Hessian paths individually for zero allocations.
             {
                 const cxxgpr::test_support::NoAllocationScope no_alloc;
                 auto mll3 = cxxgpr::value_gradient_hessian_into(ck, lik, x_ref, y_s, jitter, *buf, grad, hess);
@@ -88,6 +107,9 @@ namespace
         }
     }
 
+    /// @brief Enforces zero heap allocations on MLL, gradient, and Hessian hot paths across precisions.
+    /// @details Exercises DoublePrecision, SinglePrecision, and MixedPrecision<PromoteStorage>
+    /// on a composite Constant * RbfArd + Matern-5/2 kernel.
     TEST(HotpathRatchetTest, MllGradAndHessHotPathZeroAllocations)
     {
         // Spec: REQ-11, DES-13, DES-14, DES-15, DES-17
@@ -114,6 +136,14 @@ namespace
         verify_mll_grad_hess_zero_alloc<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(spec, n, d, x_raw, y_raw);
     }
 
+    /// @brief Audits zero heap allocations on FittedGpr::predict_into() after initial workspace warmup.
+    /// @details Fits a Fixed-optimizer GPR under precision policy P, runs one warmup predict_into(),
+    /// and asserts delta_allocations() == 0 on the second predict_into() inside NoAllocationScope.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] spec Kernel AST specification under audit.
+    /// @param[in] x_ref Column-major n x d training input view.
+    /// @param[in] y_train Training target span of length n.
+    /// @param[in] xq_ref Column-major m x d query input view.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_predict_into_zero_alloc(
         const cxxgpr::KernelSpec& spec,
@@ -127,6 +157,7 @@ namespace
             cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).with_noise_variance(1e-3).value().factor(x_ref, y_train);
         ASSERT_TRUE(fit.has_value());
 
+        // Warm up QueryWorkspace and Prediction output capacity before entering NoAllocationScope.
         cxxgpr::Prediction<Refine> pred;
         ASSERT_TRUE(fit->predict_into(xq_ref, pred).has_value());
         {
@@ -136,6 +167,9 @@ namespace
         }
     }
 
+    /// @brief Enforces zero-allocation predict_into() across all precisions and LoadedGpr mmap paths.
+    /// @details Audits Double, Single, MixedPrecision<PromoteStorage>, MixedPrecision<ReevaluateKernel>,
+    /// and persisted mmap-backed LoadedGpr::predict_into() after warmup.
     TEST(HotpathRatchetTest, PredictIntoAndLoadedGprZeroAllocationsAfterWarmup)
     {
         // Spec: REQ-11, DES-05, DES-16, DES-17
@@ -174,6 +208,7 @@ namespace
             ASSERT_TRUE(loaded.has_value());
             cxxgpr::Prediction<double> pred;
             ASSERT_TRUE(loaded->predict_into(xq_ref, pred).has_value());
+            // Audit LoadedGpr::predict_into() for zero heap allocations after warmup.
             {
                 const cxxgpr::test_support::NoAllocationScope no_alloc;
                 ASSERT_TRUE(loaded->predict_into(xq_ref, pred).has_value());
@@ -183,6 +218,9 @@ namespace
         std::filesystem::remove_all(temp_dir, ec);
     }
 
+    /// @brief Enforces zero allocations and relative speed ratchet for supplied-distance evaluation.
+    /// @details Compares an n = 96, d = 8 RbfArd + Matern-5/2 DistanceKernel against coordinate
+    /// evaluation for zero-allocation apply/grad, numerical parity, and bounded median latency ratio.
     TEST(HotpathRatchetTest, DistanceSupplyZeroAllocAndCoordinateRatioRatchet)
     {
         // Spec: REQ-05, REQ-11, DES-10

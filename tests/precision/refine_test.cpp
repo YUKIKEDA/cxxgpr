@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-07, REQ-11, DES-02, DES-05
+/// @file refine_test.cpp
+/// @brief Unit and numerical tests for mixed-precision iterative refinement and residual helpers.
+/// @details Verifies refinement tolerances, infinity norms, lower-triangle symmetrization, zero-alloc
+/// promoted float-to-double residuals, convergence for PromoteStorage and blocked ReevaluateKernel
+/// systems, double-precision fallback on accept rejection/stagnation/max-iterations, zero-RHS edge
+/// cases, and error propagation.
+
 #include "cxxgpr/precision/refine.hpp"
 
 #include <gtest/gtest.h>
@@ -18,10 +26,16 @@
 
 #include "allocation_audit.hpp"
 
-// Spec: REQ-07, REQ-11, DES-02, DES-05
 namespace
 {
 
+    /// @brief Computes an in-place lower-triangular Cholesky factorization L * L^T = A.
+    /// @details Accumulates inner products in double precision before casting back to Scalar so test
+    /// systems can produce both float and double reference factors independently of production code.
+    /// @tparam Scalar Storage scalar type (float or double).
+    /// @param[in,out] a_col_major Column-major n x n SPD matrix overwritten in-place with factor L.
+    /// @param[in] n Matrix dimension.
+    /// @return True if every diagonal pivot remained finite and strictly positive, false otherwise.
     template <typename Scalar> bool factor_lower_llt(std::vector<Scalar>& a_col_major, std::size_t n) noexcept
     {
         for (std::size_t j = 0; j < n; ++j)
@@ -52,9 +66,16 @@ namespace
         return true;
     }
 
+    /// @brief Solves (L * L^T) * x = b in-place using forward and backward triangular substitution.
+    /// @details Uses double accumulation for row reductions before writing each Scalar entry back to x.
+    /// @tparam Scalar Factor and solution scalar type (float or double).
+    /// @param[in] l_col_major Column-major n x n lower Cholesky factor L.
+    /// @param[in] n System dimension.
+    /// @param[in,out] x Right-hand side vector overwritten in-place with the solved vector.
     template <typename Scalar>
     void solve_lower_llt(std::span<const Scalar> l_col_major, std::size_t n, std::span<Scalar> x) noexcept
     {
+        // Forward substitution: solve L * z = b.
         for (std::size_t i = 0; i < n; ++i)
         {
             auto sum = static_cast<double>(x[i]);
@@ -64,6 +85,7 @@ namespace
             }
             x[i] = static_cast<Scalar>(sum / static_cast<double>(l_col_major[(i * n) + i]));
         }
+        // Backward substitution: solve L^T * x = z.
         for (std::size_t rev = n; rev > 0; --rev)
         {
             const std::size_t i = rev - 1U;
@@ -76,6 +98,11 @@ namespace
         }
     }
 
+    /// @brief Computes relative infinity-norm error ||got - truth||_inf / ||truth||_inf.
+    /// @details Used as an independent accuracy check against full double-precision Cholesky solves.
+    /// @param[in] got Candidate solution vector.
+    /// @param[in] truth Reference double-precision solution vector of equal length.
+    /// @return Relative infinity-norm distance between got and truth.
     double relative_inf_error(std::span<const double> got, std::span<const double> truth) noexcept
     {
         double max_diff = 0.0;
@@ -88,6 +115,10 @@ namespace
         return max_diff / max_truth;
     }
 
+    /// @brief Generates n uniformly spaced test points on [0, 1].
+    /// @details Constructs x_i = i / (n - 1) for 1D RBF system refinement benchmarks and tests.
+    /// @param[in] n Number of grid points (must be >= 2).
+    /// @return Vector of n sorted coordinates on [0, 1].
     std::vector<double> make_grid_points(std::size_t n)
     {
         std::vector<double> pts(n, 0.0);
@@ -98,6 +129,10 @@ namespace
         return pts;
     }
 
+    /// @brief Evaluates Forrester function target values on a 1D point grid.
+    /// @details Computes y_i = (6 * x_i - 2)^2 * sin(12 * x_i - 4) for smooth non-trivial RHS vectors.
+    /// @param[in] pts Input 1D coordinate span.
+    /// @return Target vector matching pts.size().
     std::vector<double> make_forrester_targets(std::span<const double> pts)
     {
         std::vector<double> y(pts.size(), 0.0);
@@ -109,23 +144,45 @@ namespace
         return y;
     }
 
+    /// @brief Evaluates an unscaled RBF kernel entry exp(-0.5 * (xi - xj)^2 / ell^2).
+    /// @details Uses precomputed inv_two_ell2 = 1 / (2 * ell^2) matching production RBF evaluation.
+    /// @param[in] xi First scalar coordinate.
+    /// @param[in] xj Second scalar coordinate.
+    /// @param[in] inv_two_ell2 Precomputed factor 1 / (2 * ell^2).
+    /// @return Scalar RBF kernel value in (0, 1].
     double rbf_entry(double xi, double xj, double inv_two_ell2) noexcept
     {
         const double diff = xi - xj;
         return std::exp(-(diff * diff) * inv_two_ell2);
     }
 
-    // Simulates both PromoteStorage and ReevaluateKernel (column block 32) on an n x n RBF system.
+    /// @brief Test RefineSystem simulating PromoteStorage and blocked ReevaluateKernel on RBF systems.
+    /// @details Precomputes both single-precision and double-precision Cholesky factors and preallocates
+    /// all scratch buffers so residual(), correct(), accept(), and fallback() perform zero heap allocations.
     class RbfTestRefineSystem final : public cxxgpr::RefineSystem
     {
     public:
+        /// @brief Selects residual computation and true-matrix acceptance mode for testing.
+        /// @details Distinguishes float-exact promoted matrices, promoted storage checked against true f64
+        /// RBF entries, and blocked double-precision kernel re-evaluation.
         enum class Mode : std::uint8_t
         {
+            /// @brief Uses promoted float storage whose f64 reference matrix equals static_cast<double>(a_f32).
             PromoteExactF32,
+            /// @brief Refines against promoted float storage while accept() checks true transcendental f64 RBF.
             PromoteAgainstF64Rbf,
+            /// @brief Re-evaluates true double-precision RBF columns in blocks of refinement_column_block.
             ReevaluateBlockedF64,
         };
 
+        /// @brief Builds RBF Gram matrices, float/double Cholesky factors, and preallocated scratch buffers.
+        /// @details Computes initial_w() from the float Cholesky solve and truth_f64() from the exact
+        /// double Cholesky solve for convergence accuracy comparisons.
+        /// @param[in] pts 1D training grid coordinates.
+        /// @param[in] y Right-hand side target vector.
+        /// @param[in] ell RBF lengthscale parameter.
+        /// @param[in] diag_offset Diagonal noise plus jitter shift added to K.
+        /// @param[in] mode Residual evaluation and acceptance verification mode.
         RbfTestRefineSystem(
             std::span<const double> pts, std::span<const double> y, double ell, double diag_offset, Mode mode
         ) :
@@ -172,6 +229,7 @@ namespace
                 }
             }
 
+            // Compute both float and double Cholesky factors and exact double reference solution.
             l_f32_ = a_f32_;
             EXPECT_TRUE(factor_lower_llt(l_f32_, n_));
             l_f64_ = a_f64;
@@ -180,6 +238,7 @@ namespace
             f64_truth_ = y_;
             solve_lower_llt<double>(l_f64_, n_, f64_truth_);
 
+            // Compute the unrefined float Cholesky solution cast to double as initial iterate w_0.
             for (std::size_t i = 0; i < n_; ++i)
             {
                 rhs_f32_[i] = static_cast<float>(y_[i]);
@@ -192,12 +251,27 @@ namespace
             }
         }
 
+        /// @brief Returns the initial unrefined float-Cholesky iterate cast to double.
+        /// @details Provides the starting iterate w_0 passed into refine_in_place().
+        /// @return Const reference to initial iterate vector of length n_.
         [[nodiscard]] const std::vector<double>& initial_w() const noexcept { return initial_w_; }
 
+        /// @brief Returns the double-precision Cholesky oracle solution.
+        /// @details Used to verify iterative refinement and fallback accuracy.
+        /// @return Const reference to reference solution vector of length n_.
         [[nodiscard]] const std::vector<double>& truth_f64() const noexcept { return f64_truth_; }
 
+        /// @brief Returns the double-precision target right-hand side vector y.
+        /// @details Implements RefineSystem::rhs().
+        /// @return Non-owning span over y_.
         [[nodiscard]] std::span<const double> rhs() const noexcept override { return y_; }
 
+        /// @brief Computes r = y - B * w and ||B||_inf using either blocked f64 or promoted f32 storage.
+        /// @details Dispatches to reevaluate_blocked_residual() for ReevaluateBlockedF64 or
+        /// promoted_residual_into() otherwise, both with zero heap allocations.
+        /// @param[in] w Current iterate vector of length n_.
+        /// @param[out] r Output residual vector of length n_.
+        /// @return Operator infinity norm ||B||_inf, or GprError if scratch/shape checks fail.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> residual(
             std::span<const double> w, std::span<double> r
         ) override
@@ -210,6 +284,11 @@ namespace
             return cxxgpr::promoted_residual_into(a_ref, w, y_, r, row_abs_, row_sum_);
         }
 
+        /// @brief Solves L_f32 * L_f32^T * delta_w = r in single precision and adds delta_w into w.
+        /// @details Uses preallocated rhs_f32_ scratch to stay allocation-free inside refinement loops.
+        /// @param[in] r Residual vector of length n_.
+        /// @param[in,out] w Iterate vector updated in-place via w += delta_w.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> correct(
             std::span<const double> r, std::span<double> w
         ) override
@@ -226,6 +305,12 @@ namespace
             return {};
         }
 
+        /// @brief Verifies whether w meets the true double-precision relative residual tolerance.
+        /// @details Accepts immediately for ReevaluateBlockedF64, checks promoted storage for
+        /// PromoteExactF32, and re-evaluates true double RBF entries for PromoteAgainstF64Rbf.
+        /// @param[in] w Candidate converged iterate vector of length n_.
+        /// @param[in] tol Relative residual convergence tolerance.
+        /// @return True if w satisfies the true operator residual bound, false to trigger fallback().
         [[nodiscard]] std::expected<bool, cxxgpr::GprError> accept(std::span<const double> w, double tol) override
         {
             if (mode_ == Mode::ReevaluateBlockedF64)
@@ -250,6 +335,10 @@ namespace
             return cxxgpr::meets_relative_residual(*b_inf, w, y_, accept_resid_, tol);
         }
 
+        /// @brief Overwrites w with the full double-precision Cholesky solve using preallocated buffers.
+        /// @details Uses prefactored l_f64_ and preallocated fallback_rhs_ with zero heap allocation.
+        /// @param[out] w Output iterate vector overwritten with the double-precision solution.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fallback(std::span<double> w) override
         {
             std::ranges::copy(y_, fallback_rhs_.begin());
@@ -259,6 +348,12 @@ namespace
         }
 
     private:
+        /// @brief Computes r = y - B_f64 * w and ||B_f64||_inf using 32-column double blocks.
+        /// @details Re-evaluates RBF kernel columns in deterministic column order into k_block_f64_
+        /// without allocating an n x n double matrix.
+        /// @param[in] w Current iterate vector of length n_.
+        /// @param[out] r Output residual buffer of length n_.
+        /// @return Operator infinity norm ||B_f64||_inf.
         std::expected<double, cxxgpr::GprError> reevaluate_blocked_residual(
             std::span<const double> w, std::span<double> r
         )
@@ -300,30 +395,53 @@ namespace
             return cxxgpr::inf_norm(row_abs_);
         }
 
+        /// @brief Linear system dimension (number of training grid points).
         std::size_t n_ = 0U;
+        /// @brief Precomputed RBF inverse scale 1 / (2 * ell^2).
         double inv_two_ell2_ = 0.0;
+        /// @brief Diagonal shift (noise variance plus jitter) added to Gram diagonals.
         double diag_offset_ = 0.0;
+        /// @brief Selected residual evaluation and acceptance strategy for this test system.
         Mode mode_ = Mode::PromoteExactF32;
+        /// @brief Training coordinates on [0, 1].
         std::vector<double> pts_;
+        /// @brief Double-precision right-hand side vector y.
         std::vector<double> y_;
+        /// @brief Column-major single-precision Gram matrix.
         std::vector<float> a_f32_;
+        /// @brief Column-major single-precision lower Cholesky factor of a_f32_.
         std::vector<float> l_f32_;
+        /// @brief Column-major double-precision lower Cholesky factor used for fallback and oracle.
         std::vector<double> l_f64_;
+        /// @brief Preallocated column-block buffer of size n_ * refinement_column_block.
         std::vector<double> k_block_f64_;
+        /// @brief Preallocated scratch buffer for per-row operator absolute sums.
         std::vector<double> row_abs_;
+        /// @brief Preallocated scratch buffer for per-row matrix-vector accumulation.
         std::vector<double> row_sum_;
+        /// @brief Preallocated single-precision scratch vector for triangular correction solves.
         std::vector<float> rhs_f32_;
+        /// @brief Preallocated double-precision scratch buffer for accept() residual checks.
         std::vector<double> accept_resid_;
+        /// @brief Preallocated double-precision scratch buffer for fallback() Cholesky solves.
         std::vector<double> fallback_rhs_;
+        /// @brief Initial unrefined float Cholesky solution cast to double.
         std::vector<double> initial_w_;
+        /// @brief Reference double-precision Cholesky solution vector.
         std::vector<double> f64_truth_;
     };
 
-    // Scriptable system for deterministic branch, recovery, stagnation, max-iter, zero-RHS, and error
-    // tests.
+    /// @brief Scriptable RefineSystem stub for deterministic control-flow and error-path tests.
+    /// @details Yields scripted operator norms and residual norms on each residual() call, counts
+    /// hook invocations, and injects configurable failures across residual, correct, accept, and fallback.
     class ScriptedRefineSystem final : public cxxgpr::RefineSystem
     {
     public:
+        /// @brief Constructs a scripted refinement system with predetermined norm sequences.
+        /// @details When call counts exceed vector lengths, residual() repeats the final element.
+        /// @param[in] rhs_vec Right-hand side vector returned by rhs().
+        /// @param[in] b_infs Sequence of operator infinity norms returned across residual() calls.
+        /// @param[in] residual_norms Sequence of first-element residual norms emitted across residual() calls.
         explicit ScriptedRefineSystem(
             std::vector<double> rhs_vec, std::vector<double> b_infs, std::vector<double> residual_norms
         ) :
@@ -333,21 +451,39 @@ namespace
         {
         }
 
+        /// @brief Count of residual() hook invocations observed.
         std::size_t residual_calls = 0;
+        /// @brief Count of correct() hook invocations observed.
         std::size_t correct_calls = 0;
+        /// @brief Count of accept() hook invocations observed.
         std::size_t accept_calls = 0;
+        /// @brief Count of fallback() hook invocations observed.
         std::size_t fallback_calls = 0;
 
+        /// @brief Boolean result returned by accept() when fail_accept is unset.
         bool accept_result = true;
+        /// @brief Optional error injected on residual() invocation index fail_residual_on_call.
         std::optional<cxxgpr::GprError> fail_residual;
+        /// @brief Optional error injected unconditionally on correct().
         std::optional<cxxgpr::GprError> fail_correct;
+        /// @brief Optional error injected unconditionally on accept().
         std::optional<cxxgpr::GprError> fail_accept;
+        /// @brief Optional error injected unconditionally on fallback().
         std::optional<cxxgpr::GprError> fail_fallback;
+        /// @brief Zero-based residual() call index at which fail_residual triggers.
         std::size_t fail_residual_on_call = 0;
+        /// @brief Sentinel vector written into w when fallback() succeeds.
         std::vector<double> fallback_value{42.0, -7.0, 3.0};
 
+        /// @brief Returns the scripted right-hand side vector.
+        /// @details Implements RefineSystem::rhs().
+        /// @return Non-owning span over rhs_.
         [[nodiscard]] std::span<const double> rhs() const noexcept override { return rhs_; }
 
+        /// @brief Emits the next scripted residual norm in r[0] and returns the scripted ||B||_inf.
+        /// @details Returns fail_residual if armed for the current residual_calls index.
+        /// @param[out] r Output residual buffer cleared except for r[0].
+        /// @return Scripted operator infinity norm, or fail_residual when armed.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> residual(
             std::span<const double> /*w*/, std::span<double> r
         ) override
@@ -362,6 +498,11 @@ namespace
             return idx < b_infs_.size() ? b_infs_[idx] : b_infs_.back();
         }
 
+        /// @brief Applies a dummy correction step to w unless fail_correct is armed or r is zero.
+        /// @details Increments correct_calls and perturbs w entries by +1e-6 when residual is nonzero.
+        /// @param[in] r Current residual span inspected via inf_norm().
+        /// @param[in,out] w Iterate span modified in-place.
+        /// @return Empty expected on success, or fail_correct if armed.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> correct(
             std::span<const double> r, std::span<double> w
         ) override
@@ -382,6 +523,9 @@ namespace
             return {};
         }
 
+        /// @brief Returns the scripted acceptance decision or injected accept failure.
+        /// @details Increments accept_calls on every verification attempt.
+        /// @return accept_result on success, or fail_accept if armed.
         [[nodiscard]] std::expected<bool, cxxgpr::GprError>
             accept(std::span<const double> /*w*/, double /*tol*/) override
         {
@@ -393,6 +537,10 @@ namespace
             return accept_result;
         }
 
+        /// @brief Overwrites w with fallback_value unless fail_fallback is armed.
+        /// @details Increments fallback_calls so tests can verify exact fallback invocation counts.
+        /// @param[out] w Iterate span overwritten with fallback_value.
+        /// @return Empty expected on success, or fail_fallback if armed.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fallback(std::span<double> w) override
         {
             ++fallback_calls;
@@ -408,13 +556,20 @@ namespace
         }
 
     private:
+        /// @brief Scripted right-hand side vector.
         std::vector<double> rhs_;
+        /// @brief Scripted sequence of operator infinity norms.
         std::vector<double> b_infs_;
+        /// @brief Scripted sequence of residual infinity norms placed into r[0].
         std::vector<double> residual_norms_;
     };
 
+    /// @brief Verifies refinement constants, inf_norm(), symmetrize_lower(), and meets_relative_residual().
+    /// @details Confirms max corrections, stagnation thresholds, column block size, tolerance scaling,
+    /// NaN propagation in inf_norm(), strided lower-triangle mirroring, and zero/non-finite guards.
     TEST(PrecisionRefineTest, ConstantsAndNormHelpersMatchSpecification)
     {
+        // Check specification-mandated refinement stopping constants and linear dimension tolerance.
         EXPECT_EQ(cxxgpr::max_refinement_corrections, 10U);
         EXPECT_DOUBLE_EQ(cxxgpr::refinement_stagnation_ratio, 0.9);
         EXPECT_EQ(cxxgpr::refinement_stagnation_steps, 2U);
@@ -456,6 +611,10 @@ namespace
         EXPECT_FALSE(cxxgpr::meets_relative_residual(5.0, w, b, r_small, 0.0));
     }
 
+    /// @brief Verifies promoted_residual_into() matches row-wise double dot products bit-for-bit.
+    /// @details Uses a padded stride-4 float matrix, verifies scratch buffers are cleared prior to
+    /// reuse without touching tail elements beyond n, checks convenience promoted_residual() parity,
+    /// and audits zero heap allocations under NoAllocationScope.
     TEST(PrecisionRefineTest, PromotedResidualMatchesIndependentRowDotsBitExactAndZeroAlloc)
     {
         // 3x3 matrix with column stride 4 (padding element at indices 3, 7, 11).
@@ -477,6 +636,7 @@ namespace
         const std::array<double, 3> alpha{1.125, -0.75, 0.375};
         const std::array<double, 3> y{2.0, -3.5, 4.25};
 
+        // Compute independent row-by-row reference residual and ||A||_inf in double precision.
         std::array<double, 3> expected_r{};
         double expected_b_inf = 0.0;
         for (std::size_t i = 0; i < 3U; ++i)
@@ -498,6 +658,7 @@ namespace
         std::array<double, 4> sum_scratch{-50.0, -60.0, -70.0, -80.0};
         std::array<double, 3> residual{};
 
+        // Audit promoted_residual_into() for zero heap allocations while reading strided float storage.
         std::expected<double, cxxgpr::GprError> got = std::unexpected(cxxgpr::GprError::empty_input());
         {
             const cxxgpr::test_support::NoAllocationScope scope;
@@ -515,6 +676,7 @@ namespace
         EXPECT_DOUBLE_EQ(row_abs_scratch[3], 400.0);
         EXPECT_DOUBLE_EQ(sum_scratch[3], -80.0);
 
+        // Convenience wrapper must produce bit-identical norm and residual vector.
         std::array<double, 3> convenience_residual{};
         const auto conv_got = cxxgpr::promoted_residual(a_ref, alpha, y, convenience_residual);
         ASSERT_TRUE(conv_got.has_value());
@@ -522,6 +684,9 @@ namespace
         EXPECT_EQ(convenience_residual, residual);
     }
 
+    /// @brief Negative controls verifying promoted_residual_into() rejects invalid shapes and scratch sizes.
+    /// @details Confirms EmptyInput precedence over LengthMismatch/WorkspaceTooSmall, LengthMismatch on
+    /// rectangular matrices or mismatched alpha/residual vectors, and WorkspaceTooSmall on short scratch.
     TEST(PrecisionRefineTest, PromotedResidualRejectsInvalidShapesAndUndersizedScratch)
     {
         const std::array<float, 4> a2x2{1.0F, 0.0F, 0.0F, 1.0F};
@@ -530,6 +695,7 @@ namespace
         std::array<double, 2> s2{};
         std::array<double, 1> s1{};
 
+        // Empty or null inputs must report EmptyInput before checking matrix squareness or lengths.
         const auto empty_y = cxxgpr::promoted_residual_into(ref_2x2, v2, {}, s2, s2, s2);
         ASSERT_FALSE(empty_y.has_value());
         EXPECT_EQ(empty_y.error().code(), cxxgpr::GprErrorCode::EmptyInput);
@@ -550,6 +716,7 @@ namespace
         ASSERT_FALSE(empty_resid.has_value());
         EXPECT_EQ(empty_resid.error().code(), cxxgpr::GprErrorCode::EmptyInput);
 
+        // Non-empty non-square matrix and mismatched vector lengths map to LengthMismatch.
         const auto shape_err = cxxgpr::promoted_residual_into(rect_2x3, v2, v2, s2, s2, s2);
         ASSERT_FALSE(shape_err.has_value());
         EXPECT_EQ(shape_err.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
@@ -563,6 +730,7 @@ namespace
         ASSERT_FALSE(resid_err.has_value());
         EXPECT_EQ(resid_err.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
 
+        // Undersized scratch spans map to WorkspaceTooSmall.
         const auto ws_err1 = cxxgpr::promoted_residual_into(ref_2x2, v2, v2, s2, s1, s2);
         ASSERT_FALSE(ws_err1.has_value());
         EXPECT_EQ(ws_err1.error().code(), cxxgpr::GprErrorCode::WorkspaceTooSmall);
@@ -572,6 +740,9 @@ namespace
         EXPECT_EQ(ws_err2.error().code(), cxxgpr::GprErrorCode::WorkspaceTooSmall);
     }
 
+    /// @brief Verifies iterative refinement converges to double accuracy with zero heap allocations.
+    /// @details Tests n = 40 Forrester RBF systems under both PromoteExactF32 and ReevaluateBlockedF64
+    /// (32 + 8 column blocks), checking initial float error > 1e-8 improves to < 1e-9 without fallback.
     TEST(PrecisionRefineTest, ConvergesForBothPromoteStorageAndReevaluateKernelWithZeroAlloc)
     {
         constexpr std::size_t n = 40U;
@@ -635,6 +806,10 @@ namespace
         }
     }
 
+    /// @brief Verifies PromoteStorage invokes double fallback cleanly when true f64 accept() rejects.
+    /// @details Confirms well-conditioned and ill-conditioned transcendental RBF systems return
+    /// RejectedByAccept with used_fallback() == true, zero heap allocations in refine_in_place(), and
+    /// full double-precision accuracy via fallback() and refine().
     TEST(PrecisionRefineTest, FallsBackWithoutErrorWhenPromoteStorageFailsTrueF64AcceptCheck)
     {
         constexpr std::size_t n = 40U;
@@ -679,6 +854,10 @@ namespace
         }
     }
 
+    /// @brief Verifies step-0 convergence, stagnation streak counting/resetting, NaN stagnation, and max_iters.
+    /// @details Uses ScriptedRefineSystem to exercise every refinement state-machine transition:
+    /// immediate convergence at step 0, two-step stagnation fallback, streak reset on sufficient decay,
+    /// max_refinement_corrections exhaustion, and consecutive NaN residual protection.
     TEST(PrecisionRefineTest, EarlyConvergenceStagnationRecoveryAndMaxIterationsBehaveExactly)
     {
         // Already converged at step 0: zero corrections, zero fallback.
@@ -798,6 +977,10 @@ namespace
         }
     }
 
+    /// @brief Verifies zero-RHS safe termination and error propagation across shapes and system hooks.
+    /// @details Confirms zero RHS avoids division by zero (final_relative_residual == 0.0 via fallback),
+    /// verifies EmptyInput, LengthMismatch, and WorkspaceTooSmall validation, and confirms errors from
+    /// residual(), correct(), accept(), and fallback() propagate cleanly.
     TEST(PrecisionRefineTest, ZeroRhsAvoidsDivisionByZeroAndPropagatesSystemAndShapeErrors)
     {
         // Zero RHS and zero initial iterate: denom == 0.0, never divides by zero, reaches fallback.

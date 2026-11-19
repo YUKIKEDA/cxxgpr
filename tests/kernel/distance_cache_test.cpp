@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-05, DES-09
+/// @file distance_cache_test.cpp
+/// @brief Unit and property tests for DistanceCache layout, requirement detection, and cache reuse.
+/// @details Verifies compiled kernel distance/ARD capability flags, zero-allocation build when
+/// uncached or unneeded, packed column-major lower-triangular ARD layout, parity against direct
+/// point evaluation across KernelExp modes, cache-poisoning mutation proof, and error handling.
 
 #include "cxxgpr/kernel/kernel.hpp"
 
@@ -16,8 +21,13 @@
 namespace
 {
 
+    /// @brief Verifies kernel distance/ARD requirement flags and zero-alloc uncached builds.
+    /// @details Checks reads_distances() and needs_ard_sq_diff() across coordinate-only, scalar,
+    /// ARD, and mixed kernels, then confirms DistanceCache::build allocates zero bytes when Uncached
+    /// or when neither cache buffer is required.
     TEST(DistanceCacheTest, KernelRequirementsAndZeroAllocationWhenUnneeded)
     {
+        // Constant + Linear + White requires neither scalar squared distances nor ARD differences.
         const auto c_spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(2.0).value())
             + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.5).value())
             + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.1).value());
@@ -47,6 +57,7 @@ namespace
         const std::vector<double> x_data{0.0, 1.0, 2.0, -0.5, 0.3, 1.4};
         const cxxgpr::MatrixRef<double> x(x_data.data(), 3, 2, 3);
 
+        // Verify building an uncached or unneeded cache allocates zero heap memory.
         {
             const cxxgpr::test_support::NoAllocationScope audit;
             auto uncached = cxxgpr::DistanceCache<double>::build(x, true, true, cxxgpr::DistanceCachePolicy::Uncached);
@@ -64,6 +75,9 @@ namespace
         }
     }
 
+    /// @brief Verifies packed lower-triangular ARD layout and input validation error codes.
+    /// @details Confirms EmptyInput and NonFiniteInput rejections and checks every packed ARD entry
+    /// and dense squared-distance entry against explicit pairwise differences.
     TEST(DistanceCacheTest, PackedArdLayoutMatchesSpecificationAndHandlesErrors)
     {
         const std::vector<double> x_data{1.0, 2.5, -1.0, 0.5, 0.0, 3.0, 1.5, -0.5};
@@ -101,6 +115,7 @@ namespace
         const auto packed = cache->ard_packed();
         ASSERT_EQ(packed.size(), d * tri);
 
+        // Verify packed column-major lower-triangular ARD storage layout for each dimension m.
         for (std::size_t m = 0; m < d; ++m)
         {
             for (std::size_t j = 0; j < n; ++j)
@@ -114,6 +129,7 @@ namespace
             }
         }
 
+        // Verify dense Euclidean squared-distance matrix against explicit coordinate sums.
         const auto dist = cache->dist_view();
         for (std::size_t j = 0; j < n; ++j)
         {
@@ -130,11 +146,15 @@ namespace
         }
     }
 
+    /// @brief Verifies cached kernel evaluation, gradients, and Hessians match point evaluation.
+    /// @details Exercises apply_cached(), grad_cached(), and hess_cached() on a composite kernel
+    /// under both Accurate and FastApprox exp modes and audits zero heap allocations.
     TEST(DistanceCacheTest, CachedEvaluationMatchesPointsAndReusesCacheZeroAlloc)
     {
         const std::vector<double> x_data{0.1, 0.7, 1.4, -0.5, 0.3, -0.8, 1.1, 0.2};
         const cxxgpr::MatrixRef<double> x(x_data.data(), 4, 2, 4);
 
+        // Composite tree exercising scalar distance, ARD squared-differences, Periodic, Linear, and White.
         const auto spec =
             (cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
                 * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array<double, 2>{0.8, 1.5}).value()))
@@ -183,6 +203,7 @@ namespace
                     )
                     .has_value());
 
+            // Audit cached Gram evaluation against direct apply_points().
             {
                 const cxxgpr::test_support::NoAllocationScope audit;
                 ASSERT_TRUE(compiled
@@ -262,6 +283,9 @@ namespace
         }
     }
 
+    /// @brief Verifies float DistanceCache reuse via cache-poisoning mutation and shape checks.
+    /// @details Mutates cached dist and ARD entries to confirm apply_cached() reads precomputed
+    /// buffers rather than raw x, and checks LengthMismatch rejection on mismatched point counts.
     TEST(DistanceCacheTest, AlwaysReusesPopulatedCacheAndSupportsFloat)
     {
         const std::vector<float> x_data{0.0F, 1.0F, 2.0F, -0.5F, 0.5F, 1.5F};

@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file inference.cpp
+/// @brief Implementations and explicit instantiations for posterior GPR prediction, covariance, sampling, and LOO.
+/// @details Computes posterior means, diagonal/full predictive covariances, deterministic Cholesky
+/// posterior draws, and closed-form Leave-One-Out predictions over pre-factored Cholesky models.
+
 #include "cxxgpr/workspace/inference.hpp"
 
 #include "cxxgpr/core/checked.hpp"
@@ -19,12 +24,28 @@ namespace cxxgpr
     namespace
     {
 
+        /// @brief Returns the default adaptive jitter policy used when decomposing posterior covariance for sampling.
+        /// @details Configures base jitter 1e-12, scale factor 10.0, 10 retry steps, and cap 1e-2.
+        /// @return Pre-validated JitterPolicy for sample().
         [[nodiscard]] JitterPolicy default_sample_jitter()
         {
             auto policy = JitterPolicy::adaptive(1e-12, 10.0, 10U, 1e-2);
             return *policy;
         }
 
+        /// @brief Validates training features, Cholesky factor, weight vector alpha, and query features.
+        /// @details Enforces non-emptiness, n x n factor shape, alpha length n, feature column parity,
+        /// and finiteness of alpha before allocating or mutating workspace buffers.
+        /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+        /// @param[in] x_train Column-major n x d training feature matrix view.
+        /// @param[in] l_factor Square n x n lower Cholesky factor view.
+        /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision.
+        /// @param[in] x_query Column-major m x d query feature matrix view.
+        /// @return Empty expected on success, or GprError if any check fails.
+        /// @retval GprErrorCode::EmptyInput When any input view or alpha span is empty.
+        /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+        /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols().
+        /// @retval GprErrorCode::NonFiniteInput When alpha contains NaN or +/-Inf.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> validate_predict_inputs(
             MatrixRef<typename P::Storage> x_train,
@@ -33,6 +54,7 @@ namespace cxxgpr
             MatrixRef<typename P::Storage> x_query
         )
         {
+            // Enforce validation order: non-empty -> factor & alpha dimensions -> feature dim -> finiteness.
             if (x_train.is_empty() || x_query.is_empty() || l_factor.is_empty() || alpha.empty())
             {
                 return std::unexpected(GprError::empty_input());
@@ -63,8 +85,25 @@ namespace cxxgpr
             return {};
         }
 
-        /// Evaluates K_* = k(X, X_*), computes posterior mean mu_* = K_*^T alpha into out_mean, and
-        /// overwrites workspace.query_k_star with V = L^-1 K_*.
+        /// @brief Evaluates K_* = k(X, X_*), forms posterior mean mu_* = K_*^T * alpha, and solves V = L^-1 * K_*.
+        /// @details Grows workspace monotonically if needed, computes cross-covariance in Storage precision,
+        /// accumulates K_*^T * alpha in Refine precision into out_mean, and overwrites workspace.query_k_star
+        /// in place via linalg::solve_lower_in_place().
+        /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+        /// @param[in] kernel Compiled execution-layer kernel tree.
+        /// @param[in] x_train Column-major n x d training coordinate matrix.
+        /// @param[in] l_factor Square n x n lower Cholesky factor L.
+        /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision.
+        /// @param[in] x_query Column-major m x d query coordinate matrix.
+        /// @param[in,out] workspace Reusable query-time workspace storing K_* and then V = L^-1 * K_*.
+        /// @param[out] out_mean Output vector resized to m receiving posterior mean mu_*.
+        /// @return Empty expected on success, or GprError on invalid inputs, kernel error, or solve failure.
+        /// @retval GprErrorCode::EmptyInput When inputs are empty.
+        /// @retval GprErrorCode::LengthMismatch When l_factor or alpha sizes disagree with n.
+        /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD.
+        /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+        /// @retval GprErrorCode::SizeOverflow When workspace dimensions overflow std::size_t.
+        /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> compute_mean_and_v_into(
             const CompiledKernel<typename P::Storage>& kernel,
@@ -88,11 +127,13 @@ namespace cxxgpr
             const std::size_t m = x_query.rows();
             const std::size_t d = x_train.cols();
 
+            // Grow query workspace once if dimensions exceed current capacity.
             if (auto ens = workspace.ensure(n, m, d, kernel.nested_depth()); !ens.has_value())
             {
                 return ens;
             }
 
+            // Evaluate cross-covariance matrix K_* = k(X_train, X_query) into query_k_star.
             MatrixMut<Storage> k_star_mut(workspace.query_k_star.data(), n, m, n);
             MatrixMut<Storage> scratch_mut(workspace.query_scratch.data(), n, m, n);
             if (auto cross =
@@ -102,6 +143,7 @@ namespace cxxgpr
                 return cross;
             }
 
+            // Compute posterior mean mu_* = K_*^T * alpha in Refine precision before overwriting K_*.
             out_mean.resize(m);
             const std::size_t n_local = n;
             const std::size_t m_local = m;
@@ -111,20 +153,33 @@ namespace cxxgpr
 
             const auto m_signed = static_cast<std::ptrdiff_t>(m_local);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (m_local >= 16U)
+#    pragma omp parallel for schedule(static) if ((n_local * m_local) >= 65536U)
 #endif
             for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
             {
                 const auto j = static_cast<std::size_t>(col_idx);
-                const Storage* col_ptr = k_star_ptr + j * n_local;
-                Refine acc{0};
-                for (std::size_t i = 0; i < n_local; ++i)
+                const Storage* col_ptr = k_star_ptr + (j * n_local);
+                Refine acc0{0};
+                Refine acc1{0};
+                Refine acc2{0};
+                Refine acc3{0};
+                std::size_t i = 0U;
+                for (; i + 4U <= n_local; i += 4U)
+                {
+                    acc0 += static_cast<Refine>(col_ptr[i]) * alpha_ptr[i];
+                    acc1 += static_cast<Refine>(col_ptr[i + 1U]) * alpha_ptr[i + 1U];
+                    acc2 += static_cast<Refine>(col_ptr[i + 2U]) * alpha_ptr[i + 2U];
+                    acc3 += static_cast<Refine>(col_ptr[i + 3U]) * alpha_ptr[i + 3U];
+                }
+                Refine acc = (acc0 + acc1) + (acc2 + acc3);
+                for (; i < n_local; ++i)
                 {
                     acc += static_cast<Refine>(col_ptr[i]) * alpha_ptr[i];
                 }
                 mean_ptr[j] = acc;
             }
 
+            // Overwrite K_* in place with V = L^-1 * K_* for subsequent variance/covariance projection.
             if (auto solve = linalg::solve_lower_in_place(l_factor, k_star_mut); !solve.has_value())
             {
                 return solve;
@@ -135,6 +190,26 @@ namespace cxxgpr
 
     }  // namespace
 
+    /// @brief Computes posterior mean and diagonal predictive variance into out using pre-allocated buffers.
+    /// @details Calls compute_mean_and_v_into() to obtain mu_* and V = L^-1 * K_*, evaluates k(x*_j, x*_j)
+    /// into workspace.query_kss without heap allocation, and forms max(0, k_** - ||v_j||_2^2) (+ sigma_n^2).
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation variance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[out] out Destination Prediction structure populated with length-m mean and variance vectors.
+    /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or triangular solve failure.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> predict_into(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -157,6 +232,7 @@ namespace cxxgpr
             return mv;
         }
 
+        // Evaluate prior self-variances k(x*_j, x*_j) using pre-allocated diagonal scratch.
         const std::size_t n = x_train.rows();
         const std::size_t m = x_query.rows();
         std::span<Storage> kss_span(workspace.query_kss.data(), m);
@@ -168,6 +244,7 @@ namespace cxxgpr
         out.variance.resize(m);
         out.variance_kind = options.variance_kind;
 
+        // Add observation noise variance only when predicting noisy observations rather than latent f*.
         const Refine noise_var = (options.variance_kind == VarianceKind::Observation)
             ? static_cast<Refine>(likelihood.noise_variance())
             : Refine{0};
@@ -175,16 +252,33 @@ namespace cxxgpr
         const Storage* kss_ptr = workspace.query_kss.data();
         Refine* var_ptr = out.variance.data();
 
+        // Form diagonal predictive variance max(0, k(x*_j, x*_j) - ||V_:,j||_2^2) + noise_var.
         const auto m_signed = static_cast<std::ptrdiff_t>(m);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (m >= 16U)
+#    pragma omp parallel for schedule(static) if ((n * m) >= 65536U)
 #endif
         for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
         {
             const auto j = static_cast<std::size_t>(col_idx);
-            const Storage* v_col = v_ptr + j * n;
-            Refine sq_norm{0};
-            for (std::size_t i = 0; i < n; ++i)
+            const Storage* v_col = v_ptr + (j * n);
+            Refine sq0{0};
+            Refine sq1{0};
+            Refine sq2{0};
+            Refine sq3{0};
+            std::size_t i = 0U;
+            for (; i + 4U <= n; i += 4U)
+            {
+                const auto v0 = static_cast<Refine>(v_col[i]);
+                const auto v1 = static_cast<Refine>(v_col[i + 1U]);
+                const auto v2 = static_cast<Refine>(v_col[i + 2U]);
+                const auto v3 = static_cast<Refine>(v_col[i + 3U]);
+                sq0 += v0 * v0;
+                sq1 += v1 * v1;
+                sq2 += v2 * v2;
+                sq3 += v3 * v3;
+            }
+            Refine sq_norm = (sq0 + sq1) + (sq2 + sq3);
+            for (; i < n; ++i)
             {
                 const auto val = static_cast<Refine>(v_col[i]);
                 sq_norm += val * val;
@@ -197,6 +291,24 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Computes posterior mean and diagonal predictive variance for query points x_query.
+    /// @details Allocates a Prediction<P::Refine> instance and delegates to predict_into().
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation variance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @return Populated Prediction<P::Refine>, or GprError if predict_into() fails.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> predict(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -219,6 +331,26 @@ namespace cxxgpr
         return result;
     }
 
+    /// @brief Computes posterior mean and full m x m column-major posterior covariance matrix into out.
+    /// @details Computes mu_* and V = L^-1 * K_*, evaluates the lower triangle of the prior query Gram K_**,
+    /// and forms Sigma_* = K_** - V^T * V (+ sigma_n^2 * I) symmetrically into out.covariance.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation covariance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[out] out Destination PredictiveCovariance structure populated with mean and m x m covariance.
+    /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or solve failure.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When m * m or workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> predict_covariance_into(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -249,6 +381,7 @@ namespace cxxgpr
             return std::unexpected(std::move(mm).error());
         }
 
+        // Evaluate lower triangle of the m x m prior query Gram matrix K_** = k(X*, X*).
         std::vector<Storage> kss(*mm);
         std::vector<Storage> kss_scratch(*mm);
         auto nested_kss = kernel.make_nested_buffers(m, m);
@@ -303,6 +436,24 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Computes posterior mean and full m x m column-major posterior covariance matrix.
+    /// @details Allocates a PredictiveCovariance<P::Refine> result and delegates to predict_covariance_into().
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation covariance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @return Populated PredictiveCovariance<P::Refine>, or GprError if predict_covariance_into() fails.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When m * m or workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
     template <PrecisionPolicyConcept P>
     std::expected<PredictiveCovariance<typename P::Refine>, GprError> predict_covariance(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -326,6 +477,28 @@ namespace cxxgpr
         return result;
     }
 
+    /// @brief Draws n_draws deterministic posterior samples from the predictive distribution.
+    /// @details Obtains posterior mean and covariance, decomposes Sigma_* = L_* * L_*^T with jitter
+    /// retries, and transforms Box-Muller standard normal draws z ~ N(0, I) via mu_* + L_* * z.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] n_draws Number of posterior draws to generate.
+    /// @param[in] seed Deterministic 64-bit seed passed to Xoshiro256PlusPlus.
+    /// @param[in] options Prediction configuration selecting latent or observation distribution.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[in] jitter Optional Cholesky jitter policy for Sigma_*; defaults to default_sample_jitter().
+    /// @return Flat vector of length n_draws * m packed as draw * m + i, or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When n_draws * m or m * m overflows std::size_t.
+    /// @retval GprErrorCode::CholeskyFailed When Sigma_* factorization fails across the jitter ladder.
     template <PrecisionPolicyConcept P>
     std::expected<std::vector<typename P::Refine>, GprError> sample(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -343,6 +516,7 @@ namespace cxxgpr
     {
         using Refine = P::Refine;
 
+        // Validate inputs and compute posterior mean and covariance before checking n_draws == 0.
         auto cov_res = predict_covariance<P>(kernel, likelihood, x_train, l_factor, alpha, x_query, options, workspace);
         if (!cov_res.has_value())
         {
@@ -360,6 +534,7 @@ namespace cxxgpr
             return std::unexpected(std::move(total_len).error());
         }
 
+        // Factor Sigma_* = L_* * L_*^T using adaptive jitter to handle near-singular query covariances.
         std::vector<Refine> backup(cov_res->covariance.size());
         MatrixMut<Refine> cov_mut(cov_res->covariance.data(), m, m, m);
         MatrixMut<Refine> backup_mut(backup.data(), m, m, m);
@@ -370,6 +545,7 @@ namespace cxxgpr
             return std::unexpected(std::move(chol).error());
         }
 
+        // Generate each posterior sample y^(s) = mu_* + L_* * z^(s) from deterministic Box-Muller normals.
         std::vector<Refine> samples(*total_len);
         std::vector<Refine> z(m);
         Xoshiro256PlusPlus rng(seed);
@@ -394,6 +570,24 @@ namespace cxxgpr
         return samples;
     }
 
+    /// @brief Computes closed-form Leave-One-Out predictive mean and variance (GPML §5.4.2) into out.
+    /// @details Evaluates q_ii = [A^-1]_ii via linalg::inv_diag_from_chol_l(), then computes
+    /// mu_LOO,i = y_i - alpha_i / q_ii and sigma^2_LOO,i = 1 / q_ii (subtracting sigma_n^2 and
+    /// clamping at zero when options.variance_kind == VarianceKind::Latent).
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] y_train Transformed training target vector y in refine precision (length n).
+    /// @param[in] options Prediction configuration selecting latent or observation LOO variance.
+    /// @param[in,out] scratch_n_by_n Caller-provided n x n mutable workspace for L^-1 computation.
+    /// @param[in,out] scratch_diag Caller-provided length-n mutable span receiving [A^-1]_ii.
+    /// @param[out] out Destination Prediction structure populated with LOO means and variances.
+    /// @return Empty expected on success, or GprError on invalid inputs, buffers, or non-positive q_ii.
+    /// @retval GprErrorCode::EmptyInput When l_factor, alpha, or y_train is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train/scratch sizes mismatch.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> loo_predict_into(
         const GaussianLikelihood& likelihood,
@@ -408,6 +602,7 @@ namespace cxxgpr
     {
         using Refine = P::Refine;
 
+        // Validate non-emptiness, square factor geometry, vector lengths, and finiteness upfront.
         if (l_factor.is_empty() || alpha.empty() || y_train.empty())
         {
             return std::unexpected(GprError::empty_input());
@@ -433,6 +628,7 @@ namespace cxxgpr
             }
         }
 
+        // Compute diagonal of A^-1 = (L * L^T)^-1 without allocating heap buffers.
         if (auto inv_res = linalg::inv_diag_from_chol_l(l_factor, scratch_diag, scratch_n_by_n); !inv_res.has_value())
         {
             return inv_res;
@@ -442,6 +638,7 @@ namespace cxxgpr
         out.variance.resize(n);
         out.variance_kind = options.variance_kind;
 
+        // Evaluate GPML §5.4.2 closed-form LOO mean y_i - alpha_i / [A^-1]_ii and variance 1 / [A^-1]_ii.
         const auto noise_var = static_cast<Refine>(likelihood.noise_variance());
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -459,6 +656,20 @@ namespace cxxgpr
         return {};
     }
 
+    /// @brief Computes closed-form Leave-One-Out predictive mean and variance (GPML §5.4.2).
+    /// @details Allocates temporary n x n and length-n scratch buffers and delegates to loo_predict_into().
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] y_train Transformed training target vector y in refine precision (length n).
+    /// @param[in] options Prediction configuration selecting latent or observation LOO variance.
+    /// @return Populated LOO Prediction<P::Refine>, or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When l_factor, alpha, or y_train is empty.
+    /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train lengths mismatch.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> loo_predict(
         const GaussianLikelihood& likelihood,

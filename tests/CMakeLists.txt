@@ -39,6 +39,9 @@ function(cxxgpr_add_test test_name)
         cxxgpr_test_support
         ${ARG_LIBRARIES}
     )
+    if(TARGET OpenMP::OpenMP_CXX)
+        target_link_libraries("${_target}" PRIVATE OpenMP::OpenMP_CXX)
+    endif()
 
     add_test(NAME "${test_name}" COMMAND $<TARGET_FILE:${_target}>)
     set_tests_properties("${test_name}" PROPERTIES LABELS "${ARG_LABELS}")

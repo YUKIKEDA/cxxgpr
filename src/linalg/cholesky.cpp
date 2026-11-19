@@ -1,14 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file cholesky.cpp
+/// @brief Implementations of in-place Cholesky factorization, jitter retries, solves, and log-determinants.
+/// @details Wraps Eigen in-place LLT decomposition and triangular solvers over column-major MatrixRef/MatrixMut views,
+/// with backup-restoring jitter escalation and Neumaier compensated log-determinant summation.
+
 #include "cxxgpr/linalg/cholesky.hpp"
 
 #include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/linalg/dense.hpp"
+#include "cxxgpr/linalg/parallel.hpp"
 
 #include <Eigen/Cholesky>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <vector>
+
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
 
 #include "linalg/eigen_map.hpp"
 
@@ -18,9 +31,20 @@ namespace cxxgpr::linalg
     namespace
     {
 
+        /// @brief Validates a square lower-triangular Cholesky factor L prior to solves or determinant queries.
+        /// @details Enforces square view geometry, lower-triangle finiteness, and strictly positive diagonal entries.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only Cholesky factor view.
+        /// @return Empty expected on success, or GprError if l is invalid or singular.
+        /// @retval GprErrorCode::EmptyInput When l is empty or null.
+        /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When col_stride < rows or l is non-square.
+        /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of l is non-finite.
+        /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> validate_lower_factor(MatrixRef<T> l)
         {
+            // Enforce validation order: square view geometry -> lower finiteness -> positive diagonal.
             if (const auto check = detail::validate_matrix_view(l, true); !check.has_value())
             {
                 return check;
@@ -40,9 +64,22 @@ namespace cxxgpr::linalg
             return {};
         }
 
+        /// @brief Validates a Cholesky factor L and a mutable right-hand side matrix B before in-place solves.
+        /// @details Checks L via validate_lower_factor, verifies rhs geometry and row count parity, and checks rhs
+        /// finiteness.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor view.
+        /// @param[in] rhs Mutable right-hand side matrix view.
+        /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+        /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+        /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
+        /// @retval GprErrorCode::LengthMismatch When l is non-square, strides are invalid, or rhs.rows() != l.rows().
+        /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+        /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> validate_solve_inputs(MatrixRef<T> l, MatrixMut<T> rhs)
         {
+            // Validate factor first, then right-hand side geometry, row parity, and finiteness.
             if (const auto l_check = validate_lower_factor(l); !l_check.has_value())
             {
                 return l_check;
@@ -64,17 +101,427 @@ namespace cxxgpr::linalg
             return {};
         }
 
+        /// @brief Factors a small diagonal panel block a[k:k+bs, k:k+bs] in place via unblocked lower Cholesky.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose diagonal block [k, k + bs) is factored in place.
+        /// @param[in] k Starting row and column index of the diagonal panel.
+        /// @param[in] bs Panel dimension (number of rows and columns).
+        /// @return True on success, false if a diagonal pivot is non-finite or non-positive.
+        template <KernelScalarConcept T>
+        [[nodiscard]] bool factor_unblocked_panel_diag(MatrixMut<T> a, std::size_t k, std::size_t bs) noexcept
+        {
+            for (std::size_t j = 0; j < bs; ++j)
+            {
+                const std::size_t gj = k + j;
+                T diag = a(gj, gj);
+                for (std::size_t p = 0; p < j; ++p)
+                {
+                    const T l_jp = a(gj, k + p);
+                    diag -= l_jp * l_jp;
+                }
+                if (!std::isfinite(diag) || diag <= T{0})
+                {
+                    return false;
+                }
+                const T l_jj = std::sqrt(diag);
+                if (!std::isfinite(l_jj) || l_jj <= T{0})
+                {
+                    return false;
+                }
+                a(gj, gj) = l_jj;
+                const T inv_diag = T{1} / l_jj;
+                T* const col_j = a.col(gj).data();
+                for (std::size_t i = j + 1U; i < bs; ++i)
+                {
+                    const std::size_t gi = k + i;
+                    T sum{0};
+                    for (std::size_t p = 0; p < j; ++p)
+                    {
+                        sum += a(gi, k + p) * a(gj, k + p);
+                    }
+                    col_j[gi] = (col_j[gi] - sum) * inv_diag;
+                }
+            }
+            return true;
+        }
+
+        /// @brief Solves lower-panel rows [r_begin, r_end) x cols [k, k + bs) against the factored diagonal block.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view owning factored diagonal block and trailing panel rows.
+        /// @param[in] k Starting column of the active panel.
+        /// @param[in] bs Width of the active panel.
+        /// @param[in] r_begin Inclusive starting row owned by the calling thread.
+        /// @param[in] r_end Exclusive ending row owned by the calling thread.
+        template <KernelScalarConcept T>
+        void solve_panel_rows(
+            MatrixMut<T> a, std::size_t k, std::size_t bs, std::size_t r_begin, std::size_t r_end
+        ) noexcept
+        {
+            for (std::size_t col = 0; col < bs; ++col)
+            {
+                const std::size_t gc = k + col;
+                T* const col_c = a.col(gc).data();
+                for (std::size_t p = 0; p < col; ++p)
+                {
+                    const T factor = a(gc, k + p);
+                    const T* const col_p = a.col(k + p).data();
+                    for (std::size_t r = r_begin; r < r_end; ++r)
+                    {
+                        col_c[r] -= col_p[r] * factor;
+                    }
+                }
+                const T inv_diag = T{1} / col_c[gc];
+                for (std::size_t r = r_begin; r < r_end; ++r)
+                {
+                    col_c[r] *= inv_diag;
+                }
+            }
+        }
+
+        /// @brief Applies the trailing symmetric rank-bs update to lower-triangular columns [j_begin, j_end).
+        /// @details Tiles rows in cache-resident blocks of 256 and unrolls 4 columns at a time while preserving exact
+        /// ascending p = 0..bs-1 accumulation order per matrix entry for OpenMP thread-count bitwise invariance.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose trailing lower columns [j_begin, j_end) are updated.
+        /// @param[in] k Starting column of the finished panel.
+        /// @param[in] bs Panel width.
+        /// @param[in] j_begin Inclusive first trailing column assigned to this thread.
+        /// @param[in] j_end Exclusive last trailing column assigned to this thread.
+        /// @param[in] n Matrix order.
+        template <KernelScalarConcept T>
+        void rank_k_lower_update(
+            MatrixMut<T> a, std::size_t k, std::size_t bs, std::size_t j_begin, std::size_t j_end, std::size_t n
+        ) noexcept
+        {
+            constexpr std::size_t row_tile = 256U;
+            std::size_t j = j_begin;
+            for (; j + 4U <= j_end; j += 4U)
+            {
+                const std::size_t j0 = j;
+                const std::size_t j1 = j + 1U;
+                const std::size_t j2 = j + 2U;
+                const std::size_t j3 = j + 3U;
+                T* const col0 = a.col(j0).data();
+                T* const col1 = a.col(j1).data();
+                T* const col2 = a.col(j2).data();
+                T* const col3 = a.col(j3).data();
+
+                // Update the 6 lower-triangle entries inside rows [j0, j3) in ascending p order.
+                for (std::size_t p = 0; p < bs; ++p)
+                {
+                    const T* const lp = a.col(k + p).data();
+                    const T v0 = lp[j0];
+                    const T v1 = lp[j1];
+                    const T v2 = lp[j2];
+                    col0[j0] -= v0 * v0;
+                    col0[j1] -= v1 * v0;
+                    col0[j2] -= v2 * v0;
+                    col1[j1] -= v1 * v1;
+                    col1[j2] -= v2 * v1;
+                    col2[j2] -= v2 * v2;
+                }
+
+                // Update rows [j3, n) across all 4 columns in cache-friendly row tiles.
+                for (std::size_t r_start = j3; r_start < n; r_start += row_tile)
+                {
+                    const std::size_t r_stop = std::min(r_start + row_tile, n);
+                    for (std::size_t p = 0; p < bs; ++p)
+                    {
+                        const T* const lp = a.col(k + p).data();
+                        const T v0 = lp[j0];
+                        const T v1 = lp[j1];
+                        const T v2 = lp[j2];
+                        const T v3 = lp[j3];
+                        for (std::size_t row = r_start; row < r_stop; ++row)
+                        {
+                            const T l_rp = lp[row];
+                            col0[row] -= l_rp * v0;
+                            col1[row] -= l_rp * v1;
+                            col2[row] -= l_rp * v2;
+                            col3[row] -= l_rp * v3;
+                        }
+                    }
+                }
+            }
+            for (; j < j_end; ++j)
+            {
+                T* const col_j = a.col(j).data();
+                for (std::size_t r_start = j; r_start < n; r_start += row_tile)
+                {
+                    const std::size_t r_stop = std::min(r_start + row_tile, n);
+                    for (std::size_t p = 0; p < bs; ++p)
+                    {
+                        const T* const lp = a.col(k + p).data();
+                        const T vj = lp[j];
+                        for (std::size_t row = r_start; row < r_stop; ++row)
+                        {
+                            col_j[row] -= lp[row] * vj;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// @brief Selects triangular system solve direction or full symmetric L * L^T solve.
+        enum class TriSolveMode : std::uint8_t
+        {
+            /// @brief Solves L * X = B in place.
+            Forward,
+            /// @brief Solves L^T * X = B in place.
+            Backward,
+            /// @brief Solves (L * L^T) * X = B in place.
+            Llt,
+        };
+
+        /// @brief Dispatches triangular solve over packed or strided L and B views, optionally column-parallel.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @tparam LMap Eigen matrix or map type representing lower factor L.
+        /// @tparam RhsMap Eigen matrix or map type representing mutable right-hand side B.
+        /// @param[in] l_map Eigen view over lower Cholesky factor L.
+        /// @param[in,out] rhs_map Eigen view over mutable right-hand side B.
+        /// @param[in] n_rows Row count of L and B.
+        /// @param[in] n_cols Column count of B.
+        /// @param[in] mode Triangular substitution direction or combined LLT solve.
+        template <KernelScalarConcept T, typename LMap, typename RhsMap>
+        void dispatch_tri_solve(
+            const LMap& l_map, RhsMap&& rhs_map, std::size_t n_rows, std::size_t n_cols, TriSolveMode mode
+        )
+        {
+            auto solve_slice = [&l_map, mode](auto&& rhs_slice)
+            {
+                if (mode == TriSolveMode::Forward)
+                {
+                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
+                }
+                else if (mode == TriSolveMode::Backward)
+                {
+                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                }
+                else
+                {
+                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
+                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                }
+            };
+
+#ifdef _OPENMP
+            const double approx_flops =
+                static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
+            if (n_cols >= 4U && approx_flops >= 16777216.0)
+            {
+                // Use fixed column-block width so rounding order is invariant to OpenMP thread count.
+                constexpr std::size_t col_block = 4U;
+                const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
+#    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U) shared(rhs_map, n_cols, solve_slice)
+                for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(n_blocks); ++b)
+                {
+                    const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
+                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
+                    auto slice =
+                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
+                    solve_slice(slice);
+                }
+                return;
+            }
+#else
+            const double approx_flops =
+                static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
+            if (n_cols >= 4U && approx_flops >= 16777216.0)
+            {
+                constexpr std::size_t col_block = 4U;
+                for (std::size_t col_begin = 0U; col_begin < n_cols; col_begin += col_block)
+                {
+                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
+                    auto slice =
+                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
+                    solve_slice(slice);
+                }
+                return;
+            }
+#endif
+            solve_slice(rhs_map);
+        }
+
+        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
+        /// @details Uses unit-stride Eigen::Map views when both L and B are contiguous and parallelizes independent
+        /// right-hand side column slices across OpenMP threads when n_rows^2 * n_cols >= 2^24.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
+        /// @param[in] mode Triangular substitution direction or combined LLT solve.
+        template <KernelScalarConcept T> void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode)
+        {
+            const std::size_t n_rows = l.rows();
+            const std::size_t n_cols = rhs.cols();
+            if (l.is_contiguous() && rhs.is_contiguous())
+            {
+                const Eigen::Map<const detail::ColMajorDynamic<T>> l_map(
+                    l.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_rows)
+                );
+                Eigen::Map<detail::ColMajorDynamic<T>> rhs_map(
+                    rhs.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_cols)
+                );
+                dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
+                return;
+            }
+            const auto l_map = detail::to_eigen_map(l);
+            auto rhs_map = detail::to_eigen_map(rhs);
+            dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
+        }
+
+        /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose submatrix [k, k + bs) is factored in place.
+        /// @param[in] k Starting row and column index of the submatrix.
+        /// @param[in] bs Submatrix dimension (number of rows and columns).
+        /// @return True on success, false if Eigen::LLT fails or produces a non-positive/non-finite pivot.
+        template <KernelScalarConcept T>
+        [[nodiscard]] bool factor_subblock_eigen(MatrixMut<T> a, std::size_t k, std::size_t bs)
+        {
+            const auto bs_idx = static_cast<Eigen::Index>(bs);
+            detail::MutEigenMap<T> sub_map(
+                &a(k, k), bs_idx, bs_idx, Eigen::OuterStride<>(static_cast<Eigen::Index>(a.col_stride()))
+            );
+            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
+            Eigen::LLT<RefType, Eigen::Lower> llt(sub_map);
+            if (llt.info() != Eigen::Success)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < bs; ++i)
+            {
+                const T diag = a(k + i, k + i);
+                if (!std::isfinite(diag) || diag <= T{0})
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// @brief Executes Eigen::LLT or deterministic blocked Cholesky in place on the lower triangle of a.
+        /// @details Uses blocked panel/rank-32 updates with Eigen::LLT subblock tail finishing whenever row byte size
+        /// `n * sizeof(T) >= 2048` (`n >= 256` for `double`, `n >= 512` for `float`), running inside a single
+        /// persistent OpenMP region when multiple threads are active so 1-thread and multi-thread runs stay
+        /// bit-identical. For smaller matrices runs Eigen::LLT strictly in place and verifies positive finite pivots.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
+        /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
+        /// @return Empty expected on success, or GprErrorCode::CholeskyFailed on breakdown.
+        /// @retval GprErrorCode::CholeskyFailed When factorization fails or yields a non-positive/non-finite pivot.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> run_eigen_llt_in_place(MatrixMut<T> a, CholeskyStage stage)
         {
-            auto map = detail::to_eigen_map(a);
-            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
-            Eigen::LLT<RefType, Eigen::Lower> llt(map);
             const std::size_t n = a.rows();
-            if (llt.info() != Eigen::Success)
+            if ((n * sizeof(T)) >= 2048U)
+            {
+                bool failed = false;
+                constexpr std::size_t panel_block = 32U;
+                constexpr std::size_t tail_cutoff = 64U;
+                constexpr std::size_t row_granule = 16U;
+#ifdef _OPENMP
+#    pragma omp parallel if (openmp_max_threads() > 1U) shared(a, failed, n)
+                {
+                    const auto tid = static_cast<std::size_t>(omp_get_thread_num());
+                    const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
+                    for (std::size_t k = 0; k < n; k += panel_block)
+                    {
+                        const std::size_t rem = n - k;
+                        if (rem <= tail_cutoff)
+                        {
+#    pragma omp single
+                            {
+                                if (!factor_subblock_eigen(a, k, rem))
+                                {
+                                    failed = true;
+                                }
+                            }
+                            break;
+                        }
+                        const std::size_t bs = std::min(panel_block, rem);
+#    pragma omp single
+                        {
+                            if (!factor_unblocked_panel_diag(a, k, bs))
+                            {
+                                failed = true;
+                            }
+                        }
+                        if (failed)
+                        {
+                            break;
+                        }
+                        const std::size_t row_start = k + bs;
+                        const std::size_t tail = n - row_start;
+                        const std::size_t n_gran = (tail + row_granule - 1U) / row_granule;
+                        const std::size_t chunk_begin =
+                            row_start + std::min(tail, ((n_gran * tid) / nthreads) * row_granule);
+                        const std::size_t chunk_end =
+                            row_start + std::min(tail, ((n_gran * (tid + 1U)) / nthreads) * row_granule);
+                        if (chunk_begin < chunk_end)
+                        {
+                            solve_panel_rows(a, k, bs, chunk_begin, chunk_end);
+                        }
+#    pragma omp barrier
+                        const std::size_t rel_begin = lower_block_start(tail, tid, nthreads);
+                        const std::size_t rel_end = lower_block_start(tail, tid + 1U, nthreads);
+                        rank_k_lower_update(a, k, bs, row_start + rel_begin, row_start + rel_end, n);
+#    pragma omp barrier
+                    }
+                }
+#else
+                for (std::size_t k = 0; k < n; k += panel_block)
+                {
+                    const std::size_t rem = n - k;
+                    if (rem <= tail_cutoff)
+                    {
+                        if (!factor_subblock_eigen(a, k, rem))
+                        {
+                            failed = true;
+                        }
+                        break;
+                    }
+                    const std::size_t bs = std::min(panel_block, rem);
+                    if (!factor_unblocked_panel_diag(a, k, bs))
+                    {
+                        failed = true;
+                        break;
+                    }
+                    const std::size_t row_start = k + bs;
+                    const std::size_t tail = n - row_start;
+                    (void)row_granule;
+                    solve_panel_rows(a, k, bs, row_start, n);
+                    rank_k_lower_update(a, k, bs, row_start, row_start + tail, n);
+                }
+#endif
+                if (failed)
+                {
+                    return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
+                }
+                return {};
+            }
+
+            // Wrap caller storage via Eigen::Ref (tightly packed when contiguous) so Eigen overwrites in place.
+            bool ok = false;
+            if (a.is_contiguous())
+            {
+                Eigen::Map<detail::ColMajorDynamic<T>> dense_map(
+                    a.data(), static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(n)
+                );
+                Eigen::LLT<Eigen::Ref<detail::ColMajorDynamic<T>>, Eigen::Lower> llt(dense_map);
+                ok = (llt.info() == Eigen::Success);
+            }
+            else
+            {
+                auto map = detail::to_eigen_map(a);
+                using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
+                Eigen::LLT<RefType, Eigen::Lower> llt(map);
+                ok = (llt.info() == Eigen::Success);
+            }
+            if (!ok)
             {
                 return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
             }
+            // Guard against numerical underflow or silent NaNs on the diagonal after decomposition.
             for (std::size_t i = 0; i < n; ++i)
             {
                 const T diag = a(i, i);
@@ -88,6 +535,17 @@ namespace cxxgpr::linalg
 
     }  // namespace
 
+    /// @brief Factors a symmetric positive-definite matrix A in place into its lower Cholesky factor L.
+    /// @details Validates square matrix geometry and lower-triangle finiteness before invoking Eigen in-place LLT.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in,out] a Square mutable matrix view containing the lower triangle of A on entry and L on success.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @return Empty expected on success, or GprError on invalid input or non-positive-definite matrix.
+    /// @retval GprErrorCode::EmptyInput When a is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When col_stride < rows or a is not square.
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of a is non-finite.
+    /// @retval GprErrorCode::CholeskyFailed When factorization fails or yields non-positive/non-finite pivots.
     template <KernelScalarConcept T>
     std::expected<void, GprError> cholesky_lower_in_place(MatrixMut<T> a, CholeskyStage stage)
     {
@@ -102,11 +560,26 @@ namespace cxxgpr::linalg
         return run_eigen_llt_in_place(a, stage);
     }
 
+    /// @brief Factors A in place trying j = 0 first and escalating via policy using a caller-provided backup buffer.
+    /// @details Copies A's lower triangle to backup before j = 0; on each jittered retry, restores A's lower triangle
+    /// from backup before adding j to the diagonal so failed partial factorizations never accumulate.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in,out] a Square mutable matrix view factored in place into L.
+    /// @param[out] backup Preallocated n x n square mutable matrix view used to preserve the original lower triangle.
+    /// @param[in] policy Diagonal jitter retry policy evaluated if j = 0 fails.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @return Accepted diagonal jitter (0.0 if unjittered factorization succeeded), or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When a or backup is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on a or backup.
+    /// @retval GprErrorCode::LengthMismatch When stride < rows, either view is non-square, or dimensions differ.
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of a is non-finite.
+    /// @retval GprErrorCode::CholeskyFailed When j = 0 and all jittered retry attempts fail.
     template <KernelScalarConcept T>
     std::expected<double, GprError> cholesky_lower_with_jitter(
         MatrixMut<T> a, MatrixMut<T> backup, const JitterPolicy& policy, CholeskyStage stage
     )
     {
+        // Validate target view, backup view, dimension match, and lower-triangle finiteness.
         if (const auto check = detail::validate_matrix_view(a, true); !check.has_value())
         {
             return std::unexpected(check.error());
@@ -124,12 +597,19 @@ namespace cxxgpr::linalg
             return std::unexpected(fin.error());
         }
 
+        // Skip backing up the lower triangle when no jitter retry steps are configured (e.g., Fixed(0.0)).
         const std::size_t n = a.rows();
-        if (const auto cp = copy_lower_triangle(detail::as_ref(a), backup); !cp.has_value())
+        JitterSchedule schedule = policy.retry_schedule();
+        const std::optional<double> first_retry = schedule.next();
+        if (first_retry.has_value())
         {
-            return std::unexpected(cp.error());
+            if (const auto cp = copy_lower_triangle(detail::as_ref(a), backup); !cp.has_value())
+            {
+                return std::unexpected(cp.error());
+            }
         }
 
+        // Attempt unjittered factorization (j = 0) first; propagate non-Cholesky failures immediately.
         const auto first = run_eigen_llt_in_place(a, stage);
         if (first.has_value())
         {
@@ -140,9 +620,9 @@ namespace cxxgpr::linalg
             return std::unexpected(first.error());
         }
 
+        // Retry with escalating jitter, restoring the uncorrupted lower triangle before each attempt.
         double last_j = 0.0;
-        JitterSchedule schedule = policy.retry_schedule();
-        while (const auto next_j = schedule.next())
+        for (std::optional<double> next_j = first_retry; next_j.has_value(); next_j = schedule.next())
         {
             const double j = *next_j;
             last_j = j;
@@ -168,6 +648,18 @@ namespace cxxgpr::linalg
         return std::unexpected(GprError::cholesky_failed(last_j, n, stage));
     }
 
+    /// @brief Factors A in place trying j = 0 first and escalating via policy with an internal backup buffer.
+    /// @details Allocates an n x n temporary backup buffer after validating a and delegates to the backup overload.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in,out] a Square mutable matrix view factored in place into L.
+    /// @param[in] policy Diagonal jitter retry policy evaluated if j = 0 fails.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @return Accepted diagonal jitter (0.0 if unjittered factorization succeeded), or GprError on failure.
+    /// @retval GprErrorCode::EmptyInput When a is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When col_stride * cols or rows * cols overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When col_stride < rows or a is not square.
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of a is non-finite.
+    /// @retval GprErrorCode::CholeskyFailed When j = 0 and all jittered retry attempts fail.
     template <KernelScalarConcept T>
     std::expected<double, GprError> cholesky_lower_with_jitter(
         MatrixMut<T> a, const JitterPolicy& policy, CholeskyStage stage
@@ -182,11 +674,24 @@ namespace cxxgpr::linalg
         {
             return std::unexpected(len.error());
         }
+        // Allocate a packed n x n backup buffer once and reuse the zero-allocation retry loop.
         std::vector<T> backup_storage(*len);
         MatrixMut<T> backup(backup_storage.data(), a.rows(), a.cols());
         return cholesky_lower_with_jitter(a, backup, policy, stage);
     }
 
+    /// @brief Solves L * X = B in place for a lower-triangular Cholesky factor L.
+    /// @details Validates factor and right-hand side views, then performs lower-triangular forward substitution via
+    /// Eigen.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, strides are invalid, or rhs.rows() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T>
     std::expected<void, GprError> solve_lower_in_place(MatrixRef<T> l, MatrixMut<T> rhs)
     {
@@ -194,12 +699,21 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_map);
+        apply_tri_solve(l, rhs, TriSolveMode::Forward);
         return {};
     }
 
+    /// @brief Solves L * x = b in place for a lower-triangular Cholesky factor L and vector b.
+    /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, stride is invalid, or rhs.size() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T>
     std::expected<void, GprError> solve_lower_in_place(MatrixRef<T> l, std::span<T> rhs)
     {
@@ -210,6 +724,17 @@ namespace cxxgpr::linalg
         return solve_lower_in_place(l, MatrixMut<T>(rhs.data(), rhs.size(), 1));
     }
 
+    /// @brief Solves L^T * X = B in place for a lower-triangular Cholesky factor L.
+    /// @details Interprets l.transpose() as an upper-triangular factor so strictly upper entries of l are never read.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, strides are invalid, or rhs.rows() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T>
     std::expected<void, GprError> solve_lower_transpose_in_place(MatrixRef<T> l, MatrixMut<T> rhs)
     {
@@ -217,12 +742,21 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_map);
+        apply_tri_solve(l, rhs, TriSolveMode::Backward);
         return {};
     }
 
+    /// @brief Solves L^T * x = b in place for a lower-triangular Cholesky factor L and vector b.
+    /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, stride is invalid, or rhs.size() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T>
     std::expected<void, GprError> solve_lower_transpose_in_place(MatrixRef<T> l, std::span<T> rhs)
     {
@@ -233,19 +767,39 @@ namespace cxxgpr::linalg
         return solve_lower_transpose_in_place(l, MatrixMut<T>(rhs.data(), rhs.size(), 1));
     }
 
+    /// @brief Solves (L * L^T) * X = B in place for a lower-triangular Cholesky factor L.
+    /// @details Performs forward substitution L * Y = B followed by backward substitution L^T * X = Y in place.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, strides are invalid, or rhs.rows() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T> std::expected<void, GprError> solve_llt_in_place(MatrixRef<T> l, MatrixMut<T> rhs)
     {
         if (const auto check = validate_solve_inputs(l, rhs); !check.has_value())
         {
             return check;
         }
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_map);
-        l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_map);
+        // Perform two-stage triangular solve: L * Y = B, then L^T * X = Y.
+        apply_tri_solve(l, rhs, TriSolveMode::Llt);
         return {};
     }
 
+    /// @brief Solves (L * L^T) * x = b in place for a lower-triangular Cholesky factor L and vector b.
+    /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, stride is invalid, or rhs.size() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T> std::expected<void, GprError> solve_llt_in_place(MatrixRef<T> l, std::span<T> rhs)
     {
         if (rhs.empty())
@@ -255,11 +809,26 @@ namespace cxxgpr::linalg
         return solve_llt_in_place(l, MatrixMut<T>(rhs.data(), rhs.size(), 1));
     }
 
+    /// @brief Computes diag((L * L^T)^-1) using a caller-provided n x n scratch matrix.
+    /// @details Initializes scratch_n_by_n to I_n, solves L * X = I_n in place to obtain L^-1 in the lower triangle,
+    /// and sums squared column norms in double precision.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[out] out_diag Preallocated output span of length l.rows() receiving the inverse diagonal entries.
+    /// @param[in,out] scratch_n_by_n Caller-provided n x n mutable workspace overwritten during computation.
+    /// @return Empty expected on success, or GprError on invalid factor, output length, or scratch buffer.
+    /// @retval GprErrorCode::EmptyInput When l, out_diag, or scratch_n_by_n is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or scratch_n_by_n.
+    /// @retval GprErrorCode::LengthMismatch When l or scratch_n_by_n is non-square, strides are invalid,
+    /// out_diag.size() != l.rows(), or scratch_n_by_n.rows() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of l is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T>
     std::expected<void, GprError> inv_diag_from_chol_l(
         MatrixRef<T> l, std::span<T> out_diag, MatrixMut<T> scratch_n_by_n
     )
     {
+        // Validate factor, output span length, and square scratch matrix dimensions.
         if (const auto l_check = validate_lower_factor(l); !l_check.has_value())
         {
             return l_check;
@@ -281,6 +850,7 @@ namespace cxxgpr::linalg
             return std::unexpected(GprError::length_mismatch("scratch matrix dimension must match factor dimension"));
         }
 
+        // Seed scratch with I_n, then solve L * X = I_n in place so scratch holds L^-1 (lower triangular).
         const std::size_t n = l.rows();
         for (std::size_t col = 0; col < n; ++col)
         {
@@ -294,6 +864,7 @@ namespace cxxgpr::linalg
         auto scratch_map = detail::to_eigen_map(scratch_n_by_n);
         l_map.template triangularView<Eigen::Lower>().solveInPlace(scratch_map);
 
+        // Since (L L^T)^-1 = (L^-1)^T L^-1, the col-th diagonal equals ||L^-1 e_col||_2^2.
         for (std::size_t col = 0; col < n; ++col)
         {
             double sum_sq = 0.0;
@@ -307,12 +878,24 @@ namespace cxxgpr::linalg
         return {};
     }
 
+    /// @brief Computes log|A| = sum_{i=0}^{n-1} 2 * log(L_ii) using Neumaier compensated summation.
+    /// @details Validates L and sums 2 * log(L_ii) in double precision using Neumaier error compensation to mitigate
+    /// rounding loss across varying magnitudes.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @return Log-determinant of A = L * L^T in double precision, or GprError on invalid factor.
+    /// @retval GprErrorCode::EmptyInput When l is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square or has invalid stride.
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of l is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T> std::expected<double, GprError> log_det_from_l(MatrixRef<T> l)
     {
         if (const auto check = validate_lower_factor(l); !check.has_value())
         {
             return std::unexpected(check.error());
         }
+        // Accumulate 2 * log(L_ii) with Neumaier compensation, ordering subtraction by larger magnitude.
         const std::size_t n = l.rows();
         double sum = 0.0;
         double comp = 0.0;
@@ -333,6 +916,16 @@ namespace cxxgpr::linalg
         return sum + comp;
     }
 
+    /// @brief Computes 0.5 * log|A| from a lower Cholesky factor L using Neumaier compensated summation.
+    /// @details Halves the result of log_det_from_l(l) after propagating any validation failure.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @return Half log-determinant of A = L * L^T in double precision, or GprError on invalid factor.
+    /// @retval GprErrorCode::EmptyInput When l is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square or has invalid stride.
+    /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry of l is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
     template <KernelScalarConcept T> std::expected<double, GprError> half_log_det_from_l(MatrixRef<T> l)
     {
         const auto ld = log_det_from_l(l);

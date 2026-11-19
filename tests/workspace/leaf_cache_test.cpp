@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-08, DES-11
+/// @file leaf_cache_test.cpp
+/// @brief Unit and property tests for LeafCache incremental evaluation and OpenMP determinism.
+/// @details Verifies optimizer_uses_change_indices_v trait detection, strict bitwise parameter
+/// change verification including signed-zero sensitivity, incremental leaf reuse and poisoning
+/// proof under NoAllocationScope, and bitwise thread-count invariance under OpenMP.
 
 #include "cxxgpr/workspace/workspace.hpp"
 
@@ -21,20 +26,27 @@
 namespace
 {
 
+    /// @brief Dummy optimizer tag lacking uses_change_indices for trait verification.
     struct DummyNormalOptimizer
     {
     };
 
+    /// @brief Dummy optimizer tag opting into incremental LeafCache updates via uses_change_indices.
     struct DummyFsaOptimizer
     {
+        /// @brief Opt-in flag enabling change-index tracking in optimizer traits.
         static constexpr bool uses_change_indices = true;
     };
 
     static_assert(!cxxgpr::optimizer_uses_change_indices_v<DummyNormalOptimizer>);
     static_assert(cxxgpr::optimizer_uses_change_indices_v<DummyFsaOptimizer>);
 
+    /// @brief Negative and positive controls for require_change_indices() and bitwise dirty tracking.
+    /// @details Confirms empty/out-of-range/duplicate index rejection, undeclared parameter mutation
+    /// detection (including +0.0 vs -0.0 bit flips), and clean-leaf preservation on likelihood updates.
     TEST(LeafCacheTest, RequireChangeIndicesAndBitwiseChecksRejectInvalidSteps)
     {
+        // Reject empty, out-of-range, and duplicate parameter-change index spans.
         EXPECT_EQ(
             cxxgpr::require_change_indices(std::span<const std::size_t>{}, 3U).error().code(),
             cxxgpr::GprErrorCode::IndexOutOfRange
@@ -87,6 +99,9 @@ namespace
         EXPECT_FALSE(cache.is_leaf_dirty(1U));
     }
 
+    /// @brief Verifies incremental leaf evaluation matches full evaluation with zero allocations.
+    /// @details Runs initial full evaluation, single-leaf update under NoAllocationScope matching
+    /// apply_points(), and a leaf-poisoning mutation proving clean cached leaf Grams are reused.
     TEST(LeafCacheTest, IncrementalEvaluationMatchesFullAndSkipsCleanLeavesZeroAlloc)
     {
         const std::vector<double> x_data{0.0, 0.5, 1.3, -0.4, 0.7, 1.1};
@@ -199,8 +214,12 @@ namespace
         EXPECT_GT(out_inc[0], 50.0);
     }
 
+    /// @brief Verifies OpenMP parallel distance and kernel evaluation is bitwise deterministic.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns across DistanceCache, apply_points(),
+    /// apply_cached(), grad_cached(), and apply_cross_points() between 1 and 4 OpenMP threads.
     TEST(LeafCacheTest, OpenMpColumnParallelEvaluationIsBitwiseDeterministic)
     {
+        // Generate a 72x3 non-trivial point grid to exercise multi-block OpenMP scheduling.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 3U;
         std::vector<double> x_data(n * d);
@@ -292,6 +311,190 @@ namespace
         for (std::size_t idx = 0; idx < r1.size(); ++idx)
         {
             EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r4[idx])) << "idx=" << idx;
+        }
+    }
+
+    /// @brief Verifies LeafCache incremental ARD guards (large jump, underflow weight NaN, max steps, d > 64).
+    /// @details Confirms exact parity against apply_points() when forcing full rebuilds on large ratio jumps,
+    /// underflowed 1/ell^2 weights (> 1e155), reaching the 64-step incremental drift limit, and exceeding d = 64.
+    TEST(LeafCacheTest, IncrementalArdGuardsAndFallbacksMatchFull)
+    {
+        // Case 1: Large trial jump, underflowed 1/ell^2 weights, and 65-step drift limit on d = 2.
+        {
+            constexpr std::size_t n = 12U;
+            constexpr std::size_t d = 2U;
+            std::vector<double> x_data(n * d);
+            for (std::size_t c = 0U; c < d; ++c)
+            {
+                for (std::size_t r = 0U; r < n; ++r)
+                {
+                    x_data[(c * n) + r] = (0.2 * static_cast<double>(r)) + (0.1 * static_cast<double>(c));
+                }
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+            const std::array<cxxgpr::Interval, 2> wide_intervals{
+                cxxgpr::Interval::positive(1e-5, 1e200).value(),
+                cxxgpr::Interval::positive(1e-5, 1e200).value(),
+            };
+            const auto spec = cxxgpr::KernelSpec(
+                cxxgpr::MaternArdKernel::create(
+                    std::array<double, 2>{1.0, 1.2}, cxxgpr::MaternNu::ThreeHalves, wide_intervals
+                )
+                    .value()
+            );
+            auto compiled = spec.compile<double>();
+            auto dcache = cxxgpr::DistanceCache<double>::build(
+                x, compiled.reads_distances(), compiled.needs_ard_sq_diff(), cxxgpr::DistanceCachePolicy::Cached
+            );
+            ASSERT_TRUE(dcache.has_value());
+
+            const std::size_t total_params = compiled.num_params() + 1U;
+            std::vector<double> theta(total_params, 0.0);
+            ASSERT_TRUE(compiled.get_params(std::span<double>(theta.data(), compiled.num_params())).has_value());
+            theta.back() = -1.0;
+
+            cxxgpr::LeafCache<double> lcache;
+            std::vector<double> out_inc(n * n);
+            std::vector<double> out_ref(n * n);
+            std::vector<double> scratch(n * n);
+            auto nested = compiled.make_nested_buffers(n, n);
+            const std::array<std::size_t, 3> all_idx{0U, 1U, 2U};
+
+            ASSERT_TRUE(lcache
+                    .evaluate_incremental(
+                        compiled, x, &(*dcache), theta, all_idx, total_params,
+                        cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+
+            // Drive 66 consecutive small incremental steps past k_max_inc_steps (64) to exercise reset rebuild.
+            const std::array<std::size_t, 1> only_dim0{0U};
+            for (int step = 1; step <= 66; ++step)
+            {
+                theta[0] = 0.01 * static_cast<double>(step);
+                ASSERT_TRUE(
+                    compiled.set_params(std::span<const double>(theta.data(), compiled.num_params())).has_value()
+                );
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x, &(*dcache), theta, only_dim0, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                        )
+                        .has_value());
+            }
+            ASSERT_TRUE(compiled
+                    .apply_points(
+                        x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+                }
+            }
+
+            // Trigger ratio cancellation guard (large jump) and weight underflow guard (ell > 1e155).
+            for (const double log_ell : {12.0, 368.4, 369.0, 0.5})
+            {
+                theta[0] = log_ell;
+                ASSERT_TRUE(
+                    compiled.set_params(std::span<const double>(theta.data(), compiled.num_params())).has_value()
+                );
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x, &(*dcache), theta, only_dim0, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                        )
+                        .has_value());
+                ASSERT_TRUE(compiled
+                        .apply_points(
+                            x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                        )
+                        .has_value());
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+                    }
+                }
+            }
+        }
+
+        // Case 2: High dimension d = 65 (> 64 incremental ARD cache cutoff) falls back cleanly with zero allocs.
+        {
+            constexpr std::size_t n = 6U;
+            constexpr std::size_t d = 65U;
+            std::vector<double> x_data(n * d);
+            for (std::size_t idx = 0U; idx < x_data.size(); ++idx)
+            {
+                x_data[idx] = 0.05 * static_cast<double>(idx % 17U);
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+            std::vector<double> ell(d, 1.5);
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(ell).value());
+            auto compiled = spec.compile<double>();
+            auto dcache = cxxgpr::DistanceCache<double>::build(
+                x, compiled.reads_distances(), compiled.needs_ard_sq_diff(), cxxgpr::DistanceCachePolicy::Cached
+            );
+            ASSERT_TRUE(dcache.has_value());
+
+            const std::size_t total_params = d + 1U;
+            std::vector<double> theta(total_params, std::log(1.5));
+            theta.back() = -1.0;
+            std::vector<std::size_t> all_idx(total_params);
+            for (std::size_t k = 0U; k < total_params; ++k)
+            {
+                all_idx[k] = k;
+            }
+
+            cxxgpr::LeafCache<double> lcache;
+            std::vector<double> out_inc(n * n);
+            std::vector<double> out_ref(n * n);
+            std::vector<double> scratch(n * n);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(lcache
+                    .evaluate_incremental(
+                        compiled, x, &(*dcache), theta, all_idx, total_params,
+                        cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+
+            // Single-dimension change at d = 65 must fall back cleanly with zero heap allocations.
+            theta[0] = std::log(1.7);
+            ASSERT_TRUE(compiled.set_params(std::span<const double>(theta.data(), d)).has_value());
+            const std::array<std::size_t, 1> only_0{0U};
+            {
+                const cxxgpr::test_support::NoAllocationScope audit;
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x, &(*dcache), theta, only_0, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                        )
+                        .has_value());
+            }
+            ASSERT_TRUE(compiled
+                    .apply_points(
+                        x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+                }
+            }
         }
     }
 

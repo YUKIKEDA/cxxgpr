@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// Spec: REQ-11, DES-01, DES-08, DES-16
+/// @file views_test.cpp
+/// @brief Unit tests for column-major matrix views and prediction result container defaults.
+/// @details Verifies MatrixRef and MatrixMut column-major indexing, strided subviews, out-of-bounds
+/// and zero-column safety, Prediction/PredictiveCovariance/Triangle defaults, and zero-allocation
+/// element traversal.
+
 #include "cxxgpr/core/views.hpp"
 
 #include <gtest/gtest.h>
@@ -8,10 +15,12 @@
 
 #include "allocation_audit.hpp"
 
-// Spec: REQ-11, DES-01, DES-08, DES-16
 namespace
 {
 
+    /// @brief Verifies column-major element indexing, strided subviews, and empty/oob column guards.
+    /// @details Confirms writes through a strided MatrixMut subview alias the backing buffer, checks
+    /// MatrixRef conversion and col() spans, and verifies zero-column or out-of-range col() returns empty.
     TEST(ViewsTest, ColumnMajorIndexingAndStridedSubmatrixWorkCorrectly)
     {
         // Packed 3x2 column-major matrix:
@@ -38,6 +47,7 @@ namespace
         EXPECT_DOUBLE_EQ(sub(0, 1), 5.0);
         EXPECT_DOUBLE_EQ(sub(1, 1), 6.0);
 
+        // Mutate via subview and confirm the backing storage updates at offset (1 + 3*1 + 1 = 5).
         sub(1, 1) = 42.0;
         EXPECT_DOUBLE_EQ(storage[5], 42.0);
 
@@ -67,8 +77,12 @@ namespace
         EXPECT_TRUE(mat.col(10).empty());
     }
 
+    /// @brief Verifies PredictOptions, Triangle aliasing, Prediction<T>, and PredictiveCovariance<T> defaults.
+    /// @details Confirms Observation variance is the default across options and result structs and that
+    /// cxxgpr::kernel::Triangle aliases cxxgpr::Triangle.
     TEST(ViewsTest, PredictionTypesAndClosedEnumsUseSpecifiedDefaults)
     {
+        // Confirm Observation is the default VarianceKind and Triangle aliases match across namespaces.
         EXPECT_EQ(cxxgpr::PredictOptions{}.variance_kind, cxxgpr::VarianceKind::Observation);
         EXPECT_NE(cxxgpr::Triangle::Lower, cxxgpr::Triangle::Upper);
         EXPECT_EQ(cxxgpr::kernel::Triangle::Full, cxxgpr::Triangle::Full);
@@ -88,11 +102,15 @@ namespace
         EXPECT_EQ(cov.variance_kind, cxxgpr::VarianceKind::Observation);
     }
 
+    /// @brief Verifies MatrixMut mutation, MatrixRef conversion, and col() iteration allocate zero heap memory.
+    /// @details Traverses a 3x3 matrix inside AuditMode::CppAndEigen NoAllocationScope and checks the
+    /// tracked allocation delta is zero and the accumulated sum equals 32.0.
     TEST(ViewsTest, ViewAccessAndColumnSlicingAllocateZero)
     {
         std::array<double, 9> buf{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0};
         double acc = 0.0;
         std::size_t delta = 1;
+        // Original sum is 45; changing element (2, 1) from 6 to -7 reduces sum by 13 to 32.
         {
             cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
             cxxgpr::MatrixMut<double> mut(std::span<double>{buf}, 3U, 3U);

@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+/// @file nelder_mead.cpp
+/// @brief Implementation of Nelder-Mead simplex optimization over logit-transformed parameter bounds.
+/// @details Implements derivative-free simplex initialization, reflection, expansion, outside/inside
+/// contraction, and shrink steps in unconstrained logit coordinates with multi-start restarts.
+
 #include "cxxgpr/optimizer/nelder_mead.hpp"
 
 #include "cxxgpr/optimizer/bounds.hpp"
@@ -15,10 +20,20 @@ namespace cxxgpr::optimizer
     namespace
     {
 
+        /// @brief Evaluates obj in constrained log-theta space from unconstrained logit coordinates z.
+        /// @details Guards finiteness of z, maps z to theta_buf via bounds.to_constrained(), calls
+        /// obj.value(theta_buf), and rejects non-finite scalar outputs.
+        /// @param[in,out] obj Objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z -> theta transform.
+        /// @param[in] z Unconstrained logit coordinate vector of length bounds.dim().
+        /// @param[in,out] theta_buf Caller-supplied scratch span of length bounds.dim().
+        /// @return Finite objective value at z, or GprError if evaluation fails or returns non-finite value.
+        /// @retval GprErrorCode::NonFiniteInput When z or the evaluated objective value is non-finite.
         [[nodiscard]] std::expected<double, GprError> eval_logit(
             Objective& obj, const LogBounds& bounds, std::span<const double> z, std::span<double> theta_buf
         )
         {
+            // Reject non-finite unconstrained coordinates before transforming into open log-theta bounds.
             for (const double val : z)
             {
                 if (!std::isfinite(val))
@@ -39,6 +54,18 @@ namespace cxxgpr::optimizer
             return res;
         }
 
+        /// @brief Runs one single-start Nelder-Mead simplex optimization from initial_theta.
+        /// @details Converts initial_theta to logit z0, builds d + 1 simplex vertices via axis-aligned
+        /// perturbations, and iteratively updates the worst vertex via reflection (alpha = 1), expansion
+        /// (gamma = 2), outside/inside contraction (rho = 0.5), or full simplex shrink (sigma = 0.5)
+        /// until both objective spread and simplex diameter satisfy tolerance or max_iterations is reached.
+        /// @param[in,out] obj Objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+        /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param[in] max_iterations Maximum number of simplex iterations.
+        /// @param[in] tolerance Convergence tolerance on simplex value spread and vertex infinity-norm distance.
+        /// @return OptimizerResult holding best vertex mapped back to log-theta space, or GprError on failure.
+        /// @retval GprErrorCode::NonFiniteInput When any simplex evaluation produces non-finite values.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_nelder_mead_single(
             Objective& obj,
             const LogBounds& bounds,
@@ -54,6 +81,7 @@ namespace cxxgpr::optimizer
                 return std::unexpected(std::move(u).error());
             }
 
+            // Initialize d + 1 simplex vertices around z0 using relative 5% steps (or 0.25 near 0).
             const std::size_t n_verts = d + 1U;
             std::vector<std::vector<double>> verts(n_verts, z0);
             for (std::size_t k = 1; k < n_verts; ++k)
@@ -82,6 +110,7 @@ namespace cxxgpr::optimizer
                 std::ranges::sort(order, [&](std::size_t a, std::size_t b) { return vals[a] < vals[b]; });
             };
 
+            // Standard Nelder-Mead simplex coefficients: reflection, expansion, contraction, shrink.
             constexpr double k_alpha = 1.0;
             constexpr double k_gamma = 2.0;
             constexpr double k_rho = 0.5;
@@ -102,6 +131,7 @@ namespace cxxgpr::optimizer
                 const std::size_t second_worst_idx = order[n_verts - 2U];
                 const std::size_t worst_idx = order[n_verts - 1U];
 
+                // Terminate only when both objective spread and simplex diameter fall below tolerance.
                 const double f_diff = vals[worst_idx] - vals[best_idx];
                 double max_dist = 0.0;
                 for (std::size_t k = 1; k < n_verts; ++k)
@@ -119,6 +149,7 @@ namespace cxxgpr::optimizer
                     break;
                 }
 
+                // Compute centroid of the best d vertices excluding the worst vertex.
                 std::ranges::fill(centroid, 0.0);
                 for (std::size_t k = 0; k < n_verts - 1U; ++k)
                 {
@@ -134,7 +165,7 @@ namespace cxxgpr::optimizer
                     centroid[i] *= inv_d;
                 }
 
-                // Reflection
+                // Reflection across the centroid away from the worst vertex.
                 for (std::size_t i = 0; i < d; ++i)
                 {
                     xr[i] = centroid[i] + (k_alpha * (centroid[i] - verts[worst_idx][i]));
@@ -154,7 +185,7 @@ namespace cxxgpr::optimizer
 
                 if (*fr < vals[best_idx])
                 {
-                    // Expansion
+                    // Expansion when reflection achieves a strict new simplex minimum.
                     for (std::size_t i = 0; i < d; ++i)
                     {
                         xe[i] = centroid[i] + (k_gamma * (xr[i] - centroid[i]));
@@ -173,7 +204,7 @@ namespace cxxgpr::optimizer
                     continue;
                 }
 
-                // Contraction
+                // Outside contraction if reflection improved on worst; otherwise inside contraction.
                 if (*fr < vals[worst_idx])
                 {
                     for (std::size_t i = 0; i < d; ++i)
@@ -203,7 +234,7 @@ namespace cxxgpr::optimizer
                     }
                 }
 
-                // Shrink
+                // Shrink all non-best vertices halfway toward the best vertex if contraction failed.
                 const auto& v_best = verts[best_idx];
                 for (std::size_t k = 1; k < n_verts; ++k)
                 {
@@ -234,6 +265,17 @@ namespace cxxgpr::optimizer
 
     }  // namespace
 
+    /// @brief Minimizes obj starting from log-space initial_params.
+    /// @details Validates tolerance_ >= 0 and delegates to detail::run_with_restarts() with
+    /// run_nelder_mead_single().
+    /// @param[in,out] obj Objective evaluated in log-theta space.
+    /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
+    /// @retval GprErrorCode::InvalidConfig When tolerance is non-finite or negative.
+    /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
+    /// @retval GprErrorCode::LengthMismatch When initial_params.size() != obj.dim().
+    /// @retval GprErrorCode::NonFiniteInput When initial_params or simplex evaluation yields non-finite values.
+    /// @retval GprErrorCode::InvalidInterval When objective intervals or initial_params are out of bounds.
     std::expected<OptimizerResult, GprError> NelderMead::optimize(
         Objective& obj, std::span<const double> initial_params
     ) const

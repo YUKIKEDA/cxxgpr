@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-08, REQ-11, DES-16, DES-17, DES-20
+/// @file inference_test.cpp
+/// @brief Unit and property tests for GPR posterior prediction, covariance, sampling, and LOO.
+/// @details Verifies workspace inference routines against direct dense linear-algebra oracles,
+/// checks zero-allocation predict_into() and loo_predict_into() across Double and MixedPrecision,
+/// validates posterior sampling determinism and Monte Carlo moments, OpenMP bitwise invariance,
+/// and DES-02 negative input validation precedence.
 
 #include "cxxgpr/linalg/cholesky.hpp"
 #include "cxxgpr/workspace/workspace.hpp"
@@ -24,28 +30,57 @@
 namespace
 {
 
+    /// @brief Pre-fitted Cholesky factor, alpha vector, and training arrays for inference tests.
+    /// @details Bundles precision-typed training tensors, lower factor L, and double/refine-typed
+    /// dual coefficients alpha produced by factor_and_mll() for reuse across prediction tests.
+    /// @tparam P Precision policy struct providing Storage and Refine types.
     template <typename P> struct FittedFixture
     {
+        /// @brief Kernel and matrix storage scalar type (float or double).
         using Storage = P::Storage;
+        /// @brief Refinement and prediction output scalar type (float or double).
         using Refine = P::Refine;
 
+        /// @brief Fitted Gaussian observation noise likelihood.
         cxxgpr::GaussianLikelihood likelihood;
+        /// @brief Column-major n x d training inputs in storage precision.
         std::vector<Storage> x_train;
+        /// @brief Training targets y in storage precision.
         std::vector<Storage> y_storage;
+        /// @brief Training targets y in refinement/prediction precision.
         std::vector<Refine> y_refine;
+        /// @brief Column-major n x n lower Cholesky factor L of (K + sigma_n^2 I).
         std::vector<Storage> l_factor;
+        /// @brief Solved dual coefficient vector alpha = (K + sigma_n^2 I)^(-1) y.
         std::vector<Refine> alpha;
+        /// @brief Number of training observations.
         std::size_t n = 0;
+        /// @brief Input feature dimensionality.
         std::size_t d = 0;
 
+        /// @brief Returns a non-owning column-major MatrixRef view over training inputs x_train.
+        /// @return Read-only n x d view of training coordinates.
         [[nodiscard]] cxxgpr::MatrixRef<Storage> x_ref() const noexcept
         {
             return {x_train.data(), n, d, d == 0 ? 1 : n};
         }
 
+        /// @brief Returns a non-owning column-major MatrixRef view over lower Cholesky factor L.
+        /// @return Read-only n x n view of lower factor L.
         [[nodiscard]] cxxgpr::MatrixRef<Storage> l_ref() const noexcept { return {l_factor.data(), n, n, n}; }
     };
 
+    /// @brief Constructs and factors a FittedFixture from raw double-precision training arrays.
+    /// @details Converts inputs to P::Storage, invokes factor_and_mll() with zero fixed jitter, and
+    /// copies the resulting lower Cholesky factor L and dual vector alpha into the returned fixture.
+    /// @tparam P Precision policy type governing storage and refinement scalar types.
+    /// @param[in] compiled Precompiled kernel evaluated at its current parameters.
+    /// @param[in] x_vals Flattened column-major n x d training coordinate array.
+    /// @param[in] y_vals Training target vector of length n.
+    /// @param[in] n Number of training observations.
+    /// @param[in] d Number of input feature dimensions.
+    /// @param[in] noise_sd Gaussian noise standard deviation passed to GaussianLikelihood::create().
+    /// @return Populated FittedFixture containing L, alpha, and casted training data.
     template <typename P>
     FittedFixture<P> make_fitted_fixture(
         const cxxgpr::CompiledKernel<typename P::Storage>& compiled,
@@ -59,6 +94,7 @@ namespace
         using Storage = P::Storage;
         using Refine = P::Refine;
 
+        // Configure likelihood, zero jitter, and speed-optimized FitBuffers before factoring.
         auto lik = cxxgpr::GaussianLikelihood::create(noise_sd).value();
         auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
         auto bufs = cxxgpr::FitBuffers<P>::create(n, cxxgpr::FitPolicy::prefer_speed());
@@ -106,6 +142,9 @@ namespace
         };
     }
 
+    /// @brief Verifies predict_into() matches direct dense Cholesky solves and allocates zero memory.
+    /// @details Compares Observation and Latent predictive variances, checks zero allocations after
+    /// warmup via NoAllocationScope, and cross-checks mean and variance against solve_llt_in_place().
     TEST(WorkspaceInferenceTest, PredictMatchesDirectReferenceAndZeroAllocatesAfterWarmup)
     {
         // Spec: REQ-08, REQ-11, DES-16, DES-17
@@ -192,6 +231,9 @@ namespace
         }
     }
 
+    /// @brief Verifies MixedPrecision predict_into() allocates zero heap memory after warmup.
+    /// @details Warms up QueryWorkspace under MixedPrecision<PromoteStorage> and asserts zero heap
+    /// allocations during subsequent predict_into() calls of identical query shape.
     TEST(WorkspaceInferenceTest, MixedPrecisionPredictZeroAllocatesAfterWarmup)
     {
         // Spec: REQ-11, DES-16
@@ -231,6 +273,9 @@ namespace
         );
     }
 
+    /// @brief Verifies predict_covariance() symmetry/diagonal parity and posterior sample() properties.
+    /// @details Confirms covariance symmetry and diagonal match against predict(), zero-draw empty
+    /// return, deterministic seed reproducibility, and 4000-draw Monte Carlo mean/covariance parity.
     TEST(WorkspaceInferenceTest, PredictCovarianceAndSampleMatchProperties)
     {
         // Spec: DES-16, DES-20
@@ -336,6 +381,9 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical LOO predictions match explicit held-out refits with zero allocations.
+    /// @details Compares loo_predict() Observation and Latent mean/variance against n individual
+    /// refits omitting each point, and audits loo_predict_into() under NoAllocationScope.
     TEST(WorkspaceInferenceTest, LooPredictMatchesExplicitLeaveOneOutReference)
     {
         // Spec: REQ-08, DES-16
@@ -425,6 +473,9 @@ namespace
         }
     }
 
+    /// @brief Verifies predict() outputs are bit-identical between 1 and 4 OpenMP threads.
+    /// @details Compares std::bit_cast<uint64_t> representations of every predicted mean and variance
+    /// across thread counts on an m = 32 query grid.
     TEST(WorkspaceInferenceTest, OpenMpThreadCountBitwiseDeterminism)
     {
         // Spec: REQ-11, DES-20
@@ -474,6 +525,9 @@ namespace
         }
     }
 
+    /// @brief Negative controls verifying predict(), loo_predict(), and fill_diag() error precedence.
+    /// @details Confirms DimensionMismatch, NonFiniteInput, LengthMismatch, EmptyInput, and DES-02
+    /// LengthMismatch-over-DimensionMismatch priority across prediction and LOO entry points.
     TEST(WorkspaceInferenceTest, NegativeControlsRejectInvalidInputs)
     {
         // Spec: DES-16
@@ -484,6 +538,7 @@ namespace
         auto fix = make_fitted_fixture<cxxgpr::DoublePrecision>(kernel, x_vals, y_vals, 2U, 2U, 0.1);
         cxxgpr::QueryWorkspace<cxxgpr::DoublePrecision> qws;
 
+        // Reject query column-count mismatch with DimensionMismatch.
         const std::vector<double> bad_dim_q = {0.1, 0.2};
         auto err_dim = cxxgpr::predict(
             kernel, fix.likelihood, fix.x_ref(), fix.l_ref(), fix.alpha,

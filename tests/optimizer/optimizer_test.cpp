@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-09, DES-11, DES-19, DES-20
+/// @file optimizer_test.cpp
+/// @brief Unit and property tests for hyperparameter optimizers, LogBounds, restarts, and validation.
+/// @details Verifies LogBounds unconstrained-to-constrained transformations, chain-rule gradients
+/// and Hessians against finite differences, EvalCache deduplication, convergence of L-BFGS,
+/// TrustRegion, NelderMead, FastSimulatedAnnealing, and Fixed, deterministic multi-start restarts,
+/// and negative validation controls.
 
 #include "cxxgpr/optimizer/optimizer.hpp"
 
@@ -23,11 +29,16 @@ namespace
     static_assert(cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::FastSimulatedAnnealing>::uses_change_indices);
     static_assert(!cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::Fixed>::uses_change_indices);
 
-    // Convex anisotropic quadratic in log-theta space: f(theta) = 0.5 * sum_i w_i * (theta_i -
-    // target_i)^2
+    /// @brief Convex anisotropic quadratic objective in log-theta space for optimizer tests.
+    /// @details Evaluates f(theta) = 0.5 * sum_i w_i * (theta_i - target_i)^2 with analytical
+    /// gradients, diagonal Hessians, and bitwise unchanged-parameter verification in value_at_changes().
     class QuadraticObjective final : public cxxgpr::optimizer::TwiceDifferentiable
     {
     public:
+        /// @brief Constructs a quadratic objective with target minimum, diagonal weights, and bounds.
+        /// @param[in] target Target minimizer vector in log-parameter space.
+        /// @param[in] weights Positive per-coordinate curvature weights.
+        /// @param[in] bounds Parameter Interval constraints matching target.size().
         QuadraticObjective(
             std::vector<double> target, std::vector<double> weights, std::vector<cxxgpr::Interval> bounds
         ) :
@@ -37,8 +48,13 @@ namespace
         {
         }
 
+        /// @brief Returns the number of optimization variables.
+        /// @return Objective dimension matching target_.size().
         [[nodiscard]] std::size_t dim() const noexcept override { return target_.size(); }
 
+        /// @brief Evaluates the quadratic objective value and records evaluation count and last iterate.
+        /// @param[in] params Current log-parameter vector of length dim().
+        /// @return Scalar objective value 0.5 * sum_i w_i * (params_i - target_i)^2.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> params) override
         {
             ++eval_count;
@@ -52,11 +68,16 @@ namespace
             return acc;
         }
 
+        /// @brief Evaluates the objective while verifying unlisted indices stay bitwise unchanged.
+        /// @param[in] params Candidate log-parameter vector of length dim().
+        /// @param[in] changed_indices Sorted parameter indices declared as mutated since the prior call.
+        /// @return Scalar objective value from value(params).
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_at_changes(
             std::span<const double> params, std::span<const std::size_t> changed_indices
         ) override
         {
             ++change_eval_count;
+            // Assert every parameter outside changed_indices matches the prior iterate bit-for-bit.
             if (!last_params_.empty())
             {
                 for (std::size_t i = 0; i < params.size(); ++i)
@@ -73,6 +94,9 @@ namespace
             return value(params);
         }
 
+        /// @brief Copies parameter Interval bounds into out.
+        /// @param[out] out Destination span of length dim().
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
         ) const override
@@ -81,6 +105,10 @@ namespace
             return {};
         }
 
+        /// @brief Writes analytical objective gradient into out_grad.
+        /// @param[in] params Log-parameter vector of length dim().
+        /// @param[out] out_grad Output gradient vector of length dim().
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> params, std::span<double> out_grad
         ) override
@@ -92,6 +120,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates both quadratic objective value and gradient into out_grad.
+        /// @param[in] params Log-parameter vector of length dim().
+        /// @param[out] out_grad Output gradient vector of length dim().
+        /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> params, std::span<double> out_grad
         ) override
@@ -108,6 +140,10 @@ namespace
             return v;
         }
 
+        /// @brief Writes the constant diagonal Hessian matrix into row/column-major out_hess.
+        /// @param[in] params Log-parameter vector (unused because curvature is constant).
+        /// @param[out] out_hess Output dim x dim Hessian matrix buffer.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
             [[maybe_unused]] std::span<const double> params, std::span<double> out_hess
         ) override
@@ -121,24 +157,39 @@ namespace
             return {};
         }
 
+        /// @brief Cumulative count of value() evaluations performed.
         std::size_t eval_count{0};
+        /// @brief Cumulative count of value_at_changes() evaluations performed.
         std::size_t change_eval_count{0};
 
     private:
+        /// @brief Target minimizer coordinates in log-parameter space.
         std::vector<double> target_;
+        /// @brief Positive diagonal quadratic curvature weights.
         std::vector<double> weights_;
+        /// @brief Valid parameter bounds for each dimension.
         std::vector<cxxgpr::Interval> bounds_;
+        /// @brief Snapshot of the previous params vector for change-index bit checks.
         std::vector<double> last_params_;
     };
 
-    // 2D Rosenbrock function in log-theta space: minimum at (1.0, 1.0), value 0.
+    /// @brief Two-dimensional Rosenbrock test objective with global minimum 0 at (1.0, 1.0).
+    /// @details Implements TwiceDifferentiable with exact analytical value, gradient, and Hessian
+    /// to benchmark L-BFGS and TrustRegion convergence through curved valleys.
     class RosenbrockObjective final : public cxxgpr::optimizer::TwiceDifferentiable
     {
     public:
+        /// @brief Constructs a Rosenbrock objective sharing interval iv on both coordinates.
+        /// @param[in] iv Positive hyperparameter Interval applied to both coordinates.
         explicit RosenbrockObjective(cxxgpr::Interval iv) : iv_(iv) {}
 
+        /// @brief Returns dimensionality (always 2).
+        /// @return Problem dimension (2).
         [[nodiscard]] std::size_t dim() const noexcept override { return 2U; }
 
+        /// @brief Evaluates (1 - x)^2 + 100 * (y - x^2)^2 at p.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @return Scalar Rosenbrock objective value.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
         {
             const double x = p[0];
@@ -148,6 +199,9 @@ namespace
             return (a * a) + (100.0 * b * b);
         }
 
+        /// @brief Copies interval iv_ into both elements of out.
+        /// @param[out] out Destination interval span of length 2.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
         ) const override
@@ -157,6 +211,10 @@ namespace
             return {};
         }
 
+        /// @brief Computes analytical Rosenbrock gradient at p into g.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] g Output gradient vector of length 2.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> p, std::span<double> g
         ) override
@@ -168,6 +226,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates Rosenbrock value and analytical gradient together.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] g Output gradient vector of length 2.
+        /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> p, std::span<double> g
         ) override
@@ -180,6 +242,10 @@ namespace
             return v;
         }
 
+        /// @brief Computes exact 2x2 analytical Rosenbrock Hessian at p into h.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] h Output 2x2 Hessian buffer of length 4.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
             std::span<const double> p, std::span<double> h
         ) override
@@ -194,17 +260,27 @@ namespace
         }
 
     private:
+        /// @brief Shared coordinate Interval constraint.
         cxxgpr::Interval iv_;
     };
 
-    // Multi-modal 1D function with local minimum near -2.5 and global minimum at +1.5.
+    /// @brief Multi-modal 1D quartic test objective for multi-start restart verification.
+    /// @details Evaluates (x^2 - 4)^2 - 0.6*x + 2, which traps local searches started near -2.0
+    /// in an inferior local basin while the global minimum lies above +1.5.
     class MultiModalObjective final : public cxxgpr::optimizer::Differentiable
     {
     public:
+        /// @brief Constructs the 1D multi-modal objective with bound interval iv.
+        /// @param[in] iv Positive hyperparameter Interval bound.
         explicit MultiModalObjective(cxxgpr::Interval iv) : iv_(iv) {}
 
+        /// @brief Returns problem dimensionality (always 1).
+        /// @return Problem dimension (1).
         [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
 
+        /// @brief Evaluates (x^2 - 4)^2 - 0.6*x + 2 at p[0].
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @return Scalar objective value.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
         {
             const double x = p[0];
@@ -212,6 +288,9 @@ namespace
             return ((x2 - 4.0) * (x2 - 4.0)) - (0.6 * x) + 2.0;
         }
 
+        /// @brief Copies bound interval iv_ into out[0].
+        /// @param[out] out Destination interval span of length 1.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
         ) const override
@@ -220,6 +299,10 @@ namespace
             return {};
         }
 
+        /// @brief Computes analytical derivative 4*x*(x^2 - 4) - 0.6 at p[0].
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> p, std::span<double> g
         ) override
@@ -229,6 +312,10 @@ namespace
             return {};
         }
 
+        /// @brief Evaluates multi-modal value and analytical derivative together.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> p, std::span<double> g
         ) override
@@ -242,9 +329,13 @@ namespace
         }
 
     private:
+        /// @brief Coordinate Interval constraint.
         cxxgpr::Interval iv_;
     };
 
+    /// @brief Verifies LogBounds mappings, chain-rule gradients/Hessians, and EvalCache deduplication.
+    /// @details Confirms z = 0 midpoint Jacobian identity, constrained/unconstrained roundtrip,
+    /// chain-rule gradient/Hessian match against central finite differences, and EvalCache hit reuse.
     TEST(OptimizerTest, LogBoundsAndChainRuleMatchFiniteDifferences)
     {
         // Spec: DES-19
@@ -328,6 +419,9 @@ namespace
         EXPECT_EQ(obj.eval_count, before + 1U);
     }
 
+    /// @brief Verifies L-BFGS and TrustRegion converge to the Rosenbrock global minimum.
+    /// @details Starts both first- and second-order optimizers at (-1.2, 1.0) and confirms convergence
+    /// to (1.0, 1.0) with objective value below tolerance.
     TEST(OptimizerTest, LbfgsAndTrustRegionConvergeOnRosenbrock)
     {
         // Spec: REQ-09, DES-19
@@ -335,6 +429,7 @@ namespace
         RosenbrockObjective rosen(iv);
         const std::array<double, 2> start{-1.2, 1.0};
 
+        // Run first-order L-BFGS optimization.
         const auto lbfgs = cxxgpr::optimizer::Lbfgs().with_max_iterations(200U).with_tolerance(1e-8);
         auto r_lbfgs = lbfgs.optimize(rosen, start);
         ASSERT_TRUE(r_lbfgs.has_value());
@@ -352,6 +447,10 @@ namespace
         EXPECT_LT(r_tr->value, 1e-10);
     }
 
+    /// @brief Verifies NelderMead, FastSimulatedAnnealing, and Fixed optimizer behaviors.
+    /// @details Checks NelderMead convergence on anisotropic quadratic, Fixed single-evaluation
+    /// behavior, and FastSimulatedAnnealing seeded bitwise determinism, change-index calls, and
+    /// open-interval boundary policies (Reflect and Clamp).
     TEST(OptimizerTest, NelderMeadFsaAndFixedBehaveAsSpecified)
     {
         // Spec: REQ-09, DES-11, DES-19, DES-20
@@ -359,6 +458,7 @@ namespace
         QuadraticObjective quad({0.7, -1.1}, {3.0, 1.5}, {iv, iv});
         const std::array<double, 2> start{-1.5, 2.0};
 
+        // Derivative-free Nelder-Mead simplex search on convex anisotropic quadratic.
         const auto nm = cxxgpr::optimizer::NelderMead().with_max_iterations(300U).with_tolerance(1e-6);
         auto r_nm = nm.optimize(quad, start);
         ASSERT_TRUE(r_nm.has_value());
@@ -403,6 +503,9 @@ namespace
         EXPECT_LT(r_clamp->params[0], std::log(iv.hi()));
     }
 
+    /// @brief Verifies multi-start restarts escape local traps and produce bit-identical results.
+    /// @details Confirms single-start L-BFGS remains in the x < 0 local minimum while 8-restart
+    /// seeded optimization locates x > 1.5 deterministically with bitwise identical value and params.
     TEST(OptimizerTest, RestartsFindGlobalOptimumDeterministically)
     {
         // Spec: DES-19, DES-20
@@ -427,6 +530,9 @@ namespace
         EXPECT_EQ(std::bit_cast<std::uint64_t>(r_m1->value), std::bit_cast<std::uint64_t>(r_m2->value));
     }
 
+    /// @brief Negative controls verifying optimizer input and configuration validation errors.
+    /// @details Checks EmptyInput, LengthMismatch, NonFiniteInput, InvalidInterval on boundary points,
+    /// and InvalidConfig for invalid history sizes, trust-region radii, and cooling temperatures.
     TEST(OptimizerTest, NegativeControlsRejectInvalidInputsAndConfigs)
     {
         // Spec: DES-02, DES-19
@@ -434,6 +540,7 @@ namespace
         QuadraticObjective quad({0.0, 0.0}, {1.0, 1.0}, {iv, iv});
         const cxxgpr::optimizer::Lbfgs lbfgs;
 
+        // Validate initial parameter vector errors before running optimizer iterations.
         const std::vector<double> empty;
         auto err_empty = lbfgs.optimize(quad, empty);
         ASSERT_FALSE(err_empty.has_value());

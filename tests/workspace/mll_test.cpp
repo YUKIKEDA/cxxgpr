@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Spec: REQ-01, REQ-02, REQ-04, REQ-08, DES-13, DES-15, DES-17, DES-20
+/// @file mll_test.cpp
+/// @brief Unit and property tests for MLL, analytical gradients, Hessians, and FitBuffers policies.
+/// @details Verifies workspace buffer sizing and QueryWorkspace zero-alloc reuse, KeepPlan
+/// log-marginal-likelihood and analytical gradient/Hessian parity against central finite
+/// differences across cache and Cholesky buffer policies, Single/MixedPrecision parity, and
+/// bitwise determinism across OpenMP thread counts.
 
 #include "cxxgpr/workspace/workspace.hpp"
 
@@ -21,8 +27,12 @@
 namespace
 {
 
+    /// @brief Verifies FitBuffers/WorkspaceCore sizing policies and QueryWorkspace zero-alloc reuse.
+    /// @details Checks EmptyInput on zero size, Retain vs Reuse W-matrix and distance buffer flags,
+    /// and zero heap allocations on QueryWorkspace::ensure() when capacity is already sufficient.
     TEST(WorkspaceMllTest, BufferSizingAndQueryWorkspaceReuse)
     {
+        // Reject zero training sample count before allocating any workspace buffers.
         EXPECT_EQ(
             cxxgpr::WorkspaceCore<cxxgpr::DoublePrecision>::create(0U).error().code(), cxxgpr::GprErrorCode::EmptyInput
         );
@@ -55,6 +65,10 @@ namespace
         }
     }
 
+    /// @brief Verifies KeepPlan MLL and analytical gradients match finite differences with zero alloc.
+    /// @details Sweeps all four combinations of DistanceCachePolicy and CholeskyBuffer across a
+    /// multi-product composite kernel, verifying factor restoration in Reuse mode, zero-alloc
+    /// re-evaluation under NoAllocationScope, and gradient parity against central finite differences.
     TEST(WorkspaceMllTest, KeepPlanMllAndAnalyticalGradientMatchFiniteDifferences)
     {
         const std::vector<double> x_data{0.0, 0.4, 0.9, 1.4, -0.3, 0.2, 0.8, 1.5, -0.6, 0.1};
@@ -62,6 +76,7 @@ namespace
         constexpr std::size_t n = 5U;
         const cxxgpr::MatrixRef<double> x(x_data.data(), n, 2U, n);
 
+        // Multi-product sum kernel triggering KeepPlan intermediate product caching alongside White noise.
         const auto spec =
             (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.4).value())
                 * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
@@ -173,8 +188,12 @@ namespace
         }
     }
 
+    /// @brief Verifies SinglePrecision and MixedPrecision<PromoteStorage> produce identical MLL and gradients.
+    /// @details Confirms both policies execute mll_and_gradient_into() on identical float training
+    /// data and agree bitwise on MLL and parameter gradient entries when float solves match.
     TEST(WorkspaceMllTest, SingleAndMixedPrecisionSupportMllAndGradient)
     {
+        // Evaluate MLL and gradient in float storage under SinglePrecision and MixedPrecision<PromoteStorage>.
         const std::vector<float> x_data{0.0F, 0.6F, 1.3F, -0.2F, 0.5F, 1.1F};
         const std::vector<float> y{0.4F, 1.0F, 0.2F};
         constexpr std::size_t n = 3U;
@@ -202,8 +221,12 @@ namespace
         }
     }
 
+    /// @brief Verifies MLL and analytical gradients are bit-identical across 1 and 4 OpenMP threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns of every gradient entry and final MLL
+    /// on an n = 72 composite kernel under FastApprox across single- and multi-threaded OpenMP runs.
     TEST(WorkspaceMllTest, MllAndGradientAreBitwiseDeterministicAcrossOpenMpThreads)
     {
+        // Construct an n = 72 2D synthetic dataset exercising OpenMP column reductions.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 2U;
         std::vector<double> x_data(n * d);
@@ -264,8 +287,13 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical MLL Hessian matches finite differences with lazy zero-alloc buffers.
+    /// @details Checks lazy HessianWorkspace allocation for both prefer_speed() and prefer_memory(),
+    /// audits zero-allocation subsequent calls under NoAllocationScope, and confirms symmetry and
+    /// finite-difference parity against mll_and_gradient_into().
     TEST(WorkspaceMllTest, AnalyticalHessianMatchesFiniteDiffAndZeroAllocForSpeedAndMemoryPolicies)
     {
+        // Use a composite Constant * RBF + MaternARD + White system across speed and memory policies.
         const std::vector<double> x_data{0.0, 0.5, 1.1, 1.7, -0.4, 0.2, 0.9, 1.4};
         const std::vector<double> y{0.4, 1.0, 0.7, -0.3};
         constexpr std::size_t n = 4U;
@@ -370,8 +398,12 @@ namespace
         }
     }
 
+    /// @brief Verifies analytical MLL Hessian entries are bit-identical across 1 and 4 OpenMP threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns of the full Hessian matrix between
+    /// 1-thread and 4-thread OpenMP executions on an n = 72 training set.
     TEST(WorkspaceMllTest, AnalyticalHessianIsBitwiseDeterministicAcrossOpenMpThreads)
     {
+        // Evaluate full Hessian on n = 72 points under 1 and 4 threads and compare raw bits.
         constexpr std::size_t n = 72U;
         constexpr std::size_t d = 2U;
         std::vector<double> x_data(n * d);
@@ -419,6 +451,171 @@ namespace
         for (std::size_t i = 0; i < h1.size(); ++i)
         {
             EXPECT_EQ(std::bit_cast<std::uint64_t>(h1[i]), std::bit_cast<std::uint64_t>(h4[i])) << "i=" << i;
+        }
+    }
+
+    /// @brief Verifies 1-pass isotropic/linear adjoint contraction (n >= 128) and DistanceKernel non-zero diag parity.
+    /// @details Confirms analytical gradients match central finite differences, stay bit-identical between 1 and 4
+    /// OpenMP threads, allocate zero heap bytes in reuse calls, and handle positive DistanceKernel diagonals cleanly.
+    TEST(WorkspaceMllTest, IsotropicOnePassWeightedGradsLargeNAndNonZeroDistDiag)
+    {
+        // Case 1: n = 132 (>= 128 parallel threshold) across all 5 leaf_iso_weighted_grads kernel families (1D Periodic
+        // is PSD).
+        {
+            constexpr std::size_t n = 132U;
+            constexpr std::size_t d = 1U;
+            std::vector<double> x_data(n * d);
+            std::vector<double> y(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                x_data[i] = 0.08 * static_cast<double>(i);
+                y[i] = std::sin(0.15 * static_cast<double>(i)) + (0.05 * static_cast<double>(i % 7U));
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
+                + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.3, cxxgpr::MaternNu::ThreeHalves).value())
+                + cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.9, 2.4).value())
+                + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticKernel::create(1.2, 1.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+
+            const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+            const auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+            auto run_threads = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                auto compiled = spec.compile<double>();
+                auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+                EXPECT_TRUE(bufs.has_value());
+                const std::size_t total_params = compiled.num_params() + 1U;
+                std::vector<double> grad(total_params, 0.0);
+                std::vector<double> grad_again(total_params, 0.0);
+                const auto res1 = cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, grad);
+                EXPECT_TRUE(res1.has_value()) << res1.error().message();
+                {
+                    const cxxgpr::test_support::NoAllocationScope audit;
+                    const auto res2 = cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs, grad_again);
+                    EXPECT_TRUE(res2.has_value()) << res2.error().message();
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+                return grad;
+            };
+
+#ifdef _OPENMP
+            const int saved = omp_get_max_threads();
+#endif
+            const auto g1 = run_threads(1);
+            const auto g4 = run_threads(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved);
+#endif
+            ASSERT_EQ(g1.size(), g4.size());
+            for (std::size_t p = 0U; p < g1.size(); ++p)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(g1[p]), std::bit_cast<std::uint64_t>(g4[p])) << "p=" << p;
+            }
+
+            // Finite-difference check on representative parameters across each isotropic/linear family.
+            auto compiled = spec.compile<double>();
+            auto bufs = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+            ASSERT_TRUE(bufs.has_value());
+            const std::size_t n_kernel = compiled.num_params();
+            std::vector<double> theta(n_kernel);
+            ASSERT_TRUE(compiled.get_params(theta).has_value());
+            constexpr double h = 1e-6;
+            for (std::size_t p = 0U; p < n_kernel; ++p)
+            {
+                auto tp = theta;
+                tp[p] += h;
+                ASSERT_TRUE(compiled.set_params(tp).has_value());
+                auto mp = cxxgpr::factor_and_mll(compiled, lik, x, y, jitter, *bufs);
+                ASSERT_TRUE(mp.has_value());
+                auto tm = theta;
+                tm[p] -= h;
+                ASSERT_TRUE(compiled.set_params(tm).has_value());
+                auto mm = cxxgpr::factor_and_mll(compiled, lik, x, y, jitter, *bufs);
+                ASSERT_TRUE(mm.has_value());
+                const double fd = (*mp - *mm) / (2.0 * h);
+                EXPECT_NEAR(g1[p], fd, 1e-5 * std::max(1.0, std::abs(g1[p]))) << "p=" << p;
+            }
+        }
+
+        // Case 2: Uncached (FitPolicy::prefer_memory) leaf_iso_weighted_grads parity against Cached and serial
+        // col_partials (< 3 * n) fallback.
+        {
+            constexpr std::size_t n = 132U;
+            constexpr std::size_t d = 1U;
+            std::vector<double> x_data(n * d);
+            std::vector<double> y(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                x_data[i] = 0.08 * static_cast<double>(i);
+                y[i] = std::sin(0.15 * static_cast<double>(i)) + (0.05 * static_cast<double>(i % 7U));
+            }
+            const cxxgpr::MatrixRef<double> x(x_data.data(), n, d, n);
+
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.1).value())
+                + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.3, cxxgpr::MaternNu::ThreeHalves).value())
+                + cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(0.9, 2.4).value())
+                + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticKernel::create(1.2, 1.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.7).value())
+                + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.05).value());
+            auto compiled = spec.compile<double>();
+            const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+            const auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+            auto bufs_cached =
+                cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cxxgpr::FitPolicy::prefer_speed());
+            auto bufs_uncached = cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(
+                n, cxxgpr::DistanceCachePolicy::Uncached, cxxgpr::CholeskyBuffer::Retain
+            );
+            ASSERT_TRUE(bufs_cached.has_value());
+            ASSERT_TRUE(bufs_uncached.has_value());
+
+            const std::size_t p_tot = compiled.num_params() + 1U;
+            std::vector<double> g_cached(p_tot, 0.0);
+            std::vector<double> g_uncached(p_tot, 0.0);
+            ASSERT_TRUE(cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs_cached, g_cached).has_value());
+            ASSERT_TRUE(
+                cxxgpr::mll_and_gradient_into(compiled, lik, x, y, jitter, *bufs_uncached, g_uncached).has_value()
+            );
+            for (std::size_t p = 0U; p < p_tot; ++p)
+            {
+                EXPECT_NEAR(g_uncached[p], g_cached[p], 1e-11) << "p=" << p;
+            }
+
+            // Direct CompiledKernel::weighted_grads parity: col_partials length n (serial fallback) vs 3 * n.
+            const std::size_t n_kernel = compiled.num_params();
+            std::vector<double> wg_serial(n_kernel, 0.0);
+            std::vector<double> wg_parallel(n_kernel, 0.0);
+            std::vector<double> k_scratch(n * n, 0.0);
+            std::vector<double> partials_1n(n, 0.0);
+            std::vector<double> partials_3n(3U * n, 0.0);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(compiled
+                    .weighted_grads(
+                        x, nullptr, bufs_cached->w_ref(), wg_serial, cxxgpr::MatrixMut<double>(k_scratch.data(), n, n),
+                        nested, bufs_cached->core.weighted, 0U, partials_1n
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .weighted_grads(
+                        x, nullptr, bufs_cached->w_ref(), wg_parallel,
+                        cxxgpr::MatrixMut<double>(k_scratch.data(), n, n), nested, bufs_cached->core.weighted, 0U,
+                        partials_3n
+                    )
+                    .has_value());
+            for (std::size_t p = 0U; p < n_kernel; ++p)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(wg_serial[p]), std::bit_cast<std::uint64_t>(wg_parallel[p]))
+                    << "p=" << p;
+            }
         }
     }
 
