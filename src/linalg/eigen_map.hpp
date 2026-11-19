@@ -20,7 +20,7 @@
 #include <span>
 
 #if defined(_M_X64) || defined(__x86_64__)
-#    include <emmintrin.h>
+#    include <immintrin.h>
 #endif
 
 /// @brief Internal Eigen adapters and validation utilities for linear algebra implementations.
@@ -107,8 +107,8 @@ namespace cxxgpr::linalg::detail
     }
 
     /// @brief Checks whether every entry in a contiguous scalar slice `ptr[0..len)` is finite.
-    /// @details Uses branchless 4-way unrolled SSE2 exponent-mask checks on x86_64 with scalar `std::isfinite`
-    /// fallback so normal, zero, and subnormal values pass while NaN and +/-Inf return false.
+    /// @details Uses branchless 4-way unrolled AVX-512, AVX2, or SSE2 exponent-mask checks on x86_64 with scalar
+    /// `std::isfinite` fallback so normal, zero, and subnormal values pass while NaN and +/-Inf return false.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] ptr Pointer to the start of the contiguous slice.
     /// @param[in] len Number of contiguous elements to inspect.
@@ -121,9 +121,59 @@ namespace cxxgpr::linalg::detail
             return true;
         }
         std::size_t i = 0U;
-#if defined(_M_X64) || defined(__x86_64__)
         if constexpr (std::same_as<T, double>)
         {
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+            const __m512i exp_mask = _mm512_set1_epi64(0x7FF0000000000000LL);
+            unsigned int bad0 = 0U;
+            unsigned int bad1 = 0U;
+            for (; i + 32U <= len; i += 32U)
+            {
+                const __m512i v0 = _mm512_castpd_si512(_mm512_loadu_pd(ptr + i));
+                const __m512i v1 = _mm512_castpd_si512(_mm512_loadu_pd(ptr + i + 8U));
+                const __m512i v2 = _mm512_castpd_si512(_mm512_loadu_pd(ptr + i + 16U));
+                const __m512i v3 = _mm512_castpd_si512(_mm512_loadu_pd(ptr + i + 24U));
+                bad0 |= static_cast<unsigned int>(_mm512_cmpeq_epi64_mask(_mm512_and_si512(v0, exp_mask), exp_mask));
+                bad1 |= static_cast<unsigned int>(_mm512_cmpeq_epi64_mask(_mm512_and_si512(v1, exp_mask), exp_mask));
+                bad0 |= static_cast<unsigned int>(_mm512_cmpeq_epi64_mask(_mm512_and_si512(v2, exp_mask), exp_mask));
+                bad1 |= static_cast<unsigned int>(_mm512_cmpeq_epi64_mask(_mm512_and_si512(v3, exp_mask), exp_mask));
+            }
+            unsigned int bad = bad0 | bad1;
+            for (; i + 8U <= len; i += 8U)
+            {
+                const __m512i v = _mm512_castpd_si512(_mm512_loadu_pd(ptr + i));
+                bad |= static_cast<unsigned int>(_mm512_cmpeq_epi64_mask(_mm512_and_si512(v, exp_mask), exp_mask));
+            }
+            if (bad != 0U)
+            {
+                return false;
+            }
+#elifdef __AVX2__
+            const __m256i exp_mask = _mm256_set1_epi64x(0x7FF0000000000000LL);
+            __m256i bad0 = _mm256_setzero_si256();
+            __m256i bad1 = _mm256_setzero_si256();
+            for (; i + 16U <= len; i += 16U)
+            {
+                const __m256i v0 = _mm256_castpd_si256(_mm256_loadu_pd(ptr + i));
+                const __m256i v1 = _mm256_castpd_si256(_mm256_loadu_pd(ptr + i + 4U));
+                const __m256i v2 = _mm256_castpd_si256(_mm256_loadu_pd(ptr + i + 8U));
+                const __m256i v3 = _mm256_castpd_si256(_mm256_loadu_pd(ptr + i + 12U));
+                bad0 = _mm256_or_si256(bad0, _mm256_cmpeq_epi64(_mm256_and_si256(v0, exp_mask), exp_mask));
+                bad1 = _mm256_or_si256(bad1, _mm256_cmpeq_epi64(_mm256_and_si256(v1, exp_mask), exp_mask));
+                bad0 = _mm256_or_si256(bad0, _mm256_cmpeq_epi64(_mm256_and_si256(v2, exp_mask), exp_mask));
+                bad1 = _mm256_or_si256(bad1, _mm256_cmpeq_epi64(_mm256_and_si256(v3, exp_mask), exp_mask));
+            }
+            __m256i bad = _mm256_or_si256(bad0, bad1);
+            for (; i + 4U <= len; i += 4U)
+            {
+                const __m256i v = _mm256_castpd_si256(_mm256_loadu_pd(ptr + i));
+                bad = _mm256_or_si256(bad, _mm256_cmpeq_epi64(_mm256_and_si256(v, exp_mask), exp_mask));
+            }
+            if (_mm256_movemask_epi8(bad) != 0)
+            {
+                return false;
+            }
+#elif defined(_M_X64) || defined(__x86_64__)
             const __m128i exp_mask = _mm_set_epi32(0x7FF00000, 0, 0x7FF00000, 0);
             const __m128i exp_target = _mm_set_epi32(0x7FF00000, -1, 0x7FF00000, -1);
             __m128i bad0 = _mm_setzero_si128();
@@ -149,9 +199,61 @@ namespace cxxgpr::linalg::detail
             {
                 return false;
             }
+#endif
         }
         else
         {
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+            const __m512i exp_mask = _mm512_set1_epi32(0x7F800000);
+            unsigned int bad0 = 0U;
+            unsigned int bad1 = 0U;
+            for (; i + 64U <= len; i += 64U)
+            {
+                const __m512i v0 = _mm512_castps_si512(_mm512_loadu_ps(ptr + i));
+                const __m512i v1 = _mm512_castps_si512(_mm512_loadu_ps(ptr + i + 16U));
+                const __m512i v2 = _mm512_castps_si512(_mm512_loadu_ps(ptr + i + 32U));
+                const __m512i v3 = _mm512_castps_si512(_mm512_loadu_ps(ptr + i + 48U));
+                bad0 |= static_cast<unsigned int>(_mm512_cmpeq_epi32_mask(_mm512_and_si512(v0, exp_mask), exp_mask));
+                bad1 |= static_cast<unsigned int>(_mm512_cmpeq_epi32_mask(_mm512_and_si512(v1, exp_mask), exp_mask));
+                bad0 |= static_cast<unsigned int>(_mm512_cmpeq_epi32_mask(_mm512_and_si512(v2, exp_mask), exp_mask));
+                bad1 |= static_cast<unsigned int>(_mm512_cmpeq_epi32_mask(_mm512_and_si512(v3, exp_mask), exp_mask));
+            }
+            unsigned int bad = bad0 | bad1;
+            for (; i + 16U <= len; i += 16U)
+            {
+                const __m512i v = _mm512_castps_si512(_mm512_loadu_ps(ptr + i));
+                bad |= static_cast<unsigned int>(_mm512_cmpeq_epi32_mask(_mm512_and_si512(v, exp_mask), exp_mask));
+            }
+            if (bad != 0U)
+            {
+                return false;
+            }
+#elifdef __AVX2__
+            const __m256i exp_mask = _mm256_set1_epi32(0x7F800000);
+            __m256i bad0 = _mm256_setzero_si256();
+            __m256i bad1 = _mm256_setzero_si256();
+            for (; i + 32U <= len; i += 32U)
+            {
+                const __m256i v0 = _mm256_castps_si256(_mm256_loadu_ps(ptr + i));
+                const __m256i v1 = _mm256_castps_si256(_mm256_loadu_ps(ptr + i + 8U));
+                const __m256i v2 = _mm256_castps_si256(_mm256_loadu_ps(ptr + i + 16U));
+                const __m256i v3 = _mm256_castps_si256(_mm256_loadu_ps(ptr + i + 24U));
+                bad0 = _mm256_or_si256(bad0, _mm256_cmpeq_epi32(_mm256_and_si256(v0, exp_mask), exp_mask));
+                bad1 = _mm256_or_si256(bad1, _mm256_cmpeq_epi32(_mm256_and_si256(v1, exp_mask), exp_mask));
+                bad0 = _mm256_or_si256(bad0, _mm256_cmpeq_epi32(_mm256_and_si256(v2, exp_mask), exp_mask));
+                bad1 = _mm256_or_si256(bad1, _mm256_cmpeq_epi32(_mm256_and_si256(v3, exp_mask), exp_mask));
+            }
+            __m256i bad = _mm256_or_si256(bad0, bad1);
+            for (; i + 8U <= len; i += 8U)
+            {
+                const __m256i v = _mm256_castps_si256(_mm256_loadu_ps(ptr + i));
+                bad = _mm256_or_si256(bad, _mm256_cmpeq_epi32(_mm256_and_si256(v, exp_mask), exp_mask));
+            }
+            if (_mm256_movemask_epi8(bad) != 0)
+            {
+                return false;
+            }
+#elif defined(_M_X64) || defined(__x86_64__)
             const __m128i exp_mask = _mm_set1_epi32(0x7F800000);
             __m128i bad0 = _mm_setzero_si128();
             __m128i bad1 = _mm_setzero_si128();
@@ -176,8 +278,8 @@ namespace cxxgpr::linalg::detail
             {
                 return false;
             }
-        }
 #endif
+        }
         for (; i < len; ++i)
         {
             if (!std::isfinite(ptr[i]))

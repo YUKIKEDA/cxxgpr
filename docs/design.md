@@ -81,7 +81,7 @@
 - **格納順**：全密行列は列優先（Column-major：`Eigen::Matrix<S, Eigen::Dynamic, Eigen::Dynamic, Eigen::ColMajor>`）。入力データ `x`（$n \times d$）およびカーネル行列・因子 $L$ は列優先で保持する。
 - **Cholesky 分解**：`uplo = Lower` だけを構築・参照し、`Eigen::LLT<..., Eigen::Lower>` で in-place 相当の事前確保バッファ上で分解を行う（`matrixL()` 使用）。
 - **確保検知**：`EIGEN_RUNTIME_NO_MALLOC` を用い、テスト用監査スコープ `AllocationAudit` 内で `Eigen::internal::set_is_malloc_allowed(false)` と標準ヒープ確保フックを併用し、ホットパス確保ゼロを機械的に強制する。
-- **浮動小数点ポリシー**：MSVC `/fp:precise`、GCC/Clang `-fno-fast-math` を課し、SIMD 自動ベクトル化・FMA 縮約による最適化を許可しつつ IEEE 754 `NaN`/`Inf` 検査の正確性を保つ。
+- **浮動小数点・SIMD ポリシー**：MSVC `/fp:precise`、GCC/Clang `-fno-fast-math` を課し、SIMD 自動ベクトル化・FMA 縮約による最適化を許可しつつ IEEE 754 `NaN`/`Inf` 検査の正確性を保つ。x86-64 では `CXXGPR_X86_ISA`（既定 `AVX2`：`AVX512` / `AVX2` / `SSE2` 選択可）により AVX-512 / AVX2+FMA / SSE2 の 3 階層で Eigen および内部 SIMD カーネルを最適化する。
 
 ### DES-04 観測ノイズ `GaussianLikelihood` と `JitterPolicy`
 
