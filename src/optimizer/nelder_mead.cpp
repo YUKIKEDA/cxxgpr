@@ -23,10 +23,10 @@ namespace cxxgpr::optimizer
         /// @brief Evaluates obj in constrained log-theta space from unconstrained logit coordinates z.
         /// @details Guards finiteness of z, maps z to theta_buf via bounds.to_constrained(), calls
         /// obj.value(theta_buf), and rejects non-finite scalar outputs.
-        /// @param obj Objective evaluated in log-theta space.
-        /// @param bounds Log-space bounds governing the z -> theta transform.
-        /// @param z Unconstrained logit coordinate vector of length bounds.dim().
-        /// @param theta_buf Caller-supplied scratch span of length bounds.dim().
+        /// @param[in,out] obj Objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z -> theta transform.
+        /// @param[in] z Unconstrained logit coordinate vector of length bounds.dim().
+        /// @param[in,out] theta_buf Caller-supplied scratch span of length bounds.dim().
         /// @return Finite objective value at z, or GprError if evaluation fails or returns non-finite value.
         /// @retval GprErrorCode::NonFiniteInput When z or the evaluated objective value is non-finite.
         [[nodiscard]] std::expected<double, GprError> eval_logit(
@@ -59,11 +59,11 @@ namespace cxxgpr::optimizer
         /// perturbations, and iteratively updates the worst vertex via reflection (alpha = 1), expansion
         /// (gamma = 2), outside/inside contraction (rho = 0.5), or full simplex shrink (sigma = 0.5)
         /// until both objective spread and simplex diameter satisfy tolerance or max_iterations is reached.
-        /// @param obj Objective evaluated in log-theta space.
-        /// @param bounds Log-space bounds governing the z <-> theta transform.
-        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
-        /// @param max_iterations Maximum number of simplex iterations.
-        /// @param tolerance Convergence tolerance on simplex value spread and vertex infinity-norm distance.
+        /// @param[in,out] obj Objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+        /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param[in] max_iterations Maximum number of simplex iterations.
+        /// @param[in] tolerance Convergence tolerance on simplex value spread and vertex infinity-norm distance.
         /// @return OptimizerResult holding best vertex mapped back to log-theta space, or GprError on failure.
         /// @retval GprErrorCode::NonFiniteInput When any simplex evaluation produces non-finite values.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_nelder_mead_single(
@@ -268,8 +268,8 @@ namespace cxxgpr::optimizer
     /// @brief Minimizes obj starting from log-space initial_params.
     /// @details Validates tolerance_ >= 0 and delegates to detail::run_with_restarts() with
     /// run_nelder_mead_single().
-    /// @param obj Objective evaluated in log-theta space.
-    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @param[in,out] obj Objective evaluated in log-theta space.
+    /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
     /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
     /// @retval GprErrorCode::InvalidConfig When tolerance is non-finite or negative.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.

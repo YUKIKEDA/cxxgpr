@@ -23,7 +23,7 @@ namespace
     /// @brief Computes a dense column-major pairwise squared Euclidean distance matrix.
     /// @details Evaluates ||x_i - x_j||_2^2 for all pairs (i, j) so compiled distance-based
     /// kernel evaluation can be cross-checked directly against coordinate evaluation.
-    /// @param x Column-major n x d coordinate matrix.
+    /// @param[in] x Column-major n x d coordinate matrix.
     /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {

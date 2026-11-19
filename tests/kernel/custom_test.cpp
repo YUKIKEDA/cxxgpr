@@ -28,7 +28,7 @@ namespace
     {
     public:
         /// @brief Constructs an inverse-quadratic kernel term with the given lengthscale.
-        /// @param ell Initial positive lengthscale parameter.
+        /// @param[in] ell Initial positive lengthscale parameter.
         explicit InvQuadTerm(double ell = 1.0) : ell_(ell) {}
 
         /// @brief Clones this custom kernel term preserving its lengthscale.
@@ -43,7 +43,7 @@ namespace
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
         /// @brief Writes log(ell_) into the caller-provided parameter buffer.
-        /// @param out Destination span of size 1 receiving log-transformed hyperparameters.
+        /// @param[out] out Destination span of size 1 receiving log-transformed hyperparameters.
         /// @return Empty expected on success, or LengthMismatch when out.size() != 1.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
@@ -56,7 +56,7 @@ namespace
         }
 
         /// @brief Validates and applies a new log-lengthscale in [0.05, 50.0].
-        /// @param params Input span of size 1 containing log(ell).
+        /// @param[in] params Input span of size 1 containing log(ell).
         /// @return Empty expected on success, or LengthMismatch/NonFiniteInput/InvalidConfig on failure.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
@@ -78,7 +78,7 @@ namespace
         }
 
         /// @brief Populates parameter bounds [0.05, 50.0] into the provided Interval span.
-        /// @param out Destination span of size 1 receiving the hyperparameter bounds.
+        /// @param[out] out Destination span of size 1 receiving the hyperparameter bounds.
         /// @return Empty expected on success, or LengthMismatch/interval error on failure.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
@@ -96,9 +96,9 @@ namespace
         }
 
         /// @brief Evaluates the square Gram matrix (1 + d2 / ell^2)^(-1) over the requested triangle.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param out Output kernel Gram matrix buffer.
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output kernel Gram matrix buffer.
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
@@ -126,8 +126,8 @@ namespace
         }
 
         /// @brief Evaluates the rectangular cross-covariance Gram matrix between two point sets.
-        /// @param dist Rectangular pairwise squared Euclidean distance matrix.
-        /// @param out Output cross-covariance matrix buffer.
+        /// @param[in] dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output cross-covariance matrix buffer.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
@@ -137,7 +137,7 @@ namespace
         }
 
         /// @brief Fills the prior kernel diagonal with ones since k(0) == 1.
-        /// @param out Output diagonal span of length n.
+        /// @param[out] out Output diagonal span of length n.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
         {
@@ -146,10 +146,10 @@ namespace
         }
 
         /// @brief Computes analytical derivative dk / d(log ell) over the requested triangle.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d_k Output gradient matrix buffer.
-        /// @param param_idx Zero-based local parameter index (must be 0).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d_k Output gradient matrix buffer.
+        /// @param[in] param_idx Zero-based local parameter index (must be 0).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success, or IndexOutOfRange if param_idx != 0.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
@@ -183,11 +183,11 @@ namespace
         }
 
         /// @brief Computes analytical second derivative d^2 k / d(log ell)^2 over the requested triangle.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d2_k Output Hessian matrix buffer.
-        /// @param i First local parameter index (must be 0).
-        /// @param j Second local parameter index (must be 0).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d2_k Output Hessian matrix buffer.
+        /// @param[in] i First local parameter index (must be 0).
+        /// @param[in] j Second local parameter index (must be 0).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success, or IndexOutOfRange if i != 0 or j != 0.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
@@ -231,7 +231,7 @@ namespace
 
     /// @brief Computes a dense column-major pairwise squared Euclidean distance matrix.
     /// @details Evaluates ||x_i - x_j||_2^2 for all pairs (i, j) for CustomKernel distance checks.
-    /// @param x Column-major n x d coordinate matrix.
+    /// @param[in] x Column-major n x d coordinate matrix.
     /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {

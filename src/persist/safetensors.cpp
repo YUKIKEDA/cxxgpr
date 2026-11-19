@@ -43,7 +43,7 @@ namespace cxxgpr::persist::detail
         );
 
         /// @brief Rounds v upward to the nearest 8-byte boundary.
-        /// @param v Input byte size or offset.
+        /// @param[in] v Input byte size or offset.
         /// @return Smallest multiple of 8 greater than or equal to v.
         [[nodiscard]] constexpr std::size_t align_up_8(std::size_t v) noexcept
         {
@@ -51,7 +51,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Returns element byte width for TensorDtype.
-        /// @param dt Tensor scalar type tag.
+        /// @param[in] dt Tensor scalar type tag.
         /// @return 8 for F64, 4 for F32.
         [[nodiscard]] constexpr std::size_t dtype_size(TensorDtype dt) noexcept
         {
@@ -59,7 +59,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Maps TensorDtype to its canonical Safetensors JSON dtype string.
-        /// @param dt Tensor scalar type tag.
+        /// @param[in] dt Tensor scalar type tag.
         /// @return "F64" or "F32" string view.
         [[nodiscard]] std::string_view dtype_name(TensorDtype dt) noexcept
         {
@@ -69,7 +69,7 @@ namespace cxxgpr::persist::detail
     }  // namespace
 
     /// @brief Move-constructs a MappedFile while clearing source handles and pointers.
-    /// @param other Source MappedFile whose handles are transferred and reset.
+    /// @param[in] other Source MappedFile whose handles are transferred and reset.
     MappedFile::MappedFile(MappedFile&& other) noexcept :
         data_(std::exchange(other.data_, nullptr)),
         size_(std::exchange(other.size_, 0U))
@@ -85,7 +85,7 @@ namespace cxxgpr::persist::detail
     }
 
     /// @brief Move-assigns a MappedFile after releasing any existing mapping.
-    /// @param other Source MappedFile whose handles are transferred and reset.
+    /// @param[in] other Source MappedFile whose handles are transferred and reset.
     /// @return Reference to this MappedFile.
     MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
     {
@@ -149,7 +149,7 @@ namespace cxxgpr::persist::detail
     /// @brief Opens path read-only and maps the entire file into process memory.
     /// @details Uses Win32 CreateFileW / CreateFileMappingW / MapViewOfFile on Windows and POSIX
     /// open / fstat / mmap(PROT_READ, MAP_PRIVATE) on Unix-like systems. Rejects files smaller than 8 bytes.
-    /// @param path Filesystem path to model.safetensors.
+    /// @param[in] path Filesystem path to model.safetensors.
     /// @return MappedFile owning the read-only memory mapping, or PersistFailed(Io/Tensor) on failure.
     /// @retval GprErrorCode::PersistFailed When opening, statting, size checking, or mapping fails.
     std::expected<MappedFile, GprError> MappedFile::open_read(const std::filesystem::path& path)
@@ -218,7 +218,7 @@ namespace cxxgpr::persist::detail
     /// @brief Maps and validates a Safetensors file, indexing all F64/F32 tensor records.
     /// @details Verifies the 8-byte header size prefix, 8-byte alignment of data_base, JSON nesting depth
     /// via MAX_JSON_NESTING_DEPTH, overflow-checked shape products, and bounds/alignment of data_offsets.
-    /// @param path Filesystem path to model.safetensors.
+    /// @param[in] path Filesystem path to model.safetensors.
     /// @return Shared handle to MappedSafetensors, or GprError on I/O, header, or bounds error.
     /// @retval GprErrorCode::PersistFailed When header size, alignment, JSON, dtype, or offsets are invalid.
     /// @retval GprErrorCode::SizeOverflow When tensor shape element product or byte size overflows std::size_t.
@@ -386,7 +386,7 @@ namespace cxxgpr::persist::detail
     }
 
     /// @brief Checks whether a tensor named name exists in the Safetensors header index.
-    /// @param name Tensor key name to query.
+    /// @param[in] name Tensor key name to query.
     /// @return True when name is present in records_.
     bool MappedSafetensors::contains(std::string_view name) const
     {
@@ -395,8 +395,8 @@ namespace cxxgpr::persist::detail
 
     /// @brief Returns a validated, zero-copy F64 span directly referencing mapped memory.
     /// @details Checks tensor existence, dtype F64, shape equality, 8-byte alignment, and finiteness of all elements.
-    /// @param name Tensor key name to look up.
-    /// @param expected_shape Expected tensor dimension extents.
+    /// @param[in] name Tensor key name to look up.
+    /// @param[in] expected_shape Expected tensor dimension extents.
     /// @return Read-only span of double values backed by the mmap view, or PersistFailed(Tensor).
     /// @retval GprErrorCode::PersistFailed When tensor is missing, mismatched, misaligned, or contains NaN/Inf.
     std::expected<std::span<const double>, GprError> MappedSafetensors::read_f64(
@@ -446,8 +446,8 @@ namespace cxxgpr::persist::detail
 
     /// @brief Returns a validated, zero-copy F32 span directly referencing mapped memory.
     /// @details Checks tensor existence, dtype F32, shape equality, 4-byte alignment, and finiteness of all elements.
-    /// @param name Tensor key name to look up.
-    /// @param expected_shape Expected tensor dimension extents.
+    /// @param[in] name Tensor key name to look up.
+    /// @param[in] expected_shape Expected tensor dimension extents.
     /// @return Read-only span of float values backed by the mmap view, or PersistFailed(Tensor).
     /// @retval GprErrorCode::PersistFailed When tensor is missing, mismatched, misaligned, or contains NaN/Inf.
     std::expected<std::span<const float>, GprError> MappedSafetensors::read_f32(
@@ -498,8 +498,8 @@ namespace cxxgpr::persist::detail
     /// @details Computes 8-byte aligned data offsets, pads the JSON header with spaces so data_base is a
     /// multiple of 8, writes the uint64 header length prefix and header JSON, and writes each tensor payload
     /// preceded by zero-byte alignment padding.
-    /// @param path Destination binary file path.
-    /// @param tensors Tensor descriptors and little-endian byte spans to write.
+    /// @param[in] path Destination binary file path.
+    /// @param[in] tensors Tensor descriptors and little-endian byte spans to write.
     /// @return Empty expected on success, or PersistFailed(Io) on stream open or write failure.
     /// @retval GprErrorCode::PersistFailed When opening, writing, or flushing path fails.
     std::expected<void, GprError> write_safetensors_file(

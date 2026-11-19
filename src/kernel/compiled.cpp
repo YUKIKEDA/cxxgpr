@@ -8,6 +8,7 @@
 #include "cxxgpr/kernel/compiled.hpp"
 
 #include "cxxgpr/core/checked.hpp"
+#include "cxxgpr/linalg/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <utility>
 #include <variant>
 
+#include "kernel/exp_simd.hpp"
 #include "kernel/leaf_eval.hpp"
 
 #ifdef _OPENMP
@@ -31,7 +33,7 @@ namespace cxxgpr
         /// @brief Returns true if evaluating `leaf` can consume a shared scalar squared-distance cache.
         /// @details Isotropic distance leaves and `CustomKernel` read scalar squared distances; coordinate-only and
         /// constant/white leaves do not.
-        /// @param leaf Kernel leaf variant.
+        /// @param[in] leaf Kernel leaf variant.
         /// @return True when `leaf` consumes scalar squared distances.
         [[nodiscard]] bool leaf_reads_distances(const KernelLeaf& leaf) noexcept
         {
@@ -42,7 +44,7 @@ namespace cxxgpr
 
         /// @brief Returns true if evaluating `leaf` can consume packed per-dimension ARD squared differences.
         /// @details Matches `RbfArdKernel`, `MaternArdKernel`, and `RationalQuadraticArdKernel`.
-        /// @param leaf Kernel leaf variant.
+        /// @param[in] leaf Kernel leaf variant.
         /// @return True when `leaf` consumes packed ARD squared differences.
         [[nodiscard]] bool leaf_needs_ard(const KernelLeaf& leaf) noexcept
         {
@@ -53,8 +55,8 @@ namespace cxxgpr
         /// @brief Combines two leaf or subtree `CoordMode` values across composition operators.
         /// @details `Either` acts as an identity element, matching modes preserve themselves, and conflicting
         /// `Dist` and `Points` requirements promote to `CoordMode::Mixed`.
-        /// @param a First child coordinate mode.
-        /// @param b Second child coordinate mode.
+        /// @param[in] a First child coordinate mode.
+        /// @param[in] b Second child coordinate mode.
         /// @return Combined `CoordMode` for the parent node.
         [[nodiscard]] CoordMode combine_coord_mode(CoordMode a, CoordMode b) noexcept
         {
@@ -78,55 +80,78 @@ namespace cxxgpr
         /// @details Sets diagonal entries to zero and computes each strictly lower-triangular pair once before
         /// mirroring to the upper triangle.
         /// @tparam T Storage floating-point scalar type.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param dist Target square squared-distance matrix of shape `(n, n)`.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[out] dist Target square squared-distance matrix of shape `(n, n)`.
         template <KernelScalarConcept T> void fill_square_sq_dist(MatrixRef<T> x, MatrixMut<T> dist) noexcept
         {
             const std::size_t n = x.rows();
             const std::size_t d = x.cols();
-            // Exploit symmetry: compute strictly lower entries and mirror across the diagonal.
-            for (std::size_t col = 0; col < n; ++col)
+            if (n == 0U || d == 0U)
             {
-                dist(col, col) = T{0};
+                return;
+            }
+            auto run_lower = [&](std::size_t col_begin, std::size_t col_end)
+            {
+                for (std::size_t col = col_begin; col < col_end; ++col)
+                {
+                    const std::size_t len = n - col;
+                    T* col_ptr = &dist(col, col);
+                    detail::set_scaled_sq_diff_slice(col_ptr, x.col(0U).data() + col, x(col, 0U), T{1}, len);
+                    for (std::size_t k = 1U; k < d; ++k)
+                    {
+                        detail::add_scaled_sq_diff_slice(col_ptr, x.col(k).data() + col, x(col, k), T{1}, len);
+                    }
+                    dist(col, col) = T{0};
+                }
+            };
+            if (n >= 256U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, run_lower);
+            }
+            else
+            {
+                run_lower(0U, n);
+            }
+            for (std::size_t col = 0U; col < n; ++col)
+            {
                 for (std::size_t row = col + 1U; row < n; ++row)
                 {
                     const std::size_t r1 = row;
                     const std::size_t r2 = col;
-                    T acc = T{0};
-                    for (std::size_t k = 0; k < d; ++k)
-                    {
-                        const T diff = x(r1, k) - x(r2, k);
-                        acc += diff * diff;
-                    }
-                    dist(r1, r2) = acc;
-                    dist(r2, r1) = acc;
+                    dist(r2, r1) = dist(r1, r2);
                 }
             }
         }
 
         /// @brief Populates a rectangular cross squared Euclidean distance matrix between `x1` and `x2`.
-        /// @details Iterates in column-major order across `(x1.rows(), x2.rows())` pairs.
+        /// @details Vectorizes each column slice along feature dimensions using `set_scaled_sq_diff_slice` and
+        /// `add_scaled_sq_diff_slice`, parallelizing across columns when `(x1.rows() * x2.rows()) >= 65536U`.
         /// @tparam T Storage floating-point scalar type.
-        /// @param x1 First point matrix of shape `(n1, d)`.
-        /// @param x2 Second point matrix of shape `(n2, d)`.
-        /// @param dist Target rectangular squared-distance matrix of shape `(n1, n2)`.
+        /// @param[in] x1 First point matrix of shape `(n1, d)`.
+        /// @param[in] x2 Second point matrix of shape `(n2, d)`.
+        /// @param[out] dist Target rectangular squared-distance matrix of shape `(n1, n2)`.
         template <KernelScalarConcept T>
         void fill_cross_sq_dist(MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> dist) noexcept
         {
             const std::size_t n1 = x1.rows();
             const std::size_t n2 = x2.rows();
             const std::size_t d = x1.cols();
-            for (std::size_t col = 0; col < n2; ++col)
+            if (n1 == 0U || n2 == 0U || d == 0U)
             {
-                for (std::size_t row = 0; row < n1; ++row)
+                return;
+            }
+            const auto n2_s = static_cast<std::ptrdiff_t>(n2);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n1 * n2) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < n2_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                T* col_ptr = &dist(0U, col);
+                detail::set_scaled_sq_diff_slice(col_ptr, x1.col(0U).data(), x2(col, 0U), T{1}, n1);
+                for (std::size_t k = 1U; k < d; ++k)
                 {
-                    T acc = T{0};
-                    for (std::size_t k = 0; k < d; ++k)
-                    {
-                        const T diff = x1(row, k) - x2(col, k);
-                        acc += diff * diff;
-                    }
-                    dist(row, col) = acc;
+                    detail::add_scaled_sq_diff_slice(col_ptr, x1.col(k).data(), x2(col, k), T{1}, n1);
                 }
             }
         }
@@ -134,8 +159,8 @@ namespace cxxgpr
         /// @brief Validates that a scratch matrix matches `out` shape and does not alias `out`.
         /// @details Returns `WorkspaceTooSmall` if dimensions differ and `InvalidConfig` on pointer aliasing.
         /// @tparam T Storage floating-point scalar type.
-        /// @param out Reference output matrix view whose dimensions must be matched.
-        /// @param scratch Mutable scratch matrix view to check.
+        /// @param[in] out Reference output matrix view whose dimensions must be matched.
+        /// @param[in] scratch Mutable scratch matrix view to check.
         /// @return Empty expected on success, or workspace/aliasing error.
         /// @retval GprErrorCode::WorkspaceTooSmall If `scratch` rows or columns differ from `out`.
         /// @retval GprErrorCode::InvalidConfig If `scratch.data() == out.data()`.
@@ -155,40 +180,47 @@ namespace cxxgpr
         }
 
         /// @brief Applies an element-wise binary mutation `op(dst(row, col), src(row, col))` over `uplo`.
-        /// @details Parallelizes across columns with OpenMP (`if (n_cols >= 64U)`) so workers operate on disjoint
-        /// columns within the requested triangle (`Lower`, `Upper`, or `Full`).
+        /// @details Uses area-balanced `linalg::parallel_for_lower_blocks` (`n_cols >= 384U`) for square `Lower`
+        /// matrices and column-parallel OpenMP (`n_cols >= 384U`) for `Upper` or `Full`.
         /// @tparam T Storage floating-point scalar type.
         /// @tparam Op Callable mutating `T& dst_elem` using `T src_elem`.
-        /// @param dst Destination matrix updated in place.
-        /// @param src Source matrix read over the active region.
-        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
-        /// @param op Element-wise update functor.
+        /// @param[in,out] dst Destination matrix updated in place.
+        /// @param[in] src Source matrix read over the active region.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in] op Element-wise update functor.
         template <KernelScalarConcept T, typename Op>
         void apply_binary_op(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo, Op&& op) noexcept
         {
             const std::size_t n_rows = dst.rows();
             const std::size_t n_cols = dst.cols();
-            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
             // Restrict updates to the active triangle on square outputs and parallelize disjoint columns.
             if (uplo == Triangle::Lower && n_rows == n_cols)
             {
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n_cols >= 64U)
-#endif
-                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+                auto run_lower = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    const auto col = static_cast<std::size_t>(col_s);
-                    for (std::size_t row = col; row < n_rows; ++row)
+                    for (std::size_t col = col_begin; col < col_end; ++col)
                     {
-                        op(dst(row, col), src(row, col));
+                        for (std::size_t row = col; row < n_rows; ++row)
+                        {
+                            op(dst(row, col), src(row, col));
+                        }
                     }
+                };
+                if (n_cols >= 384U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_lower);
+                }
+                else
+                {
+                    run_lower(0U, n_cols);
                 }
                 return;
             }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
             if (uplo == Triangle::Upper && n_rows == n_cols)
             {
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n_cols >= 64U)
+#    pragma omp parallel for schedule(static) if (n_cols >= 384U)
 #endif
                 for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
                 {
@@ -201,7 +233,7 @@ namespace cxxgpr
                 return;
             }
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n_cols >= 64U)
+#    pragma omp parallel for schedule(static) if (n_cols >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
@@ -216,9 +248,9 @@ namespace cxxgpr
         /// @brief Copies `src` into `dst` over the specified matrix region `uplo`.
         /// @details Delegates column-parallel assignment to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
-        /// @param dst Destination matrix.
-        /// @param src Source matrix.
-        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[out] dst Destination matrix.
+        /// @param[in] src Source matrix.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void copy_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
             apply_binary_op(dst, src, uplo, [](T& d, T s) { d = s; });
@@ -227,9 +259,9 @@ namespace cxxgpr
         /// @brief Accumulates `dst += src` over the specified matrix region `uplo`.
         /// @details Delegates column-parallel addition to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
-        /// @param dst Destination matrix accumulated in place.
-        /// @param src Summand matrix.
-        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in,out] dst Destination matrix accumulated in place.
+        /// @param[in] src Summand matrix.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
             apply_binary_op(dst, src, uplo, [](T& d, T s) { d += s; });
@@ -238,45 +270,50 @@ namespace cxxgpr
         /// @brief Accumulates Hadamard product `dst *= src` over the specified matrix region `uplo`.
         /// @details Delegates column-parallel element-wise multiplication to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
-        /// @param dst Destination matrix scaled in place.
-        /// @param src Multiplier matrix.
-        /// @param uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in,out] dst Destination matrix scaled in place.
+        /// @param[in] src Multiplier matrix.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
             apply_binary_op(dst, src, uplo, [](T& d, T s) { d *= s; });
         }
 
         /// @brief Multiplies the lower triangle (including diagonal) of `dst` by scalar `scale`.
-        /// @details Parallelizes across columns with OpenMP (`if (n >= 64U)`).
+        /// @details Uses area-balanced `linalg::parallel_for_lower_blocks` (`n >= 384U`).
         /// @tparam T Storage floating-point scalar type.
-        /// @param dst Square matrix whose lower triangle is scaled in place.
-        /// @param scale Scalar multiplier.
+        /// @param[in,out] dst Square matrix whose lower triangle is scaled in place.
+        /// @param[in] scale Scalar multiplier.
         template <KernelScalarConcept T> void scale_lower(MatrixMut<T> dst, T scale) noexcept
         {
             const std::size_t n = dst.rows();
-            const auto n_cols = static_cast<std::ptrdiff_t>(n);
-            // Scale columns in parallel over the lower triangle only.
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
-#endif
-            for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
+            auto run_range = [&](std::size_t col_begin, std::size_t col_end)
             {
-                const auto col = static_cast<std::size_t>(col_s);
-                for (std::size_t row = col; row < n; ++row)
+                for (std::size_t col = col_begin; col < col_end; ++col)
                 {
-                    dst(row, col) *= scale;
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        dst(row, col) *= scale;
+                    }
                 }
+            };
+            if (n >= 384U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, run_range);
+            }
+            else
+            {
+                run_range(0U, n);
             }
         }
 
         /// @brief Computes the symmetric Frobenius inner product $\langle A, B \rangle_F$ from lower triangles.
         /// @details Evaluates each column's `diag + 2 * strictly_lower` inner product in `double` across OpenMP
-        /// workers into `col_partials`, then reduces `col_partials` serially in ascending column index order so the
-        /// floating-point result is bit-for-bit independent of thread count.
+        /// workers (`n >= 384U`) into `col_partials`, then reduces `col_partials` serially in ascending column index
+        /// order so the floating-point result is bit-for-bit independent of thread count.
         /// @tparam T Storage floating-point scalar type.
-        /// @param a First symmetric matrix (only lower triangle read).
-        /// @param b Second symmetric matrix (only lower triangle read).
-        /// @param col_partials Pre-allocated per-column partial sum buffer of length at least `a.rows()`.
+        /// @param[in] a First symmetric matrix (only lower triangle read).
+        /// @param[in] b Second symmetric matrix (only lower triangle read).
+        /// @param[in,out] col_partials Pre-allocated per-column partial sum buffer of length at least `a.rows()`.
         /// @return Full symmetric Frobenius inner product in `double`.
         template <KernelScalarConcept T>
         [[nodiscard]] double lower_frobenius(MatrixRef<T> a, MatrixRef<T> b, std::span<double> col_partials) noexcept
@@ -285,7 +322,7 @@ namespace cxxgpr
             const auto n_cols = static_cast<std::ptrdiff_t>(n);
             // Compute column-wise symmetric contributions (diag + 2 * strictly lower) in parallel.
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(static) if (n >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
@@ -309,10 +346,10 @@ namespace cxxgpr
 
         /// @brief Computes the sum of all entries $\sum_{i,j} W_{ij}$ of a symmetric matrix from its lower triangle.
         /// @details Used to contract against constant matrices (`ConstantKernel`). Computes column-wise partials in
-        /// parallel and sums them serially in ascending column order for deterministic OpenMP reductions.
+        /// parallel (`n >= 384U`) and sums them serially in ascending column order for deterministic OpenMP reductions.
         /// @tparam T Storage floating-point scalar type.
-        /// @param w Symmetric matrix whose lower triangle is summed.
-        /// @param col_partials Pre-allocated per-column partial sum buffer of length at least `w.rows()`.
+        /// @param[in] w Symmetric matrix whose lower triangle is summed.
+        /// @param[in,out] col_partials Pre-allocated per-column partial sum buffer of length at least `w.rows()`.
         /// @return Sum of all $n^2$ symmetric entries in `double`.
         template <KernelScalarConcept T>
         [[nodiscard]] double lower_sum(MatrixRef<T> w, std::span<double> col_partials) noexcept
@@ -321,7 +358,7 @@ namespace cxxgpr
             const auto n_cols = static_cast<std::ptrdiff_t>(n);
             // Accumulate diag + 2 * strictly lower per column in parallel.
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(static) if (n >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
@@ -346,7 +383,7 @@ namespace cxxgpr
         /// @brief Computes the trace $\sum_i W_{ii}$ from the diagonal of `w`.
         /// @details Used to contract against `WhiteKernel`, whose derivative is nonzero only on the diagonal.
         /// @tparam T Storage floating-point scalar type.
-        /// @param w Symmetric square matrix.
+        /// @param[in] w Symmetric square matrix.
         /// @return Sum of diagonal entries in `double`.
         template <KernelScalarConcept T> [[nodiscard]] double lower_diag_sum(MatrixRef<T> w) noexcept
         {
@@ -366,9 +403,9 @@ namespace cxxgpr
     /// @brief Constructs `depth` contiguous intermediate matrix buffers of shape `rows x cols`.
     /// @details Delegates capacity allocation to `resize`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param depth Number of nested buffer levels to allocate.
-    /// @param rows Row capacity per buffer level.
-    /// @param cols Column capacity per buffer level.
+    /// @param[in] depth Number of nested buffer levels to allocate.
+    /// @param[in] rows Row capacity per buffer level.
+    /// @param[in] cols Column capacity per buffer level.
     template <KernelScalarConcept T>
     NestedBuffers<T>::NestedBuffers(std::size_t depth, std::size_t rows, std::size_t cols)
     {
@@ -378,9 +415,9 @@ namespace cxxgpr
     /// @brief Reconfigures nested buffer dimensions and grows backing storage monotonically if needed.
     /// @details Never shrinks existing capacity so repeated resize calls for smaller subproblems avoid reallocations.
     /// @tparam T Storage floating-point scalar type.
-    /// @param depth Number of nested buffer levels.
-    /// @param rows Row dimension per level.
-    /// @param cols Column dimension per level.
+    /// @param[in] depth Number of nested buffer levels.
+    /// @param[in] rows Row dimension per level.
+    /// @param[in] cols Column dimension per level.
     template <KernelScalarConcept T>
     void NestedBuffers<T>::resize(std::size_t depth, std::size_t rows, std::size_t cols)
     {
@@ -399,9 +436,9 @@ namespace cxxgpr
     /// @details Indexes into the contiguous slab at `index * rows_ * cols_` with shape `(rows, cols)` and stride
     /// `rows`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param index Zero-based buffer level index (`< depth()`).
-    /// @param rows Active view row count (`<= rows()`).
-    /// @param cols Active view column count (`<= cols()`).
+    /// @param[in] index Zero-based buffer level index (`< depth()`).
+    /// @param[in] rows Active view row count (`<= rows()`).
+    /// @param[in] cols Active view column count (`<= cols()`).
     /// @return Mutable matrix view backed by level `index`.
     template <KernelScalarConcept T>
     MatrixMut<T> NestedBuffers<T>::level(std::size_t index, std::size_t rows, std::size_t cols)
@@ -511,8 +548,8 @@ namespace cxxgpr
         /// @brief Validates that populated distance and ARD caches match the shape of point matrix `x`.
         /// @details Checks square distance cache dimensions `(n, n)`, ARD point count `n`, ARD feature count `d`, and
         /// packed triangular length `d * n * (n + 1) / 2`.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param cache Precomputed distance and ARD cache to validate.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[in] cache Precomputed distance and ARD cache to validate.
         /// @return Empty expected on compatibility, or length/dimension mismatch error.
         /// @retval GprErrorCode::LengthMismatch If cached distance or ARD packed lengths disagree with `x.rows()`.
         /// @retval GprErrorCode::DimensionMismatch If `cache.num_dims() != x.cols()`.
@@ -549,7 +586,7 @@ namespace cxxgpr
 
         /// @brief Returns the half-open global parameter range `[begin, end)` owned by `term`.
         /// @details Inspects `LeafRef`, `SumTerm`, or `ProductTerm` variant fields.
-        /// @param term Compiled AST node.
+        /// @param[in] term Compiled AST node.
         /// @return Pair `(begin, end)` of global parameter indices.
         static std::pair<std::size_t, std::size_t> param_range(const Term& term) noexcept
         {
@@ -570,8 +607,8 @@ namespace cxxgpr
 
         /// @brief Checks whether global hyperparameter index `param_idx` lies inside `term`'s subtree.
         /// @details Evaluates `param_idx >= begin && param_idx < end` using `param_range`.
-        /// @param term Compiled AST node.
-        /// @param param_idx Global hyperparameter index to query.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] param_idx Global hyperparameter index to query.
         /// @return True if `term` owns `param_idx`.
         static bool contains_param(const Term& term, std::size_t param_idx) noexcept
         {
@@ -582,7 +619,7 @@ namespace cxxgpr
         /// @brief Computes the nested intermediate buffer depth required to evaluate `term` without allocation.
         /// @details Leaf terms require depth 0 (they evaluate directly into caller-provided `out` or `scratch`); each
         /// non-leaf child adds one nested level above its own required depth.
-        /// @param term Compiled AST node.
+        /// @param[in] term Compiled AST node.
         /// @return Maximum nested buffer depth required across all subtrees of `term`.
         static std::size_t compute_nested_depth(const Term& term) noexcept
         {
@@ -614,10 +651,10 @@ namespace cxxgpr
         /// @brief Recursively compiles a declaration-layer `KernelSpec` into an associatively flattened `Term`.
         /// @details Assigns contiguous leaf indices and `ParameterBinding` records in depth-first left-to-right order,
         /// and flattens nested `SumNode` or `ProductNode` chains via `collect_sum` and `collect_product`.
-        /// @param spec Input kernel expression specification.
-        /// @param out_leaves Output vector accumulating compiled leaf objects.
-        /// @param out_bindings Output vector accumulating parameter-to-leaf bindings.
-        /// @param next_param_idx Running global parameter counter incremented for each bound parameter.
+        /// @param[in] spec Input kernel expression specification.
+        /// @param[in,out] out_leaves Output vector accumulating compiled leaf objects.
+        /// @param[in,out] out_bindings Output vector accumulating parameter-to-leaf bindings.
+        /// @param[in,out] next_param_idx Running global parameter counter incremented for each bound parameter.
         /// @return Compiled `Term` representing `spec`.
         static Term compile_node(
             const KernelSpec& spec,
@@ -670,11 +707,11 @@ namespace cxxgpr
 
         /// @brief Associatively flattens nested `KernelSpec::SumNode` trees into `out_terms`.
         /// @details Traverses `lhs` then `rhs` so leaf and parameter ordering stays strictly depth-first left-to-right.
-        /// @param spec Current `KernelSpec` node being flattened.
-        /// @param out_terms Destination list of non-sum summand `Term` nodes.
-        /// @param out_leaves Accumulator of compiled leaf objects.
-        /// @param out_bindings Accumulator of global parameter bindings.
-        /// @param next_param_idx Running global parameter counter.
+        /// @param[in] spec Current `KernelSpec` node being flattened.
+        /// @param[in,out] out_terms Destination list of non-sum summand `Term` nodes.
+        /// @param[in,out] out_leaves Accumulator of compiled leaf objects.
+        /// @param[in,out] out_bindings Accumulator of global parameter bindings.
+        /// @param[in,out] next_param_idx Running global parameter counter.
         static void collect_sum(
             const KernelSpec& spec,
             std::vector<Term>& out_terms,
@@ -694,11 +731,11 @@ namespace cxxgpr
 
         /// @brief Associatively flattens nested `KernelSpec::ProductNode` trees into `out_terms`.
         /// @details Traverses `lhs` then `rhs` so leaf and parameter ordering stays strictly depth-first left-to-right.
-        /// @param spec Current `KernelSpec` node being flattened.
-        /// @param out_terms Destination list of non-product factor `Term` nodes.
-        /// @param out_leaves Accumulator of compiled leaf objects.
-        /// @param out_bindings Accumulator of global parameter bindings.
-        /// @param next_param_idx Running global parameter counter.
+        /// @param[in] spec Current `KernelSpec` node being flattened.
+        /// @param[in,out] out_terms Destination list of non-product factor `Term` nodes.
+        /// @param[in,out] out_leaves Accumulator of compiled leaf objects.
+        /// @param[in,out] out_bindings Accumulator of global parameter bindings.
+        /// @param[in,out] next_param_idx Running global parameter counter.
         static void collect_product(
             const KernelSpec& spec,
             std::vector<Term>& out_terms,
@@ -718,7 +755,7 @@ namespace cxxgpr
 
         /// @brief Verifies that every ARD leaf in `leaves` expects `x_dim` input features.
         /// @details Checks `RbfArdKernel`, `MaternArdKernel`, and `RationalQuadraticArdKernel` lengthscale counts.
-        /// @param x_dim Feature dimensionality of the point coordinate matrix.
+        /// @param[in] x_dim Feature dimensionality of the point coordinate matrix.
         /// @return Empty expected on match, or dimension-mismatch error.
         /// @retval GprErrorCode::DimensionMismatch If any ARD leaf expects a different feature count.
         [[nodiscard]] std::expected<void, GprError> validate_ard_dims(std::size_t x_dim) const
@@ -750,10 +787,10 @@ namespace cxxgpr
         /// @details Rejects kernels with coordinate-only leaves (`Points` or `Mixed`), enforces non-empty and optional
         /// squareness constraints on `dist`, verifies matching `out` shape, and scans the active region of `dist` for
         /// finite values.
-        /// @param dist Input squared-distance matrix view.
-        /// @param out Reference output matrix view.
-        /// @param uplo Active matrix triangle when `square == true`.
-        /// @param square True for square self-covariance/derivative calls, false for cross-covariance calls.
+        /// @param[in] dist Input squared-distance matrix view.
+        /// @param[in] out Reference output matrix view.
+        /// @param[in] uplo Active matrix triangle when `square == true`.
+        /// @param[in] square True for square self-covariance/derivative calls, false for cross-covariance calls.
         /// @return Empty expected on success, or mode/empty/shape/finiteness error.
         /// @retval GprErrorCode::UnsupportedKernelOperation If the compiled tree depends on raw coordinates.
         /// @retval GprErrorCode::EmptyInput If `dist` has zero rows or columns.
@@ -805,8 +842,8 @@ namespace cxxgpr
 
         /// @brief Validates point matrix shape, square output shape, ARD dimensions, and coordinate finiteness.
         /// @details Enforces empty -> shape -> ARD dimension -> finite scan order before point-based tree evaluation.
-        /// @param x Input point coordinate matrix of shape `(n, d)`.
-        /// @param out Reference square output matrix of shape `(n, n)`.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[in] out Reference square output matrix of shape `(n, n)`.
         /// @return Empty expected on success, or validation error.
         /// @retval GprErrorCode::EmptyInput If `x` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` is not `(x.rows(), x.rows())`.
@@ -841,9 +878,9 @@ namespace cxxgpr
 
         /// @brief Validates point matrices `x1` and `x2` and rectangular output `out` for cross-covariance evaluation.
         /// @details Enforces empty -> output shape -> matching feature dimension -> ARD dimension -> finiteness checks.
-        /// @param x1 First point matrix of shape `(n1, d)`.
-        /// @param x2 Second point matrix of shape `(n2, d)`.
-        /// @param out Reference output matrix of shape `(n1, n2)`.
+        /// @param[in] x1 First point matrix of shape `(n1, d)`.
+        /// @param[in] x2 Second point matrix of shape `(n2, d)`.
+        /// @param[in] out Reference output matrix of shape `(n1, n2)`.
         /// @return Empty expected on success, or validation error.
         /// @retval GprErrorCode::EmptyInput If `x1` or `x2` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` is not `(x1.rows(), x2.rows())`.
@@ -896,10 +933,10 @@ namespace cxxgpr
 
         /// @brief Verifies that `nested` has enough buffer depth and element capacity for `level_idx`.
         /// @details Returns `GprErrorCode::WorkspaceTooSmall` without allocating if capacity is insufficient.
-        /// @param nested Caller-supplied nested buffer pool.
-        /// @param level_idx Required zero-based buffer level index.
-        /// @param rows Required row capacity.
-        /// @param cols Required column capacity.
+        /// @param[in,out] nested Caller-supplied nested buffer pool.
+        /// @param[in] level_idx Required zero-based buffer level index.
+        /// @param[in] rows Required row capacity.
+        /// @param[in] cols Required column capacity.
         /// @return Empty expected when `nested` suffices, or workspace error.
         /// @retval GprErrorCode::WorkspaceTooSmall If depth or matrix dimensions are too small.
         [[nodiscard]] std::expected<void, GprError> ensure_nested(
@@ -916,13 +953,13 @@ namespace cxxgpr
         /// @brief Recursively evaluates a compiled `Term` into `out` from squared Euclidean distances.
         /// @details Evaluates the first child directly into `out`, folds subsequent leaf children through `scratch`,
         /// and folds nested composite children through `nested.level(level_idx, ...)`.
-        /// @param term Compiled AST node to evaluate.
-        /// @param dist Square squared-distance matrix.
-        /// @param out Destination Gram matrix view.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] out Destination Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or evaluation/workspace error.
         [[nodiscard]] std::expected<void, GprError> eval_term_dist(
             const Term& term,
@@ -996,13 +1033,13 @@ namespace cxxgpr
         /// @brief Evaluates a single compiled leaf at `leaf_idx` using caches when available.
         /// @details Prefers `DistanceCache::dist_view()` for distance leaves and `DistanceCache::ard_packed()` for ARD
         /// leaves; materializes square distances in `nested` for uncached `CustomKernel` leaves.
-        /// @param leaf_idx Zero-based index into `leaves`.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param out Destination square matrix of shape `(n, n)`.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param nested Pre-allocated buffer pool used if `CustomKernel` needs uncached squared distances.
-        /// @param level_idx Nesting depth inside `nested` for `CustomKernel` distance buffer.
-        /// @param cache Optional precomputed distance and ARD cache.
+        /// @param[in] leaf_idx Zero-based index into `leaves`.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[out] out Destination square matrix of shape `(n, n)`.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] nested Pre-allocated buffer pool used if `CustomKernel` needs uncached squared distances.
+        /// @param[in] level_idx Nesting depth inside `nested` for `CustomKernel` distance buffer.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_leaf_at(
             std::size_t leaf_idx,
@@ -1043,15 +1080,53 @@ namespace cxxgpr
             return detail::leaf_apply_points(kl, x, out, uplo, exp_mode, cached_ls[leaf_idx]);
         }
 
+        /// @brief Evaluates a single compiled leaf using `DistanceCache<T>` and incremental ARD $s^2$ state.
+        /// @details Routes ARD leaves with `cache.has_ard()` to `leaf_apply_ard_packed_incremental` and delegates all
+        /// other leaves cleanly to `eval_leaf_at`.
+        /// @param[in] leaf_idx Zero-based index into `leaves`.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[in] cache Precomputed distance and ARD cache.
+        /// @param[out] out Destination square matrix `(n, n)`.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in,out] nested Pre-allocated nested buffer pool.
+        /// @param[in,out] ard_s2_cache Caller-owned packed $s^2$ buffer for this leaf.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+        /// @return Empty expected on success, or workspace/evaluation error.
+        [[nodiscard]] std::expected<void, GprError> eval_leaf_ard_incremental(
+            std::size_t leaf_idx,
+            MatrixRef<T> x,
+            const DistanceCache<T>& cache,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf_idx];
+            if (cache.has_ard() && leaf_needs_ard(kl))
+            {
+                return detail::leaf_apply_ard_packed_incremental(
+                    kl, cached_ls[leaf_idx], cache.ard_packed(), x.rows(), out, uplo, exp_mode, ard_s2_cache, prev_ls,
+                    s2_valid, inc_steps
+                );
+            }
+            return eval_leaf_at(leaf_idx, x, out, uplo, nested, 0U, &cache);
+        }
+
         /// @brief Reconstructs the composite Gram matrix from precomputed per-leaf Gram matrices.
         /// @details Walks the flattened AST, copying leaf views directly into `out` and combining composite children
         /// via `nested` buffers without re-evaluating any kernel leaf.
-        /// @param term Current compiled AST node.
-        /// @param leaf_grams Precomputed Gram matrix views indexed by `leaf_idx`.
-        /// @param out Destination matrix view.
-        /// @param uplo Active matrix triangle to combine.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Current compiled AST node.
+        /// @param[in] leaf_grams Precomputed Gram matrix views indexed by `leaf_idx`.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle to combine.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/operation error.
         [[nodiscard]] std::expected<void, GprError> eval_combine_term(
             const Term& term,
@@ -1117,14 +1192,14 @@ namespace cxxgpr
 
         /// @brief Recursively evaluates a compiled `Term` from point coordinates `x` (and optional `cache`).
         /// @details Evaluates `terms[0]` into `out`, leaf siblings via `scratch`, and composite siblings via `nested`.
-        /// @param term Compiled AST node to evaluate.
-        /// @param x Input point coordinate matrix.
-        /// @param out Destination square Gram matrix view.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
-        /// @param cache Optional precomputed distance and ARD cache.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x Input point coordinate matrix.
+        /// @param[out] out Destination square Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_points(
             const Term& term,
@@ -1197,12 +1272,12 @@ namespace cxxgpr
 
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from rectangular squared distances.
         /// @details Always evaluates full rectangular matrices (`Triangle::Full`) using `scratch` and `nested`.
-        /// @param term Compiled AST node to evaluate.
-        /// @param dist Rectangular squared-distance matrix.
-        /// @param out Destination cross-covariance matrix view.
-        /// @param scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Rectangular squared-distance matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross_dist(
             const Term& term,
@@ -1273,13 +1348,13 @@ namespace cxxgpr
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from two point coordinate matrices.
         /// @details Uses `nested` to materialize cross squared distances for `CustomKernel` leaves and combines child
         /// cross-covariances across sums and products.
-        /// @param term Compiled AST node to evaluate.
-        /// @param x1 First point matrix of shape `(n1, d)`.
-        /// @param x2 Second point matrix of shape `(n2, d)`.
-        /// @param out Destination cross-covariance matrix of shape `(n1, n2)`.
-        /// @param scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees and custom distances.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x1 First point matrix of shape `(n1, d)`.
+        /// @param[in] x2 Second point matrix of shape `(n2, d)`.
+        /// @param[out] out Destination cross-covariance matrix of shape `(n1, n2)`.
+        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees and custom distances.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross_points(
             const Term& term,
@@ -1362,11 +1437,11 @@ namespace cxxgpr
         /// @brief Recursively evaluates the self-covariance diagonal $k(x_i, x_i)$ of a compiled `Term`.
         /// @details Evaluates `terms[0]` into `out` and subsequent terms into disjoint slices of `scratch_vec` indexed
         /// by `level_idx * out.size()` so zero heap allocations occur when caller scratch is provided.
-        /// @param term Compiled AST node.
-        /// @param x Input point coordinate matrix of shape `(n, d)`.
-        /// @param out Output diagonal span of length `n`.
-        /// @param scratch_vec Caller-supplied scratch vector sliced by recursion level.
-        /// @param level_idx Current nesting depth into `scratch_vec`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[out] out Output diagonal span of length `n`.
+        /// @param[in,out] scratch_vec Caller-supplied scratch vector sliced by recursion level.
+        /// @param[in] level_idx Current nesting depth into `scratch_vec`.
         /// @return Empty expected on success, or workspace/evaluation error.
         /// @retval GprErrorCode::LengthMismatch If `scratch_vec` is shorter than `(level_idx + 1) * out.size()`.
         [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
@@ -1423,15 +1498,15 @@ namespace cxxgpr
         /// from squared Euclidean distances.
         /// @details Routes sum nodes directly to the single summand owning `param_idx`, and applies the product rule
         /// $(\partial f_{\text{owner}} / \partial \theta_p) \odot \prod_{m \ne \text{owner}} f_m$ on product nodes.
-        /// @param term Compiled AST node.
-        /// @param dist Square squared-distance matrix.
-        /// @param d_k Output derivative matrix view.
-        /// @param param_idx Global hyperparameter index to differentiate with respect to.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch_a First reusable square scratch buffer.
-        /// @param scratch_b Second reusable square scratch buffer.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d_k Output derivative matrix view.
+        /// @param[in] param_idx Global hyperparameter index to differentiate with respect to.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
         [[nodiscard]] std::expected<void, GprError> eval_grad_dist(
@@ -1506,16 +1581,16 @@ namespace cxxgpr
         /// @brief Recursively evaluates $\partial K / \partial \theta_p$ from point coordinates (and optional cache).
         /// @details Uses cached distance or packed ARD derivatives on compatible leaves, materializes distances into
         /// `nested` for uncached `CustomKernel`, and folds sibling factors across sums and products.
-        /// @param term Compiled AST node.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param d_k Output derivative matrix of shape `(n, n)`.
-        /// @param param_idx Global hyperparameter index to differentiate with respect to.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch_a First reusable square scratch buffer.
-        /// @param scratch_b Second reusable square scratch buffer.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
-        /// @param cache Optional precomputed distance and ARD cache.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+        /// @param[in] param_idx Global hyperparameter index to differentiate with respect to.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
         [[nodiscard]] std::expected<void, GprError> eval_grad_points(
@@ -1622,17 +1697,17 @@ namespace cxxgpr
         /// `ProductTerm`, computes $(\partial^2 f_m / \partial \theta_i \partial \theta_j) \prod_{r \ne m} f_r$ when
         /// co-located and $(\partial f_{m_i}/\partial \theta_i)(\partial f_{m_j}/\partial \theta_j) \prod_{r \ne
         /// m_i,m_j} f_r$ across distinct factors.
-        /// @param term Compiled AST node.
-        /// @param dist Square squared-distance matrix.
-        /// @param d2_k Output second-derivative matrix view.
-        /// @param i First global hyperparameter index.
-        /// @param j Second global hyperparameter index.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch_a First reusable square scratch buffer.
-        /// @param scratch_b Second reusable square scratch buffer.
-        /// @param scratch_c Third reusable square scratch buffer.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d2_k Output second-derivative matrix view.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
         [[nodiscard]] std::expected<void, GprError> eval_hess_dist(
@@ -1768,18 +1843,18 @@ namespace cxxgpr
         /// @brief Recursively evaluates $\partial^2 K / (\partial \theta_i \partial \theta_j)$ from point coordinates.
         /// @details Handles cached distance/ARD acceleration, `CustomKernel` distance materialization, cross-summand
         /// zeroing, and same-factor vs cross-factor product Hessian rules.
-        /// @param term Compiled AST node.
-        /// @param x Input point coordinate matrix of shape `(n, d)`.
-        /// @param d2_k Output second-derivative matrix of shape `(n, n)`.
-        /// @param i First global hyperparameter index.
-        /// @param j Second global hyperparameter index.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch_a First reusable square scratch buffer.
-        /// @param scratch_b Second reusable square scratch buffer.
-        /// @param scratch_c Third reusable square scratch buffer.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param level_idx Current nesting depth inside `nested`.
-        /// @param cache Optional precomputed distance and ARD cache.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
         [[nodiscard]] std::expected<void, GprError> eval_hess_points(
@@ -1950,7 +2025,7 @@ namespace cxxgpr
 
         /// @brief Returns true if `term` is a `LeafRef` wrapping a `ConstantKernel`.
         /// @details Constant factors fold into a single scalar multiplier in product retention and adjoint contraction.
-        /// @param term Compiled AST node.
+        /// @param[in] term Compiled AST node.
         /// @return True when `term` is a `ConstantKernel` leaf.
         [[nodiscard]] bool is_constant_term(const Term& term) const noexcept
         {
@@ -1964,7 +2039,7 @@ namespace cxxgpr
         /// @brief Counts non-constant child factors in a product's term list.
         /// @details Excludes `ConstantKernel` leaves because they reduce to a scalar multiplier without needing Gram
         /// matrix buffers.
-        /// @param terms Child factors of a `ProductTerm`.
+        /// @param[in] terms Child factors of a `ProductTerm`.
         /// @return Number of spatially varying factors.
         [[nodiscard]] std::size_t varying_factors(const std::vector<Term>& terms) const noexcept
         {
@@ -1981,7 +2056,7 @@ namespace cxxgpr
 
         /// @brief Computes the scalar product of all `ConstantKernel` factors in `terms`.
         /// @details Returns `T{1}` when no constant leaf appears directly in `terms`.
-        /// @param terms Child factors of a `ProductTerm`.
+        /// @param[in] terms Child factors of a `ProductTerm`.
         /// @return Combined scalar constant multiplier cast to `T`.
         [[nodiscard]] T constant_scale(const std::vector<Term>& terms) const noexcept
         {
@@ -2014,7 +2089,7 @@ namespace cxxgpr
 
         /// @brief Estimates peak `n x n` buffers needed for an unkept reverse contraction walk over `term`.
         /// @details Establishes the memory budget against which `compute_kept_products` caps retained factor Grams.
-        /// @param term Compiled AST node.
+        /// @param[in] term Compiled AST node.
         /// @return Peak `n x n` buffer count without factor Gram retention.
         [[nodiscard]] static std::size_t unkept_buffers_of(const Term& term) noexcept
         {
@@ -2042,8 +2117,8 @@ namespace cxxgpr
         /// @brief Computes `n x n` working buffers needed during `walk_weighted` for `term`.
         /// @details When `keeps == true`, a top-level product already has its varying factor Grams stored in
         /// `kept_bufs`, so the walk only needs 1 effective-weight buffer plus child walk buffers.
-        /// @param term Compiled AST node.
-        /// @param keeps True if this node's varying factor Grams were pre-retained by `apply_keeping`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] keeps True if this node's varying factor Grams were pre-retained by `apply_keeping`.
         /// @return Peak working buffer count required while walking `term`.
         [[nodiscard]] std::size_t node_buffers_of(const Term& term, bool keeps) const noexcept
         {
@@ -2077,7 +2152,7 @@ namespace cxxgpr
         /// products.
         /// @details Sums `varying_factors` over the first `products` top-level `ProductTerm` nodes with at least two
         /// varying factors.
-        /// @param products Number of eligible top-level `ProductTerm` nodes to retain.
+        /// @param[in] products Number of eligible top-level `ProductTerm` nodes to retain.
         /// @return Total number of retained `n x n` factor Gram matrices.
         [[nodiscard]] std::size_t kept_grams_count(std::size_t products) const noexcept
         {
@@ -2102,7 +2177,7 @@ namespace cxxgpr
         /// retain factor Grams.
         /// @details Takes the maximum `node_buffers_of` across top-level terms, marking the first `products` eligible
         /// `ProductTerm` nodes as kept.
-        /// @param products Number of eligible top-level `ProductTerm` nodes whose factor Grams are kept.
+        /// @param[in] products Number of eligible top-level `ProductTerm` nodes whose factor Grams are kept.
         /// @return Peak scratch buffer depth needed by `walk_weighted` outside the kept Gram slots.
         [[nodiscard]] std::size_t walk_buffers_count(std::size_t products) const noexcept
         {
@@ -2157,14 +2232,14 @@ namespace cxxgpr
         /// @brief Evaluates the local derivative $\partial K_{\text{leaf}} / \partial \theta_{\text{local\_idx}}$
         /// using caches when available.
         /// @details Mirrors `eval_leaf_at` dispatch for gradients inside the `walk_weighted` adjoint pass.
-        /// @param leaf_idx Zero-based index into `leaves`.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param cache Optional precomputed distance and ARD cache.
-        /// @param d_k Output derivative matrix view.
-        /// @param local_idx Local hyperparameter index within `leaves[leaf_idx]`.
-        /// @param uplo Active matrix triangle to write.
-        /// @param nested Pre-allocated nested buffer pool for uncached `CustomKernel` distance construction.
-        /// @param level_idx Current nesting depth inside `nested`.
+        /// @param[in] leaf_idx Zero-based index into `leaves`.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] d_k Output derivative matrix view.
+        /// @param[in] local_idx Local hyperparameter index within `leaves[leaf_idx]`.
+        /// @param[in] uplo Active matrix triangle to write.
+        /// @param[in,out] nested Pre-allocated nested buffer pool for uncached `CustomKernel` distance construction.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> grad_leaf_at(
             std::size_t leaf_idx,
@@ -2208,14 +2283,14 @@ namespace cxxgpr
         /// @details For the first `products` top-level multi-factor `ProductTerm` nodes, evaluates each non-constant
         /// factor once into `kept_bufs`, applies any folded `ConstantKernel` scale, and multiplies into the product
         /// accumulator before adding into `out`. Unkept terms evaluate normally via `eval_term_points`.
-        /// @param x Input point matrix of shape `(n, d)`.
-        /// @param cache Optional precomputed distance and ARD cache.
-        /// @param out Destination square Gram matrix of shape `(n, n)`.
-        /// @param uplo Active matrix triangle to populate.
-        /// @param scratch Reusable square scratch matrix.
-        /// @param nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param kept_bufs Pre-allocated retention buffer pool receiving kept factor Grams.
-        /// @param products Maximum number of top-level multi-factor products to retain.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] scratch Reusable square scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in,out] kept_bufs Pre-allocated retention buffer pool receiving kept factor Grams.
+        /// @param[in] products Maximum number of top-level multi-factor products to retain.
         /// @return Empty expected on success, or workspace/evaluation error.
         /// @retval GprErrorCode::WorkspaceTooSmall If `kept_bufs` or `nested` capacity is insufficient.
         [[nodiscard]] std::expected<void, GprError> eval_keeping_impl(
@@ -2339,20 +2414,22 @@ namespace cxxgpr
         /// (reusing `kept_bufs` when `has_kept == true`) and optionally return $\langle W, K_{\text{term}} \rangle_F$
         /// when
         /// `need_value` is set or a sibling `ConstantKernel` requires its log-parameter gradient.
-        /// @param term Compiled AST node being traversed.
-        /// @param x Input point coordinate matrix of shape `(n, d)`.
-        /// @param cache Optional precomputed distance and ARD cache.
-        /// @param weight Incoming symmetric adjoint weight matrix (lower triangle read).
-        /// @param out_grads Output span receiving $\langle W, \partial K / \partial \theta \rangle_F$ for `term`.
-        /// @param kernel_scratch Reusable `n x n` scratch matrix for single-leaf gradient/value evaluation.
-        /// @param nested Pre-allocated buffer pool for uncached `CustomKernel` distance matrices.
-        /// @param weighted_bufs Pre-allocated `keep_plan` + walk buffer pool (`kept_bufs` followed by walk scratch).
-        /// @param kept_offset Starting buffer index in `weighted_bufs` if `has_kept` is true.
-        /// @param kept_count Number of retained factor Grams starting at `kept_offset`.
-        /// @param has_kept True when `term`'s varying factor Grams were pre-retained in `weighted_bufs`.
-        /// @param walk_cursor First free buffer index in `weighted_bufs` beyond retained Grams and outer frames.
-        /// @param col_partials Per-column scratch array of length at least `n` for deterministic serial reductions.
-        /// @param need_value True when an enclosing product needs $\langle W, K_{\text{term}} \rangle_F$ back.
+        /// @param[in] term Compiled AST node being traversed.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[in] weight Incoming symmetric adjoint weight matrix (lower triangle read).
+        /// @param[out] out_grads Output span receiving $\langle W, \partial K / \partial \theta \rangle_F$ for `term`.
+        /// @param[in,out] kernel_scratch Reusable `n x n` scratch matrix for single-leaf gradient/value evaluation.
+        /// @param[in,out] nested Pre-allocated buffer pool for uncached `CustomKernel` distance matrices.
+        /// @param[in,out] weighted_bufs Pre-allocated `keep_plan` + walk buffer pool (`kept_bufs` followed by walk
+        /// scratch).
+        /// @param[in] kept_offset Starting buffer index in `weighted_bufs` if `has_kept` is true.
+        /// @param[in] kept_count Number of retained factor Grams starting at `kept_offset`.
+        /// @param[in] has_kept True when `term`'s varying factor Grams were pre-retained in `weighted_bufs`.
+        /// @param[in] walk_cursor First free buffer index in `weighted_bufs` beyond retained Grams and outer frames.
+        /// @param[in,out] col_partials Per-column scratch array of length at least `n` for deterministic serial
+        /// reductions.
+        /// @param[in] need_value True when an enclosing product needs $\langle W, K_{\text{term}} \rangle_F$ back.
         /// @return Contracted term value $\langle W, K_{\text{term}} \rangle_F$ (when `need_value` or needed by a
         /// sibling `ConstantKernel`), `0.0` otherwise, or an error.
         [[nodiscard]] std::expected<double, GprError> walk_weighted(
@@ -2411,6 +2488,15 @@ namespace cxxgpr
                     const double val = wk->variance() * lower_diag_sum(weight);
                     out_grads[0] = val;
                     return need_value ? val : 0.0;
+                }
+                if (leaf_needs_ard(kl))
+                {
+                    const std::span<const T> ard_packed =
+                        (cache != nullptr && cache->has_ard()) ? cache->ard_packed() : std::span<const T>{};
+                    return detail::leaf_ard_weighted_grads(
+                        kl, cached_ls[leaf->leaf_idx], x, ard_packed, weight, kernel_scratch, col_partials, out_grads,
+                        need_value, exp_mode
+                    );
                 }
                 for (std::size_t p = 0; p < leaf->param_count; ++p)
                 {
@@ -2620,7 +2706,7 @@ namespace cxxgpr
     /// @brief Constructs a compiled kernel from its private `Impl` state.
     /// @details Internal constructor invoked by `CompiledKernel::from_spec`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param impl Owning pointer to compiled AST state.
+    /// @param[in] impl Owning pointer to compiled AST state.
     template <KernelScalarConcept T>
     CompiledKernel<T>::CompiledKernel(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))
     {
@@ -2629,13 +2715,13 @@ namespace cxxgpr
     /// @brief Move-constructs a `CompiledKernel<T>`.
     /// @details Transfers ownership of the internal `Impl` pointer without copying leaves or bindings.
     /// @tparam T Storage floating-point scalar type.
-    /// @param other Source compiled kernel moved from.
+    /// @param[in] other Source compiled kernel moved from.
     template <KernelScalarConcept T> CompiledKernel<T>::CompiledKernel(CompiledKernel&& other) noexcept = default;
 
     /// @brief Move-assigns a `CompiledKernel<T>`.
     /// @details Transfers ownership of the internal `Impl` pointer without copying leaves or bindings.
     /// @tparam T Storage floating-point scalar type.
-    /// @param other Source compiled kernel moved from.
+    /// @param[in] other Source compiled kernel moved from.
     /// @return Reference to `*this`.
     template <KernelScalarConcept T>
     CompiledKernel<T>& CompiledKernel<T>::operator=(CompiledKernel&& other) noexcept = default;
@@ -2648,7 +2734,7 @@ namespace cxxgpr
     /// @brief Copy-constructs a `CompiledKernel<T>` with independent mutable leaf state.
     /// @details Deep-copies the compiled `Impl` AST, leaves, bindings, and cached lengthscales.
     /// @tparam T Storage floating-point scalar type.
-    /// @param other Compiled kernel instance to clone.
+    /// @param[in] other Compiled kernel instance to clone.
     template <KernelScalarConcept T>
     CompiledKernel<T>::CompiledKernel(const CompiledKernel& other) : impl_(std::make_unique<Impl>(*other.impl_))
     {
@@ -2657,7 +2743,7 @@ namespace cxxgpr
     /// @brief Copy-assigns a `CompiledKernel<T>` with independent mutable leaf state.
     /// @details Deep-copies `other`'s `Impl` state while guarding against self-assignment.
     /// @tparam T Storage floating-point scalar type.
-    /// @param other Compiled kernel instance to clone.
+    /// @param[in] other Compiled kernel instance to clone.
     /// @return Reference to `*this`.
     template <KernelScalarConcept T> CompiledKernel<T>& CompiledKernel<T>::operator=(const CompiledKernel& other)
     {
@@ -2673,7 +2759,7 @@ namespace cxxgpr
     /// `nested_depth` (adding one level when `CustomKernel` requires a temporary squared-distance matrix), and
     /// populates cached ARD lengthscale vectors.
     /// @tparam T Storage floating-point scalar type.
-    /// @param spec Declaration-layer kernel expression tree.
+    /// @param[in] spec Declaration-layer kernel expression tree.
     /// @return Compiled execution-layer kernel instance.
     template <KernelScalarConcept T> CompiledKernel<T> CompiledKernel<T>::from_spec(const KernelSpec& spec)
     {
@@ -2722,7 +2808,7 @@ namespace cxxgpr
     /// @brief Sets the exponential evaluation backend used by built-in leaves.
     /// @details Selects between exact `std::exp` (`Accurate`) and polynomial approximation (`FastApprox`).
     /// @tparam T Storage floating-point scalar type.
-    /// @param mode Exponential evaluation backend to use.
+    /// @param[in] mode Exponential evaluation backend to use.
     template <KernelScalarConcept T> void CompiledKernel<T>::set_kernel_exp(KernelExp mode) noexcept
     {
         impl_->exp_mode = mode;
@@ -2785,8 +2871,8 @@ namespace cxxgpr
     /// @brief Allocates a `NestedBuffers<T>` workspace sized for this compiled kernel and matrix shape `(rows, cols)`.
     /// @details Pre-allocates `nested_depth()` contiguous matrices.
     /// @tparam T Storage floating-point scalar type.
-    /// @param rows Matrix row capacity.
-    /// @param cols Matrix column capacity.
+    /// @param[in] rows Matrix row capacity.
+    /// @param[in] cols Matrix column capacity.
     /// @return Pre-sized `NestedBuffers<T>` instance.
     template <KernelScalarConcept T>
     NestedBuffers<T> CompiledKernel<T>::make_nested_buffers(std::size_t rows, std::size_t cols) const
@@ -2797,7 +2883,7 @@ namespace cxxgpr
     /// @brief Writes all flattened log-space hyperparameters into `out`.
     /// @details Collects parameter slices across `leaves` in depth-first left-to-right order.
     /// @tparam T Storage floating-point scalar type.
-    /// @param out Destination span of length `num_params()`.
+    /// @param[out] out Destination span of length `num_params()`.
     /// @return Empty expected on success, or length mismatch error.
     /// @retval GprErrorCode::LengthMismatch If `out.size() != num_params()`.
     template <KernelScalarConcept T>
@@ -2824,7 +2910,7 @@ namespace cxxgpr
     /// @details Validates and updates a staged copy of `leaves` first, committing `impl_->leaves` and refreshing
     /// `cached_ls` only if every leaf accepts its parameter slice.
     /// @tparam T Storage floating-point scalar type.
-    /// @param params Log-space hyperparameter span of length `num_params()`.
+    /// @param[in] params Log-space hyperparameter span of length `num_params()`.
     /// @return Empty expected on success, or length/bounds error leaving state unchanged.
     /// @retval GprErrorCode::LengthMismatch If `params.size() != num_params()`.
     /// @retval GprErrorCode::InvalidHyperparameter If any value violates its open parameter interval.
@@ -2855,7 +2941,7 @@ namespace cxxgpr
     /// @brief Writes open hyperparameter intervals for all bound parameters into `out`.
     /// @details Iterates over `leaves` in depth-first left-to-right order.
     /// @tparam T Storage floating-point scalar type.
-    /// @param out Destination span of length `num_params()`.
+    /// @param[out] out Destination span of length `num_params()`.
     /// @return Empty expected on success, or length mismatch error.
     /// @retval GprErrorCode::LengthMismatch If `out.size() != num_params()`.
     template <KernelScalarConcept T>
@@ -2891,11 +2977,11 @@ namespace cxxgpr
     /// @brief Evaluates the square Gram matrix from squared Euclidean distances using caller-supplied buffers.
     /// @details Checks non-aliasing scratch, validates distance compatibility and finiteness, and evaluates `root`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param out Destination square Gram matrix view.
-    /// @param uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
-    /// @param scratch Non-aliasing scratch matrix matching `out` shape.
-    /// @param nested Pre-allocated nested buffer pool for composite subtrees.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] out Destination square Gram matrix view.
+    /// @param[in] uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
+    /// @param[in,out] scratch Non-aliasing scratch matrix matching `out` shape.
+    /// @param[in,out] nested Pre-allocated nested buffer pool for composite subtrees.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply(
@@ -2916,10 +3002,10 @@ namespace cxxgpr
     /// @brief Evaluates the square Gram matrix from squared Euclidean distances using temporary nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(out.rows(), out.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param out Destination square Gram matrix view.
-    /// @param uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
-    /// @param scratch Non-aliasing scratch matrix matching `out` shape.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] out Destination square Gram matrix view.
+    /// @param[in] uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
+    /// @param[in,out] scratch Non-aliasing scratch matrix matching `out` shape.
     /// @return Empty expected on success, or validation/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply(
@@ -2933,11 +3019,11 @@ namespace cxxgpr
     /// @brief Evaluates the square training Gram matrix from point coordinates using caller-supplied buffers.
     /// @details Checks scratch non-aliasing, validates coordinates and ARD dimensions, and evaluates `root`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point coordinate matrix of shape `(n, d)`.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
-    /// @param scratch Non-aliasing scratch matrix of shape `(n, n)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_points(
@@ -2958,10 +3044,10 @@ namespace cxxgpr
     /// @brief Evaluates the square training Gram matrix from point coordinates using temporary nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(out.rows(), out.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point coordinate matrix of shape `(n, d)`.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
-    /// @param scratch Non-aliasing scratch matrix of shape `(n, n)`.
+    /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle (`Lower`, `Upper`, or `Full`).
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n, n)`.
     /// @return Empty expected on success, or validation/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_points(
@@ -2975,10 +3061,10 @@ namespace cxxgpr
     /// @brief Evaluates the rectangular cross-covariance matrix from squared distances using caller buffers.
     /// @details Checks scratch non-aliasing, validates distance compatibility and finiteness, and evaluates `root`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input rectangular squared-distance matrix of shape `(n1, n2)`.
-    /// @param out Destination cross-covariance matrix of shape `(n1, n2)`.
-    /// @param scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] dist Input rectangular squared-distance matrix of shape `(n1, n2)`.
+    /// @param[out] out Destination cross-covariance matrix of shape `(n1, n2)`.
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cross(
@@ -2999,9 +3085,9 @@ namespace cxxgpr
     /// @brief Evaluates the rectangular cross-covariance matrix from squared distances using temporary nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(out.rows(), out.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input rectangular squared-distance matrix.
-    /// @param out Destination cross-covariance matrix view.
-    /// @param scratch Non-aliasing scratch matrix matching `out` shape.
+    /// @param[in] dist Input rectangular squared-distance matrix.
+    /// @param[out] out Destination cross-covariance matrix view.
+    /// @param[in,out] scratch Non-aliasing scratch matrix matching `out` shape.
     /// @return Empty expected on success, or validation/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cross(
@@ -3015,11 +3101,11 @@ namespace cxxgpr
     /// @brief Evaluates the rectangular cross-covariance matrix from point matrices `x1` and `x2`.
     /// @details Uses caller-supplied `scratch` and `nested` buffers with zero heap allocations.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x1 First point matrix of shape `(n1, d)`.
-    /// @param x2 Second point matrix of shape `(n2, d)`.
-    /// @param out Destination cross-covariance matrix of shape `(n1, n2)`.
-    /// @param scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x1 First point matrix of shape `(n1, d)`.
+    /// @param[in] x2 Second point matrix of shape `(n2, d)`.
+    /// @param[out] out Destination cross-covariance matrix of shape `(n1, n2)`.
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cross_points(
@@ -3040,10 +3126,10 @@ namespace cxxgpr
     /// @brief Evaluates the rectangular cross-covariance matrix from point matrices using temporary nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(out.rows(), out.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x1 First point matrix of shape `(n1, d)`.
-    /// @param x2 Second point matrix of shape `(n2, d)`.
-    /// @param out Destination cross-covariance matrix of shape `(n1, n2)`.
-    /// @param scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
+    /// @param[in] x1 First point matrix of shape `(n1, d)`.
+    /// @param[in] x2 Second point matrix of shape `(n2, d)`.
+    /// @param[out] out Destination cross-covariance matrix of shape `(n1, n2)`.
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n1, n2)`.
     /// @return Empty expected on success, or validation/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cross_points(
@@ -3058,9 +3144,9 @@ namespace cxxgpr
     /// @details Validates empty inputs, output span length, ARD feature count, scratch length `(nested_depth + 1) * n`,
     /// and coordinate finiteness before running `eval_fill_diag` with zero heap allocations.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param out Output diagonal span of length `n`.
-    /// @param scratch Scratch vector span of length at least `(nested_depth() + 1) * n`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] out Output diagonal span of length `n`.
+    /// @param[in,out] scratch Scratch vector span of length at least `(nested_depth() + 1) * n`.
     /// @return Empty expected on success, or validation/length/evaluation error.
     /// @retval GprErrorCode::EmptyInput If `x` has zero rows or columns.
     /// @retval GprErrorCode::LengthMismatch If `out` or `scratch` is improperly sized.
@@ -3105,8 +3191,8 @@ namespace cxxgpr
     /// @brief Fills the diagonal $k(x_i, x_i)$ for query points `x` using a temporary scratch buffer.
     /// @details Allocates `(nested_depth() + 1) * out.size()` elements and forwards to the zero-alloc `fill_diag`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param out Output diagonal span of length `n`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] out Output diagonal span of length `n`.
     /// @return Empty expected on success, or validation/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::fill_diag(MatrixRef<T> x, std::span<T> out) const
@@ -3121,13 +3207,13 @@ namespace cxxgpr
     /// @details Validates scratch non-aliasing, distance compatibility/finiteness, and parameter bounds before
     /// traversing `root`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param d_k Output derivative matrix view.
-    /// @param param_idx Global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer matching `d_k` shape.
-    /// @param scratch_b Second non-aliasing scratch buffer matching `d_k` shape.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] d_k Output derivative matrix view.
+    /// @param[in] param_idx Global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer matching `d_k` shape.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer matching `d_k` shape.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/index/workspace error.
     /// @retval GprErrorCode::InvalidConfig If `scratch_a` and `scratch_b` alias each other or `d_k`.
     /// @retval GprErrorCode::IndexOutOfRange If `param_idx >= num_params()`.
@@ -3169,12 +3255,12 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d_k.rows(), d_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param d_k Output derivative matrix view.
-    /// @param param_idx Global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer matching `d_k` shape.
-    /// @param scratch_b Second non-aliasing scratch buffer matching `d_k` shape.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] d_k Output derivative matrix view.
+    /// @param[in] param_idx Global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer matching `d_k` shape.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer matching `d_k` shape.
     /// @return Empty expected on success, or validation/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::grad(
@@ -3193,13 +3279,13 @@ namespace cxxgpr
     /// @brief Evaluates $\partial K / \partial \theta_{\text{param\_idx}}$ directly from point coordinates.
     /// @details Validates non-aliasing scratch buffers, point inputs, ARD dimensions, and parameter index bounds.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param d_k Output derivative matrix of shape `(n, n)`.
-    /// @param param_idx Global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param scratch_b Second non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+    /// @param[in] param_idx Global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/index/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::grad_points(
@@ -3239,12 +3325,12 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d_k.rows(), d_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param d_k Output derivative matrix of shape `(n, n)`.
-    /// @param param_idx Global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param scratch_b Second non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+    /// @param[in] param_idx Global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer of shape `(n, n)`.
     /// @return Empty expected on success, or validation/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::grad_points(
@@ -3264,15 +3350,15 @@ namespace cxxgpr
     /// from squared Euclidean distances.
     /// @details Requires three mutually distinct non-aliasing scratch buffers matching `d2_k` shape.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param d2_k Output second-derivative matrix view.
-    /// @param i First global hyperparameter index in `[0, num_params())`.
-    /// @param j Second global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] d2_k Output second-derivative matrix view.
+    /// @param[in] i First global hyperparameter index in `[0, num_params())`.
+    /// @param[in] j Second global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/index/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess(
@@ -3319,14 +3405,14 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d2_k.rows(), d2_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param dist Input square squared-distance matrix.
-    /// @param d2_k Output second-derivative matrix view.
-    /// @param i First global hyperparameter index.
-    /// @param j Second global hyperparameter index.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
+    /// @param[in] dist Input square squared-distance matrix.
+    /// @param[out] d2_k Output second-derivative matrix view.
+    /// @param[in] i First global hyperparameter index.
+    /// @param[in] j Second global hyperparameter index.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
     /// @return Empty expected on success, or validation/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess(
@@ -3347,15 +3433,15 @@ namespace cxxgpr
     /// @brief Evaluates $\partial^2 K / (\partial \theta_i \partial \theta_j)$ directly from point coordinates.
     /// @details Requires three mutually distinct non-aliasing scratch buffers and valid parameter indices `(i, j)`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param d2_k Output second-derivative matrix of shape `(n, n)`.
-    /// @param i First global hyperparameter index in `[0, num_params())`.
-    /// @param j Second global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+    /// @param[in] i First global hyperparameter index in `[0, num_params())`.
+    /// @param[in] j Second global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/index/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess_points(
@@ -3402,14 +3488,14 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d2_k.rows(), d2_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param d2_k Output second-derivative matrix of shape `(n, n)`.
-    /// @param i First global hyperparameter index.
-    /// @param j Second global hyperparameter index.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+    /// @param[in] i First global hyperparameter index.
+    /// @param[in] j Second global hyperparameter index.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
     /// @return Empty expected on success, or validation/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess_points(
@@ -3430,12 +3516,12 @@ namespace cxxgpr
     /// @brief Evaluates the square training Gram matrix using precomputed `DistanceCache<T>` when populated.
     /// @details Validates scratch, points, ARD dimensions, and cache shapes before walking `root` with `&cache`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed scalar distance and packed ARD cache.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch Non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed scalar distance and packed ARD cache.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch Non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/cache/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cached(
@@ -3465,11 +3551,11 @@ namespace cxxgpr
     /// @brief Evaluates the training Gram matrix using `DistanceCache<T>` and temporary nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(out.rows(), out.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch Non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch Non-aliasing scratch buffer of shape `(n, n)`.
     /// @return Empty expected on success, or validation/cache error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cached(
@@ -3483,14 +3569,14 @@ namespace cxxgpr
     /// @brief Evaluates $\partial K / \partial \theta_{\text{param\_idx}}$ using precomputed `DistanceCache<T>`.
     /// @details Validates scratch non-aliasing, point shapes, cache shapes, and parameter bounds before walking `root`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param d_k Output derivative matrix of shape `(n, n)`.
-    /// @param param_idx Global hyperparameter index in `[0, num_params())`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+    /// @param[in] param_idx Global hyperparameter index in `[0, num_params())`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/cache/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::grad_cached(
@@ -3535,13 +3621,13 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d_k.rows(), d_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param d_k Output derivative matrix of shape `(n, n)`.
-    /// @param param_idx Global hyperparameter index.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+    /// @param[in] param_idx Global hyperparameter index.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
     /// @return Empty expected on success, or validation/cache/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::grad_cached(
@@ -3561,16 +3647,16 @@ namespace cxxgpr
     /// @brief Evaluates $\partial^2 K / (\partial \theta_i \partial \theta_j)$ using precomputed `DistanceCache<T>`.
     /// @details Validates three non-aliasing scratch buffers, point inputs, cache compatibility, and parameter indices.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param d2_k Output second-derivative matrix of shape `(n, n)`.
-    /// @param i First global hyperparameter index.
-    /// @param j Second global hyperparameter index.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+    /// @param[in] i First global hyperparameter index.
+    /// @param[in] j Second global hyperparameter index.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or validation/cache/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess_cached(
@@ -3624,15 +3710,15 @@ namespace cxxgpr
     /// nested buffers.
     /// @details Convenience overload allocating `make_nested_buffers(d2_k.rows(), d2_k.cols())`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param d2_k Output second-derivative matrix of shape `(n, n)`.
-    /// @param i First global hyperparameter index.
-    /// @param j Second global hyperparameter index.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch_a First non-aliasing scratch buffer.
-    /// @param scratch_b Second non-aliasing scratch buffer.
-    /// @param scratch_c Third non-aliasing scratch buffer.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+    /// @param[in] i First global hyperparameter index.
+    /// @param[in] j Second global hyperparameter index.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch_a First non-aliasing scratch buffer.
+    /// @param[in,out] scratch_b Second non-aliasing scratch buffer.
+    /// @param[in,out] scratch_c Third non-aliasing scratch buffer.
     /// @return Empty expected on success, or validation/cache/index error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::hess_cached(
@@ -3654,7 +3740,7 @@ namespace cxxgpr
     /// @brief Returns the compiled leaf index owning flattened global parameter `param_idx`.
     /// @details Used by incremental leaf-cache evaluators to map changed parameter indices to dirty leaves.
     /// @tparam T Storage floating-point scalar type.
-    /// @param param_idx Global hyperparameter index.
+    /// @param[in] param_idx Global hyperparameter index.
     /// @return Zero-based leaf index in `[0, num_leaves())`, or `GprErrorCode::IndexOutOfRange`.
     /// @retval GprErrorCode::IndexOutOfRange If `param_idx >= num_params()`.
     template <KernelScalarConcept T>
@@ -3670,11 +3756,11 @@ namespace cxxgpr
     /// @brief Evaluates a single compiled leaf Gram matrix directly from point coordinates `x`.
     /// @details Supports selective per-leaf recomputation for incremental optimizers.
     /// @tparam T Storage floating-point scalar type.
-    /// @param leaf_idx Zero-based leaf index in `[0, num_leaves())`.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param out Destination square leaf Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] leaf_idx Zero-based leaf index in `[0, num_leaves())`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] out Destination square leaf Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or index/validation/evaluation error.
     /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
     template <KernelScalarConcept T>
@@ -3696,12 +3782,12 @@ namespace cxxgpr
     /// @brief Evaluates a single compiled leaf Gram matrix using precomputed `DistanceCache<T>`.
     /// @details Validates leaf bounds, point shape, and cache shape before evaluating `leaves[leaf_idx]`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param leaf_idx Zero-based leaf index in `[0, num_leaves())`.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param out Destination square leaf Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] leaf_idx Zero-based leaf index in `[0, num_leaves())`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] out Destination square leaf Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or index/validation/cache error.
     /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
     template <KernelScalarConcept T>
@@ -3729,15 +3815,62 @@ namespace cxxgpr
         return impl_->eval_leaf_at(leaf_idx, x, out, uplo, nested, 0, &cache);
     }
 
+    /// @brief Evaluates a single compiled leaf using `DistanceCache<T>` and incremental ARD $s^2$ state.
+    /// @details Validates leaf bounds, point shape, and cache shape before delegating to
+    /// `eval_leaf_ard_incremental`.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf_idx Zero-based leaf index in `[0, num_leaves())`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] out Destination square leaf Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
+    /// @param[in,out] ard_s2_cache Caller-owned packed $s^2$ buffer for this leaf.
+    /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+    /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+    /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+    /// @return Empty expected on success, or index/validation/cache error.
+    /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> CompiledKernel<T>::apply_leaf_cached_incremental(
+        std::size_t leaf_idx,
+        MatrixRef<T> x,
+        const DistanceCache<T>& cache,
+        MatrixMut<T> out,
+        Triangle uplo,
+        NestedBuffers<T>& nested,
+        std::span<T> ard_s2_cache,
+        std::span<double> prev_ls,
+        bool& s2_valid,
+        std::size_t& inc_steps
+    ) const
+    {
+        if (leaf_idx >= impl_->leaves.size())
+        {
+            return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+        }
+        if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value())
+        {
+            return v;
+        }
+        if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value())
+        {
+            return cs;
+        }
+        return impl_->eval_leaf_ard_incremental(
+            leaf_idx, x, cache, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps
+        );
+    }
+
     /// @brief Combines precomputed per-leaf Gram matrices into the full composite Gram matrix.
     /// @details Validates output squareness, non-aliasing scratch, `leaf_grams.size() == num_leaves()`, and every
     /// leaf Gram's `(n, n)` shape before walking `root` via `eval_combine_term`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param leaf_grams Span of precomputed square Gram matrix views ordered by leaf index.
-    /// @param out Destination composite Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to combine.
-    /// @param scratch Non-aliasing scratch matrix of shape `(n, n)`.
-    /// @param nested Pre-allocated nested buffer pool.
+    /// @param[in] leaf_grams Span of precomputed square Gram matrix views ordered by leaf index.
+    /// @param[out] out Destination composite Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to combine.
+    /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
     /// @return Empty expected on success, or empty/shape/workspace error.
     /// @retval GprErrorCode::EmptyInput If `out` is empty or null.
     /// @retval GprErrorCode::LengthMismatch If `out` is non-square, leaf count mismatches, or any leaf Gram shape
@@ -3789,7 +3922,7 @@ namespace cxxgpr
     /// @brief Returns the number of `n x n` buffers required to retain factor Grams for `products` top-level products.
     /// @details Callers pass this depth to `kept_bufs` in `apply_keeping` and `apply_cached_keeping`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param products Number of top-level multi-factor products to retain.
+    /// @param[in] products Number of top-level multi-factor products to retain.
     /// @return Number of `n x n` buffers needed for retained factor Grams.
     template <KernelScalarConcept T> std::size_t CompiledKernel<T>::kept_buffers(std::size_t products) const noexcept
     {
@@ -3800,7 +3933,7 @@ namespace cxxgpr
     /// @details Equals `kept_grams_count(products) + walk_buffers_count(products)`, partitioning `weighted_bufs` into a
     /// retained-Gram prefix followed by reverse-walk working buffers.
     /// @tparam T Storage floating-point scalar type.
-    /// @param products Number of top-level multi-factor products retained during forward evaluation.
+    /// @param[in] products Number of top-level multi-factor products retained during forward evaluation.
     /// @return Total `NestedBuffers<T>` depth required for `weighted_grads`.
     template <KernelScalarConcept T>
     std::size_t CompiledKernel<T>::weighted_buffers(std::size_t products) const noexcept
@@ -3812,13 +3945,13 @@ namespace cxxgpr
     /// @details Saves varying factor Grams of the first `products` top-level multi-factor products into `kept_bufs` so
     /// a subsequent `weighted_grads` call avoids re-evaluating those factors.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch Non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param nested Pre-allocated intermediate buffer pool.
-    /// @param kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
-    /// @param products Number of top-level multi-factor products to retain.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch Non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[in,out] kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
+    /// @param[in] products Number of top-level multi-factor products to retain.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_keeping(
@@ -3845,14 +3978,14 @@ namespace cxxgpr
     /// @brief Evaluates the training Gram matrix using `DistanceCache<T>` while saving `keep_plan` factor Grams.
     /// @details Combines distance/ARD cache acceleration with factor Gram retention in `kept_bufs`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Precomputed distance and ARD cache.
-    /// @param out Destination square Gram matrix of shape `(n, n)`.
-    /// @param uplo Active matrix triangle to populate.
-    /// @param scratch Non-aliasing scratch buffer of shape `(n, n)`.
-    /// @param nested Pre-allocated intermediate buffer pool.
-    /// @param kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
-    /// @param products Number of top-level multi-factor products to retain.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Precomputed distance and ARD cache.
+    /// @param[out] out Destination square Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] scratch Non-aliasing scratch buffer of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[in,out] kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
+    /// @param[in] products Number of top-level multi-factor products to retain.
     /// @return Empty expected on success, or validation/cache/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cached_keeping(
@@ -3886,17 +4019,17 @@ namespace cxxgpr
     /// in the prefix `[0, kept_total)` of `weighted_bufs` and delegating adjoint contraction to `walk_weighted` using
     /// working slots starting at `kept_total`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param x Input point matrix of shape `(n, d)`.
-    /// @param cache Optional precomputed distance and ARD cache (`nullptr` for uncached evaluation).
-    /// @param weight_lower Lower triangle of the symmetric adjoint matrix $W$ of shape `(n, n)`.
-    /// @param out_grads Output span of length `num_params()` receiving $\langle W, \partial K / \partial \theta_p
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Optional precomputed distance and ARD cache (`nullptr` for uncached evaluation).
+    /// @param[in] weight_lower Lower triangle of the symmetric adjoint matrix $W$ of shape `(n, n)`.
+    /// @param[out] out_grads Output span of length `num_params()` receiving $\langle W, \partial K / \partial \theta_p
     /// \rangle_F$.
-    /// @param kernel_scratch Non-aliasing square scratch buffer of shape `(n, n)`.
-    /// @param nested Pre-allocated intermediate buffer pool.
-    /// @param weighted_bufs Pre-allocated pool containing kept factor Grams in `[0, kept_buffers(products))` followed
-    /// by walk scratch up to `weighted_buffers(products)`.
-    /// @param products Number of top-level multi-factor products previously retained in `weighted_bufs`.
-    /// @param col_partials Per-column partial sum buffer of length at least `n` for deterministic reduction.
+    /// @param[in,out] kernel_scratch Non-aliasing square scratch buffer of shape `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[in,out] weighted_bufs Pre-allocated pool containing kept factor Grams in `[0, kept_buffers(products))`
+    /// followed by walk scratch up to `weighted_buffers(products)`.
+    /// @param[in] products Number of top-level multi-factor products previously retained in `weighted_bufs`.
+    /// @param[in,out] col_partials Per-column partial sum buffer of length at least `n` for deterministic reduction.
     /// @return Empty expected on success, or length/shape/cache/workspace error.
     /// @retval GprErrorCode::LengthMismatch If `out_grads.size() != num_params()` or cache/input dimensions mismatch.
     /// @retval GprErrorCode::WorkspaceTooSmall If `col_partials` or `weighted_bufs` is smaller than required.

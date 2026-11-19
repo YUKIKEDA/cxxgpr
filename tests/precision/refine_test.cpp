@@ -33,8 +33,8 @@ namespace
     /// @details Accumulates inner products in double precision before casting back to Scalar so test
     /// systems can produce both float and double reference factors independently of production code.
     /// @tparam Scalar Storage scalar type (float or double).
-    /// @param a_col_major Column-major n x n SPD matrix overwritten in-place with factor L.
-    /// @param n Matrix dimension.
+    /// @param[in,out] a_col_major Column-major n x n SPD matrix overwritten in-place with factor L.
+    /// @param[in] n Matrix dimension.
     /// @return True if every diagonal pivot remained finite and strictly positive, false otherwise.
     template <typename Scalar> bool factor_lower_llt(std::vector<Scalar>& a_col_major, std::size_t n) noexcept
     {
@@ -69,9 +69,9 @@ namespace
     /// @brief Solves (L * L^T) * x = b in-place using forward and backward triangular substitution.
     /// @details Uses double accumulation for row reductions before writing each Scalar entry back to x.
     /// @tparam Scalar Factor and solution scalar type (float or double).
-    /// @param l_col_major Column-major n x n lower Cholesky factor L.
-    /// @param n System dimension.
-    /// @param x Right-hand side vector overwritten in-place with the solved vector.
+    /// @param[in] l_col_major Column-major n x n lower Cholesky factor L.
+    /// @param[in] n System dimension.
+    /// @param[in,out] x Right-hand side vector overwritten in-place with the solved vector.
     template <typename Scalar>
     void solve_lower_llt(std::span<const Scalar> l_col_major, std::size_t n, std::span<Scalar> x) noexcept
     {
@@ -100,8 +100,8 @@ namespace
 
     /// @brief Computes relative infinity-norm error ||got - truth||_inf / ||truth||_inf.
     /// @details Used as an independent accuracy check against full double-precision Cholesky solves.
-    /// @param got Candidate solution vector.
-    /// @param truth Reference double-precision solution vector of equal length.
+    /// @param[in] got Candidate solution vector.
+    /// @param[in] truth Reference double-precision solution vector of equal length.
     /// @return Relative infinity-norm distance between got and truth.
     double relative_inf_error(std::span<const double> got, std::span<const double> truth) noexcept
     {
@@ -117,7 +117,7 @@ namespace
 
     /// @brief Generates n uniformly spaced test points on [0, 1].
     /// @details Constructs x_i = i / (n - 1) for 1D RBF system refinement benchmarks and tests.
-    /// @param n Number of grid points (must be >= 2).
+    /// @param[in] n Number of grid points (must be >= 2).
     /// @return Vector of n sorted coordinates on [0, 1].
     std::vector<double> make_grid_points(std::size_t n)
     {
@@ -131,7 +131,7 @@ namespace
 
     /// @brief Evaluates Forrester function target values on a 1D point grid.
     /// @details Computes y_i = (6 * x_i - 2)^2 * sin(12 * x_i - 4) for smooth non-trivial RHS vectors.
-    /// @param pts Input 1D coordinate span.
+    /// @param[in] pts Input 1D coordinate span.
     /// @return Target vector matching pts.size().
     std::vector<double> make_forrester_targets(std::span<const double> pts)
     {
@@ -146,9 +146,9 @@ namespace
 
     /// @brief Evaluates an unscaled RBF kernel entry exp(-0.5 * (xi - xj)^2 / ell^2).
     /// @details Uses precomputed inv_two_ell2 = 1 / (2 * ell^2) matching production RBF evaluation.
-    /// @param xi First scalar coordinate.
-    /// @param xj Second scalar coordinate.
-    /// @param inv_two_ell2 Precomputed factor 1 / (2 * ell^2).
+    /// @param[in] xi First scalar coordinate.
+    /// @param[in] xj Second scalar coordinate.
+    /// @param[in] inv_two_ell2 Precomputed factor 1 / (2 * ell^2).
     /// @return Scalar RBF kernel value in (0, 1].
     double rbf_entry(double xi, double xj, double inv_two_ell2) noexcept
     {
@@ -178,11 +178,11 @@ namespace
         /// @brief Builds RBF Gram matrices, float/double Cholesky factors, and preallocated scratch buffers.
         /// @details Computes initial_w() from the float Cholesky solve and truth_f64() from the exact
         /// double Cholesky solve for convergence accuracy comparisons.
-        /// @param pts 1D training grid coordinates.
-        /// @param y Right-hand side target vector.
-        /// @param ell RBF lengthscale parameter.
-        /// @param diag_offset Diagonal noise plus jitter shift added to K.
-        /// @param mode Residual evaluation and acceptance verification mode.
+        /// @param[in] pts 1D training grid coordinates.
+        /// @param[in] y Right-hand side target vector.
+        /// @param[in] ell RBF lengthscale parameter.
+        /// @param[in] diag_offset Diagonal noise plus jitter shift added to K.
+        /// @param[in] mode Residual evaluation and acceptance verification mode.
         RbfTestRefineSystem(
             std::span<const double> pts, std::span<const double> y, double ell, double diag_offset, Mode mode
         ) :
@@ -269,8 +269,8 @@ namespace
         /// @brief Computes r = y - B * w and ||B||_inf using either blocked f64 or promoted f32 storage.
         /// @details Dispatches to reevaluate_blocked_residual() for ReevaluateBlockedF64 or
         /// promoted_residual_into() otherwise, both with zero heap allocations.
-        /// @param w Current iterate vector of length n_.
-        /// @param r Output residual vector of length n_.
+        /// @param[in] w Current iterate vector of length n_.
+        /// @param[out] r Output residual vector of length n_.
         /// @return Operator infinity norm ||B||_inf, or GprError if scratch/shape checks fail.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> residual(
             std::span<const double> w, std::span<double> r
@@ -286,8 +286,8 @@ namespace
 
         /// @brief Solves L_f32 * L_f32^T * delta_w = r in single precision and adds delta_w into w.
         /// @details Uses preallocated rhs_f32_ scratch to stay allocation-free inside refinement loops.
-        /// @param r Residual vector of length n_.
-        /// @param w Iterate vector updated in-place via w += delta_w.
+        /// @param[in] r Residual vector of length n_.
+        /// @param[in,out] w Iterate vector updated in-place via w += delta_w.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> correct(
             std::span<const double> r, std::span<double> w
@@ -308,8 +308,8 @@ namespace
         /// @brief Verifies whether w meets the true double-precision relative residual tolerance.
         /// @details Accepts immediately for ReevaluateBlockedF64, checks promoted storage for
         /// PromoteExactF32, and re-evaluates true double RBF entries for PromoteAgainstF64Rbf.
-        /// @param w Candidate converged iterate vector of length n_.
-        /// @param tol Relative residual convergence tolerance.
+        /// @param[in] w Candidate converged iterate vector of length n_.
+        /// @param[in] tol Relative residual convergence tolerance.
         /// @return True if w satisfies the true operator residual bound, false to trigger fallback().
         [[nodiscard]] std::expected<bool, cxxgpr::GprError> accept(std::span<const double> w, double tol) override
         {
@@ -337,7 +337,7 @@ namespace
 
         /// @brief Overwrites w with the full double-precision Cholesky solve using preallocated buffers.
         /// @details Uses prefactored l_f64_ and preallocated fallback_rhs_ with zero heap allocation.
-        /// @param w Output iterate vector overwritten with the double-precision solution.
+        /// @param[out] w Output iterate vector overwritten with the double-precision solution.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fallback(std::span<double> w) override
         {
@@ -351,8 +351,8 @@ namespace
         /// @brief Computes r = y - B_f64 * w and ||B_f64||_inf using 32-column double blocks.
         /// @details Re-evaluates RBF kernel columns in deterministic column order into k_block_f64_
         /// without allocating an n x n double matrix.
-        /// @param w Current iterate vector of length n_.
-        /// @param r Output residual buffer of length n_.
+        /// @param[in] w Current iterate vector of length n_.
+        /// @param[out] r Output residual buffer of length n_.
         /// @return Operator infinity norm ||B_f64||_inf.
         std::expected<double, cxxgpr::GprError> reevaluate_blocked_residual(
             std::span<const double> w, std::span<double> r
@@ -439,9 +439,9 @@ namespace
     public:
         /// @brief Constructs a scripted refinement system with predetermined norm sequences.
         /// @details When call counts exceed vector lengths, residual() repeats the final element.
-        /// @param rhs_vec Right-hand side vector returned by rhs().
-        /// @param b_infs Sequence of operator infinity norms returned across residual() calls.
-        /// @param residual_norms Sequence of first-element residual norms emitted across residual() calls.
+        /// @param[in] rhs_vec Right-hand side vector returned by rhs().
+        /// @param[in] b_infs Sequence of operator infinity norms returned across residual() calls.
+        /// @param[in] residual_norms Sequence of first-element residual norms emitted across residual() calls.
         explicit ScriptedRefineSystem(
             std::vector<double> rhs_vec, std::vector<double> b_infs, std::vector<double> residual_norms
         ) :
@@ -482,7 +482,7 @@ namespace
 
         /// @brief Emits the next scripted residual norm in r[0] and returns the scripted ||B||_inf.
         /// @details Returns fail_residual if armed for the current residual_calls index.
-        /// @param r Output residual buffer cleared except for r[0].
+        /// @param[out] r Output residual buffer cleared except for r[0].
         /// @return Scripted operator infinity norm, or fail_residual when armed.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> residual(
             std::span<const double> /*w*/, std::span<double> r
@@ -500,8 +500,8 @@ namespace
 
         /// @brief Applies a dummy correction step to w unless fail_correct is armed or r is zero.
         /// @details Increments correct_calls and perturbs w entries by +1e-6 when residual is nonzero.
-        /// @param r Current residual span inspected via inf_norm().
-        /// @param w Iterate span modified in-place.
+        /// @param[in] r Current residual span inspected via inf_norm().
+        /// @param[in,out] w Iterate span modified in-place.
         /// @return Empty expected on success, or fail_correct if armed.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> correct(
             std::span<const double> r, std::span<double> w
@@ -539,7 +539,7 @@ namespace
 
         /// @brief Overwrites w with fallback_value unless fail_fallback is armed.
         /// @details Increments fallback_calls so tests can verify exact fallback invocation counts.
-        /// @param w Iterate span overwritten with fallback_value.
+        /// @param[out] w Iterate span overwritten with fallback_value.
         /// @return Empty expected on success, or fail_fallback if armed.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fallback(std::span<double> w) override
         {

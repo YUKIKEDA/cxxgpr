@@ -29,7 +29,7 @@ namespace cxxgpr::test_support
 
     /// @brief Observes a pointer via a volatile sink to prevent dead-store elimination in tests.
     /// @details Forces the compiler to materialize computed buffers before measuring allocation deltas.
-    /// @param ptr Pointer to test data whose computation must not be eliminated as dead code.
+    /// @param[in] ptr Pointer to test data whose computation must not be eliminated as dead code.
     void touch_for_test(const void* ptr) noexcept;
 
     /// @brief RAII scope tracking C++ heap allocations and optionally forbidding Eigen runtime malloc.
@@ -40,7 +40,7 @@ namespace cxxgpr::test_support
     public:
         /// @brief Enters an allocation audit scope and snapshots the current thread allocation count.
         /// @details When mode is AuditMode::CppAndEigen, disables Eigen runtime malloc until destruction.
-        /// @param mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
+        /// @param[in] mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
         explicit NoAllocationScope(AuditMode mode = AuditMode::CppAndEigen) noexcept;
 
         /// @brief Exits the allocation audit scope and restores prior Eigen runtime malloc state.

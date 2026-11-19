@@ -26,7 +26,7 @@ namespace cxxgpr::linalg
         /// @brief Validates a square lower-triangular Cholesky factor L prior to solves or determinant queries.
         /// @details Enforces square view geometry, lower-triangle finiteness, and strictly positive diagonal entries.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param l Square read-only Cholesky factor view.
+        /// @param[in] l Square read-only Cholesky factor view.
         /// @return Empty expected on success, or GprError if l is invalid or singular.
         /// @retval GprErrorCode::EmptyInput When l is empty or null.
         /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
@@ -60,8 +60,8 @@ namespace cxxgpr::linalg
         /// @details Checks L via validate_lower_factor, verifies rhs geometry and row count parity, and checks rhs
         /// finiteness.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param l Square read-only lower Cholesky factor view.
-        /// @param rhs Mutable right-hand side matrix view.
+        /// @param[in] l Square read-only lower Cholesky factor view.
+        /// @param[in] rhs Mutable right-hand side matrix view.
         /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
         /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
         /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
@@ -97,8 +97,8 @@ namespace cxxgpr::linalg
         /// @details Uses Eigen::Ref over the strided map so Eigen decomposes directly in caller storage without
         /// copying, then verifies Eigen::Success and positive finite diagonal pivots.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param a Square mutable matrix view containing A's lower triangle on entry.
-        /// @param stage Factorization stage recorded in CholeskyFailed errors.
+        /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
+        /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
         /// @return Empty expected on success, or GprErrorCode::CholeskyFailed on breakdown.
         /// @retval GprErrorCode::CholeskyFailed When Eigen::LLT fails or produces a non-positive or non-finite pivot.
         template <KernelScalarConcept T>
@@ -130,8 +130,8 @@ namespace cxxgpr::linalg
     /// @brief Factors a symmetric positive-definite matrix A in place into its lower Cholesky factor L.
     /// @details Validates square matrix geometry and lower-triangle finiteness before invoking Eigen in-place LLT.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Square mutable matrix view containing the lower triangle of A on entry and L on success.
-    /// @param stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @param[in,out] a Square mutable matrix view containing the lower triangle of A on entry and L on success.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
     /// @return Empty expected on success, or GprError on invalid input or non-positive-definite matrix.
     /// @retval GprErrorCode::EmptyInput When a is empty or null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
@@ -156,10 +156,10 @@ namespace cxxgpr::linalg
     /// @details Copies A's lower triangle to backup before j = 0; on each jittered retry, restores A's lower triangle
     /// from backup before adding j to the diagonal so failed partial factorizations never accumulate.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Square mutable matrix view factored in place into L.
-    /// @param backup Preallocated n x n square mutable matrix view used to preserve the original lower triangle.
-    /// @param policy Diagonal jitter retry policy evaluated if j = 0 fails.
-    /// @param stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @param[in,out] a Square mutable matrix view factored in place into L.
+    /// @param[out] backup Preallocated n x n square mutable matrix view used to preserve the original lower triangle.
+    /// @param[in] policy Diagonal jitter retry policy evaluated if j = 0 fails.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
     /// @return Accepted diagonal jitter (0.0 if unjittered factorization succeeded), or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When a or backup is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on a or backup.
@@ -239,9 +239,9 @@ namespace cxxgpr::linalg
     /// @brief Factors A in place trying j = 0 first and escalating via policy with an internal backup buffer.
     /// @details Allocates an n x n temporary backup buffer after validating a and delegates to the backup overload.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Square mutable matrix view factored in place into L.
-    /// @param policy Diagonal jitter retry policy evaluated if j = 0 fails.
-    /// @param stage Factorization call site recorded in CholeskyFailed diagnostics.
+    /// @param[in,out] a Square mutable matrix view factored in place into L.
+    /// @param[in] policy Diagonal jitter retry policy evaluated if j = 0 fails.
+    /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
     /// @return Accepted diagonal jitter (0.0 if unjittered factorization succeeded), or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When a is empty or null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols or rows * cols overflows std::size_t.
@@ -272,8 +272,8 @@ namespace cxxgpr::linalg
     /// @details Validates factor and right-hand side views, then performs lower-triangular forward substitution via
     /// Eigen.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable matrix view holding B on entry and X on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
@@ -296,8 +296,8 @@ namespace cxxgpr::linalg
     /// @brief Solves L * x = b in place for a lower-triangular Cholesky factor L and vector b.
     /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable vector span holding b on entry and x on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
@@ -317,8 +317,8 @@ namespace cxxgpr::linalg
     /// @brief Solves L^T * X = B in place for a lower-triangular Cholesky factor L.
     /// @details Interprets l.transpose() as an upper-triangular factor so strictly upper entries of l are never read.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable matrix view holding B on entry and X on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
@@ -341,8 +341,8 @@ namespace cxxgpr::linalg
     /// @brief Solves L^T * x = b in place for a lower-triangular Cholesky factor L and vector b.
     /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable vector span holding b on entry and x on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
@@ -362,8 +362,8 @@ namespace cxxgpr::linalg
     /// @brief Solves (L * L^T) * X = B in place for a lower-triangular Cholesky factor L.
     /// @details Performs forward substitution L * Y = B followed by backward substitution L^T * X = Y in place.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable matrix view holding B on entry and X on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
@@ -387,8 +387,8 @@ namespace cxxgpr::linalg
     /// @brief Solves (L * L^T) * x = b in place for a lower-triangular Cholesky factor L and vector b.
     /// @details Guards empty spans before forwarding rhs as an n x 1 MatrixMut view.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param rhs Mutable vector span holding b on entry and x on success.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in,out] rhs Mutable vector span holding b on entry and x on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
     /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
@@ -408,9 +408,9 @@ namespace cxxgpr::linalg
     /// @details Initializes scratch_n_by_n to I_n, solves L * X = I_n in place to obtain L^-1 in the lower triangle,
     /// and sums squared column norms in double precision.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
-    /// @param out_diag Preallocated output span of length l.rows() receiving the inverse diagonal entries.
-    /// @param scratch_n_by_n Caller-provided n x n mutable workspace overwritten during computation.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[out] out_diag Preallocated output span of length l.rows() receiving the inverse diagonal entries.
+    /// @param[in,out] scratch_n_by_n Caller-provided n x n mutable workspace overwritten during computation.
     /// @return Empty expected on success, or GprError on invalid factor, output length, or scratch buffer.
     /// @retval GprErrorCode::EmptyInput When l, out_diag, or scratch_n_by_n is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or scratch_n_by_n.
@@ -477,7 +477,7 @@ namespace cxxgpr::linalg
     /// @details Validates L and sums 2 * log(L_ii) in double precision using Neumaier error compensation to mitigate
     /// rounding loss across varying magnitudes.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
     /// @return Log-determinant of A = L * L^T in double precision, or GprError on invalid factor.
     /// @retval GprErrorCode::EmptyInput When l is empty or null.
     /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.
@@ -514,7 +514,7 @@ namespace cxxgpr::linalg
     /// @brief Computes 0.5 * log|A| from a lower Cholesky factor L using Neumaier compensated summation.
     /// @details Halves the result of log_det_from_l(l) after propagating any validation failure.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
     /// @return Half log-determinant of A = L * L^T in double precision, or GprError on invalid factor.
     /// @retval GprErrorCode::EmptyInput When l is empty or null.
     /// @retval GprErrorCode::SizeOverflow When l.col_stride() * l.cols() overflows std::size_t.

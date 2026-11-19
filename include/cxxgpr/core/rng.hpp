@@ -24,7 +24,7 @@ namespace cxxgpr
     public:
         /// @brief Initializes the 256-bit generator state from a 64-bit seed using SplitMix64.
         /// @details Steps a SplitMix64 state four times to derive independent initial words s_[0..3].
-        /// @param seed Deterministic 64-bit seed value.
+        /// @param[in] seed Deterministic 64-bit seed value.
         explicit constexpr Xoshiro256PlusPlus(std::uint64_t seed) noexcept
         {
             std::uint64_t x = seed;
@@ -67,7 +67,7 @@ namespace cxxgpr
 
         /// @brief Returns an integer uniformly distributed in the closed interval [0, max].
         /// @details Uses unbiased 128-bit rejection sampling without division bias.
-        /// @param max Inclusive upper bound of the sampled integer range.
+        /// @param[in] max Inclusive upper bound of the sampled integer range.
         /// @return Uniformly sampled index in [0, max].
         [[nodiscard]] std::size_t up_to(std::size_t max) noexcept;
 
@@ -83,7 +83,7 @@ namespace cxxgpr
 
         /// @brief Checks internal state equality between two generator instances.
         /// @details Compares all four 64-bit state words in s_.
-        /// @param other Generator instance to compare against.
+        /// @param[in] other Generator instance to compare against.
         /// @return True if both generators hold identical 256-bit internal states.
         [[nodiscard]] constexpr bool operator==(const Xoshiro256PlusPlus& other) const noexcept = default;
 

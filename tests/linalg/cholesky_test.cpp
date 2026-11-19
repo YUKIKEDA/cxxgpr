@@ -43,8 +43,8 @@ namespace
     /// @details Evaluates exp(-0.5 * ((i - j) * 0.35)^2) across all pairs and adds diag_offset to
     /// diagonal entries so test systems can tune conditioning across float and double precisions.
     /// @tparam Scalar Matrix scalar type (float or double).
-    /// @param n Square matrix order.
-    /// @param diag_offset Non-negative diagonal shift added to every diagonal entry.
+    /// @param[in] n Square matrix order.
+    /// @param[in] diag_offset Non-negative diagonal shift added to every diagonal entry.
     /// @return Column-major n x n SPD Gram matrix stored in a flat vector.
     template <typename Scalar> std::vector<Scalar> make_rbf_gram(std::size_t n, Scalar diag_offset)
     {

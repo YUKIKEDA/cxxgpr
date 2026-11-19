@@ -78,11 +78,11 @@ namespace
     /// for a given optimizer instance and precision policy across all kernels in the supplied list.
     /// @tparam O Optimizer policy type (Fixed, Lbfgs, TrustRegion, NelderMead, or FSA).
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param opt Configured optimizer instance.
-    /// @param kernels Collection of named built-in kernel specs to test.
-    /// @param x_ref Column-major n x d training input view.
-    /// @param y_train Training target values of length n.
-    /// @param xq_ref Column-major m x d query input view.
+    /// @param[in] opt Configured optimizer instance.
+    /// @param[in] kernels Collection of named built-in kernel specs to test.
+    /// @param[in] x_ref Column-major n x d training input view.
+    /// @param[in] y_train Training target values of length n.
+    /// @param[in] xq_ref Column-major m x d query input view.
     template <typename O, cxxgpr::PrecisionPolicyConcept P>
     void verify_kernel_matrix_for(
         const O& opt,
@@ -149,10 +149,10 @@ namespace
     /// @details Invokes verify_kernel_matrix_for() with Fixed, Lbfgs, TrustRegion, NelderMead,
     /// and FastSimulatedAnnealing over the supplied kernel suite.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernels Collection of named kernel specs to test.
-    /// @param x_ref Column-major n x d training input view.
-    /// @param y_train Training target values of length n.
-    /// @param xq_ref Column-major m x d query input view.
+    /// @param[in] kernels Collection of named kernel specs to test.
+    /// @param[in] x_ref Column-major n x d training input view.
+    /// @param[in] y_train Training target values of length n.
+    /// @param[in] xq_ref Column-major m x d query input view.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_all_optimizers_for_precision(
         const std::vector<NamedKernel>& kernels,
@@ -346,11 +346,11 @@ namespace
     /// @details Compares posterior predictions from every combination against the Accurate +
     /// prefer_speed() reference fit within exp_tol.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param spec Kernel specification factored across policy combinations.
-    /// @param x_ref Column-major n x d training input view.
-    /// @param y_train Training target values of length n.
-    /// @param xq_ref Column-major m x d query input view.
-    /// @param exp_tol Prediction tolerance permitted when KernelExp::FastApprox is active.
+    /// @param[in] spec Kernel specification factored across policy combinations.
+    /// @param[in] x_ref Column-major n x d training input view.
+    /// @param[in] y_train Training target values of length n.
+    /// @param[in] xq_ref Column-major m x d query input view.
+    /// @param[in] exp_tol Prediction tolerance permitted when KernelExp::FastApprox is active.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_exp_and_policy_matrix(
         const cxxgpr::KernelSpec& spec,

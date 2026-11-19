@@ -19,7 +19,7 @@ namespace cxxgpr
 
         /// @brief Maps a CholeskyStage enum value to a human-readable stage name.
         /// @details Used when formatting CholeskyFailed diagnostic messages.
-        /// @param stage Cholesky call site stage.
+        /// @param[in] stage Cholesky call site stage.
         /// @return Stage label string ("Fit", "Predict", or "Unknown").
         constexpr std::string_view stage_label(CholeskyStage stage) noexcept
         {
@@ -36,7 +36,7 @@ namespace cxxgpr
 
         /// @brief Maps a SlotErrorKind enum value to a diagnostic description fragment.
         /// @details Explains slot mismatch semantics inside DistanceSlot error messages.
-        /// @param kind Distance slot mismatch subtype.
+        /// @param[in] kind Distance slot mismatch subtype.
         /// @return Descriptive clause for the slot error kind.
         constexpr std::string_view slot_kind_message(SlotErrorKind kind) noexcept
         {
@@ -55,7 +55,7 @@ namespace cxxgpr
 
         /// @brief Maps a PersistErrorKind enum value to a short snake_case tag.
         /// @details Embedded in PersistFailed messages for concise error identification.
-        /// @param kind Persistence failure subtype.
+        /// @param[in] kind Persistence failure subtype.
         /// @return Short category identifier string.
         constexpr std::string_view persist_kind_label(PersistErrorKind kind) noexcept
         {
@@ -83,9 +83,9 @@ namespace cxxgpr
         /// @brief Formats optional slot, ARD dimension, and entry coordinates into a location clause.
         /// @details Produces fragments such as " in slot 0, dimension 1 at (2, 3)" depending on which
         /// optional fields are present.
-        /// @param slot Optional distance slot index.
-        /// @param dim Optional ARD dimension index.
-        /// @param pair Optional (row, col) matrix coordinates.
+        /// @param[in] slot Optional distance slot index.
+        /// @param[in] dim Optional ARD dimension index.
+        /// @param[in] pair Optional (row, col) matrix coordinates.
         /// @return Formatted location suffix, or an empty string if all fields are std::nullopt.
         std::string format_distance_place(
             std::optional<std::size_t> slot,
@@ -114,10 +114,10 @@ namespace cxxgpr
 
         /// @brief Formats the full diagnostic message for an InvalidDistance error.
         /// @details Combines optional location coordinates from format_distance_place() with reason.
-        /// @param slot Optional distance slot index.
-        /// @param dim Optional ARD dimension index.
-        /// @param pair Optional (row, col) matrix coordinates.
-        /// @param reason Underlying validation failure cause.
+        /// @param[in] slot Optional distance slot index.
+        /// @param[in] dim Optional ARD dimension index.
+        /// @param[in] pair Optional (row, col) matrix coordinates.
+        /// @param[in] reason Underlying validation failure cause.
         /// @return Complete formatted error string.
         std::string format_invalid_distance_message(
             std::optional<std::size_t> slot,
@@ -149,7 +149,7 @@ namespace cxxgpr
 
     /// @brief Constructs a LengthMismatch error with details.
     /// @details Prefixes reason with "length mismatch: ".
-    /// @param reason Description of expected versus actual length.
+    /// @param[in] reason Description of expected versus actual length.
     /// @return GprError with code GprErrorCode::LengthMismatch.
     GprError GprError::length_mismatch(std::string reason)
     {
@@ -158,8 +158,8 @@ namespace cxxgpr
 
     /// @brief Constructs a DimensionMismatch error recording actual and expected feature dimensions.
     /// @details Formats the mismatch message and populates x_dim_ and expected_dim_.
-    /// @param x_dim Supplied number of feature columns.
-    /// @param expected_dim Required number of feature columns.
+    /// @param[in] x_dim Supplied number of feature columns.
+    /// @param[in] expected_dim Required number of feature columns.
     /// @return GprError with code GprErrorCode::DimensionMismatch.
     GprError GprError::dimension_mismatch(std::size_t x_dim, std::size_t expected_dim)
     {
@@ -175,7 +175,7 @@ namespace cxxgpr
 
     /// @brief Constructs an IndexOutOfRange error with details.
     /// @details Prefixes reason with "index out of range: ".
-    /// @param reason Description of the out-of-range index access.
+    /// @param[in] reason Description of the out-of-range index access.
     /// @return GprError with code GprErrorCode::IndexOutOfRange.
     GprError GprError::index_out_of_range(std::string reason)
     {
@@ -184,8 +184,8 @@ namespace cxxgpr
 
     /// @brief Constructs an InsufficientData error recording provided and minimum required point counts.
     /// @details Formats the sample count message and populates n_points_ and min_points_.
-    /// @param n_points Supplied training point count.
-    /// @param min_points Minimum required training point count.
+    /// @param[in] n_points Supplied training point count.
+    /// @param[in] min_points Minimum required training point count.
     /// @return GprError with code GprErrorCode::InsufficientData.
     GprError GprError::insufficient_data(std::size_t n_points, std::size_t min_points)
     {
@@ -217,7 +217,7 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidHyperparameter error with details.
     /// @details Prefixes reason with "invalid hyperparameter: ".
-    /// @param reason Description of the invalid hyperparameter.
+    /// @param[in] reason Description of the invalid hyperparameter.
     /// @return GprError with code GprErrorCode::InvalidHyperparameter.
     GprError GprError::invalid_hyperparameter(std::string reason)
     {
@@ -226,7 +226,7 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidNoiseVariance error with details.
     /// @details Prefixes reason with "invalid observation noise variance: ".
-    /// @param reason Description of the invalid noise variance.
+    /// @param[in] reason Description of the invalid noise variance.
     /// @return GprError with code GprErrorCode::InvalidNoiseVariance.
     GprError GprError::invalid_noise_variance(std::string reason)
     {
@@ -235,8 +235,8 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidInterval error for invalid interval bounds (lo, hi).
     /// @details Populates interval_error_kind_, interval_lo_, and interval_hi_.
-    /// @param lo Candidate lower endpoint.
-    /// @param hi Candidate upper endpoint.
+    /// @param[in] lo Candidate lower endpoint.
+    /// @param[in] hi Candidate upper endpoint.
     /// @return GprError with code GprErrorCode::InvalidInterval.
     GprError GprError::invalid_interval_bounds(double lo, double hi)
     {
@@ -253,9 +253,9 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidInterval error for a parameter value outside (lo, hi).
     /// @details Populates interval_error_kind_, interval_value_, interval_lo_, and interval_hi_.
-    /// @param value Candidate parameter value.
-    /// @param lo Exclusive lower bound.
-    /// @param hi Exclusive upper bound.
+    /// @param[in] value Candidate parameter value.
+    /// @param[in] lo Exclusive lower bound.
+    /// @param[in] hi Exclusive upper bound.
     /// @return GprError with code GprErrorCode::InvalidInterval.
     GprError GprError::invalid_interval_out_of_range(double value, double lo, double hi)
     {
@@ -272,7 +272,7 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidConfig error with details.
     /// @details Prefixes reason with "invalid configuration: ".
-    /// @param reason Description of the configuration error.
+    /// @param[in] reason Description of the configuration error.
     /// @return GprError with code GprErrorCode::InvalidConfig.
     GprError GprError::invalid_config(std::string reason)
     {
@@ -281,10 +281,10 @@ namespace cxxgpr
 
     /// @brief Constructs an InvalidDistance error identifying slot, ARD dimension, matrix pair, and cause.
     /// @details Formats the location-aware message and preserves distance_reason_ for later enrichment.
-    /// @param slot Optional distance slot index.
-    /// @param dim Optional ARD dimension index.
-    /// @param pair Optional (row, col) matrix coordinates.
-    /// @param reason Human-readable validation failure description.
+    /// @param[in] slot Optional distance slot index.
+    /// @param[in] dim Optional ARD dimension index.
+    /// @param[in] pair Optional (row, col) matrix coordinates.
+    /// @param[in] reason Human-readable validation failure description.
     /// @return GprError with code GprErrorCode::InvalidDistance.
     GprError GprError::invalid_distance(
         std::optional<std::size_t> slot,
@@ -304,8 +304,8 @@ namespace cxxgpr
 
     /// @brief Constructs a DistanceSlot error for a slot matching mismatch.
     /// @details Populates slot_error_kind_ and distance_slot_ with a descriptive slot message.
-    /// @param kind Slot mismatch category.
-    /// @param slot Optional offending slot index.
+    /// @param[in] kind Slot mismatch category.
+    /// @param[in] slot Optional offending slot index.
     /// @return GprError with code GprErrorCode::DistanceSlot.
     GprError GprError::distance_slot(SlotErrorKind kind, std::optional<std::size_t> slot)
     {
@@ -324,7 +324,7 @@ namespace cxxgpr
 
     /// @brief Constructs an UnsupportedKernelOperation error with details.
     /// @details Prefixes reason with "unsupported kernel operation: ".
-    /// @param reason Description of the unsupported kernel operation.
+    /// @param[in] reason Description of the unsupported kernel operation.
     /// @return GprError with code GprErrorCode::UnsupportedKernelOperation.
     GprError GprError::unsupported_kernel_operation(std::string reason)
     {
@@ -333,9 +333,9 @@ namespace cxxgpr
 
     /// @brief Constructs a CholeskyFailed error recording the last jitter attempted, matrix size, and stage.
     /// @details Populates jitter_, matrix_size_, and cholesky_stage_.
-    /// @param jitter Last diagonal jitter value applied prior to failure.
-    /// @param matrix_size Square matrix order n.
-    /// @param stage Factorization call site stage.
+    /// @param[in] jitter Last diagonal jitter value applied prior to failure.
+    /// @param[in] matrix_size Square matrix order n.
+    /// @param[in] stage Factorization call site stage.
     /// @return GprError with code GprErrorCode::CholeskyFailed.
     GprError GprError::cholesky_failed(double jitter, std::size_t matrix_size, CholeskyStage stage)
     {
@@ -363,7 +363,7 @@ namespace cxxgpr
 
     /// @brief Constructs an OptimizationNotConverged error recording completed iterations.
     /// @details Populates iterations_ alongside the convergence failure message.
-    /// @param iterations Number of completed optimizer iterations.
+    /// @param[in] iterations Number of completed optimizer iterations.
     /// @return GprError with code GprErrorCode::OptimizationNotConverged.
     GprError GprError::optimization_not_converged(std::size_t iterations)
     {
@@ -386,8 +386,8 @@ namespace cxxgpr
 
     /// @brief Constructs a PersistFailed error identifying the failure kind and reason.
     /// @details Populates persist_error_kind_ and formats the sub-category label into the message.
-    /// @param kind Persistence failure subtype.
-    /// @param reason Human-readable persistence failure description.
+    /// @param[in] kind Persistence failure subtype.
+    /// @param[in] reason Human-readable persistence failure description.
     /// @return GprError with code GprErrorCode::PersistFailed.
     GprError GprError::persist_failed(PersistErrorKind kind, std::string reason)
     {
@@ -401,8 +401,8 @@ namespace cxxgpr
 
     /// @brief Constructs an UnsupportedPersistVersion error recording found and supported versions.
     /// @details Populates found_version_ and supported_version_.
-    /// @param found Version number discovered in the persisted artifact.
-    /// @param supported Version number supported by this library build.
+    /// @param[in] found Version number discovered in the persisted artifact.
+    /// @param[in] supported Version number supported by this library build.
     /// @return GprError with code GprErrorCode::UnsupportedPersistVersion.
     GprError GprError::unsupported_persist_version(std::uint32_t found, std::uint32_t supported)
     {
@@ -418,7 +418,7 @@ namespace cxxgpr
 
     /// @brief Names the distance slot on an InvalidDistance error if not already set; otherwise returns *this.
     /// @details Reconstructs the error via invalid_distance() so the formatted message includes the slot index.
-    /// @param slot_place Distance slot index to attach if distance_slot_ is unset.
+    /// @param[in] slot_place Distance slot index to attach if distance_slot_ is unset.
     /// @return Updated GprError with slot set, or an unmodified copy of *this.
     GprError GprError::with_slot_if_unset(std::size_t slot_place) const
     {
@@ -432,7 +432,7 @@ namespace cxxgpr
 
     /// @brief Names the ARD dimension on an InvalidDistance error if not already set; otherwise returns *this.
     /// @details Reconstructs the error via invalid_distance() so the formatted message includes the ARD dimension.
-    /// @param dim_place ARD dimension index to attach if distance_dim_ is unset.
+    /// @param[in] dim_place ARD dimension index to attach if distance_dim_ is unset.
     /// @return Updated GprError with dimension set, or an unmodified copy of *this.
     GprError GprError::with_dim_if_unset(std::size_t dim_place) const
     {

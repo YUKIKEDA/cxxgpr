@@ -57,8 +57,8 @@ namespace cxxgpr
 
     /// @brief Validates a non-empty, in-bounds, duplicate-free span of changed parameter indices.
     /// @details Rejects empty spans, indices >= n_params, and repeated indices before incremental leaf lookup.
-    /// @param indices Span of zero-based parameter indices claimed to have changed.
-    /// @param n_params Total number of objective parameters (kernel + likelihood).
+    /// @param[in] indices Span of zero-based parameter indices claimed to have changed.
+    /// @param[in] n_params Total number of objective parameters (kernel + likelihood).
     /// @return Empty expected on success, or GprError if indices are empty, out of range, or duplicated.
     /// @retval GprErrorCode::IndexOutOfRange When indices is empty, any index >= n_params, or duplicates exist.
     [[nodiscard]] std::expected<void, GprError> require_change_indices(
@@ -80,8 +80,8 @@ namespace cxxgpr
         /// @brief Sizes internal storage for n_leaves square matrices of order n; preserves capacity if unchanged.
         /// @details Checks n * n and n_leaves * n * n against std::size_t overflow, builds MatrixRef<T>
         /// views into contiguous storage, and marks all leaves dirty while resetting primed state.
-        /// @param n_leaves Number of kernel leaves in the flattened CompiledKernel tree.
-        /// @param n Training sample count (matrix order).
+        /// @param[in] n_leaves Number of kernel leaves in the flattened CompiledKernel tree.
+        /// @param[in] n Training sample count (matrix order).
         /// @return Empty expected on success, or GprError if total element count overflows std::size_t.
         /// @retval GprErrorCode::SizeOverflow When n * n or n_leaves * n * n overflows std::size_t.
         [[nodiscard]] std::expected<void, GprError> resize(std::size_t n_leaves, std::size_t n);
@@ -90,10 +90,10 @@ namespace cxxgpr
         /// @details Verifies params.size() == total_params and validates change_indices; if primed, checks
         /// every coordinate via bit_cast equality against last_params_ so undeclared changes fail cleanly,
         /// then flags only leaves owning indices in [0, kernel.num_params()).
-        /// @param params Candidate full log-space parameter vector (kernel parameters + noise parameter).
-        /// @param change_indices Non-empty duplicate-free span of parameter indices modified since last step.
-        /// @param kernel Compiled kernel tree mapping parameter indices to owning leaf indices.
-        /// @param total_params Expected full parameter count (kernel.num_params() + 1).
+        /// @param[in] params Candidate full log-space parameter vector (kernel parameters + noise parameter).
+        /// @param[in] change_indices Non-empty duplicate-free span of parameter indices modified since last step.
+        /// @param[in] kernel Compiled kernel tree mapping parameter indices to owning leaf indices.
+        /// @param[in] total_params Expected full parameter count (kernel.num_params() + 1).
         /// @return Empty expected on success, or GprError on length mismatch or undeclared parameter changes.
         /// @retval GprErrorCode::LengthMismatch When params.size() != total_params.
         /// @retval GprErrorCode::IndexOutOfRange When change_indices is invalid or an unlisted parameter changed.
@@ -114,7 +114,7 @@ namespace cxxgpr
 
         /// @brief Records params as the baseline parameter vector for subsequent bit-exact change checks.
         /// @details Copies params into last_params_ and marks the cache primed.
-        /// @param params Full log-space parameter vector matching the current cached leaf Grams.
+        /// @param[in] params Full log-space parameter vector matching the current cached leaf Grams.
         /// @return Empty expected on completion.
         [[nodiscard]] std::expected<void, GprError> record(std::span<const double> params);
 
@@ -122,16 +122,16 @@ namespace cxxgpr
         /// @details Sizes storage if needed, runs bit-exact prepare_step(), evaluates dirty leaves via
         /// apply_leaf_cached() (or apply_leaf_points() when dist_cache is null), combines leaf Grams with
         /// combine_from_leaf_grams(), and records params on success (invalidating on any mid-step error).
-        /// @param kernel Compiled execution-layer kernel tree.
-        /// @param x Column-major n x d training coordinate matrix.
-        /// @param dist_cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
-        /// @param params Candidate full log-space parameter vector of length total_params.
-        /// @param change_indices Non-empty duplicate-free span of changed parameter indices.
-        /// @param total_params Expected length of params (kernel parameters plus noise parameter).
-        /// @param out Column-major n x n destination composite Gram matrix.
-        /// @param uplo Triangular or full matrix region to populate.
-        /// @param scratch Non-aliasing n x n scratch matrix view for tree combination.
-        /// @param nested Pre-allocated NestedBuffers with depth >= kernel.nested_depth() and shape >= n x n.
+        /// @param[in] kernel Compiled execution-layer kernel tree.
+        /// @param[in] x Column-major n x d training coordinate matrix.
+        /// @param[in] dist_cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
+        /// @param[in] params Candidate full log-space parameter vector of length total_params.
+        /// @param[in] change_indices Non-empty duplicate-free span of changed parameter indices.
+        /// @param[in] total_params Expected length of params (kernel parameters plus noise parameter).
+        /// @param[out] out Column-major n x n destination composite Gram matrix.
+        /// @param[in] uplo Triangular or full matrix region to populate.
+        /// @param[in,out] scratch Non-aliasing n x n scratch matrix view for tree combination.
+        /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= kernel.nested_depth() and shape >= n x n.
         /// @return Empty expected on success, or GprError if validation, leaf evaluation, or combination fails.
         /// @retval GprErrorCode::EmptyInput When x is empty or null.
         /// @retval GprErrorCode::SizeOverflow When leaf cache sizing overflows std::size_t.
@@ -161,7 +161,7 @@ namespace cxxgpr
 
         /// @brief Returns true if leaf_idx is marked dirty and needs recomputation.
         /// @details Returns false when leaf_idx >= num_leaves().
-        /// @param leaf_idx Zero-based leaf index.
+        /// @param[in] leaf_idx Zero-based leaf index.
         /// @return True if dirty_[leaf_idx] is non-zero.
         [[nodiscard]] bool is_leaf_dirty(std::size_t leaf_idx) const noexcept;
 
@@ -177,13 +177,13 @@ namespace cxxgpr
 
         /// @brief Returns a mutable n x n column-major view of the cached Gram matrix for leaf_idx.
         /// @details Returns an empty view when leaf_idx >= num_leaves().
-        /// @param leaf_idx Zero-based leaf index in [0, num_leaves()).
+        /// @param[in] leaf_idx Zero-based leaf index in [0, num_leaves()).
         /// @return Mutable n x n column-major view of leaf_idx storage.
         [[nodiscard]] MatrixMut<T> leaf_gram_mut(std::size_t leaf_idx) noexcept;
 
         /// @brief Returns an immutable n x n column-major view of the cached Gram matrix for leaf_idx.
         /// @details Returns an empty view when leaf_idx >= num_leaves().
-        /// @param leaf_idx Zero-based leaf index in [0, num_leaves()).
+        /// @param[in] leaf_idx Zero-based leaf index in [0, num_leaves()).
         /// @return Immutable n x n column-major view of leaf_idx storage.
         [[nodiscard]] MatrixRef<T> leaf_gram(std::size_t leaf_idx) const noexcept;
 
@@ -193,10 +193,14 @@ namespace cxxgpr
         [[nodiscard]] std::span<const double> last_params() const noexcept { return last_params_; }
 
     private:
+        /// @brief Fixed per-leaf pre-allocated capacity for incremental ARD lengthscale snapshots.
+        static constexpr std::size_t k_ard_ls_stride_ = 64U;
         /// @brief Number of cached leaf Gram slots.
         std::size_t n_leaves_ = 0;
         /// @brief Square matrix order n for each cached leaf Gram slot.
         std::size_t order_ = 0;
+        /// @brief Number of packed lower-triangular entries per leaf (`order_ * (order_ + 1) / 2`).
+        std::size_t ard_per_dim_ = 0;
         /// @brief Contiguous column-major storage for all n_leaves_ n x n leaf Gram matrices.
         std::vector<T> storage_;
         /// @brief Pre-built immutable MatrixRef views into each leaf slice of storage_.
@@ -205,6 +209,14 @@ namespace cxxgpr
         std::vector<std::uint8_t> dirty_;
         /// @brief Baseline log-space parameters corresponding to the current clean leaf Grams.
         std::vector<double> last_params_;
+        /// @brief Pre-allocated packed lower-triangular ARD s^2 cache of size `n_leaves_ * ard_per_dim_`.
+        std::vector<T> ard_s2_storage_;
+        /// @brief Pre-allocated lengthscale snapshots per leaf for incremental ARD updates.
+        std::vector<double> ard_prev_ls_;
+        /// @brief Per-leaf validity flags for `ard_s2_storage_` (1 = valid, 0 = rebuild required).
+        std::vector<std::uint8_t> ard_s2_valid_;
+        /// @brief Per-leaf counters of consecutive incremental delta updates since the last full rebuild.
+        std::vector<std::size_t> ard_inc_steps_;
         /// @brief True once at least one full step has populated storage_ and last_params_.
         bool primed_ = false;
     };

@@ -39,8 +39,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between residual formula tags.
         /// @details Stateless tag structs always compare equal.
-        /// @param lhs Left-hand residual formula tag.
-        /// @param rhs Right-hand residual formula tag.
+        /// @param[in] lhs Left-hand residual formula tag.
+        /// @param[in] rhs Right-hand residual formula tag.
         /// @return Always true.
         [[nodiscard]] friend constexpr bool operator==(PromoteStorage lhs, PromoteStorage rhs) noexcept = default;
     };
@@ -60,8 +60,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between residual formula tags.
         /// @details Stateless tag structs always compare equal.
-        /// @param lhs Left-hand residual formula tag.
-        /// @param rhs Right-hand residual formula tag.
+        /// @param[in] lhs Left-hand residual formula tag.
+        /// @param[in] rhs Right-hand residual formula tag.
         /// @return Always true.
         [[nodiscard]] friend constexpr bool operator==(ReevaluateKernel lhs, ReevaluateKernel rhs) noexcept = default;
     };
@@ -95,7 +95,7 @@ namespace cxxgpr
     /// @brief Returns the canonical precision string ("double", "single", or "mixed") for persistence.
     /// @details Collapses both mixed-precision residual variants to "mixed", leaving residual mode to
     /// to_residual_string().
-    /// @param kind Persisted precision enum value.
+    /// @param[in] kind Persisted precision enum value.
     /// @return Canonical precision identifier string view.
     [[nodiscard]] constexpr std::string_view to_precision_string(PersistPrecisionKind kind) noexcept
     {
@@ -115,7 +115,7 @@ namespace cxxgpr
 
     /// @brief Returns the canonical residual formula string for persistence.
     /// @details Emits "reevaluate_kernel" for MixedReevaluate and "promote_storage" otherwise.
-    /// @param kind Persisted precision enum value.
+    /// @param[in] kind Persisted precision enum value.
     /// @return Canonical residual formula identifier string view.
     [[nodiscard]] constexpr std::string_view to_residual_string(PersistPrecisionKind kind) noexcept
     {
@@ -154,8 +154,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between precision policy tags.
         /// @details Stateless policy tags always compare equal.
-        /// @param lhs Left-hand double precision policy tag.
-        /// @param rhs Right-hand double precision policy tag.
+        /// @param[in] lhs Left-hand double precision policy tag.
+        /// @param[in] rhs Right-hand double precision policy tag.
         /// @return Always true.
         [[nodiscard]] friend constexpr bool operator==(DoublePrecision lhs, DoublePrecision rhs) noexcept = default;
     };
@@ -182,8 +182,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between precision policy tags.
         /// @details Stateless policy tags always compare equal.
-        /// @param lhs Left-hand single precision policy tag.
-        /// @param rhs Right-hand single precision policy tag.
+        /// @param[in] lhs Left-hand single precision policy tag.
+        /// @param[in] rhs Right-hand single precision policy tag.
         /// @return Always true.
         [[nodiscard]] friend constexpr bool operator==(SinglePrecision lhs, SinglePrecision rhs) noexcept = default;
     };
@@ -215,8 +215,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between mixed-precision policy tags.
         /// @details Stateless policy tags of the same instantiation always compare equal.
-        /// @param lhs Left-hand mixed-precision policy tag.
-        /// @param rhs Right-hand mixed-precision policy tag.
+        /// @param[in] lhs Left-hand mixed-precision policy tag.
+        /// @param[in] rhs Right-hand mixed-precision policy tag.
         /// @return Always true.
         [[nodiscard]] friend constexpr bool operator==(MixedPrecision lhs, MixedPrecision rhs) noexcept = default;
     };
@@ -239,8 +239,8 @@ namespace cxxgpr
     /// @details Rejects empty spans or mismatched lengths and widens through double for consistent
     /// cross-precision conversion.
     /// @tparam P Precision policy defining Storage and Refine scalar types.
-    /// @param src Source span in P::Storage precision.
-    /// @param dst Destination span in P::Refine precision with matching length.
+    /// @param[in] src Source span in P::Storage precision.
+    /// @param[out] dst Destination span in P::Refine precision with matching length.
     /// @return Empty expected on success, or GprError on empty or mismatched spans.
     /// @retval GprErrorCode::EmptyInput When src or dst is empty.
     /// @retval GprErrorCode::LengthMismatch When dst.size() != src.size().
@@ -273,9 +273,9 @@ namespace cxxgpr
     /// @details Traverses k_storage column-by-column in ascending row order for deterministic dot
     /// products with zero dynamic heap allocation.
     /// @tparam P Precision policy defining Storage and Refine scalar types.
-    /// @param k_storage Column-major n_train x m cross-covariance matrix in P::Storage precision.
-    /// @param alpha Prediction weight vector of length n_train in P::Refine precision.
-    /// @param out Destination span of length m receiving k_storage^T * alpha in P::Refine precision.
+    /// @param[in] k_storage Column-major n_train x m cross-covariance matrix in P::Storage precision.
+    /// @param[in] alpha Prediction weight vector of length n_train in P::Refine precision.
+    /// @param[out] out Destination span of length m receiving k_storage^T * alpha in P::Refine precision.
     /// @return Empty expected on success, or GprError on invalid dimensions or empty inputs.
     /// @retval GprErrorCode::EmptyInput When k_storage, alpha, or out is empty or k_storage.data() is null.
     /// @retval GprErrorCode::LengthMismatch When alpha.size() != k_storage.rows() or out.size() != k_storage.cols().

@@ -34,11 +34,11 @@ namespace cxxgpr
         /// @brief Evaluates the scaled infinity-norm stopping criterion for a candidate iterate.
         /// @details Guards non-finite inputs, negative norms, non-positive tolerances, and zero
         /// scaling denominators before comparing ||r||_inf / (||B||_inf * ||w||_inf + ||b||_inf) < tol.
-        /// @param b_inf Matrix infinity norm ||B||_inf.
-        /// @param r_inf Residual infinity norm ||r||_inf.
-        /// @param w Current iterate vector.
-        /// @param b Right-hand side vector.
-        /// @param tol Convergence tolerance on the relative residual.
+        /// @param[in] b_inf Matrix infinity norm ||B||_inf.
+        /// @param[in] r_inf Residual infinity norm ||r||_inf.
+        /// @param[in] w Current iterate vector.
+        /// @param[in] b Right-hand side vector.
+        /// @param[in] tol Convergence tolerance on the relative residual.
         /// @return ResidualEvaluation holding relative_residual and convergence verdict.
         ResidualEvaluation evaluate_residual_scale(
             double b_inf, double r_inf, std::span<const double> w, std::span<const double> b, double tol
@@ -69,7 +69,7 @@ namespace cxxgpr
 
     /// @brief Returns the infinity norm max_i |values[i]|, or 0.0 when empty.
     /// @details Propagates NaN immediately upon encountering any NaN entry.
-    /// @param values Input scalar vector span.
+    /// @param[in] values Input scalar vector span.
     /// @return Maximum absolute element, 0.0 if empty, or NaN if any entry is NaN.
     double inf_norm(std::span<const double> values) noexcept
     {
@@ -89,11 +89,11 @@ namespace cxxgpr
 
     /// @brief Evaluates whether ||residual||_inf / (b_inf * ||w||_inf + ||b||_inf) < tol with denom > 0.
     /// @details Delegates norm computation and denominator checks to evaluate_residual_scale().
-    /// @param b_inf Operator infinity norm ||B||_inf.
-    /// @param w Current iterate vector.
-    /// @param b Right-hand side vector.
-    /// @param residual Residual vector r = b - B * w.
-    /// @param tol Relative residual convergence threshold.
+    /// @param[in] b_inf Operator infinity norm ||B||_inf.
+    /// @param[in] w Current iterate vector.
+    /// @param[in] b Right-hand side vector.
+    /// @param[in] residual Residual vector r = b - B * w.
+    /// @param[in] tol Relative residual convergence threshold.
     /// @return True iff the scaled relative residual is finite and strictly below tol.
     bool meets_relative_residual(
         double b_inf, std::span<const double> w, std::span<const double> b, std::span<const double> residual, double tol
@@ -105,12 +105,12 @@ namespace cxxgpr
     /// @brief Computes residual = y - a_f32 * alpha and ||a_f32||_inf using caller-supplied scratch spans.
     /// @details Validates shapes and scratch capacity, zeroes caller scratch, traverses a_f32 in
     /// ascending column-major order for deterministic double accumulation, and writes y - sum.
-    /// @param a_f32 Square n x n float system matrix in column-major order.
-    /// @param alpha Current double iterate of length n.
-    /// @param y Double right-hand side vector of length n.
-    /// @param residual Output residual span of length n.
-    /// @param row_abs_scratch Caller-owned scratch buffer of length >= n.
-    /// @param sum_scratch Caller-owned scratch buffer of length >= n.
+    /// @param[in] a_f32 Square n x n float system matrix in column-major order.
+    /// @param[in] alpha Current double iterate of length n.
+    /// @param[in] y Double right-hand side vector of length n.
+    /// @param[out] residual Output residual span of length n.
+    /// @param[in,out] row_abs_scratch Caller-owned scratch buffer of length >= n.
+    /// @param[in,out] sum_scratch Caller-owned scratch buffer of length >= n.
     /// @return Infinity norm ||a_f32||_inf, or GprError on invalid shapes or undersized scratch.
     /// @retval GprErrorCode::EmptyInput When any input span or matrix view is empty or null.
     /// @retval GprErrorCode::LengthMismatch When a_f32, alpha, or residual dimensions disagree with y.size().
@@ -179,10 +179,10 @@ namespace cxxgpr
 
     /// @brief Computes residual = y - a_f32 * alpha and ||a_f32||_inf with temporary internal scratch.
     /// @details Allocates two temporary n-element double buffers and delegates to promoted_residual_into().
-    /// @param a_f32 Square n x n float system matrix in column-major order.
-    /// @param alpha Current double iterate of length n.
-    /// @param y Double right-hand side vector of length n.
-    /// @param residual Output residual span of length n.
+    /// @param[in] a_f32 Square n x n float system matrix in column-major order.
+    /// @param[in] alpha Current double iterate of length n.
+    /// @param[in] y Double right-hand side vector of length n.
+    /// @param[out] residual Output residual span of length n.
     /// @return Infinity norm ||a_f32||_inf, or GprError on invalid dimensions.
     /// @retval GprErrorCode::EmptyInput When any input span or matrix view is empty or null.
     /// @retval GprErrorCode::LengthMismatch When a_f32, alpha, or residual dimensions disagree with y.size().
@@ -214,9 +214,9 @@ namespace cxxgpr
     /// @details Executes up to max_refinement_corrections steps of residual evaluation, convergence
     /// gating via system.accept(), stagnation streak detection, and triangular solve correction,
     /// falling back to system.fallback() whenever convergence cannot be confirmed.
-    /// @param system Polymorphic linear system providing residual, correction, acceptance, and fallback.
-    /// @param w Initial iterate overwritten in-place with the refined or fallback solution.
-    /// @param residual_scratch Caller-supplied buffer of length >= w.size().
+    /// @param[in,out] system Polymorphic linear system providing residual, correction, acceptance, and fallback.
+    /// @param[in,out] w Initial iterate overwritten in-place with the refined or fallback solution.
+    /// @param[in,out] residual_scratch Caller-supplied buffer of length >= w.size().
     /// @return RefinementSummary detailing final status, step count, and relative residual, or GprError.
     /// @retval GprErrorCode::EmptyInput When w or system.rhs() is empty.
     /// @retval GprErrorCode::LengthMismatch When w.size() != system.rhs().size().
@@ -337,8 +337,8 @@ namespace cxxgpr
 
     /// @brief Convenience wrapper that allocates residual scratch and returns the refined iterate vector.
     /// @details Validates non-emptiness, allocates w.size() doubles for residuals, and calls refine_in_place().
-    /// @param system Polymorphic linear system providing residual, correction, acceptance, and fallback.
-    /// @param w Initial iterate vector moved in and updated in-place.
+    /// @param[in,out] system Polymorphic linear system providing residual, correction, acceptance, and fallback.
+    /// @param[in] w Initial iterate vector moved in and updated in-place.
     /// @return Refined (or fallback) solution vector, or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When w or system.rhs() is empty.
     /// @retval GprErrorCode::LengthMismatch When w.size() != system.rhs().size().

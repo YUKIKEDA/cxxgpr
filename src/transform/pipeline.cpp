@@ -26,7 +26,7 @@ namespace cxxgpr::transform
         /// @brief Deep-clones a vector of polymorphic transform unique pointers.
         /// @details Skips null pointers while cloning each transform step into a newly reserved vector.
         /// @tparam Ptr Smart pointer type exposing clone().
-        /// @param src Source vector of polymorphic transform pointers.
+        /// @param[in] src Source vector of polymorphic transform pointers.
         /// @return Vector holding deep copies of all non-null elements in src.
         template <typename Ptr> std::vector<Ptr> clone_ptr_vec(const std::vector<Ptr>& src)
         {
@@ -48,7 +48,7 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a fitted input pipeline from an ordered list of fitted steps.
     /// @details Takes ownership of steps in forward application order.
-    /// @param steps Ordered vector of fitted input transform steps.
+    /// @param[in] steps Ordered vector of fitted input transform steps.
     FittedPipeline::FittedPipeline(std::vector<std::unique_ptr<FittedInputTransform>> steps) noexcept :
         steps_(std::move(steps))
     {
@@ -56,12 +56,12 @@ namespace cxxgpr::transform
 
     /// @brief Deep-copies the fitted input pipeline.
     /// @details Clones each non-null step preserving forward order.
-    /// @param other Source FittedPipeline to copy.
+    /// @param[in] other Source FittedPipeline to copy.
     FittedPipeline::FittedPipeline(const FittedPipeline& other) : steps_(clone_ptr_vec(other.steps_)) {}
 
     /// @brief Deep-copy assigns the fitted input pipeline.
     /// @details Replaces owned steps with deep clones of other's steps when &other != this.
-    /// @param other Source FittedPipeline to copy from.
+    /// @param[in] other Source FittedPipeline to copy from.
     /// @return Reference to *this.
     FittedPipeline& FittedPipeline::operator=(const FittedPipeline& other)
     {
@@ -74,9 +74,9 @@ namespace cxxgpr::transform
 
     /// @brief Applies all steps in forward order to x in place.
     /// @details Empty pipelines delegate to FittedIdentityInput so validation matches identity behavior.
-    /// @param x Mutable column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in,out] x Mutable column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Empty expected on success, or GprError from validation, null step, or step execution.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -113,10 +113,10 @@ namespace cxxgpr::transform
 
     /// @brief Applies all steps in forward order from x into out without allocation.
     /// @details Executes step 0 out of place into out, then executes steps 1..k-1 in place on out.
-    /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError from validation, null step, or step execution.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -161,9 +161,9 @@ namespace cxxgpr::transform
 
     /// @brief Applies all steps in reverse order to invert the transform in place.
     /// @details Empty pipelines delegate to FittedIdentityInput; non-empty pipelines traverse steps_ in reverse.
-    /// @param x Mutable column-major transformed feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in,out] x Mutable column-major transformed feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Empty expected on success, or GprError from validation, null step, or step execution.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -201,10 +201,10 @@ namespace cxxgpr::transform
     /// @brief Applies all steps in reverse order from x into out without allocation.
     /// @details Executes the last step out of place into out via inverse_apply_into and preceding steps in place on
     /// out.
-    /// @param x Read-only column-major transformed feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major transformed feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError from validation, null step, or step execution.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -261,19 +261,19 @@ namespace cxxgpr::transform
 
     /// @brief Constructs an input pipeline from an ordered list of unfitted steps.
     /// @details Takes ownership of steps in forward application order.
-    /// @param steps Ordered vector of unfitted input transform steps.
+    /// @param[in] steps Ordered vector of unfitted input transform steps.
     Pipeline::Pipeline(std::vector<std::unique_ptr<UnfittedInputTransform>> steps) noexcept : steps_(std::move(steps))
     {
     }
 
     /// @brief Deep-copies the unfitted input pipeline.
     /// @details Clones each non-null step preserving forward order.
-    /// @param other Source Pipeline to copy.
+    /// @param[in] other Source Pipeline to copy.
     Pipeline::Pipeline(const Pipeline& other) : steps_(clone_ptr_vec(other.steps_)) {}
 
     /// @brief Deep-copy assigns the unfitted input pipeline.
     /// @details Replaces owned steps with deep clones of other's steps when &other != this.
-    /// @param other Source Pipeline to copy from.
+    /// @param[in] other Source Pipeline to copy from.
     /// @return Reference to *this.
     Pipeline& Pipeline::operator=(const Pipeline& other)
     {
@@ -286,7 +286,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends a step by cloning it onto the end of this pipeline.
     /// @details Lvalue overload cloning step onto steps_.
-    /// @param step Unfitted input transform to clone and append.
+    /// @param[in] step Unfitted input transform to clone and append.
     /// @return Reference to *this.
     Pipeline& Pipeline::then(const UnfittedInputTransform& step) &
     {
@@ -296,7 +296,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends a step by cloning it onto the end of this rvalue pipeline.
     /// @details Rvalue overload cloning step onto steps_ and forwarding *this.
-    /// @param step Unfitted input transform to clone and append.
+    /// @param[in] step Unfitted input transform to clone and append.
     /// @return Rvalue reference to *this.
     Pipeline&& Pipeline::then(const UnfittedInputTransform& step) &&
     {
@@ -306,7 +306,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends an owned step onto the end of this pipeline.
     /// @details Moves non-null step into steps_ and ignores null pointers.
-    /// @param step Owned unfitted input transform to append.
+    /// @param[in] step Owned unfitted input transform to append.
     /// @return Reference to *this.
     Pipeline& Pipeline::then(std::unique_ptr<UnfittedInputTransform> step) &
     {
@@ -319,7 +319,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends an owned step onto the end of this rvalue pipeline.
     /// @details Moves non-null step into steps_ and forwards *this.
-    /// @param step Owned unfitted input transform to append.
+    /// @param[in] step Owned unfitted input transform to append.
     /// @return Rvalue reference to *this.
     Pipeline&& Pipeline::then(std::unique_ptr<UnfittedInputTransform> step) &&
     {
@@ -333,9 +333,9 @@ namespace cxxgpr::transform
     /// @brief Fits each step sequentially on the output of the preceding step.
     /// @details Validates training features once upfront, then copies x into a mutable scratch buffer transformed
     /// stagewise after fitting each step.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return FittedPipeline on success, or GprError on validation failure, null step, or step fitting error.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -381,9 +381,9 @@ namespace cxxgpr::transform
 
     /// @brief Fits each step sequentially and returns a boxed fitted pipeline.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Boxed FittedPipeline on success, or GprError on validation failure, null step, or step fitting error.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -415,7 +415,7 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a fitted target pipeline from an ordered list of fitted steps.
     /// @details Takes ownership of steps in forward application order.
-    /// @param steps Ordered vector of fitted target transform steps.
+    /// @param[in] steps Ordered vector of fitted target transform steps.
     FittedTargetPipeline::FittedTargetPipeline(std::vector<std::unique_ptr<FittedTargetTransform>> steps) noexcept :
         steps_(std::move(steps))
     {
@@ -423,14 +423,14 @@ namespace cxxgpr::transform
 
     /// @brief Deep-copies the fitted target pipeline.
     /// @details Clones each non-null step preserving forward order.
-    /// @param other Source FittedTargetPipeline to copy.
+    /// @param[in] other Source FittedTargetPipeline to copy.
     FittedTargetPipeline::FittedTargetPipeline(const FittedTargetPipeline& other) : steps_(clone_ptr_vec(other.steps_))
     {
     }
 
     /// @brief Deep-copy assigns the fitted target pipeline.
     /// @details Replaces owned steps with deep clones of other's steps when &other != this.
-    /// @param other Source FittedTargetPipeline to copy from.
+    /// @param[in] other Source FittedTargetPipeline to copy from.
     /// @return Reference to *this.
     FittedTargetPipeline& FittedTargetPipeline::operator=(const FittedTargetPipeline& other)
     {
@@ -444,7 +444,7 @@ namespace cxxgpr::transform
     /// @brief Applies all steps in forward order to y in place.
     /// @details Empty pipelines delegate to FittedIdentityTarget; non-empty pipelines apply steps_[0..k-1]
     /// sequentially.
-    /// @param y Mutable span of target values updated in place.
+    /// @param[in,out] y Mutable span of target values updated in place.
     /// @return Empty expected on success, or GprError on empty/non-finite input or null step.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -475,8 +475,8 @@ namespace cxxgpr::transform
 
     /// @brief Applies all steps in forward order from y into out without allocation.
     /// @details Executes step 0 out of place into out via transform_into, then executes steps 1..k-1 in place on out.
-    /// @param y Read-only span of target values.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] y Read-only span of target values.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on invalid input, length mismatch, or null step.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != y.size().
@@ -524,9 +524,9 @@ namespace cxxgpr::transform
         /// @details Validates values before executing fn(*step, values) from the final step back to step 0 so chained
         /// affine/Jacobian scalings compose correctly.
         /// @tparam InPlaceFn Callable invocable as fn(const FittedTargetTransform&, std::span<double>).
-        /// @param steps Non-empty vector of fitted target pipeline steps.
-        /// @param values Mutable prediction or covariance span updated in place.
-        /// @param fn Step-wise inverse operation callback.
+        /// @param[in] steps Non-empty vector of fitted target pipeline steps.
+        /// @param[in,out] values Mutable prediction or covariance span updated in place.
+        /// @param[in] fn Step-wise inverse operation callback.
         /// @return Empty expected on success, or GprError on invalid values, null step, or step failure.
         /// @retval GprErrorCode::EmptyInput When values is empty.
         /// @retval GprErrorCode::NonFiniteInput When any element of values is NaN or infinite.
@@ -561,11 +561,11 @@ namespace cxxgpr::transform
         /// @tparam IntoFn Callable invocable as into_fn(const FittedTargetTransform&, std::span<const double>,
         /// std::span<double>).
         /// @tparam InPlaceFn Callable invocable as inplace_fn(const FittedTargetTransform&, std::span<double>).
-        /// @param steps Non-empty vector of fitted target pipeline steps.
-        /// @param values Read-only prediction or covariance span.
-        /// @param out Preallocated mutable output buffer of matching length.
-        /// @param into_fn Out-of-place inverse callback for the last step.
-        /// @param inplace_fn In-place inverse callback for preceding steps.
+        /// @param[in] steps Non-empty vector of fitted target pipeline steps.
+        /// @param[in] values Read-only prediction or covariance span.
+        /// @param[out] out Preallocated mutable output buffer of matching length.
+        /// @param[in] into_fn Out-of-place inverse callback for the last step.
+        /// @param[in] inplace_fn In-place inverse callback for preceding steps.
         /// @return Empty expected on success, or GprError on invalid values, length mismatch, null step, or step
         /// failure.
         /// @retval GprErrorCode::EmptyInput When values is empty.
@@ -614,7 +614,7 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse mean transforms in reverse order in place.
     /// @details Empty pipelines delegate to FittedIdentityTarget.
-    /// @param mean Mutable span of transformed predictive means updated in place.
+    /// @param[in,out] mean Mutable span of transformed predictive means updated in place.
     /// @return Empty expected on success, or GprError on empty/non-finite input or null step.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of mean is NaN or infinite.
@@ -632,8 +632,8 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse mean transforms in reverse order from mean into out without allocation.
     /// @details Empty pipelines delegate to FittedIdentityTarget.
-    /// @param mean Read-only span of transformed predictive means.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] mean Read-only span of transformed predictive means.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on invalid input, length mismatch, or null step.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != mean.size().
@@ -656,7 +656,7 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse variance transforms in reverse order in place.
     /// @details Composes squared derivative scalings across all steps from step k-1 down to 0.
-    /// @param var Mutable span of transformed predictive variances updated in place.
+    /// @param[in,out] var Mutable span of transformed predictive variances updated in place.
     /// @return Empty expected on success, or GprError on empty/non-finite input or null step.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of var is NaN or infinite.
@@ -674,8 +674,8 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse variance transforms in reverse order from var into out without allocation.
     /// @details Empty pipelines delegate to FittedIdentityTarget.
-    /// @param var Read-only span of transformed predictive variances.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] var Read-only span of transformed predictive variances.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on invalid input, length mismatch, or null step.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != var.size().
@@ -699,7 +699,7 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse covariance transforms in reverse order in place.
     /// @details Empty pipelines delegate to FittedIdentityTarget.
-    /// @param cov Mutable flattened m x m covariance buffer updated in place.
+    /// @param[in,out] cov Mutable flattened m x m covariance buffer updated in place.
     /// @return Empty expected on success, or GprError on empty/non-finite input or null step.
     /// @retval GprErrorCode::EmptyInput When cov is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of cov is NaN or infinite.
@@ -717,8 +717,8 @@ namespace cxxgpr::transform
 
     /// @brief Applies inverse covariance transforms in reverse order from cov into out without allocation.
     /// @details Empty pipelines delegate to FittedIdentityTarget.
-    /// @param cov Read-only flattened m x m transformed covariance buffer.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] cov Read-only flattened m x m transformed covariance buffer.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on invalid input, length mismatch, or null step.
     /// @retval GprErrorCode::EmptyInput When cov is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != cov.size().
@@ -752,7 +752,7 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a target pipeline from an ordered list of unfitted steps.
     /// @details Takes ownership of steps in forward application order.
-    /// @param steps Ordered vector of unfitted target transform steps.
+    /// @param[in] steps Ordered vector of unfitted target transform steps.
     TargetPipeline::TargetPipeline(std::vector<std::unique_ptr<UnfittedTargetTransform>> steps) noexcept :
         steps_(std::move(steps))
     {
@@ -760,12 +760,12 @@ namespace cxxgpr::transform
 
     /// @brief Deep-copies the unfitted target pipeline.
     /// @details Clones each non-null step preserving forward order.
-    /// @param other Source TargetPipeline to copy.
+    /// @param[in] other Source TargetPipeline to copy.
     TargetPipeline::TargetPipeline(const TargetPipeline& other) : steps_(clone_ptr_vec(other.steps_)) {}
 
     /// @brief Deep-copy assigns the unfitted target pipeline.
     /// @details Replaces owned steps with deep clones of other's steps when &other != this.
-    /// @param other Source TargetPipeline to copy from.
+    /// @param[in] other Source TargetPipeline to copy from.
     /// @return Reference to *this.
     TargetPipeline& TargetPipeline::operator=(const TargetPipeline& other)
     {
@@ -778,7 +778,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends a step by cloning it onto the end of this target pipeline.
     /// @details Lvalue overload cloning step onto steps_.
-    /// @param step Unfitted target transform to clone and append.
+    /// @param[in] step Unfitted target transform to clone and append.
     /// @return Reference to *this.
     TargetPipeline& TargetPipeline::then(const UnfittedTargetTransform& step) &
     {
@@ -788,7 +788,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends a step by cloning it onto the end of this rvalue target pipeline.
     /// @details Rvalue overload cloning step onto steps_ and forwarding *this.
-    /// @param step Unfitted target transform to clone and append.
+    /// @param[in] step Unfitted target transform to clone and append.
     /// @return Rvalue reference to *this.
     TargetPipeline&& TargetPipeline::then(const UnfittedTargetTransform& step) &&
     {
@@ -798,7 +798,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends an owned step onto the end of this target pipeline.
     /// @details Moves non-null step into steps_ and ignores null pointers.
-    /// @param step Owned unfitted target transform to append.
+    /// @param[in] step Owned unfitted target transform to append.
     /// @return Reference to *this.
     TargetPipeline& TargetPipeline::then(std::unique_ptr<UnfittedTargetTransform> step) &
     {
@@ -811,7 +811,7 @@ namespace cxxgpr::transform
 
     /// @brief Appends an owned step onto the end of this rvalue target pipeline.
     /// @details Moves non-null step into steps_ and forwards *this.
-    /// @param step Owned unfitted target transform to append.
+    /// @param[in] step Owned unfitted target transform to append.
     /// @return Rvalue reference to *this.
     TargetPipeline&& TargetPipeline::then(std::unique_ptr<UnfittedTargetTransform> step) &&
     {
@@ -825,7 +825,7 @@ namespace cxxgpr::transform
     /// @brief Fits each step sequentially on the output of the preceding step.
     /// @details Validates training targets upfront, then copies y into a mutable scratch buffer transformed stagewise
     /// after fitting each step.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return FittedTargetPipeline on success, or GprError on invalid targets, null step, or step fitting failure.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y or an intermediate output is non-finite.
@@ -866,7 +866,7 @@ namespace cxxgpr::transform
 
     /// @brief Fits each step sequentially and returns a boxed fitted target pipeline.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return Boxed FittedTargetPipeline on success, or GprError on invalid targets, null step, or step fitting
     /// failure.
     /// @retval GprErrorCode::EmptyInput When y is empty.

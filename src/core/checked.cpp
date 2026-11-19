@@ -21,7 +21,7 @@ namespace cxxgpr
         /// @brief Verifies that every element in a floating-point span is finite.
         /// @details Uses std::isfinite so normal, zero, and subnormal values pass while NaN and +/-Inf fail.
         /// @tparam T Floating-point scalar type (float or double).
-        /// @param values Input span to inspect.
+        /// @param[in] values Input span to inspect.
         /// @return Empty expected if all elements are finite, or GprError otherwise.
         /// @retval GprErrorCode::NonFiniteInput When any element is NaN or +/-Inf.
         template <typename T> std::expected<void, GprError> require_finite_impl(std::span<const T> values) noexcept
@@ -38,10 +38,10 @@ namespace cxxgpr
 
         /// @brief Validates non-emptiness, dimension product overflow, and buffer length for a matrix.
         /// @details Enforces EmptyInput -> SizeOverflow -> LengthMismatch before inspecting values.
-        /// @param data_size Supplied flat buffer length.
-        /// @param n_rows Matrix row count.
-        /// @param n_cols Matrix column count.
-        /// @param name Matrix label included in length-mismatch diagnostics.
+        /// @param[in] data_size Supplied flat buffer length.
+        /// @param[in] n_rows Matrix row count.
+        /// @param[in] n_cols Matrix column count.
+        /// @param[in] name Matrix label included in length-mismatch diagnostics.
         /// @return Product n_rows * n_cols on success, or GprError on shape violation.
         /// @retval GprErrorCode::EmptyInput When n_rows == 0, n_cols == 0, or data_size == 0.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -73,8 +73,8 @@ namespace cxxgpr
 
     /// @brief Adds two std::size_t counts, returning SizeOverflow on unsigned wraparound.
     /// @details Tests a > max - b prior to adding so unsigned wraparound never occurs.
-    /// @param a First non-negative addend.
-    /// @param b Second non-negative addend.
+    /// @param[in] a First non-negative addend.
+    /// @param[in] b Second non-negative addend.
     /// @return Sum a + b, or GprError on overflow.
     /// @retval GprErrorCode::SizeOverflow When a + b exceeds std::numeric_limits<std::size_t>::max().
     std::expected<std::size_t, GprError> checked_add(std::size_t a, std::size_t b) noexcept
@@ -89,8 +89,8 @@ namespace cxxgpr
 
     /// @brief Multiplies two std::size_t counts, returning SizeOverflow on unsigned wraparound.
     /// @details Short-circuits zero operands before dividing max by b.
-    /// @param a First non-negative factor.
-    /// @param b Second non-negative factor.
+    /// @param[in] a First non-negative factor.
+    /// @param[in] b Second non-negative factor.
     /// @return Product a * b, or GprError on overflow.
     /// @retval GprErrorCode::SizeOverflow When a * b exceeds std::numeric_limits<std::size_t>::max().
     std::expected<std::size_t, GprError> checked_mul(std::size_t a, std::size_t b) noexcept
@@ -109,8 +109,8 @@ namespace cxxgpr
 
     /// @brief Computes n_rows * n_cols for non-empty column-major dimensions.
     /// @details Rejects zero dimensions with EmptyInput before checking multiplication overflow.
-    /// @param n_rows Number of matrix rows.
-    /// @param n_cols Number of matrix columns.
+    /// @param[in] n_rows Number of matrix rows.
+    /// @param[in] n_cols Number of matrix columns.
     /// @return Total element count n_rows * n_cols, or GprError.
     /// @retval GprErrorCode::EmptyInput When n_rows == 0 or n_cols == 0.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -126,7 +126,7 @@ namespace cxxgpr
 
     /// @brief Computes packed lower-triangular length n * (n + 1) / 2 without false intermediate overflow.
     /// @details Divides whichever factor is even by 2 prior to calling checked_mul().
-    /// @param n Matrix order.
+    /// @param[in] n Matrix order.
     /// @return Packed lower-triangular element count, or GprError on overflow.
     /// @retval GprErrorCode::SizeOverflow When n * (n + 1) / 2 overflows std::size_t.
     std::expected<std::size_t, GprError> packed_len(std::size_t n) noexcept
@@ -142,7 +142,7 @@ namespace cxxgpr
 
     /// @brief Rejects a zero count with EmptyInput.
     /// @details Returns success when n != 0.
-    /// @param n Element or dimension count to validate.
+    /// @param[in] n Element or dimension count to validate.
     /// @return Empty expected on success, or GprError when n == 0.
     /// @retval GprErrorCode::EmptyInput When n == 0.
     std::expected<void, GprError> require_nonempty(std::size_t n) noexcept
@@ -160,9 +160,9 @@ namespace cxxgpr
 
         /// @brief Formats a LengthMismatch error when actual != expected in require_count.
         /// @details Produces a diagnostic string naming the checked item, expected count, and actual count.
-        /// @param actual Observed element count.
-        /// @param expected Required element count.
-        /// @param what Human-readable label describing the checked quantity.
+        /// @param[in] actual Observed element count.
+        /// @param[in] expected Required element count.
+        /// @param[in] what Human-readable label describing the checked quantity.
         /// @return GprError with code GprErrorCode::LengthMismatch.
         GprError make_count_mismatch_error(std::size_t actual, std::size_t expected, std::string_view what)
         {
@@ -173,7 +173,7 @@ namespace cxxgpr
 
     /// @brief Rejects any NaN or Inf entry in a double span with NonFiniteInput.
     /// @details Delegates to require_finite_impl<double>().
-    /// @param values Double-precision scalar span to inspect.
+    /// @param[in] values Double-precision scalar span to inspect.
     /// @return Empty expected if all entries are finite, or GprError otherwise.
     /// @retval GprErrorCode::NonFiniteInput When any element is NaN or +/-Inf.
     std::expected<void, GprError> require_finite(std::span<const double> values) noexcept
@@ -183,7 +183,7 @@ namespace cxxgpr
 
     /// @brief Rejects any NaN or Inf entry in a float span with NonFiniteInput.
     /// @details Delegates to require_finite_impl<float>().
-    /// @param values Single-precision scalar span to inspect.
+    /// @param[in] values Single-precision scalar span to inspect.
     /// @return Empty expected if all entries are finite, or GprError otherwise.
     /// @retval GprErrorCode::NonFiniteInput When any element is NaN or +/-Inf.
     std::expected<void, GprError> require_finite(std::span<const float> values) noexcept
@@ -193,10 +193,10 @@ namespace cxxgpr
 
     /// @brief Validates a non-empty, finite, column-major matrix span matching n_rows x n_cols.
     /// @details Validates shape header preconditions first and then inspects finiteness of x.
-    /// @param x Flat column-major matrix buffer.
-    /// @param n_rows Matrix row count.
-    /// @param n_cols Matrix column count.
-    /// @param name Matrix label included in length-mismatch diagnostics.
+    /// @param[in] x Flat column-major matrix buffer.
+    /// @param[in] n_rows Matrix row count.
+    /// @param[in] n_cols Matrix column count.
+    /// @param[in] name Matrix label included in length-mismatch diagnostics.
     /// @return Empty expected if valid, or GprError describing the first violated precondition.
     /// @retval GprErrorCode::EmptyInput When n_rows == 0, n_cols == 0, or x is empty.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -218,12 +218,12 @@ namespace cxxgpr
     /// @brief Validates training inputs (X, y) in strict error-precedence order.
     /// @details Enforces EmptyInput -> SizeOverflow -> LengthMismatch -> DimensionMismatch ->
     /// NonFiniteInput -> InsufficientData, including Gram matrix n_rows * n_rows overflow checks.
-    /// @param x Flat column-major feature matrix buffer of shape n_rows x n_cols.
-    /// @param n_rows Number of training samples.
-    /// @param n_cols Number of input feature dimensions.
-    /// @param y Target vector span of length n_rows.
-    /// @param expected_d Optional required feature dimension for kernel compatibility.
-    /// @param min_points Minimum required number of training points.
+    /// @param[in] x Flat column-major feature matrix buffer of shape n_rows x n_cols.
+    /// @param[in] n_rows Number of training samples.
+    /// @param[in] n_cols Number of input feature dimensions.
+    /// @param[in] y Target vector span of length n_rows.
+    /// @param[in] expected_d Optional required feature dimension for kernel compatibility.
+    /// @param[in] min_points Minimum required number of training points.
     /// @return Empty expected if all preconditions pass, or the highest-precedence GprError.
     /// @retval GprErrorCode::EmptyInput When n_rows == 0, n_cols == 0, x is empty, or y is empty.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols or n_rows * n_rows overflows std::size_t.
@@ -294,9 +294,9 @@ namespace cxxgpr
     /// @brief Validates target vector y and sample count n for distance-only training.
     /// @details Enforces EmptyInput -> SizeOverflow (n * n) -> LengthMismatch -> NonFiniteInput ->
     /// InsufficientData without requiring a feature matrix X.
-    /// @param n Number of training samples implied by supplied distance matrices.
-    /// @param y Target vector span of expected length n.
-    /// @param min_points Minimum required number of training points.
+    /// @param[in] n Number of training samples implied by supplied distance matrices.
+    /// @param[in] y Target vector span of expected length n.
+    /// @param[in] min_points Minimum required number of training points.
     /// @return Empty expected if valid, or the highest-precedence GprError.
     /// @retval GprErrorCode::EmptyInput When n == 0 or y is empty.
     /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -335,10 +335,10 @@ namespace cxxgpr
     /// @brief Validates query inputs Xs against the expected feature dimension.
     /// @details Enforces EmptyInput -> SizeOverflow -> LengthMismatch -> DimensionMismatch ->
     /// NonFiniteInput for column-major query features.
-    /// @param xs Flat column-major query matrix buffer of shape n_rows x n_cols.
-    /// @param n_rows Number of query points.
-    /// @param n_cols Number of query feature columns.
-    /// @param expected_d Feature dimension required by the fitted model.
+    /// @param[in] xs Flat column-major query matrix buffer of shape n_rows x n_cols.
+    /// @param[in] n_rows Number of query points.
+    /// @param[in] n_cols Number of query feature columns.
+    /// @param[in] expected_d Feature dimension required by the fitted model.
     /// @return Empty expected if valid, or GprError describing the violated precondition.
     /// @retval GprErrorCode::EmptyInput When n_rows == 0, n_cols == 0, or xs is empty.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.

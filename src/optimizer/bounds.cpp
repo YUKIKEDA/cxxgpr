@@ -22,7 +22,7 @@ namespace cxxgpr::optimizer
         /// @brief Evaluates the logistic sigmoid 1 / (1 + exp(-s)) safely without floating-point overflow.
         /// @details Clamps s to [-k_logit_clamp, k_logit_clamp] and branches on the sign of s so exp()
         /// always receives a non-positive argument.
-        /// @param s Input real value.
+        /// @param[in] s Input real value.
         /// @return Logistic sigmoid value strictly inside (0, 1).
         [[nodiscard]] double stable_sigmoid(double s) noexcept
         {
@@ -39,9 +39,9 @@ namespace cxxgpr::optimizer
 
         /// @brief Clamps val strictly inside the open interval (lo, hi) using adjacent representable doubles.
         /// @details Prevents round-off in sigmoid scaling from touching endpoints lo or hi.
-        /// @param val Candidate scalar inside or near (lo, hi).
-        /// @param lo Exclusive lower bound.
-        /// @param hi Exclusive upper bound.
+        /// @param[in] val Candidate scalar inside or near (lo, hi).
+        /// @param[in] lo Exclusive lower bound.
+        /// @param[in] hi Exclusive upper bound.
         /// @return Value clamped to [std::nextafter(lo, hi), std::nextafter(hi, lo)].
         [[nodiscard]] double clamp_strict_interior(double val, double lo, double hi) noexcept
         {
@@ -55,7 +55,7 @@ namespace cxxgpr::optimizer
 
     /// @brief Builds log-space bounds from Objective::fill_intervals(), requiring 0 < lo < hi.
     /// @details Queries obj.dim(), fills user-space intervals, and delegates to from_intervals().
-    /// @param obj Optimization objective providing open user-space parameter intervals.
+    /// @param[in] obj Optimization objective providing open user-space parameter intervals.
     /// @return Validated LogBounds, or GprError if obj is zero-dimensional or has invalid bounds.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0.
     /// @retval GprErrorCode::InvalidInterval When any interval violates 0 < lo < hi or finite logs.
@@ -76,7 +76,7 @@ namespace cxxgpr::optimizer
 
     /// @brief Builds log-space bounds from explicit user-space open intervals (0 < lo < hi).
     /// @details Verifies non-emptiness, finiteness, strict positivity, and finite ordered log bounds.
-    /// @param intervals Span of open user-space intervals (lo, hi).
+    /// @param[in] intervals Span of open user-space intervals (lo, hi).
     /// @return Validated LogBounds, or GprError if intervals is empty or any bound is invalid.
     /// @retval GprErrorCode::EmptyInput When intervals is empty.
     /// @retval GprErrorCode::InvalidInterval When any interval violates 0 < lo < hi or finite logs.
@@ -111,7 +111,7 @@ namespace cxxgpr::optimizer
 
     /// @brief Validates that theta is finite, has length dim(), and lies strictly inside (lo_log, hi_log).
     /// @details Checks empty span, dimension mismatch, non-finite values, and strict open-interval containment.
-    /// @param theta Candidate log-space parameter vector.
+    /// @param[in] theta Candidate log-space parameter vector.
     /// @return Empty expected on success, or GprError on invalid count, non-finite entry, or bound breach.
     /// @retval GprErrorCode::EmptyInput When theta is empty.
     /// @retval GprErrorCode::LengthMismatch When theta.size() != dim().
@@ -147,8 +147,8 @@ namespace cxxgpr::optimizer
     /// @brief Maps constrained log-space theta into unconstrained z with d(theta)/dz = 1 at the midpoint.
     /// @details Validates theta inside open bounds, checks out_z length, and applies
     /// z_i = 0.25 * width_i * log(p_i / (1 - p_i)) for normalized coordinate p_i in (0, 1).
-    /// @param theta Strictly interior constrained log-space vector of length dim().
-    /// @param out_z Destination span of length dim() receiving unconstrained logit coordinates.
+    /// @param[in] theta Strictly interior constrained log-space vector of length dim().
+    /// @param[out] out_z Destination span of length dim() receiving unconstrained logit coordinates.
     /// @return Empty expected on success, or GprError on invalid theta or out_z length mismatch.
     /// @retval GprErrorCode::EmptyInput When theta is empty.
     /// @retval GprErrorCode::LengthMismatch When theta.size() != dim() or out_z.size() != dim().
@@ -179,8 +179,8 @@ namespace cxxgpr::optimizer
 
     /// @brief Maps unconstrained z back into strictly interior log-space theta.
     /// @details Evaluates lo_log_i + width_i * sigmoid(4 * z_i / width_i) clamped to strict interior.
-    /// @param z Unconstrained logit coordinate vector of length dim().
-    /// @param out_theta Destination span of length dim() receiving interior log-space theta.
+    /// @param[in] z Unconstrained logit coordinate vector of length dim().
+    /// @param[out] out_theta Destination span of length dim() receiving interior log-space theta.
     void LogBounds::to_constrained(std::span<const double> z, std::span<double> out_theta) const noexcept
     {
         const std::size_t d = dim();
@@ -194,9 +194,9 @@ namespace cxxgpr::optimizer
 
     /// @brief Maps unconstrained z to theta and computes first derivatives d(theta_i)/dz_i.
     /// @details Computes theta_i and Jacobian diagonal d1_i = 4 * s_i * (1 - s_i) (unit at midpoint z_i = 0).
-    /// @param z Unconstrained logit coordinate vector of length dim().
-    /// @param out_theta Destination span of length dim() receiving interior log-space theta.
-    /// @param out_dtheta_dz Destination span of length dim() receiving d(theta_i)/dz_i.
+    /// @param[in] z Unconstrained logit coordinate vector of length dim().
+    /// @param[out] out_theta Destination span of length dim() receiving interior log-space theta.
+    /// @param[out] out_dtheta_dz Destination span of length dim() receiving d(theta_i)/dz_i.
     void LogBounds::to_constrained_with_jacobian(
         std::span<const double> z, std::span<double> out_theta, std::span<double> out_dtheta_dz
     ) const noexcept
@@ -215,10 +215,10 @@ namespace cxxgpr::optimizer
     /// @brief Maps unconstrained z to theta and computes first and second derivatives d(theta)/dz and d^2(theta)/dz^2.
     /// @details Computes theta_i, d1_i = 4 * s_i * (1 - s_i), and d2_i = (16 / width_i) * s_i * (1 - s_i) * (1 - 2 *
     /// s_i).
-    /// @param z Unconstrained logit coordinate vector of length dim().
-    /// @param out_theta Destination span of length dim() receiving interior log-space theta.
-    /// @param out_d1 Destination span of length dim() receiving first derivatives d(theta_i)/dz_i.
-    /// @param out_d2 Destination span of length dim() receiving second derivatives d^2(theta_i)/dz_i^2.
+    /// @param[in] z Unconstrained logit coordinate vector of length dim().
+    /// @param[out] out_theta Destination span of length dim() receiving interior log-space theta.
+    /// @param[out] out_d1 Destination span of length dim() receiving first derivatives d(theta_i)/dz_i.
+    /// @param[out] out_d2 Destination span of length dim() receiving second derivatives d^2(theta_i)/dz_i^2.
     void LogBounds::to_constrained_with_derivatives(
         std::span<const double> z, std::span<double> out_theta, std::span<double> out_d1, std::span<double> out_d2
     ) const noexcept
@@ -238,9 +238,9 @@ namespace cxxgpr::optimizer
 
     /// @brief Applies the first-order chain rule g_z[i] = g_theta[i] * d1[i].
     /// @details Multiplies each constrained gradient entry by the diagonal Jacobian factor d(theta_i)/dz_i.
-    /// @param g_theta Gradient with respect to constrained log-space theta (length dim()).
-    /// @param d1 First derivatives d(theta_i)/dz_i (length dim()).
-    /// @param out_g_z Destination span receiving gradient with respect to unconstrained z.
+    /// @param[in] g_theta Gradient with respect to constrained log-space theta (length dim()).
+    /// @param[in] d1 First derivatives d(theta_i)/dz_i (length dim()).
+    /// @param[out] out_g_z Destination span receiving gradient with respect to unconstrained z.
     void LogBounds::chain_gradient(
         std::span<const double> g_theta, std::span<const double> d1, std::span<double> out_g_z
     ) noexcept
@@ -254,11 +254,11 @@ namespace cxxgpr::optimizer
 
     /// @brief Applies the second-order chain rule H_z = J^T * H_theta * J + diag(g_theta * d2).
     /// @details Scales entry (row, col) by d1[row] * d1[col] and adds g_theta[row] * d2[row] on the diagonal.
-    /// @param h_theta Flattened dim x dim Hessian in log-theta space.
-    /// @param g_theta Gradient in log-theta space (length dim()).
-    /// @param d1 First derivatives d(theta_i)/dz_i (length dim()).
-    /// @param d2 Second derivatives d^2(theta_i)/dz_i^2 (length dim()).
-    /// @param out_h_z Destination flattened dim x dim span receiving Hessian in unconstrained z space.
+    /// @param[in] h_theta Flattened dim x dim Hessian in log-theta space.
+    /// @param[in] g_theta Gradient in log-theta space (length dim()).
+    /// @param[in] d1 First derivatives d(theta_i)/dz_i (length dim()).
+    /// @param[in] d2 Second derivatives d^2(theta_i)/dz_i^2 (length dim()).
+    /// @param[out] out_h_z Destination flattened dim x dim span receiving Hessian in unconstrained z space.
     void LogBounds::chain_hessian(
         std::span<const double> h_theta,
         std::span<const double> g_theta,
@@ -285,8 +285,8 @@ namespace cxxgpr::optimizer
 
     /// @brief Samples a deterministic log-uniform point strictly inside (lo_log, hi_log).
     /// @details Uses rng.open_unit() in (0, 1) and clamps to strict interior of each log-space interval.
-    /// @param rng Deterministic Xoshiro256PlusPlus generator state.
-    /// @param out_theta Destination span of length dim() receiving sampled log-space parameters.
+    /// @param[in,out] rng Deterministic Xoshiro256PlusPlus generator state.
+    /// @param[out] out_theta Destination span of length dim() receiving sampled log-space parameters.
     void LogBounds::sample_log_uniform(Xoshiro256PlusPlus& rng, std::span<double> out_theta) const noexcept
     {
         const std::size_t d = dim();
@@ -302,13 +302,13 @@ namespace cxxgpr::optimizer
     /// @details Returns the cached value and gradient when valid_ is true and z matches last_z_; otherwise
     /// checks finiteness of z, maps z to theta and Jacobian d1, calls obj.value_and_gradient_into(), checks
     /// output finiteness, chains g_z = g_theta * d1, and caches the result.
-    /// @param obj Differentiable objective evaluated in log-theta space.
-    /// @param bounds Log-space bounds governing the z <-> theta transform.
-    /// @param z Unconstrained logit parameter vector of length bounds.dim().
-    /// @param theta_buf Caller-supplied scratch span of length bounds.dim() for constrained theta.
-    /// @param d1_buf Caller-supplied scratch span of length bounds.dim() for Jacobian d(theta)/dz.
-    /// @param grad_theta_buf Caller-supplied scratch span of length bounds.dim() for log-theta gradient.
-    /// @param out_grad_z Destination span of length bounds.dim() receiving unconstrained gradient g_z.
+    /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
+    /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+    /// @param[in] z Unconstrained logit parameter vector of length bounds.dim().
+    /// @param[in,out] theta_buf Caller-supplied scratch span of length bounds.dim() for constrained theta.
+    /// @param[in,out] d1_buf Caller-supplied scratch span of length bounds.dim() for Jacobian d(theta)/dz.
+    /// @param[in,out] grad_theta_buf Caller-supplied scratch span of length bounds.dim() for log-theta gradient.
+    /// @param[out] out_grad_z Destination span of length bounds.dim() receiving unconstrained gradient g_z.
     /// @return Objective scalar value at z, or GprError if evaluation fails or yields non-finite outputs.
     /// @retval GprErrorCode::NonFiniteInput When z, objective value, or any gradient component is non-finite.
     std::expected<double, GprError> EvalCache::eval_unconstrained(

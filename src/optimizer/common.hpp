@@ -22,8 +22,8 @@ namespace cxxgpr::optimizer::detail
 
     /// @brief Computes the Euclidean dot product of two equal-length vectors.
     /// @details Accumulates sum_i a[i] * b[i] in double precision.
-    /// @param a First input vector span.
-    /// @param b Second input vector span (must have length >= a.size()).
+    /// @param[in] a First input vector span.
+    /// @param[in] b Second input vector span (must have length >= a.size()).
     /// @return Inner product a^T * b.
     [[nodiscard]] inline double dot_vec(std::span<const double> a, std::span<const double> b) noexcept
     {
@@ -37,7 +37,7 @@ namespace cxxgpr::optimizer::detail
 
     /// @brief Computes the Euclidean L2 norm ||a||_2.
     /// @details Evaluates sqrt(dot_vec(a, a)).
-    /// @param a Input vector span.
+    /// @param[in] a Input vector span.
     /// @return Non-negative Euclidean norm of a.
     [[nodiscard]] inline double norm2_vec(std::span<const double> a) noexcept
     {
@@ -51,10 +51,10 @@ namespace cxxgpr::optimizer::detail
     /// with the lowest objective value.
     /// @tparam RunSingleFn Callable with signature std::expected<OptimizerResult, GprError>(const LogBounds&,
     /// std::span<const double>).
-    /// @param obj Optimization objective supplying dimension and open parameter bounds.
-    /// @param initial_params Caller-provided initial log-space parameter vector.
-    /// @param restarts Multi-start restart count and deterministic Xoshiro256++ seed.
-    /// @param run_single Per-start solver callback invoked for initial_params and each sampled restart.
+    /// @param[in] obj Optimization objective supplying dimension and open parameter bounds.
+    /// @param[in] initial_params Caller-provided initial log-space parameter vector.
+    /// @param[in] restarts Multi-start restart count and deterministic Xoshiro256++ seed.
+    /// @param[in] run_single Per-start solver callback invoked for initial_params and each sampled restart.
     /// @return Best OptimizerResult across all runs, or GprError if initial validation or all runs fail.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
     /// @retval GprErrorCode::LengthMismatch When initial_params.size() != obj.dim().

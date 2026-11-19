@@ -22,9 +22,9 @@ namespace cxxgpr::persist::detail
     /// @brief Iteratively checks that JSON object and array nesting does not exceed max_depth before parsing.
     /// @details Performs a single linear pass over text while ignoring braces and brackets inside string
     /// literals, avoiding stack exhaustion on adversarial or corrupted JSON inputs.
-    /// @param text Raw JSON text to inspect.
-    /// @param max_depth Maximum permissible nesting depth of '{' and '[' delimiters.
-    /// @param kind Persistence error subcategory reported if max_depth is exceeded.
+    /// @param[in] text Raw JSON text to inspect.
+    /// @param[in] max_depth Maximum permissible nesting depth of '{' and '[' delimiters.
+    /// @param[in] kind Persistence error subcategory reported if max_depth is exceeded.
     /// @return Empty expected when nesting stays within max_depth, or a PersistFailed error otherwise.
     /// @retval GprErrorCode::PersistFailed When structural nesting exceeds max_depth.
     [[nodiscard]] inline std::expected<void, GprError> check_json_max_depth(

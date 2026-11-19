@@ -34,12 +34,12 @@ namespace cxxgpr
     struct KernelSpecPersistAccess
     {
         /// @brief Returns the root NodeVariant stored inside spec.
-        /// @param spec Kernel specification whose variant node is inspected.
+        /// @param[in] spec Kernel specification whose variant node is inspected.
         /// @return Constant reference to spec.node_.
         [[nodiscard]] static const KernelSpec::NodeVariant& node(const KernelSpec& spec) noexcept { return spec.node_; }
 
         /// @brief Extracts child pointers if v holds a SumNode, or {nullptr, nullptr} otherwise.
-        /// @param v KernelSpec variant node to inspect.
+        /// @param[in] v KernelSpec variant node to inspect.
         /// @return Pair of left and right child pointers for SumNode, or two null pointers.
         [[nodiscard]] static std::pair<const KernelSpec*, const KernelSpec*> as_sum(
             const KernelSpec::NodeVariant& v
@@ -53,7 +53,7 @@ namespace cxxgpr
         }
 
         /// @brief Extracts child pointers if v holds a ProductNode, or {nullptr, nullptr} otherwise.
-        /// @param v KernelSpec variant node to inspect.
+        /// @param[in] v KernelSpec variant node to inspect.
         /// @return Pair of left and right child pointers for ProductNode, or two null pointers.
         [[nodiscard]] static std::pair<const KernelSpec*, const KernelSpec*> as_product(
             const KernelSpec::NodeVariant& v
@@ -78,7 +78,7 @@ namespace cxxgpr::persist::detail
         constexpr std::size_t k_max_nesting_depth = 128U;
 
         /// @brief Constructs a PersistFailed(Config) error with reason.
-        /// @param reason Diagnostic message describing the configuration error.
+        /// @param[in] reason Diagnostic message describing the configuration error.
         /// @return GprError with PersistErrorKind::Config.
         [[nodiscard]] GprError config_err(std::string reason)
         {
@@ -86,8 +86,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Serializes a bounded parameter value and its open interval (lo, hi) as JSON.
-        /// @param val Parameter value in constrained user units.
-        /// @param iv Validated open interval bounds (lo, hi).
+        /// @param[in] val Parameter value in constrained user units.
+        /// @param[in] iv Validated open interval bounds (lo, hi).
         /// @return JSON object containing "value", "lo", and "hi".
         [[nodiscard]] nlohmann::json encode_bounded(double val, const Interval& iv)
         {
@@ -99,7 +99,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Parses and validates a bounded parameter JSON object against Interval::positive and BoundedParam.
-        /// @param j JSON object containing numeric "value", "lo", and "hi" fields.
+        /// @param[in] j JSON object containing numeric "value", "lo", and "hi" fields.
         /// @return Validated (value, Interval) pair or GprError on schema or range error.
         /// @retval GprErrorCode::PersistFailed When required numeric fields are missing or malformed.
         /// @retval GprErrorCode::InvalidInterval When bounds or value fail open-interval validation.
@@ -131,7 +131,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Maps MaternNu enum value to its canonical config.json string token.
-        /// @param nu Matern smoothness parameter enum.
+        /// @param[in] nu Matern smoothness parameter enum.
         /// @return Canonical fraction string ("1/2", "3/2", or "5/2").
         [[nodiscard]] std::string_view nu_to_str(MaternNu nu) noexcept
         {
@@ -148,7 +148,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Parses canonical Matern smoothness string into MaternNu.
-        /// @param s Serialized smoothness string ("1/2", "3/2", or "5/2").
+        /// @param[in] s Serialized smoothness string ("1/2", "3/2", or "5/2").
         /// @return Matching MaternNu enum value, or PersistFailed(Config) if unrecognized.
         /// @retval GprErrorCode::PersistFailed When s is not a supported Matern nu token.
         [[nodiscard]] std::expected<MaternNu, GprError> str_to_nu(std::string_view s)
@@ -171,7 +171,7 @@ namespace cxxgpr::persist::detail
         /// @brief Serializes a single KernelLeaf variant into its tagged config.json representation.
         /// @details Encodes hyperparameters alongside open bounds for all 10 built-in leaves and validates
         /// persist_id and JSON state for CustomKernel leaves.
-        /// @param leaf Kernel leaf variant to serialize.
+        /// @param[in] leaf Kernel leaf variant to serialize.
         /// @return Single-key JSON object representing the leaf, or GprError if custom leaf is not persistable.
         /// @retval GprErrorCode::PersistFailed When a custom kernel has an invalid/empty persist_id or state fails.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_leaf(const KernelLeaf& leaf)
@@ -327,8 +327,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively encodes a KernelSpec tree into JSON while guarding against excessive depth.
-        /// @param spec Kernel specification tree node to encode.
-        /// @param depth Current AST recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] spec Kernel specification tree node to encode.
+        /// @param[in] depth Current AST recursion depth bounded by k_max_nesting_depth.
         /// @return JSON representation of spec, or GprError if depth or leaf serialization fails.
         /// @retval GprErrorCode::PersistFailed When nesting depth exceeds 128 or a leaf fails to serialize.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_kernel(const KernelSpec& spec, std::size_t depth)
@@ -377,9 +377,9 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively decodes a kernel JSON node into a KernelSpec tree.
-        /// @param j Single-key JSON object representing a leaf, sum, or product kernel node.
-        /// @param registry Extension registry used to instantiate "custom" leaves.
-        /// @param depth Current AST recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] j Single-key JSON object representing a leaf, sum, or product kernel node.
+        /// @param[in] registry Extension registry used to instantiate "custom" leaves.
+        /// @param[in] depth Current AST recursion depth bounded by k_max_nesting_depth.
         /// @return Reconstructed KernelSpec on success, or GprError on schema, interval, or registry failure.
         /// @retval GprErrorCode::PersistFailed When nesting exceeds 128, schema is invalid, or custom ID is missing.
         [[nodiscard]] std::expected<KernelSpec, GprError> decode_kernel(
@@ -652,7 +652,7 @@ namespace cxxgpr::persist::detail
 
         /// @brief Serializes a user-defined transform implementing persist_id() and persist_state_json().
         /// @tparam CustomTransformT Input or target transform interface type.
-        /// @param t Custom transform instance to serialize.
+        /// @param[in] t Custom transform instance to serialize.
         /// @return JSON object {"custom": {"persist_id": ..., "state": ...}}, or GprError if non-persistable.
         /// @retval GprErrorCode::PersistFailed When persist_id() is empty/reserved or state export fails.
         template <typename CustomTransformT>
@@ -692,8 +692,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively encodes an UnfittedInputTransform hierarchy into config.json format.
-        /// @param t Unfitted input transform node to serialize.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] t Unfitted input transform node to serialize.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_unfitted_input(
             const transform::UnfittedInputTransform& t, std::size_t depth
@@ -756,8 +756,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively encodes a FittedInputTransform hierarchy and its fitted statistics into JSON.
-        /// @param t Fitted input transform node to serialize.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] t Fitted input transform node to serialize.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_fitted_input(
             const transform::FittedInputTransform& t, std::size_t depth
@@ -820,8 +820,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively encodes an UnfittedTargetTransform hierarchy into config.json format.
-        /// @param t Unfitted target transform node to serialize.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] t Unfitted target transform node to serialize.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_unfitted_target(
             const transform::UnfittedTargetTransform& t, std::size_t depth
@@ -868,8 +868,8 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively encodes a FittedTargetTransform hierarchy and its fitted statistics into JSON.
-        /// @param t Fitted target transform node to serialize.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] t Fitted target transform node to serialize.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
         [[nodiscard]] std::expected<nlohmann::json, GprError> encode_fitted_target(
             const transform::FittedTargetTransform& t, std::size_t depth
@@ -916,9 +916,9 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively decodes an UnfittedInputTransform hierarchy from JSON.
-        /// @param j JSON string ("identity") or single-key transform descriptor object.
-        /// @param registry Registry supplying factories for "custom" transforms.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] j JSON string ("identity") or single-key transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" transforms.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return Owned UnfittedInputTransform instance, or GprError on schema, range, or registry error.
         [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedInputTransform>, GprError> decode_unfitted_input(
             const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
@@ -996,9 +996,9 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively decodes a FittedInputTransform hierarchy and validates restored statistics.
-        /// @param j JSON string ("identity") or single-key fitted transform descriptor object.
-        /// @param registry Registry supplying factories for "custom" transforms.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] j JSON string ("identity") or single-key fitted transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" transforms.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return Owned FittedInputTransform instance, or GprError on schema, parameter, or registry error.
         [[nodiscard]] std::expected<std::unique_ptr<transform::FittedInputTransform>, GprError> decode_fitted_input(
             const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
@@ -1090,9 +1090,9 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively decodes an UnfittedTargetTransform hierarchy from JSON.
-        /// @param j JSON string ("identity") or single-key target transform descriptor object.
-        /// @param registry Registry supplying factories for "custom" target transforms.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] j JSON string ("identity") or single-key target transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return Owned UnfittedTargetTransform instance, or GprError on schema, range, or registry error.
         [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedTargetTransform>, GprError>
             decode_unfitted_target(const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth)
@@ -1163,9 +1163,9 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Recursively decodes a FittedTargetTransform hierarchy and validates restored statistics.
-        /// @param j JSON string ("identity") or single-key fitted target transform descriptor object.
-        /// @param registry Registry supplying factories for "custom" target transforms.
-        /// @param depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[in] j JSON string ("identity") or single-key fitted target transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
         /// @return Owned FittedTargetTransform instance, or GprError on schema, parameter, or registry error.
         [[nodiscard]] std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError> decode_fitted_target(
             const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
@@ -1251,7 +1251,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Serializes a JitterPolicy (FixedJitter or AdaptiveJitter) into a tagged JSON object.
-        /// @param jitter Cholesky jitter stabilization policy.
+        /// @param[in] jitter Cholesky jitter stabilization policy.
         /// @return JSON representation of jitter.
         [[nodiscard]] nlohmann::json encode_jitter(const JitterPolicy& jitter)
         {
@@ -1274,7 +1274,7 @@ namespace cxxgpr::persist::detail
         }
 
         /// @brief Parses and validates a JitterPolicy JSON descriptor.
-        /// @param j Single-key JSON object ("fixed" or "adaptive").
+        /// @param[in] j Single-key JSON object ("fixed" or "adaptive").
         /// @return Validated JitterPolicy, or GprError on invalid schema or parameter values.
         [[nodiscard]] std::expected<JitterPolicy, GprError> decode_jitter(const nlohmann::json& j)
         {
@@ -1312,7 +1312,7 @@ namespace cxxgpr::persist::detail
     /// @brief Serializes a SaveInput bundle into pretty-printed config.json text.
     /// @details Encodes kernel AST, likelihood with bounds, jitter policy, unfitted/fitted transforms,
     /// precision/residual flags, exponential math mode, and distance cache policy.
-    /// @param input Borrowed model configuration and transform references to serialize.
+    /// @param[in] input Borrowed model configuration and transform references to serialize.
     /// @return Formatted JSON text on success, or GprError if any subtree or custom component fails encoding.
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or depth exceeds 128.
     std::expected<std::string, GprError> serialize_config_json(const SaveInput& input)
@@ -1396,8 +1396,8 @@ namespace cxxgpr::persist::detail
     /// @details Enforces MAX_JSON_NESTING_DEPTH prior to JSON parsing, checks model/distance checkpoint
     /// compatibility, validates format_version and factor_kind == "llt", and deserializes kernels,
     /// likelihood, jitter, and transforms.
-    /// @param path Filesystem path to config.json.
-    /// @param registry Registry supplying custom kernel and transform deserialization factories.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
     /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
     /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
     /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.

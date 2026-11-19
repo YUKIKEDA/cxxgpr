@@ -36,7 +36,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated maximum trust-region outer iterations.
         /// @details Bounds the number of trust-region quadratic subproblem trials per start.
-        /// @param max_iterations Maximum number of outer trust-region iterations per start.
+        /// @param[in] max_iterations Maximum number of outer trust-region iterations per start.
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_max_iterations(std::size_t max_iterations) const noexcept
         {
@@ -47,7 +47,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated gradient norm and step convergence tolerance.
         /// @details Validated at optimize() time to be finite and non-negative.
-        /// @param tolerance Convergence tolerance threshold (>= 0).
+        /// @param[in] tolerance Convergence tolerance threshold (>= 0).
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_tolerance(double tolerance) const noexcept
         {
@@ -58,7 +58,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated initial trust-region radius in unconstrained logit coordinates.
         /// @details Validated at optimize() time to be finite, positive, and <= max_radius_.
-        /// @param initial_radius Starting trust-region radius (> 0).
+        /// @param[in] initial_radius Starting trust-region radius (> 0).
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_initial_radius(double initial_radius) const noexcept
         {
@@ -69,7 +69,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated maximum allowed trust-region radius.
         /// @details Validated at optimize() time to be finite and >= initial_radius_.
-        /// @param max_radius Upper bound on adaptive trust-region radius (>= initial_radius_).
+        /// @param[in] max_radius Upper bound on adaptive trust-region radius (>= initial_radius_).
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_max_radius(double max_radius) const noexcept
         {
@@ -80,8 +80,8 @@ namespace cxxgpr::optimizer
 
         /// @brief Configures deterministic multi-start restarts sampled log-uniformly via Xoshiro256++.
         /// @details Runs count additional starts from log-uniform samples after evaluating initial_params.
-        /// @param count Number of extra random restarts.
-        /// @param seed Seed used to generate restart starting points.
+        /// @param[in] count Number of extra random restarts.
+        /// @param[in] seed Seed used to generate restart starting points.
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_restarts(std::size_t count, std::uint64_t seed = 0U) const noexcept
         {
@@ -118,8 +118,8 @@ namespace cxxgpr::optimizer
         /// @brief Minimizes obj starting from log-space initial_params.
         /// @details Validates tolerance_ >= 0, 0 < initial_radius_ <= max_radius_, validates bounds and
         /// initial_params, and runs single or multi-start trust-region Newton optimization.
-        /// @param obj TwiceDifferentiable objective providing value, analytical gradient, and Hessian.
-        /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+        /// @param[in,out] obj TwiceDifferentiable objective providing value, analytical gradient, and Hessian.
+        /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
         /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
         /// @retval GprErrorCode::InvalidConfig When tolerance or radius configuration is invalid.
         /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
@@ -132,7 +132,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two TrustRegion configurations.
         /// @details Compares max_iterations_, tolerance_, initial_radius_, max_radius_, and restarts_.
-        /// @param other TrustRegion instance to compare against.
+        /// @param[in] other TrustRegion instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const TrustRegion& other) const noexcept = default;
 

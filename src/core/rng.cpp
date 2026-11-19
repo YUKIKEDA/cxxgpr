@@ -32,8 +32,8 @@ namespace cxxgpr
 
         /// @brief Computes the exact 128-bit unsigned product of two 64-bit integers.
         /// @details Splits each operand into 32-bit halves and propagates carries across partial products.
-        /// @param a First 64-bit unsigned factor.
-        /// @param b Second 64-bit unsigned factor.
+        /// @param[in] a First 64-bit unsigned factor.
+        /// @param[in] b Second 64-bit unsigned factor.
         /// @return Full 128-bit unsigned product split into hi and lo 64-bit words.
         constexpr U128 mul_u64_u64(std::uint64_t a, std::uint64_t b) noexcept
         {
@@ -68,7 +68,7 @@ namespace cxxgpr
 
     /// @brief Returns an integer uniformly distributed in the closed interval [0, max].
     /// @details Uses Lemire's divisionless nearly-divisionless rejection algorithm on [0, max].
-    /// @param max Inclusive upper bound of the integer range.
+    /// @param[in] max Inclusive upper bound of the integer range.
     /// @return Unbiased uniform integer in [0, max].
     std::size_t Xoshiro256PlusPlus::up_to(std::size_t max) noexcept
     {

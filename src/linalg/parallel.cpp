@@ -35,8 +35,8 @@ namespace cxxgpr::linalg
 
         /// @brief Computes the exact 128-bit product of two 64-bit unsigned integers.
         /// @details Splits each operand into 32-bit halves and propagates carries from low to high words.
-        /// @param a First 64-bit unsigned multiplicand.
-        /// @param b Second 64-bit unsigned multiplicand.
+        /// @param[in] a First 64-bit unsigned multiplicand.
+        /// @param[in] b Second 64-bit unsigned multiplicand.
         /// @return Exact 128-bit unsigned product a * b.
         [[nodiscard]] constexpr Uint128 mul_u64_u128(std::uint64_t a, std::uint64_t b) noexcept
         {
@@ -59,8 +59,8 @@ namespace cxxgpr::linalg
 
         /// @brief Compares two 128-bit unsigned integers for a >= b.
         /// @details Evaluates lexicographic order on (hi, lo).
-        /// @param a Left-hand 128-bit unsigned integer.
-        /// @param b Right-hand 128-bit unsigned integer.
+        /// @param[in] a Left-hand 128-bit unsigned integer.
+        /// @param[in] b Right-hand 128-bit unsigned integer.
         /// @return True if a >= b.
         [[nodiscard]] constexpr bool u128_ge(Uint128 a, Uint128 b) noexcept
         {
@@ -69,8 +69,8 @@ namespace cxxgpr::linalg
 
         /// @brief Compares two 128-bit unsigned integers for a < b.
         /// @details Evaluates lexicographic order on (hi, lo).
-        /// @param a Left-hand 128-bit unsigned integer.
-        /// @param b Right-hand 128-bit unsigned integer.
+        /// @param[in] a Left-hand 128-bit unsigned integer.
+        /// @param[in] b Right-hand 128-bit unsigned integer.
         /// @return True if a < b.
         [[nodiscard]] constexpr bool u128_lt(Uint128 a, Uint128 b) noexcept
         {
@@ -79,8 +79,8 @@ namespace cxxgpr::linalg
 
         /// @brief Subtracts b from a assuming a >= b in 128-bit unsigned arithmetic.
         /// @details Propagates a single borrow bit from the low 64-bit word to the high 64-bit word.
-        /// @param a Minuend (must satisfy a >= b).
-        /// @param b Subtrahend.
+        /// @param[in] a Minuend (must satisfy a >= b).
+        /// @param[in] b Subtrahend.
         /// @return Difference a - b.
         [[nodiscard]] constexpr Uint128 u128_sub(Uint128 a, Uint128 b) noexcept
         {
@@ -90,8 +90,8 @@ namespace cxxgpr::linalg
 
         /// @brief Computes lower-triangular entry count in columns [0, min(col, n)) in 64-bit arithmetic.
         /// @details Evaluates c * n - c * (c - 1) / 2 where c = min(col, n).
-        /// @param n Matrix order.
-        /// @param col Exclusive ending column index.
+        /// @param[in] n Matrix order.
+        /// @param[in] col Exclusive ending column index.
         /// @return Number of lower-triangular entries in columns [0, min(col, n)).
         [[nodiscard]] constexpr std::uint64_t lower_area_u64(std::uint64_t n, std::uint64_t col) noexcept
         {
@@ -102,7 +102,7 @@ namespace cxxgpr::linalg
 
         /// @brief Resolves requested thread count, falling back to openmp_max_threads() when zero.
         /// @details Leaves positive thread counts unchanged.
-        /// @param num_threads Requested thread count, or 0 for automatic OpenMP query.
+        /// @param[in] num_threads Requested thread count, or 0 for automatic OpenMP query.
         /// @return Effective positive thread count.
         [[nodiscard]] std::size_t resolve_threads(std::size_t num_threads) noexcept
         {
@@ -118,8 +118,8 @@ namespace cxxgpr::linalg
     /// @brief Returns the count of lower-triangular entries (including diagonal) in columns [0, col) of an n x n
     /// matrix.
     /// @details Delegates to lower_area_u64 with col clamped to n.
-    /// @param n Matrix order (number of rows and columns).
-    /// @param col Exclusive ending column index.
+    /// @param[in] n Matrix order (number of rows and columns).
+    /// @param[in] col Exclusive ending column index.
     /// @return Number of lower-triangular entries covered by columns [0, min(col, n)).
     std::size_t lower_area(std::size_t n, std::size_t col) noexcept
     {
@@ -129,9 +129,9 @@ namespace cxxgpr::linalg
     /// @brief Returns the starting column index of an area-balanced partition block in an n x n lower triangle.
     /// @details Uses binary search with exact 128-bit cross-multiplication to locate the column whose cumulative area
     /// best approximates block_idx / n_blocks of the total lower triangle.
-    /// @param n Matrix order (number of rows and columns).
-    /// @param block_idx Zero-based block index in [0, n_blocks].
-    /// @param n_blocks Total number of partition blocks (clamped to at least 1).
+    /// @param[in] n Matrix order (number of rows and columns).
+    /// @param[in] block_idx Zero-based block index in [0, n_blocks].
+    /// @param[in] n_blocks Total number of partition blocks (clamped to at least 1).
     /// @return Starting column index in [0, n].
     std::size_t lower_block_start(std::size_t n, std::size_t block_idx, std::size_t n_blocks) noexcept
     {
@@ -193,10 +193,10 @@ namespace cxxgpr::linalg
     /// @brief Executes fn(col_begin, col_end, ctx) across area-balanced column blocks covering [0, n).
     /// @details Uses OpenMP static-1 scheduling over area-balanced lower-triangle column intervals when OpenMP is
     /// active and more than one block is used; otherwise executes serially on [0, n).
-    /// @param n Matrix order specifying column range [0, n).
-    /// @param num_threads Requested thread count, or 0 to query openmp_max_threads().
-    /// @param fn Callback invoked once per non-empty column block [col_begin, col_end).
-    /// @param ctx Opaque context pointer forwarded unchanged to fn.
+    /// @param[in] n Matrix order specifying column range [0, n).
+    /// @param[in] num_threads Requested thread count, or 0 to query openmp_max_threads().
+    /// @param[in] fn Callback invoked once per non-empty column block [col_begin, col_end).
+    /// @param[in,out] ctx Opaque context pointer forwarded unchanged to fn.
     void parallel_for_lower_blocks_raw(
         std::size_t n,
         std::size_t num_threads,
@@ -241,11 +241,11 @@ namespace cxxgpr::linalg
     /// @brief Evaluates fn(col, ctx) in parallel into col_partials and reduces deterministically in ascending order.
     /// @details Validates inputs, computes independent per-column partials concurrently across area-balanced blocks,
     /// and sums col_partials[0..n) serially with Neumaier compensation for bit-identical reproducibility.
-    /// @param n Number of columns to evaluate and reduce.
-    /// @param num_threads Requested thread count, or 0 to query openmp_max_threads().
-    /// @param col_partials Preallocated workspace of length n storing per-column partial results.
-    /// @param fn Callback returning the partial double contribution for column col.
-    /// @param ctx Opaque context pointer forwarded unchanged to fn.
+    /// @param[in] n Number of columns to evaluate and reduce.
+    /// @param[in] num_threads Requested thread count, or 0 to query openmp_max_threads().
+    /// @param[in,out] col_partials Preallocated workspace of length n storing per-column partial results.
+    /// @param[in] fn Callback returning the partial double contribution for column col.
+    /// @param[in,out] ctx Opaque context pointer forwarded unchanged to fn.
     /// @return Deterministically reduced sum in double precision, or GprError on invalid arguments.
     /// @retval GprErrorCode::EmptyInput When n == 0 or col_partials is empty.
     /// @retval GprErrorCode::LengthMismatch When col_partials.size() != n.

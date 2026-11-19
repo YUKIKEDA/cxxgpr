@@ -35,7 +35,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated maximum L-BFGS iterations.
         /// @details Bounds the number of outer quasi-Newton steps per start.
-        /// @param max_iterations Maximum number of L-BFGS iterations per start.
+        /// @param[in] max_iterations Maximum number of L-BFGS iterations per start.
         /// @return Updated Lbfgs configuration copy.
         [[nodiscard]] Lbfgs with_max_iterations(std::size_t max_iterations) const noexcept
         {
@@ -46,7 +46,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated relative gradient and function convergence tolerance.
         /// @details Validated at optimize() time to be finite and non-negative.
-        /// @param tolerance Convergence tolerance threshold (>= 0).
+        /// @param[in] tolerance Convergence tolerance threshold (>= 0).
         /// @return Updated Lbfgs configuration copy.
         [[nodiscard]] Lbfgs with_tolerance(double tolerance) const noexcept
         {
@@ -57,7 +57,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated number of (s, y) correction pairs retained.
         /// @details Validated at optimize() time to be at least 1.
-        /// @param history_size Number of recent secant pairs used in two-loop recursion (>= 1).
+        /// @param[in] history_size Number of recent secant pairs used in two-loop recursion (>= 1).
         /// @return Updated Lbfgs configuration copy.
         [[nodiscard]] Lbfgs with_history_size(std::size_t history_size) const noexcept
         {
@@ -68,8 +68,8 @@ namespace cxxgpr::optimizer
 
         /// @brief Configures deterministic multi-start restarts sampled log-uniformly via Xoshiro256++.
         /// @details Runs count additional starts from log-uniform samples after evaluating initial_params.
-        /// @param count Number of extra random restarts.
-        /// @param seed Seed used to generate restart starting points.
+        /// @param[in] count Number of extra random restarts.
+        /// @param[in] seed Seed used to generate restart starting points.
         /// @return Updated Lbfgs configuration copy.
         [[nodiscard]] Lbfgs with_restarts(std::size_t count, std::uint64_t seed = 0U) const noexcept
         {
@@ -101,8 +101,8 @@ namespace cxxgpr::optimizer
         /// @brief Minimizes obj starting from log-space initial_params.
         /// @details Validates tolerance_ >= 0 and history_size_ >= 1, validates bounds and initial_params,
         /// and executes single or multi-start L-BFGS optimization in unconstrained logit coordinates.
-        /// @param obj Differentiable objective evaluated in log-theta space.
-        /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+        /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
+        /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
         /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
         /// @retval GprErrorCode::InvalidConfig When tolerance is invalid/negative or history_size == 0.
         /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
@@ -115,7 +115,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two Lbfgs configurations.
         /// @details Compares max_iterations_, tolerance_, history_size_, and restarts_.
-        /// @param other Lbfgs instance to compare against.
+        /// @param[in] other Lbfgs instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const Lbfgs& other) const noexcept = default;
 

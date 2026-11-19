@@ -27,8 +27,8 @@ namespace cxxgpr::transform
         /// @brief Validates a target or prediction span and applies fn element-wise in place.
         /// @details Enforces canonical vector validation before updating each element v = fn(v).
         /// @tparam Fn Callable mapping double -> double.
-        /// @param values Mutable span updated in place.
-        /// @param fn Element-wise scalar transformation callable.
+        /// @param[in,out] values Mutable span updated in place.
+        /// @param[in] fn Element-wise scalar transformation callable.
         /// @return Empty expected on success, or GprError on empty or non-finite values.
         /// @retval GprErrorCode::EmptyInput When values is empty.
         /// @retval GprErrorCode::NonFiniteInput When any element of values is NaN or infinite.
@@ -48,9 +48,9 @@ namespace cxxgpr::transform
         /// @brief Validates target and output spans and writes fn(values[i]) into out[i].
         /// @details Enforces canonical vector validation with output length parity before element-wise evaluation.
         /// @tparam Fn Callable mapping double -> double.
-        /// @param values Read-only input span.
-        /// @param out Preallocated mutable output span of matching length.
-        /// @param fn Element-wise scalar transformation callable.
+        /// @param[in] values Read-only input span.
+        /// @param[out] out Preallocated mutable output span of matching length.
+        /// @param[in] fn Element-wise scalar transformation callable.
         /// @return Empty expected on success, or GprError on invalid length or non-finite values.
         /// @retval GprErrorCode::EmptyInput When values is empty.
         /// @retval GprErrorCode::LengthMismatch When out.size() != values.size().
@@ -73,8 +73,8 @@ namespace cxxgpr::transform
 
     /// @brief Applies the forward transform into a preallocated output buffer.
     /// @details Validates input and output sizes, copies y when non-aliasing, and delegates to transform(out).
-    /// @param y Read-only span of target values.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] y Read-only span of target values.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != y.size().
@@ -98,8 +98,8 @@ namespace cxxgpr::transform
     /// @brief Maps predictive means back to the original target scale into out.
     /// @details Validates input and output sizes, copies mean when non-aliasing, and delegates to
     /// inverse_transform_mean(out).
-    /// @param mean Read-only span of transformed predictive means.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] mean Read-only span of transformed predictive means.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != mean.size().
@@ -122,8 +122,8 @@ namespace cxxgpr::transform
     /// @brief Maps predictive variances back to the original target scale into out.
     /// @details Validates input and output sizes, copies var when non-aliasing, and delegates to
     /// inverse_transform_variance(out).
-    /// @param var Read-only span of transformed predictive variances.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] var Read-only span of transformed predictive variances.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != var.size().
@@ -146,7 +146,7 @@ namespace cxxgpr::transform
     /// @brief Maps a query-query covariance matrix from transformed space back to the original scale.
     /// @details For affine target transforms y = a * z + b, every covariance entry scales by the constant squared
     /// Jacobian (dy/dz)^2 = a^2, matching inverse_transform_variance.
-    /// @param cov Mutable flattened m x m covariance buffer updated in place.
+    /// @param[in,out] cov Mutable flattened m x m covariance buffer updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When cov is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of cov is NaN or infinite.
@@ -158,8 +158,8 @@ namespace cxxgpr::transform
 
     /// @brief Maps a query-query covariance matrix back to the original scale into out.
     /// @details Delegates to inverse_transform_variance_into(cov, out), exact for affine target transforms.
-    /// @param cov Read-only flattened m x m transformed covariance buffer.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] cov Read-only flattened m x m transformed covariance buffer.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When cov is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != cov.size().
@@ -201,7 +201,7 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness without modifying y.
     /// @details Delegates to detail::validate_target_vector.
-    /// @param y Mutable span of target values validated in place.
+    /// @param[in,out] y Mutable span of target values validated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite values.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -212,8 +212,8 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness and copies y into out.
     /// @details Guards aliasing via out.data() != y.data() before copying.
-    /// @param y Read-only span of target values.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] y Read-only span of target values.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != y.size().
@@ -235,7 +235,7 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness without modifying mean.
     /// @details Delegates to detail::validate_target_vector.
-    /// @param mean Mutable span of predictive means validated in place.
+    /// @param[in,out] mean Mutable span of predictive means validated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite values.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of mean is NaN or infinite.
@@ -246,8 +246,8 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness and copies mean into out.
     /// @details Delegates directly to transform_into(mean, out).
-    /// @param mean Read-only span of predictive means.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] mean Read-only span of predictive means.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != mean.size().
@@ -261,7 +261,7 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness without modifying var.
     /// @details Delegates to detail::validate_target_vector.
-    /// @param var Mutable span of predictive variances validated in place.
+    /// @param[in,out] var Mutable span of predictive variances validated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite values.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of var is NaN or infinite.
@@ -272,8 +272,8 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness and copies var into out.
     /// @details Delegates directly to transform_into(var, out).
-    /// @param var Read-only span of predictive variances.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] var Read-only span of predictive variances.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != var.size().
@@ -295,7 +295,7 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness and returns a typed fitted identity transform.
     /// @details Validates training targets before returning a stateless FittedIdentityTarget.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return FittedIdentityTarget on success, or GprError on invalid training targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -310,7 +310,7 @@ namespace cxxgpr::transform
 
     /// @brief Validates non-emptiness and finiteness and returns a boxed fitted identity transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return Boxed FittedIdentityTarget on success, or GprError on invalid training targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -336,8 +336,8 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a FittedStandardizeTarget from finite mean and positive finite std.
     /// @details Enforces finiteness of both parameters before checking std > 0.
-    /// @param mean Finite target mean offset.
-    /// @param std Strictly positive finite target scale divisor.
+    /// @param[in] mean Finite target mean offset.
+    /// @param[in] std Strictly positive finite target scale divisor.
     /// @return Validated FittedStandardizeTarget on success, or GprError on invalid parameters.
     /// @retval GprErrorCode::NonFiniteInput When mean or std is NaN or infinite.
     /// @retval GprErrorCode::InvalidHyperparameter When std <= 0.
@@ -361,7 +361,7 @@ namespace cxxgpr::transform
 
     /// @brief Standardizes targets in place: (y - mean) / std.
     /// @details Applies affine centering and scaling element-wise in place.
-    /// @param y Mutable span of target values updated in place.
+    /// @param[in,out] y Mutable span of target values updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -374,8 +374,8 @@ namespace cxxgpr::transform
 
     /// @brief Standardizes targets into out: (y - mean) / std.
     /// @details Writes standardized targets directly into out without allocation.
-    /// @param y Read-only span of target values.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] y Read-only span of target values.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != y.size().
@@ -391,7 +391,7 @@ namespace cxxgpr::transform
 
     /// @brief Restores predictive means in place: mean + std * z.
     /// @details Inverts standardization on transformed predictive means in place.
-    /// @param mean Mutable span of standardized predictive means updated in place.
+    /// @param[in,out] mean Mutable span of standardized predictive means updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of mean is NaN or infinite.
@@ -404,8 +404,8 @@ namespace cxxgpr::transform
 
     /// @brief Restores predictive means into out: mean + std * z.
     /// @details Writes unscaled predictive means directly into out without allocation.
-    /// @param mean Read-only span of standardized predictive means.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] mean Read-only span of standardized predictive means.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != mean.size().
@@ -421,7 +421,7 @@ namespace cxxgpr::transform
 
     /// @brief Scales predictive variances in place by std^2.
     /// @details For y = mean + std * z, Var(y) = (dy/dz)^2 * Var(z) = std^2 * Var(z).
-    /// @param var Mutable span of standardized predictive variances updated in place.
+    /// @param[in,out] var Mutable span of standardized predictive variances updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of var is NaN or infinite.
@@ -434,8 +434,8 @@ namespace cxxgpr::transform
 
     /// @brief Scales predictive variances into out by std^2.
     /// @details Writes original-scale predictive variances directly into out without allocation.
-    /// @param var Read-only span of standardized predictive variances.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] var Read-only span of standardized predictive variances.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != var.size().
@@ -459,7 +459,7 @@ namespace cxxgpr::transform
 
     /// @brief Estimates training mean and population std, using 1.0 for constant targets.
     /// @details Validates y before computing two-pass population statistics.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return FittedStandardizeTarget on success, or GprError on invalid targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -475,7 +475,7 @@ namespace cxxgpr::transform
 
     /// @brief Estimates training mean and population std and returns a boxed fitted transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return Boxed FittedStandardizeTarget on success, or GprError on invalid targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -503,10 +503,10 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a FittedMinMaxTarget from validated extrema and finite range [range_lo, range_hi].
     /// @details Validates output interval bounds first, then extremum finiteness and ordering data_min <= data_max.
-    /// @param data_min Minimum training target value.
-    /// @param data_max Maximum training target value (must be >= data_min).
-    /// @param range_lo Finite lower endpoint of the target interval.
-    /// @param range_hi Finite upper endpoint of the target interval (must exceed range_lo).
+    /// @param[in] data_min Minimum training target value.
+    /// @param[in] data_max Maximum training target value (must be >= data_min).
+    /// @param[in] range_lo Finite lower endpoint of the target interval.
+    /// @param[in] range_hi Finite upper endpoint of the target interval (must exceed range_lo).
     /// @return Validated FittedMinMaxTarget on success, or GprError on invalid range or extrema.
     /// @retval GprErrorCode::InvalidConfig When range_lo or range_hi is non-finite or range_hi <= range_lo.
     /// @retval GprErrorCode::NonFiniteInput When data_min or data_max is NaN or infinite.
@@ -553,7 +553,7 @@ namespace cxxgpr::transform
 
     /// @brief Scales targets in place onto [range_lo, range_hi].
     /// @details Applies range_lo + out_span * (y - data_min) / data_span element-wise in place.
-    /// @param y Mutable span of target values updated in place.
+    /// @param[in,out] y Mutable span of target values updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -570,8 +570,8 @@ namespace cxxgpr::transform
 
     /// @brief Scales targets into out onto [range_lo, range_hi].
     /// @details Writes scaled targets directly into out without allocation.
-    /// @param y Read-only span of target values.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] y Read-only span of target values.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != y.size().
@@ -591,7 +591,7 @@ namespace cxxgpr::transform
 
     /// @brief Restores predictive means in place to the original target scale.
     /// @details Applies data_min + data_span * (z - range_lo) / out_span element-wise in place.
-    /// @param mean Mutable span of transformed predictive means updated in place.
+    /// @param[in,out] mean Mutable span of transformed predictive means updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of mean is NaN or infinite.
@@ -608,8 +608,8 @@ namespace cxxgpr::transform
 
     /// @brief Restores predictive means into out on the original target scale.
     /// @details Writes original-scale predictive means directly into out without allocation.
-    /// @param mean Read-only span of transformed predictive means.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] mean Read-only span of transformed predictive means.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When mean is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != mean.size().
@@ -630,7 +630,7 @@ namespace cxxgpr::transform
     /// @brief Scales predictive variances in place by (data_span / (range_hi - range_lo))^2.
     /// @details For y = data_min + (data_span / out_span) * (z - range_lo), the squared Jacobian factor is (dy/dz)^2 =
     /// (data_span / out_span)^2.
-    /// @param var Mutable span of transformed predictive variances updated in place.
+    /// @param[in,out] var Mutable span of transformed predictive variances updated in place.
     /// @return Empty expected on success, or GprError on empty or non-finite input.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of var is NaN or infinite.
@@ -644,8 +644,8 @@ namespace cxxgpr::transform
 
     /// @brief Scales predictive variances into out on the original target scale.
     /// @details Writes original-scale predictive variances directly into out without allocation using (dy/dz)^2.
-    /// @param var Read-only span of transformed predictive variances.
-    /// @param out Preallocated mutable output buffer of matching length.
+    /// @param[in] var Read-only span of transformed predictive variances.
+    /// @param[out] out Preallocated mutable output buffer of matching length.
     /// @return Empty expected on success, or GprError on empty input, length mismatch, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When var is empty.
     /// @retval GprErrorCode::LengthMismatch When out.size() != var.size().
@@ -670,8 +670,8 @@ namespace cxxgpr::transform
 
     /// @brief Creates a MinMaxTarget mapping onto [lo, hi], rejecting non-finite bounds or hi <= lo.
     /// @details Validates target interval bounds via detail::validate_feature_range.
-    /// @param lo Finite lower endpoint of the target output interval.
-    /// @param hi Finite upper endpoint of the target output interval (must exceed lo).
+    /// @param[in] lo Finite lower endpoint of the target output interval.
+    /// @param[in] hi Finite upper endpoint of the target output interval (must exceed lo).
     /// @return Validated MinMaxTarget on success, or GprErrorCode::InvalidConfig on invalid bounds.
     /// @retval GprErrorCode::InvalidConfig When lo or hi is non-finite or hi <= lo.
     std::expected<MinMaxTarget, GprError> MinMaxTarget::create(double lo, double hi)
@@ -685,7 +685,7 @@ namespace cxxgpr::transform
 
     /// @brief Estimates training minimum and maximum and returns a typed fitted transform.
     /// @details Validates y before finding target extrema with std::ranges::minmax_element.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return FittedMinMaxTarget on success, or GprError on invalid training targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.
@@ -702,7 +702,7 @@ namespace cxxgpr::transform
 
     /// @brief Estimates training minimum and maximum and returns a boxed fitted transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param y Read-only span of training target values.
+    /// @param[in] y Read-only span of training target values.
     /// @return Boxed FittedMinMaxTarget on success, or GprError on invalid training targets.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::NonFiniteInput When any element of y is NaN or infinite.

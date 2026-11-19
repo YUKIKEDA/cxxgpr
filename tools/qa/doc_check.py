@@ -639,7 +639,9 @@ def _has_top_level_assign_before(tokens: list[Token], limit_idx: int) -> bool:
     bracket = 0
     paren = 0
     end = limit_idx if limit_idx >= 0 else len(tokens)
-    for tok in tokens[:end]:
+    for k, tok in enumerate(tokens[:end]):
+        if tok.kind == "IDENT" and tok.text == "operator":
+            return False
         if tok.kind == "OP":
             if tok.text == "(":
                 paren += 1
@@ -656,6 +658,8 @@ def _has_top_level_assign_before(tokens: list[Token], limit_idx: int) -> bool:
             elif tok.text == ">>" and paren == 0 and bracket == 0 and angle >= 2:
                 angle -= 2
             elif tok.text == "=" and paren == 0 and bracket == 0 and angle == 0:
+                if k > 0 and tokens[k - 1].kind == "IDENT" and tokens[k - 1].text == "operator":
+                    continue
                 return True
     return False
 
@@ -680,8 +684,25 @@ def _validate_doc_block(
         if not re.search(rf"@tparam\s+{re.escape(tp)}\b", doc.text):
             errors.append(f"{rel}:{doc.line}: {kind_label} Doxygen block missing '@tparam {tp}'")
     for param in params:
-        if not re.search(rf"@param(?:\[(?:in|out|in,out)\])?\s+{re.escape(param)}\b", doc.text):
-            errors.append(f"{rel}:{doc.line}: {kind_label} Doxygen block missing '@param {param}'")
+        if re.search(rf"@param\[(?:in|out|in,out)\]\s+{re.escape(param)}\b", doc.text):
+            continue
+        if re.search(rf"@param\s+{re.escape(param)}\b", doc.text):
+            errors.append(
+                f"{rel}:{doc.line}: {kind_label} '@param {param}' must specify direction "
+                "('@param[in]', '@param[out]', or '@param[in,out]')"
+            )
+        else:
+            errors.append(
+                f"{rel}:{doc.line}: {kind_label} Doxygen block missing "
+                f"'@param[in|out|in,out] {param}'"
+            )
+    for m in re.finditer(r"@param(?!\[(?:in|out|in,out)\])\s+([A-Za-z_][A-Za-z0-9_]*)", doc.text):
+        p_name = m.group(1)
+        if p_name not in params:
+            errors.append(
+                f"{rel}:{doc.line}: {kind_label} bare '@param {p_name}' without direction tag "
+                "([in], [out], or [in,out])"
+            )
     if require_return and not re.search(r"@returns?\b", doc.text):
         errors.append(f"{rel}:{doc.line}: {kind_label} Doxygen block missing '@return'")
 
@@ -1422,6 +1443,10 @@ def _run_self_test() -> int:
             "/// @brief Missing tparam and param and return.\n"
             "template <typename T>\n"
             "int bad_fn(T val);\n"
+            "/// @brief Bare param without direction.\n"
+            "/// @param x Undirected parameter.\n"
+            "/// @return Identity value.\n"
+            "int bare_param_fn(int x);\n"
             "struct UndocStruct { int x; };\n"
             "}\n",
             encoding="utf-8",
@@ -1459,25 +1484,29 @@ def _run_self_test() -> int:
             "        /// @brief Stored scalar value.\n"
             "        T value = T{0};\n"
             "        /// @brief Checks equality.\n"
-            "        /// @param other Value to compare against.\n"
+            "        /// @param[in] other Value to compare against.\n"
             "        /// @return True when equal.\n"
             "        bool operator==(const GoodBox& other) const = default;\n"
             "        /// @brief Constructs a GoodBox.\n"
-            "        /// @param initial Initial stored value.\n"
+            "        /// @param[in] initial Initial stored value.\n"
             "        GoodBox(T initial);\n"
             "        /// @brief Resets value to zero.\n"
             "        void reset();\n"
+            "        /// @brief Doubles stored value in place and writes old value to out.\n"
+            "        /// @param[in,out] cur Running value updated in place.\n"
+            "        /// @param[out]    old Receives prior value.\n"
+            "        void swap_double(T& cur, T& old);\n"
             "    };\n"
             "    /// @brief Out-of-line constructor.\n"
             "    /// @tparam T Value scalar type.\n"
-            "    /// @param initial Initial stored value.\n"
+            "    /// @param[in] initial Initial stored value.\n"
             "    template <typename T> GoodBox<T>::GoodBox(T initial) : value{initial} {}\n"
             "    /// @brief Out-of-line void method.\n"
             "    /// @tparam T Value scalar type.\n"
             "    template <typename T> void GoodBox<T>::reset() { value = T{0}; }\n"
             "    /// @brief Scales input by two.\n"
             "    /// @tparam T Scalar type.\n"
-            "    /// @param x Input scalar.\n"
+            "    /// @param[in] x Input scalar.\n"
             "    /// @return Doubled value.\n"
             "    template <typename T> T twice(T x) { return x + x; }\n"
             "}\n",
@@ -1487,8 +1516,11 @@ def _run_self_test() -> int:
         hpp_errs = check_cpp_file(bad_hpp, "header")
         cpp_errs = check_cpp_file(bad_cpp, "src")
         good_errs = check_cpp_file(good_hpp, "header")
-        if len(hpp_errs) < 8:
-            print(f"Self-test expected >= 8 header errors, got {len(hpp_errs)}: {hpp_errs}")
+        if len(hpp_errs) < 9:
+            print(f"Self-test expected >= 9 header errors, got {len(hpp_errs)}: {hpp_errs}")
+            return 1
+        if not any("must specify direction" in e for e in hpp_errs):
+            print(f"Self-test expected bare '@param' direction error, got: {hpp_errs}")
             return 1
         if len(cpp_errs) < 2:
             print(f"Self-test expected >= 2 src errors, got {len(cpp_errs)}: {cpp_errs}")

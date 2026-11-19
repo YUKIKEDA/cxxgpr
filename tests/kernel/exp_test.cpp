@@ -21,7 +21,7 @@ namespace
 
     /// @brief Computes a column-major pairwise squared Euclidean distance matrix.
     /// @details Evaluates ||x_i - x_j||_2^2 for validating DistanceKernel under FastApprox.
-    /// @param x Column-major n x d coordinate matrix.
+    /// @param[in] x Column-major n x d coordinate matrix.
     /// @return Column-major n x n vector of squared Euclidean distances.
     std::vector<double> make_sq_dist(cxxgpr::MatrixRef<double> x)
     {
@@ -46,8 +46,8 @@ namespace
 
     /// @brief Computes a column-major matrix of per-dimension squared coordinate differences.
     /// @details Evaluates (x_{i,dim} - x_{j,dim})^2 for binding ArdDistance slots in exp tests.
-    /// @param x Column-major n x d coordinate matrix.
-    /// @param dim Zero-based coordinate dimension index.
+    /// @param[in] x Column-major n x d coordinate matrix.
+    /// @param[in] dim Zero-based coordinate dimension index.
     /// @return Column-major n x n vector of single-dimension squared differences.
     std::vector<double> make_dim_sq_diff(cxxgpr::MatrixRef<double> x, std::size_t dim)
     {

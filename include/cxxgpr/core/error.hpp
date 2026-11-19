@@ -14,13 +14,21 @@
 #include <string_view>
 #include <utility>
 
+/// @defgroup cxxgpr_core Core Types and Error Handling
+/// @brief Error diagnostics, strong bounded parameters, views, and deterministic PRNG primitives.
+/// @{
+
 /// @brief Top-level namespace for the cxxgpr Gaussian process regression library.
 namespace cxxgpr
 {
 
+    /// @ingroup cxxgpr_core
     /// @brief Error categories returned by cxxgpr API boundaries.
     /// @details Covers input validation, parameter bounds, distance matrix checking, linear
     /// algebra failures, optimization status, workspace capacity, and model persistence.
+    /// @note All library APIs avoid throwing exceptions across API boundaries and instead return errors via
+    /// std::expected.
+    /// @see GprError
     enum class GprErrorCode : std::uint8_t
     {
         /// @brief Input matrix, target vector, or buffer span is empty or has a zero extent.
@@ -137,27 +145,27 @@ namespace cxxgpr
 
         /// @brief Constructs a LengthMismatch error with details.
         /// @details Formats the supplied mismatch description into the diagnostic message.
-        /// @param reason Human-readable explanation of expected versus actual buffer length.
+        /// @param[in] reason Human-readable explanation of expected versus actual buffer length.
         /// @return GprError with code GprErrorCode::LengthMismatch.
         [[nodiscard]] static GprError length_mismatch(std::string reason);
 
         /// @brief Constructs a DimensionMismatch error recording actual and expected feature dimensions.
         /// @details Populates x_dim() and expected_dim() alongside a formatted diagnostic message.
-        /// @param x_dim Supplied number of feature columns.
-        /// @param expected_dim Required number of feature columns.
+        /// @param[in] x_dim Supplied number of feature columns.
+        /// @param[in] expected_dim Required number of feature columns.
         /// @return GprError with code GprErrorCode::DimensionMismatch.
         [[nodiscard]] static GprError dimension_mismatch(std::size_t x_dim, std::size_t expected_dim);
 
         /// @brief Constructs an IndexOutOfRange error with details.
         /// @details Formats the supplied out-of-range reason into the diagnostic message.
-        /// @param reason Human-readable explanation of the invalid index.
+        /// @param[in] reason Human-readable explanation of the invalid index.
         /// @return GprError with code GprErrorCode::IndexOutOfRange.
         [[nodiscard]] static GprError index_out_of_range(std::string reason);
 
         /// @brief Constructs an InsufficientData error recording provided and minimum required point counts.
         /// @details Populates n_points() and min_points() alongside a formatted diagnostic message.
-        /// @param n_points Number of training samples supplied.
-        /// @param min_points Minimum number of training samples required.
+        /// @param[in] n_points Number of training samples supplied.
+        /// @param[in] min_points Minimum number of training samples required.
         /// @return GprError with code GprErrorCode::InsufficientData.
         [[nodiscard]] static GprError insufficient_data(std::size_t n_points, std::size_t min_points);
 
@@ -173,43 +181,43 @@ namespace cxxgpr
 
         /// @brief Constructs an InvalidHyperparameter error with details.
         /// @details Formats the supplied hyperparameter validation reason into the message.
-        /// @param reason Human-readable description of the hyperparameter violation.
+        /// @param[in] reason Human-readable description of the hyperparameter violation.
         /// @return GprError with code GprErrorCode::InvalidHyperparameter.
         [[nodiscard]] static GprError invalid_hyperparameter(std::string reason);
 
         /// @brief Constructs an InvalidNoiseVariance error with details.
         /// @details Formats the supplied observation noise violation reason into the message.
-        /// @param reason Human-readable description of the invalid noise variance.
+        /// @param[in] reason Human-readable description of the invalid noise variance.
         /// @return GprError with code GprErrorCode::InvalidNoiseVariance.
         [[nodiscard]] static GprError invalid_noise_variance(std::string reason);
 
         /// @brief Constructs an InvalidInterval error for invalid interval bounds (lo, hi).
         /// @details Records IntervalErrorKind::InvalidBounds, interval_lo(), and interval_hi().
-        /// @param lo Candidate lower bound.
-        /// @param hi Candidate upper bound.
+        /// @param[in] lo Candidate lower bound.
+        /// @param[in] hi Candidate upper bound.
         /// @return GprError with code GprErrorCode::InvalidInterval.
         [[nodiscard]] static GprError invalid_interval_bounds(double lo, double hi);
 
         /// @brief Constructs an InvalidInterval error for a parameter value outside (lo, hi).
         /// @details Records IntervalErrorKind::OutOfRange, interval_value(), interval_lo(), and interval_hi().
-        /// @param value Candidate parameter value.
-        /// @param lo Exclusive lower bound.
-        /// @param hi Exclusive upper bound.
+        /// @param[in] value Candidate parameter value.
+        /// @param[in] lo Exclusive lower bound.
+        /// @param[in] hi Exclusive upper bound.
         /// @return GprError with code GprErrorCode::InvalidInterval.
         [[nodiscard]] static GprError invalid_interval_out_of_range(double value, double lo, double hi);
 
         /// @brief Constructs an InvalidConfig error with details.
         /// @details Formats the configuration error description into the message.
-        /// @param reason Human-readable explanation of the invalid configuration setting.
+        /// @param[in] reason Human-readable explanation of the invalid configuration setting.
         /// @return GprError with code GprErrorCode::InvalidConfig.
         [[nodiscard]] static GprError invalid_config(std::string reason);
 
         /// @brief Constructs an InvalidDistance error identifying slot, ARD dimension, matrix pair, and cause.
         /// @details Stores all provided location metadata so outer wrappers can fill unset slot or dimension indices.
-        /// @param slot Optional distance slot index where the violation occurred.
-        /// @param dim Optional ARD dimension index within the distance source.
-        /// @param pair Optional (row, col) matrix entry coordinates of the offending value.
-        /// @param reason Human-readable cause of the distance validation failure.
+        /// @param[in] slot Optional distance slot index where the violation occurred.
+        /// @param[in] dim Optional ARD dimension index within the distance source.
+        /// @param[in] pair Optional (row, col) matrix entry coordinates of the offending value.
+        /// @param[in] reason Human-readable cause of the distance validation failure.
         /// @return GprError with code GprErrorCode::InvalidDistance.
         [[nodiscard]] static GprError invalid_distance(
             std::optional<std::size_t> slot,
@@ -220,22 +228,22 @@ namespace cxxgpr
 
         /// @brief Constructs a DistanceSlot error for a slot matching mismatch.
         /// @details Populates slot_error_kind() and optional distance_slot().
-        /// @param kind Specific slot matching failure category.
-        /// @param slot Optional offending slot index.
+        /// @param[in] kind Specific slot matching failure category.
+        /// @param[in] slot Optional offending slot index.
         /// @return GprError with code GprErrorCode::DistanceSlot.
         [[nodiscard]] static GprError distance_slot(SlotErrorKind kind, std::optional<std::size_t> slot);
 
         /// @brief Constructs an UnsupportedKernelOperation error with details.
         /// @details Formats the unsupported operation explanation into the diagnostic message.
-        /// @param reason Human-readable explanation of why the kernel cannot perform the operation.
+        /// @param[in] reason Human-readable explanation of why the kernel cannot perform the operation.
         /// @return GprError with code GprErrorCode::UnsupportedKernelOperation.
         [[nodiscard]] static GprError unsupported_kernel_operation(std::string reason);
 
         /// @brief Constructs a CholeskyFailed error recording the last jitter attempted, matrix size, and stage.
         /// @details Populates jitter(), matrix_size(), and cholesky_stage().
-        /// @param jitter Final diagonal jitter value already attempted before failure.
-        /// @param matrix_size Order of the square matrix whose factorization failed.
-        /// @param stage Model lifecycle stage at which factorization failed.
+        /// @param[in] jitter Final diagonal jitter value already attempted before failure.
+        /// @param[in] matrix_size Order of the square matrix whose factorization failed.
+        /// @param[in] stage Model lifecycle stage at which factorization failed.
         /// @return GprError with code GprErrorCode::CholeskyFailed.
         [[nodiscard]] static GprError cholesky_failed(double jitter, std::size_t matrix_size, CholeskyStage stage);
 
@@ -246,7 +254,7 @@ namespace cxxgpr
 
         /// @brief Constructs an OptimizationNotConverged error recording completed iterations.
         /// @details Populates iterations() alongside a formatted diagnostic message.
-        /// @param iterations Number of optimization iterations completed before stopping.
+        /// @param[in] iterations Number of optimization iterations completed before stopping.
         /// @return GprError with code GprErrorCode::OptimizationNotConverged.
         [[nodiscard]] static GprError optimization_not_converged(std::size_t iterations);
 
@@ -257,15 +265,15 @@ namespace cxxgpr
 
         /// @brief Constructs a PersistFailed error identifying the failure kind and reason.
         /// @details Populates persist_error_kind() alongside a formatted diagnostic message.
-        /// @param kind Persistence failure sub-category.
-        /// @param reason Human-readable failure description.
+        /// @param[in] kind Persistence failure sub-category.
+        /// @param[in] reason Human-readable failure description.
         /// @return GprError with code GprErrorCode::PersistFailed.
         [[nodiscard]] static GprError persist_failed(PersistErrorKind kind, std::string reason);
 
         /// @brief Constructs an UnsupportedPersistVersion error recording found and supported versions.
         /// @details Populates found_version() and supported_version().
-        /// @param found Format version integer read from the persisted artifact.
-        /// @param supported Format version integer supported by this library build.
+        /// @param[in] found Format version integer read from the persisted artifact.
+        /// @param[in] supported Format version integer supported by this library build.
         /// @return GprError with code GprErrorCode::UnsupportedPersistVersion.
         [[nodiscard]] static GprError unsupported_persist_version(std::uint32_t found, std::uint32_t supported);
 
@@ -402,27 +410,27 @@ namespace cxxgpr
 
         /// @brief Names the distance slot on an InvalidDistance error if not already set; otherwise returns *this.
         /// @details Rebuilds the formatted message to include slot_place while preserving dim, pair, and reason.
-        /// @param slot_place Distance slot index to attach if distance_slot() is empty.
+        /// @param[in] slot_place Distance slot index to attach if distance_slot() is empty.
         /// @return Updated GprError with slot set, or an unchanged copy of *this.
         [[nodiscard]] GprError with_slot_if_unset(std::size_t slot_place) const;
 
         /// @brief Names the ARD dimension on an InvalidDistance error if not already set; otherwise returns *this.
         /// @details Rebuilds the formatted message to include dim_place while preserving slot, pair, and reason.
-        /// @param dim_place ARD dimension index to attach if distance_dim() is empty.
+        /// @param[in] dim_place ARD dimension index to attach if distance_dim() is empty.
         /// @return Updated GprError with dimension set, or an unchanged copy of *this.
         [[nodiscard]] GprError with_dim_if_unset(std::size_t dim_place) const;
 
         /// @brief Checks structural equality between two GprError instances.
         /// @details Compares error code, message fields, and all optional metadata fields.
-        /// @param other GprError instance to compare against.
+        /// @param[in] other GprError instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const GprError& other) const = default;
 
     private:
         /// @brief Constructs a GprError backed by a static string literal without allocating.
         /// @details Leaves dynamic_message_ empty so message() reads static_message_.
-        /// @param code Error category code.
-        /// @param static_message Static-storage diagnostic string view.
+        /// @param[in] code Error category code.
+        /// @param[in] static_message Static-storage diagnostic string view.
         GprError(GprErrorCode code, std::string_view static_message) noexcept :
             code_(code),
             static_message_(static_message)
@@ -431,8 +439,8 @@ namespace cxxgpr
 
         /// @brief Constructs a GprError owning a dynamically formatted diagnostic string.
         /// @details Leaves static_message_ empty so message() reads dynamic_message_.
-        /// @param code Error category code.
-        /// @param dynamic_message Owned diagnostic message string.
+        /// @param[in] code Error category code.
+        /// @param[in] dynamic_message Owned diagnostic message string.
         GprError(GprErrorCode code, std::string dynamic_message) noexcept :
             code_(code),
             dynamic_message_(std::move(dynamic_message))
@@ -489,3 +497,5 @@ namespace cxxgpr
     };
 
 }  // namespace cxxgpr
+
+/// @}

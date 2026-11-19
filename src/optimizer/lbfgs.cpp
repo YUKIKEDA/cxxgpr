@@ -47,12 +47,12 @@ namespace cxxgpr::optimizer
         /// @details Handles all four Moré–Thuente interpolation cases (Case 1: fp > fx, Case 2: opposite-sign
         /// derivatives, Case 3: same-sign decreasing slope magnitude, Case 4: non-decreasing slope magnitude),
         /// updates stx/sty endpoints, clamps to [stpmin, stpmax], and bisects if bracket bounds are violated.
-        /// @param st LineSearchState updated in place with the new bracket endpoints.
-        /// @param stp Current trial step length.
-        /// @param fp Objective value (or modified Stage 1 value) at stp.
-        /// @param dp Directional derivative (or modified Stage 1 derivative) at stp.
-        /// @param stpmin Inclusive lower safeguard bound for the next trial step.
-        /// @param stpmax Inclusive upper safeguard bound for the next trial step.
+        /// @param[in,out] st LineSearchState updated in place with the new bracket endpoints.
+        /// @param[in] stp Current trial step length.
+        /// @param[in] fp Objective value (or modified Stage 1 value) at stp.
+        /// @param[in] dp Directional derivative (or modified Stage 1 derivative) at stp.
+        /// @param[in] stpmin Inclusive lower safeguard bound for the next trial step.
+        /// @param[in] stpmax Inclusive upper safeguard bound for the next trial step.
         /// @return Safeguarded next trial step length along the search direction.
         double cstep(LineSearchState& st, double stp, double fp, double dp, double stpmin, double stpmax)
         {
@@ -218,9 +218,9 @@ namespace cxxgpr::optimizer
         /// @details Runs the backward loop from newest to oldest pair to compute alpha_i and update q,
         /// applies Oren-Luenberger diagonal scaling gamma = (s^T * y) / (y^T * y) from the newest pair,
         /// and runs the forward loop to reconstruct -H_k * g into out_dir.
-        /// @param grad Current unconstrained gradient g_z of length d.
-        /// @param history Bounded deque of recent (s, y, rho) curvature pairs (oldest to newest).
-        /// @param out_dir Destination span of length d receiving the descent search direction.
+        /// @param[in] grad Current unconstrained gradient g_z of length d.
+        /// @param[in] history Bounded deque of recent (s, y, rho) curvature pairs (oldest to newest).
+        /// @param[out] out_dir Destination span of length d receiving the descent search direction.
         void compute_two_loop_direction(
             std::span<const double> grad, const std::deque<LbfgsPair>& history, std::span<double> out_dir
         )
@@ -274,12 +274,12 @@ namespace cxxgpr::optimizer
         /// @details Maps initial_theta into z, iteratively evaluates two-loop descent directions, performs
         /// Moré–Thuente strong-Wolfe line search with EvalCache reuse and Stage 1 modified function
         /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap.
-        /// @param obj Differentiable objective evaluated in log-theta space.
-        /// @param bounds Log-space bounds governing the z <-> theta transform.
-        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
-        /// @param max_iterations Maximum outer L-BFGS iterations.
-        /// @param tolerance Relative gradient and function-change convergence tolerance.
-        /// @param history_size Maximum number of (s, y) secant pairs retained.
+        /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+        /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param[in] max_iterations Maximum outer L-BFGS iterations.
+        /// @param[in] tolerance Relative gradient and function-change convergence tolerance.
+        /// @param[in] history_size Maximum number of (s, y) secant pairs retained.
         /// @return OptimizerResult with best feasible log-space parameters found, or GprError if initial eval fails.
         /// @retval GprErrorCode::NonFiniteInput When initial objective or gradient evaluation yields non-finite values.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_lbfgs_single(
@@ -568,8 +568,8 @@ namespace cxxgpr::optimizer
     /// @brief Minimizes obj starting from log-space initial_params.
     /// @details Validates tolerance_ >= 0 and history_size_ >= 1, then runs run_lbfgs_single() across
     /// initial_params and deterministic log-uniform restarts via detail::run_with_restarts().
-    /// @param obj Differentiable objective evaluated in log-theta space.
-    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
+    /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
     /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
     /// @retval GprErrorCode::InvalidConfig When tolerance is invalid/negative or history_size == 0.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.

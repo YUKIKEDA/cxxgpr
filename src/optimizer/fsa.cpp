@@ -26,10 +26,10 @@ namespace cxxgpr::optimizer
         /// @brief Projects a proposed coordinate back into the strict open interval (lo, hi).
         /// @details Under BoundaryPolicy::Clamp, clamps to [nextafter(lo, hi), nextafter(hi, lo)]; under
         /// BoundaryPolicy::Reflect, folds excess distance via a period-2*width triangle wave across lo and hi.
-        /// @param val Proposed scalar value in log-theta space.
-        /// @param lo Exclusive lower bound in log-theta space.
-        /// @param hi Exclusive upper bound in log-theta space.
-        /// @param policy Boundary projection strategy (Clamp or Reflect).
+        /// @param[in] val Proposed scalar value in log-theta space.
+        /// @param[in] lo Exclusive lower bound in log-theta space.
+        /// @param[in] hi Exclusive upper bound in log-theta space.
+        /// @param[in] policy Boundary projection strategy (Clamp or Reflect).
         /// @return Projected coordinate strictly inside (lo, hi).
         [[nodiscard]] double apply_boundary(double val, double lo, double hi, BoundaryPolicy policy) noexcept
         {
@@ -59,14 +59,14 @@ namespace cxxgpr::optimizer
         /// @details Evaluates initial_theta via obj.value(), cycles through coordinates iter % d proposing
         /// Cauchy steps temp * tan(pi * (u - 0.5)) under Ingber cooling, detects bit-exact changed indices
         /// relative to last_eval for Objective::value_at_changes(), and accepts via Metropolis criterion.
-        /// @param obj Objective evaluated in log-theta space (supports value_at_changes()).
-        /// @param bounds Log-space open bounds for boundary projection.
-        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
-        /// @param max_iterations Maximum annealing steps to perform.
-        /// @param initial_temperature Positive starting annealing temperature T_0.
-        /// @param cooling_rate Non-negative Ingber cooling factor c.
-        /// @param seed Deterministic 64-bit PRNG seed for this trajectory.
-        /// @param boundary_policy Out-of-bounds projection policy (Clamp or Reflect).
+        /// @param[in,out] obj Objective evaluated in log-theta space (supports value_at_changes()).
+        /// @param[in] bounds Log-space open bounds for boundary projection.
+        /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param[in] max_iterations Maximum annealing steps to perform.
+        /// @param[in] initial_temperature Positive starting annealing temperature T_0.
+        /// @param[in] cooling_rate Non-negative Ingber cooling factor c.
+        /// @param[in] seed Deterministic 64-bit PRNG seed for this trajectory.
+        /// @param[in] boundary_policy Out-of-bounds projection policy (Clamp or Reflect).
         /// @return Best parameters encountered along the trajectory, or GprError if initial eval fails.
         /// @retval GprErrorCode::NonFiniteInput When initial evaluation yields NaN or +/-Inf.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_fsa_single(
@@ -172,8 +172,8 @@ namespace cxxgpr::optimizer
     /// @brief Minimizes obj starting from log-space initial_params.
     /// @details Validates initial_temperature_ > 0 and cooling_rate_ >= 0, then delegates to
     /// detail::run_with_restarts() incrementing run_seed = seed_ + run_idx per trajectory.
-    /// @param obj Objective evaluated in log-theta space (supports value_at_changes()).
-    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @param[in,out] obj Objective evaluated in log-theta space (supports value_at_changes()).
+    /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
     /// @return Best OptimizerResult across the initial run and restarts, or GprError on invalid config/input.
     /// @retval GprErrorCode::InvalidConfig When initial_temperature <= 0 or cooling_rate < 0 or non-finite.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.

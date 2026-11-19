@@ -18,7 +18,7 @@ namespace cxxgpr
 
         /// @brief Validates that an open interval is strictly positive (0 < lo < hi).
         /// @details Delegates to Interval::positive() so log(value) remains well-defined over (lo, hi).
-        /// @param interval Candidate interval to verify.
+        /// @param[in] interval Candidate interval to verify.
         /// @return Strictly positive Interval or GprError on non-positive or inverted bounds.
         /// @retval GprErrorCode::InvalidInterval When lo <= 0, lo >= hi, or either endpoint is non-finite.
         [[nodiscard]] std::expected<Interval, GprError> require_positive_interval(Interval interval)
@@ -28,8 +28,8 @@ namespace cxxgpr
 
         /// @brief Constructs a strictly positive BoundedParam inside the given positive interval.
         /// @details Rejects invalid intervals before checking open interior membership of value.
-        /// @param value Candidate parameter value in user units.
-        /// @param interval Candidate bounding interval.
+        /// @param[in] value Candidate parameter value in user units.
+        /// @param[in] interval Candidate bounding interval.
         /// @return Validated BoundedParam or GprError on invalid interval or out-of-range value.
         /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes value.
         [[nodiscard]] std::expected<BoundedParam, GprError> make_positive_param(double value, Interval interval)
@@ -45,8 +45,8 @@ namespace cxxgpr
 
         /// @brief Validates and wraps vectors of positive values and matching open intervals.
         /// @details Requires non-empty values and equal-length intervals before building each BoundedParam.
-        /// @param values Parameter values in user units.
-        /// @param intervals Matching open bounding intervals.
+        /// @param[in] values Parameter values in user units.
+        /// @param[in] intervals Matching open bounding intervals.
         /// @return Vector of validated BoundedParam objects or GprError on first invalid entry.
         /// @retval GprErrorCode::EmptyInput When values is empty.
         /// @retval GprErrorCode::LengthMismatch When intervals.size() != values.size().
@@ -80,7 +80,7 @@ namespace cxxgpr
 
         /// @brief Validates and wraps positive parameter values against Interval::default_positive().
         /// @details Requires a non-empty value span and checks every entry against (1e-5, 1e5).
-        /// @param values Parameter values in user units.
+        /// @param[in] values Parameter values in user units.
         /// @return Vector of validated BoundedParam objects or GprError on empty or out-of-range input.
         /// @retval GprErrorCode::EmptyInput When values is empty.
         /// @retval GprErrorCode::InvalidInterval When any value lies outside (1e-5, 1e5).
@@ -109,8 +109,8 @@ namespace cxxgpr
         /// @brief Converts an unconstrained log-space optimizer parameter back to user units and validates bounds.
         /// @details Checks finiteness of log_value, guards exp(log_value) against overflow to +infinity,
         /// and verifies strict containment inside current.interval() without mutating current.
-        /// @param current Existing BoundedParam holding the target open interval.
-        /// @param log_value Candidate parameter in natural log space.
+        /// @param[in] current Existing BoundedParam holding the target open interval.
+        /// @param[in] log_value Candidate parameter in natural log space.
         /// @return New BoundedParam with value exp(log_value) or GprError on failure.
         /// @retval GprErrorCode::NonFiniteInput When log_value is NaN or infinite.
         /// @retval GprErrorCode::InvalidInterval When exp(log_value) overflows or falls outside current.interval().
@@ -135,8 +135,8 @@ namespace cxxgpr
 
         /// @brief Writes the natural logarithm of a single BoundedParam into a length-1 span.
         /// @details Verifies out.size() == 1 before writing param.ln().
-        /// @param param Source bounded parameter.
-        /// @param out Destination span of length 1.
+        /// @param[in] param Source bounded parameter.
+        /// @param[out] out Destination span of length 1.
         /// @return Empty expected on success or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
         [[nodiscard]] std::expected<void, GprError> get_single_param(const BoundedParam& param, std::span<double> out)
@@ -151,8 +151,8 @@ namespace cxxgpr
 
         /// @brief Atomically updates a single BoundedParam from a length-1 log-space span.
         /// @details Computes and validates the replacement BoundedParam before assigning param.
-        /// @param param Target bounded parameter to update on success.
-        /// @param params Input span of length 1 containing the candidate log-space parameter.
+        /// @param[in,out] param Target bounded parameter to update on success.
+        /// @param[in] params Input span of length 1 containing the candidate log-space parameter.
         /// @return Empty expected on success or GprError on invalid count, non-finite input, or bound error.
         /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
         /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -177,8 +177,8 @@ namespace cxxgpr
 
         /// @brief Writes the open interval of a single BoundedParam into a length-1 span.
         /// @details Verifies out.size() == 1 before writing param.interval().
-        /// @param param Source bounded parameter.
-        /// @param out Destination span of length 1.
+        /// @param[in] param Source bounded parameter.
+        /// @param[out] out Destination span of length 1.
         /// @return Empty expected on success or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
         [[nodiscard]] std::expected<void, GprError> get_single_bound(const BoundedParam& param, std::span<Interval> out)
@@ -193,7 +193,7 @@ namespace cxxgpr
 
         /// @brief Extracts user-unit scalar values from a span of BoundedParam objects.
         /// @details Preserves dimension ordering for ARD kernel accessors.
-        /// @param params Source span of bounded parameters.
+        /// @param[in] params Source span of bounded parameters.
         /// @return Vector of user-unit values.
         [[nodiscard]] std::vector<double> extract_values(std::span<const BoundedParam> params)
         {
@@ -208,7 +208,7 @@ namespace cxxgpr
 
         /// @brief Extracts open bounding intervals from a span of BoundedParam objects.
         /// @details Preserves dimension ordering for ARD kernel accessors.
-        /// @param params Source span of bounded parameters.
+        /// @param[in] params Source span of bounded parameters.
         /// @return Vector of open Interval descriptors.
         [[nodiscard]] std::vector<Interval> extract_intervals(std::span<const BoundedParam> params)
         {
@@ -227,7 +227,7 @@ namespace cxxgpr
 
     /// @brief Constructs an RBF kernel with lengthscale inside Interval::default_positive().
     /// @details Delegates to create(double, Interval) with Interval::default_positive().
-    /// @param lengthscale Positive lengthscale in user units.
+    /// @param[in] lengthscale Positive lengthscale in user units.
     /// @return Validated RbfKernel or GprError if out of range.
     /// @retval GprErrorCode::InvalidInterval When lengthscale is non-finite or outside (1e-5, 1e5).
     std::expected<RbfKernel, GprError> RbfKernel::create(double lengthscale)
@@ -237,8 +237,8 @@ namespace cxxgpr
 
     /// @brief Constructs an RBF kernel with lengthscale strictly inside the given positive interval.
     /// @details Validates strict positivity of interval and open containment of lengthscale.
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param interval Strictly positive open bounding interval.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] interval Strictly positive open bounding interval.
     /// @return Validated RbfKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes lengthscale.
     std::expected<RbfKernel, GprError> RbfKernel::create(double lengthscale, Interval interval)
@@ -253,7 +253,7 @@ namespace cxxgpr
 
     /// @brief Writes log(lengthscale) into out[0].
     /// @details Delegates to get_single_param().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> RbfKernel::get_params(std::span<double> out) const
@@ -263,7 +263,7 @@ namespace cxxgpr
 
     /// @brief Updates lengthscale from log-space params[0], failing atomically if out of bounds.
     /// @details Delegates to set_single_param() so lengthscale_ is unchanged on validation failure.
-    /// @param params Input span of length 1 containing log(lengthscale).
+    /// @param[in] params Input span of length 1 containing log(lengthscale).
     /// @return Empty expected on success or GprError on failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -275,7 +275,7 @@ namespace cxxgpr
 
     /// @brief Writes the open interval into out[0].
     /// @details Delegates to get_single_bound().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> RbfKernel::bounds_into(std::span<Interval> out) const
@@ -287,7 +287,7 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD RBF kernel with positive lengthscales inside Interval::default_positive().
     /// @details Validates every dimension against (1e-5, 1e5).
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
     /// @return Validated RbfArdKernel or GprError on empty or invalid input.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::InvalidInterval When any lengthscale lies outside default bounds.
@@ -303,8 +303,8 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD RBF kernel with per-dimension open intervals.
     /// @details Validates non-empty matching spans and strict positivity of each interval.
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
-    /// @param intervals Matching span of strictly positive open intervals.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] intervals Matching span of strictly positive open intervals.
     /// @return Validated RbfArdKernel or GprError on empty, mismatched, or invalid inputs.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::LengthMismatch When intervals.size() != lengthscales.size().
@@ -339,7 +339,7 @@ namespace cxxgpr
 
     /// @brief Writes log(lengthscales) into out.
     /// @details Populates out[i] = log(lengthscale_i) after verifying span length.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> RbfArdKernel::get_params(std::span<double> out) const
@@ -358,7 +358,7 @@ namespace cxxgpr
     /// @brief Atomically updates all lengthscales from log-space parameters.
     /// @details Builds a complete staging vector before moving into lengthscales_ so any validation
     /// error rolls back without partial mutation.
-    /// @param params Input span of log-space lengthscales of length num_params().
+    /// @param[in] params Input span of log-space lengthscales of length num_params().
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
     /// @retval GprErrorCode::NonFiniteInput When any element of params is NaN or infinite.
@@ -387,7 +387,7 @@ namespace cxxgpr
 
     /// @brief Writes per-dimension open intervals into out.
     /// @details Populates out[i] after checking span length.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> RbfArdKernel::bounds_into(std::span<Interval> out) const
@@ -407,8 +407,8 @@ namespace cxxgpr
 
     /// @brief Constructs a Matern kernel with lengthscale inside Interval::default_positive().
     /// @details Delegates to create(double, MaternNu, Interval) with Interval::default_positive().
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param nu Discrete Matern smoothness order.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] nu Discrete Matern smoothness order.
     /// @return Validated MaternKernel or GprError if lengthscale is out of range.
     /// @retval GprErrorCode::InvalidInterval When lengthscale is non-finite or outside (1e-5, 1e5).
     std::expected<MaternKernel, GprError> MaternKernel::create(double lengthscale, MaternNu nu)
@@ -418,9 +418,9 @@ namespace cxxgpr
 
     /// @brief Constructs a Matern kernel with lengthscale inside the given positive interval.
     /// @details Validates strict positivity of interval and open containment of lengthscale.
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param nu Discrete Matern smoothness order.
-    /// @param interval Strictly positive open bounding interval.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] nu Discrete Matern smoothness order.
+    /// @param[in] interval Strictly positive open bounding interval.
     /// @return Validated MaternKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes lengthscale.
     std::expected<MaternKernel, GprError> MaternKernel::create(double lengthscale, MaternNu nu, Interval interval)
@@ -435,7 +435,7 @@ namespace cxxgpr
 
     /// @brief Writes log(lengthscale) into out[0].
     /// @details Delegates to get_single_param().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> MaternKernel::get_params(std::span<double> out) const
@@ -445,7 +445,7 @@ namespace cxxgpr
 
     /// @brief Updates lengthscale from log-space params[0], failing atomically if out of bounds.
     /// @details Delegates to set_single_param().
-    /// @param params Input span of length 1 containing log(lengthscale).
+    /// @param[in] params Input span of length 1 containing log(lengthscale).
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -457,7 +457,7 @@ namespace cxxgpr
 
     /// @brief Writes the open interval into out[0].
     /// @details Delegates to get_single_bound().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> MaternKernel::bounds_into(std::span<Interval> out) const
@@ -469,8 +469,8 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD Matern kernel with lengthscales inside Interval::default_positive().
     /// @details Validates every dimension against (1e-5, 1e5).
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
-    /// @param nu Discrete Matern smoothness order.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] nu Discrete Matern smoothness order.
     /// @return Validated MaternArdKernel or GprError on empty or invalid input.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::InvalidInterval When any lengthscale lies outside default bounds.
@@ -486,9 +486,9 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD Matern kernel with per-dimension open intervals.
     /// @details Validates non-empty matching spans and strict positivity of each interval.
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
-    /// @param nu Discrete Matern smoothness order.
-    /// @param intervals Matching span of strictly positive open intervals.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] nu Discrete Matern smoothness order.
+    /// @param[in] intervals Matching span of strictly positive open intervals.
     /// @return Validated MaternArdKernel or GprError on empty, mismatched, or invalid inputs.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::LengthMismatch When intervals.size() != lengthscales.size().
@@ -523,7 +523,7 @@ namespace cxxgpr
 
     /// @brief Writes log(lengthscales) into out.
     /// @details Populates out[i] = log(lengthscale_i) after verifying span length.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> MaternArdKernel::get_params(std::span<double> out) const
@@ -541,7 +541,7 @@ namespace cxxgpr
 
     /// @brief Atomically updates all lengthscales from log-space parameters.
     /// @details Stages all validated updates in a temporary vector before replacing lengthscales_.
-    /// @param params Input span of log-space lengthscales of length num_params().
+    /// @param[in] params Input span of log-space lengthscales of length num_params().
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
     /// @retval GprErrorCode::NonFiniteInput When any element of params is NaN or infinite.
@@ -570,7 +570,7 @@ namespace cxxgpr
 
     /// @brief Writes per-dimension open intervals into out.
     /// @details Populates out[i] after checking span length.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> MaternArdKernel::bounds_into(std::span<Interval> out) const
@@ -590,8 +590,8 @@ namespace cxxgpr
 
     /// @brief Constructs a periodic kernel with default positive intervals.
     /// @details Validates both lengthscale and period against Interval::default_positive().
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param period Positive spatial period in user units.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] period Positive spatial period in user units.
     /// @return Validated PeriodicKernel or GprError on out-of-range parameters.
     /// @retval GprErrorCode::InvalidInterval When lengthscale or period lies outside (1e-5, 1e5).
     std::expected<PeriodicKernel, GprError> PeriodicKernel::create(double lengthscale, double period)
@@ -601,10 +601,10 @@ namespace cxxgpr
 
     /// @brief Constructs a periodic kernel with explicit intervals for lengthscale and period.
     /// @details Validates strict positivity of both intervals and containment of both values.
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param period Positive spatial period in user units.
-    /// @param lengthscale_interval Strictly positive open interval for lengthscale.
-    /// @param period_interval Strictly positive open interval for period.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] period Positive spatial period in user units.
+    /// @param[in] lengthscale_interval Strictly positive open interval for lengthscale.
+    /// @param[in] period_interval Strictly positive open interval for period.
     /// @return Validated PeriodicKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When either interval or value fails validation.
     std::expected<PeriodicKernel, GprError> PeriodicKernel::create(
@@ -626,7 +626,7 @@ namespace cxxgpr
 
     /// @brief Writes [log(lengthscale), log(period)] into out.
     /// @details Verifies out.size() == 2 before populating log-space values.
-    /// @param out Destination span of length 2.
+    /// @param[out] out Destination span of length 2.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 2.
     std::expected<void, GprError> PeriodicKernel::get_params(std::span<double> out) const
@@ -642,7 +642,7 @@ namespace cxxgpr
 
     /// @brief Atomically updates lengthscale and period from log-space parameters.
     /// @details Validates both log parameters into temporaries before committing either member.
-    /// @param params Input span of length 2 ordered [log(lengthscale), log(period)].
+    /// @param[in] params Input span of length 2 ordered [log(lengthscale), log(period)].
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 2.
     /// @retval GprErrorCode::NonFiniteInput When any parameter is NaN or infinite.
@@ -671,7 +671,7 @@ namespace cxxgpr
 
     /// @brief Writes [lengthscale_interval, period_interval] into out.
     /// @details Verifies out.size() == 2 before writing intervals.
-    /// @param out Destination span of length 2.
+    /// @param[out] out Destination span of length 2.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 2.
     std::expected<void, GprError> PeriodicKernel::bounds_into(std::span<Interval> out) const
@@ -689,8 +689,8 @@ namespace cxxgpr
 
     /// @brief Constructs an isotropic RQ kernel with default positive intervals.
     /// @details Validates both lengthscale and alpha against Interval::default_positive().
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param alpha Positive scale-mixture shape parameter.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] alpha Positive scale-mixture shape parameter.
     /// @return Validated RationalQuadraticKernel or GprError on out-of-range parameters.
     /// @retval GprErrorCode::InvalidInterval When lengthscale or alpha lies outside (1e-5, 1e5).
     std::expected<RationalQuadraticKernel, GprError> RationalQuadraticKernel::create(double lengthscale, double alpha)
@@ -700,10 +700,10 @@ namespace cxxgpr
 
     /// @brief Constructs an isotropic RQ kernel with explicit intervals for lengthscale and alpha.
     /// @details Validates strict positivity of both intervals and containment of both values.
-    /// @param lengthscale Positive lengthscale in user units.
-    /// @param alpha Positive scale-mixture shape parameter.
-    /// @param lengthscale_interval Strictly positive open interval for lengthscale.
-    /// @param alpha_interval Strictly positive open interval for alpha.
+    /// @param[in] lengthscale Positive lengthscale in user units.
+    /// @param[in] alpha Positive scale-mixture shape parameter.
+    /// @param[in] lengthscale_interval Strictly positive open interval for lengthscale.
+    /// @param[in] alpha_interval Strictly positive open interval for alpha.
     /// @return Validated RationalQuadraticKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When either interval or value fails validation.
     std::expected<RationalQuadraticKernel, GprError> RationalQuadraticKernel::create(
@@ -725,7 +725,7 @@ namespace cxxgpr
 
     /// @brief Writes [log(lengthscale), log(alpha)] into out.
     /// @details Verifies out.size() == 2 before populating log-space values.
-    /// @param out Destination span of length 2.
+    /// @param[out] out Destination span of length 2.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 2.
     std::expected<void, GprError> RationalQuadraticKernel::get_params(std::span<double> out) const
@@ -741,7 +741,7 @@ namespace cxxgpr
 
     /// @brief Atomically updates lengthscale and alpha from log-space parameters.
     /// @details Validates both log parameters into temporaries before committing either member.
-    /// @param params Input span of length 2 ordered [log(lengthscale), log(alpha)].
+    /// @param[in] params Input span of length 2 ordered [log(lengthscale), log(alpha)].
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 2.
     /// @retval GprErrorCode::NonFiniteInput When any parameter is NaN or infinite.
@@ -770,7 +770,7 @@ namespace cxxgpr
 
     /// @brief Writes [lengthscale_interval, alpha_interval] into out.
     /// @details Verifies out.size() == 2 before writing intervals.
-    /// @param out Destination span of length 2.
+    /// @param[out] out Destination span of length 2.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 2.
     std::expected<void, GprError> RationalQuadraticKernel::bounds_into(std::span<Interval> out) const
@@ -788,8 +788,8 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD RQ kernel with default positive intervals.
     /// @details Validates non-empty lengthscales and alpha against Interval::default_positive().
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
-    /// @param alpha Positive scale-mixture shape parameter.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] alpha Positive scale-mixture shape parameter.
     /// @return Validated RationalQuadraticArdKernel or GprError on empty or out-of-range inputs.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::InvalidInterval When any lengthscale or alpha lies outside default bounds.
@@ -812,10 +812,10 @@ namespace cxxgpr
 
     /// @brief Constructs an ARD RQ kernel with explicit intervals for lengthscales and alpha.
     /// @details Validates non-empty matching spans for lengthscales and strict positivity of all intervals.
-    /// @param lengthscales Non-empty span of per-dimension lengthscales in user units.
-    /// @param alpha Positive scale-mixture shape parameter.
-    /// @param lengthscale_intervals Matching span of strictly positive open intervals.
-    /// @param alpha_interval Strictly positive open interval for alpha.
+    /// @param[in] lengthscales Non-empty span of per-dimension lengthscales in user units.
+    /// @param[in] alpha Positive scale-mixture shape parameter.
+    /// @param[in] lengthscale_intervals Matching span of strictly positive open intervals.
+    /// @param[in] alpha_interval Strictly positive open interval for alpha.
     /// @return Validated RationalQuadraticArdKernel or GprError on empty, mismatched, or invalid inputs.
     /// @retval GprErrorCode::EmptyInput When lengthscales is empty.
     /// @retval GprErrorCode::LengthMismatch When lengthscale_intervals.size() != lengthscales.size().
@@ -858,7 +858,7 @@ namespace cxxgpr
 
     /// @brief Writes [log(lengthscales)..., log(alpha)] into out.
     /// @details Populates log lengthscales followed by log(alpha) at index lengthscales_.size().
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> RationalQuadraticArdKernel::get_params(std::span<double> out) const
@@ -878,7 +878,7 @@ namespace cxxgpr
     /// @brief Atomically updates lengthscales and alpha from log-space parameters.
     /// @details Stages all lengthscales and alpha before committing so an invalid alpha or lengthscale
     /// preserves the previous kernel parameters untouched.
-    /// @param params Input span of length num_params() ordered [log(lengthscales)..., log(alpha)].
+    /// @param[in] params Input span of length num_params() ordered [log(lengthscales)..., log(alpha)].
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
     /// @retval GprErrorCode::NonFiniteInput When any parameter is NaN or infinite.
@@ -913,7 +913,7 @@ namespace cxxgpr
 
     /// @brief Writes [lengthscale_intervals..., alpha_interval] into out.
     /// @details Populates lengthscale intervals followed by alpha_interval at index lengthscales_.size().
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> RationalQuadraticArdKernel::bounds_into(std::span<Interval> out) const
@@ -934,7 +934,7 @@ namespace cxxgpr
 
     /// @brief Constructs a constant kernel with value inside Interval::default_positive().
     /// @details Delegates to create(double, Interval) with Interval::default_positive().
-    /// @param constant Positive constant amplitude in user units.
+    /// @param[in] constant Positive constant amplitude in user units.
     /// @return Validated ConstantKernel or GprError if out of range.
     /// @retval GprErrorCode::InvalidInterval When constant is non-finite or outside (1e-5, 1e5).
     std::expected<ConstantKernel, GprError> ConstantKernel::create(double constant)
@@ -944,8 +944,8 @@ namespace cxxgpr
 
     /// @brief Constructs a constant kernel with value inside the given positive interval.
     /// @details Validates strict positivity of interval and open containment of constant.
-    /// @param constant Positive constant amplitude in user units.
-    /// @param interval Strictly positive open bounding interval.
+    /// @param[in] constant Positive constant amplitude in user units.
+    /// @param[in] interval Strictly positive open bounding interval.
     /// @return Validated ConstantKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes constant.
     std::expected<ConstantKernel, GprError> ConstantKernel::create(double constant, Interval interval)
@@ -960,7 +960,7 @@ namespace cxxgpr
 
     /// @brief Writes log(constant) into out[0].
     /// @details Delegates to get_single_param().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> ConstantKernel::get_params(std::span<double> out) const
@@ -970,7 +970,7 @@ namespace cxxgpr
 
     /// @brief Updates constant from log-space params[0], failing atomically if out of bounds.
     /// @details Delegates to set_single_param().
-    /// @param params Input span of length 1 containing log(constant).
+    /// @param[in] params Input span of length 1 containing log(constant).
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -982,7 +982,7 @@ namespace cxxgpr
 
     /// @brief Writes the open interval into out[0].
     /// @details Delegates to get_single_bound().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> ConstantKernel::bounds_into(std::span<Interval> out) const
@@ -994,7 +994,7 @@ namespace cxxgpr
 
     /// @brief Constructs a linear kernel with variance inside Interval::default_positive().
     /// @details Delegates to create(double, Interval) with Interval::default_positive().
-    /// @param variance Positive slope variance multiplier in user units.
+    /// @param[in] variance Positive slope variance multiplier in user units.
     /// @return Validated LinearKernel or GprError if out of range.
     /// @retval GprErrorCode::InvalidInterval When variance is non-finite or outside (1e-5, 1e5).
     std::expected<LinearKernel, GprError> LinearKernel::create(double variance)
@@ -1004,8 +1004,8 @@ namespace cxxgpr
 
     /// @brief Constructs a linear kernel with variance inside the given positive interval.
     /// @details Validates strict positivity of interval and open containment of variance.
-    /// @param variance Positive slope variance multiplier in user units.
-    /// @param interval Strictly positive open bounding interval.
+    /// @param[in] variance Positive slope variance multiplier in user units.
+    /// @param[in] interval Strictly positive open bounding interval.
     /// @return Validated LinearKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes variance.
     std::expected<LinearKernel, GprError> LinearKernel::create(double variance, Interval interval)
@@ -1020,7 +1020,7 @@ namespace cxxgpr
 
     /// @brief Writes log(variance) into out[0].
     /// @details Delegates to get_single_param().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> LinearKernel::get_params(std::span<double> out) const
@@ -1030,7 +1030,7 @@ namespace cxxgpr
 
     /// @brief Updates variance from log-space params[0], failing atomically if out of bounds.
     /// @details Delegates to set_single_param().
-    /// @param params Input span of length 1 containing log(variance).
+    /// @param[in] params Input span of length 1 containing log(variance).
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -1042,7 +1042,7 @@ namespace cxxgpr
 
     /// @brief Writes the open interval into out[0].
     /// @details Delegates to get_single_bound().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> LinearKernel::bounds_into(std::span<Interval> out) const
@@ -1054,7 +1054,7 @@ namespace cxxgpr
 
     /// @brief Constructs a white-noise kernel with variance inside Interval::default_positive().
     /// @details Delegates to create(double, Interval) with Interval::default_positive().
-    /// @param variance Positive noise variance in user units.
+    /// @param[in] variance Positive noise variance in user units.
     /// @return Validated WhiteKernel or GprError if out of range.
     /// @retval GprErrorCode::InvalidInterval When variance is non-finite or outside (1e-5, 1e5).
     std::expected<WhiteKernel, GprError> WhiteKernel::create(double variance)
@@ -1064,8 +1064,8 @@ namespace cxxgpr
 
     /// @brief Constructs a white-noise kernel with variance inside the given positive interval.
     /// @details Validates strict positivity of interval and open containment of variance.
-    /// @param variance Positive noise variance in user units.
-    /// @param interval Strictly positive open bounding interval.
+    /// @param[in] variance Positive noise variance in user units.
+    /// @param[in] interval Strictly positive open bounding interval.
     /// @return Validated WhiteKernel or GprError on invalid interval or value.
     /// @retval GprErrorCode::InvalidInterval When interval is non-positive or excludes variance.
     std::expected<WhiteKernel, GprError> WhiteKernel::create(double variance, Interval interval)
@@ -1080,7 +1080,7 @@ namespace cxxgpr
 
     /// @brief Writes log(variance) into out[0].
     /// @details Delegates to get_single_param().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> WhiteKernel::get_params(std::span<double> out) const
@@ -1090,7 +1090,7 @@ namespace cxxgpr
 
     /// @brief Updates variance from log-space params[0], failing atomically if out of bounds.
     /// @details Delegates to set_single_param().
-    /// @param params Input span of length 1 containing log(variance).
+    /// @param[in] params Input span of length 1 containing log(variance).
     /// @return Empty expected on success or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::NonFiniteInput When params[0] is NaN or infinite.
@@ -1102,7 +1102,7 @@ namespace cxxgpr
 
     /// @brief Writes the open interval into out[0].
     /// @details Delegates to get_single_bound().
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> WhiteKernel::bounds_into(std::span<Interval> out) const

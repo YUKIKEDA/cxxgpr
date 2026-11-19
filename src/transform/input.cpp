@@ -29,11 +29,11 @@ namespace cxxgpr::transform
         /// @details Enforces expected_cols parity before slicing each contiguous column [col * n_rows, (col + 1) *
         /// n_rows).
         /// @tparam Fn Callable invocable as col_fn(std::size_t col, std::span<double> col_span).
-        /// @param x Mutable column-major feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
-        /// @param expected_cols Expected number of feature columns.
-        /// @param col_fn Per-column in-place transformation callback.
+        /// @param[in,out] x Mutable column-major feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
+        /// @param[in] expected_cols Expected number of feature columns.
+        /// @param[in] col_fn Per-column in-place transformation callback.
         /// @return Empty expected on success, or GprError from canonical matrix validation.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -63,12 +63,12 @@ namespace cxxgpr::transform
         /// @details Enforces expected_cols and out.size() parity before slicing contiguous input and output columns.
         /// @tparam Fn Callable invocable as col_fn(std::size_t col, std::span<const double> src, std::span<double>
         /// dst).
-        /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
-        /// @param expected_cols Expected number of feature columns.
-        /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
-        /// @param col_fn Per-column out-of-place transformation callback.
+        /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
+        /// @param[in] expected_cols Expected number of feature columns.
+        /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
+        /// @param[in] col_fn Per-column out-of-place transformation callback.
         /// @return Empty expected on success, or GprError from canonical matrix validation.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -103,10 +103,10 @@ namespace cxxgpr::transform
 
     /// @brief Applies the fitted transform out of place into a preallocated output buffer.
     /// @details Validates inputs and output size, copies x into out when non-aliasing, and delegates to apply().
-    /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation or transform failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -132,10 +132,10 @@ namespace cxxgpr::transform
     /// @brief Maps transformed features back to original coordinates into a preallocated buffer.
     /// @details Validates inputs and output size, copies x into out when non-aliasing, and delegates to
     /// inverse_apply().
-    /// @param x Read-only column-major transformed feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major transformed feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation or inverse transform failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -188,9 +188,9 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness without modifying x.
     /// @details Delegates directly to detail::validate_input_matrix.
-    /// @param x Mutable column-major feature buffer validated in place.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in,out] x Mutable column-major feature buffer validated in place.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Empty expected on success, or GprError on invalid dimensions, packing, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -205,10 +205,10 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness and copies x into out.
     /// @details Guards aliasing via out.data() != x.data() before copying.
-    /// @param x Read-only column-major feature buffer.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on invalid dimensions, buffer size, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -231,9 +231,9 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness without modifying x.
     /// @details Identity inverse equals forward application.
-    /// @param x Mutable column-major feature buffer validated in place.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in,out] x Mutable column-major feature buffer validated in place.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Empty expected on success, or GprError on invalid dimensions, packing, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -248,10 +248,10 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness and copies x into out.
     /// @details Identity inverse equals forward application.
-    /// @param x Read-only column-major feature buffer.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on invalid dimensions, buffer size, or non-finite values.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -274,9 +274,9 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness and returns a typed fitted identity transform.
     /// @details Ensures invalid training matrices still surface errors consistently during fit().
-    /// @param x Read-only column-major training feature buffer.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature buffer.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return FittedIdentityInput on success, or GprError on invalid training matrix.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -295,9 +295,9 @@ namespace cxxgpr::transform
 
     /// @brief Validates packing and finiteness and returns a boxed fitted identity transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param x Read-only column-major training feature buffer.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature buffer.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Boxed FittedIdentityInput on success, or GprError on invalid training matrix.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -327,8 +327,8 @@ namespace cxxgpr::transform
 
     /// @brief Constructs a FittedStandardizeInput from validated per-column means and positive stds.
     /// @details Enforces validation order: EmptyInput -> LengthMismatch -> NonFiniteInput -> InvalidHyperparameter.
-    /// @param mean Per-column mean offsets.
-    /// @param std Per-column positive scale factors.
+    /// @param[in] mean Per-column mean offsets.
+    /// @param[in] std Per-column positive scale factors.
     /// @return Validated FittedStandardizeInput on success, or GprError on invalid parameters.
     /// @retval GprErrorCode::EmptyInput When mean or std is empty.
     /// @retval GprErrorCode::LengthMismatch When std.size() != mean.size().
@@ -367,9 +367,9 @@ namespace cxxgpr::transform
 
     /// @brief Standardizes features in place: (x - mean) / std.
     /// @details Applies z = (x - m) / s per column slice with s guaranteed positive.
-    /// @param x Mutable column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match mean().size()).
+    /// @param[in,out] x Mutable column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match mean().size()).
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -395,10 +395,10 @@ namespace cxxgpr::transform
 
     /// @brief Standardizes features into out: (x - mean) / std.
     /// @details Writes standardized column slices into out without allocation.
-    /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match mean().size()).
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match mean().size()).
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -425,9 +425,9 @@ namespace cxxgpr::transform
 
     /// @brief Restores original feature coordinates in place: x * std + mean.
     /// @details Applies the affine inverse transform per column slice in place.
-    /// @param x Mutable column-major standardized feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match mean().size()).
+    /// @param[in,out] x Mutable column-major standardized feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match mean().size()).
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -453,10 +453,10 @@ namespace cxxgpr::transform
 
     /// @brief Restores original feature coordinates into out: x * std + mean.
     /// @details Writes original-coordinate column slices into out without allocation.
-    /// @param x Read-only column-major standardized feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match mean().size()).
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major standardized feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match mean().size()).
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -491,9 +491,9 @@ namespace cxxgpr::transform
 
     /// @brief Estimates per-column means and population stds, using 1.0 for constant columns.
     /// @details Validates matrix packing and finiteness before computing two-pass column statistics.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return FittedStandardizeInput on success, or GprError on invalid training input.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -523,9 +523,9 @@ namespace cxxgpr::transform
 
     /// @brief Estimates per-column means and population stds and returns a boxed fitted transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Boxed FittedStandardizeInput on success, or GprError on invalid training input.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -556,10 +556,10 @@ namespace cxxgpr::transform
     /// @brief Constructs a FittedMinMaxInput from validated extrema and finite range [range_lo, range_hi].
     /// @details Enforces validation order: EmptyInput -> LengthMismatch -> NonFiniteInput -> InvalidConfig ->
     /// InvalidHyperparameter.
-    /// @param data_min Per-column training minima.
-    /// @param data_max Per-column training maxima.
-    /// @param range_lo Finite lower endpoint of the target interval.
-    /// @param range_hi Finite upper endpoint of the target interval (must exceed range_lo).
+    /// @param[in] data_min Per-column training minima.
+    /// @param[in] data_max Per-column training maxima.
+    /// @param[in] range_lo Finite lower endpoint of the target interval.
+    /// @param[in] range_hi Finite upper endpoint of the target interval (must exceed range_lo).
     /// @return Validated FittedMinMaxInput on success, or GprError on invalid extrema or range.
     /// @retval GprErrorCode::EmptyInput When data_min or data_max is empty.
     /// @retval GprErrorCode::LengthMismatch When data_max.size() != data_min.size().
@@ -610,9 +610,9 @@ namespace cxxgpr::transform
 
     /// @brief Scales features in place onto [range_lo, range_hi].
     /// @details Applies range_lo + (range_hi - range_lo) * (v - data_min) / safe_span(data_max, data_min) per column.
-    /// @param x Mutable column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match min().size()).
+    /// @param[in,out] x Mutable column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match min().size()).
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -640,10 +640,10 @@ namespace cxxgpr::transform
 
     /// @brief Scales features into out onto [range_lo, range_hi].
     /// @details Writes scaled columns directly into out without allocation.
-    /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match min().size()).
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match min().size()).
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -671,9 +671,9 @@ namespace cxxgpr::transform
 
     /// @brief Restores original feature coordinates in place.
     /// @details Applies data_min + safe_span(data_max, data_min) * (v - range_lo) / (range_hi - range_lo) per column.
-    /// @param x Mutable column-major scaled feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match min().size()).
+    /// @param[in,out] x Mutable column-major scaled feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match min().size()).
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -701,10 +701,10 @@ namespace cxxgpr::transform
 
     /// @brief Restores original feature coordinates into out.
     /// @details Writes unscaled feature columns directly into out without allocation.
-    /// @param x Read-only column-major scaled feature buffer of size n_rows * n_cols.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns (must match min().size()).
-    /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+    /// @param[in] x Read-only column-major scaled feature buffer of size n_rows * n_cols.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns (must match min().size()).
+    /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -740,8 +740,8 @@ namespace cxxgpr::transform
 
     /// @brief Creates a MinMaxInput mapping onto [lo, hi], rejecting non-finite bounds or hi <= lo.
     /// @details Validates target interval bounds via detail::validate_feature_range.
-    /// @param lo Finite lower endpoint of the target output interval.
-    /// @param hi Finite upper endpoint of the target output interval (must exceed lo).
+    /// @param[in] lo Finite lower endpoint of the target output interval.
+    /// @param[in] hi Finite upper endpoint of the target output interval (must exceed lo).
     /// @return Validated MinMaxInput on success, or GprErrorCode::InvalidConfig on invalid bounds.
     /// @retval GprErrorCode::InvalidConfig When lo or hi is non-finite or hi <= lo.
     std::expected<MinMaxInput, GprError> MinMaxInput::create(double lo, double hi)
@@ -756,9 +756,9 @@ namespace cxxgpr::transform
     /// @brief Estimates per-column minima and maxima and returns a typed fitted transform.
     /// @details Validates matrix packing and finiteness before finding per-column extrema with
     /// std::ranges::minmax_element.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return FittedMinMaxInput on success, or GprError on invalid training input.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -789,9 +789,9 @@ namespace cxxgpr::transform
 
     /// @brief Estimates per-column minima and maxima and returns a boxed fitted transform.
     /// @details Delegates to fit_typed and boxes the typed result.
-    /// @param x Read-only column-major training feature matrix.
-    /// @param n_rows Number of training sample rows.
-    /// @param n_cols Number of feature columns.
+    /// @param[in] x Read-only column-major training feature matrix.
+    /// @param[in] n_rows Number of training sample rows.
+    /// @param[in] n_cols Number of feature columns.
     /// @return Boxed FittedMinMaxInput on success, or GprError on invalid training input.
     /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.

@@ -30,15 +30,15 @@ namespace cxxgpr
     /// (+ sigma_n^2 when options.variance_kind == VarianceKind::Observation) with zero heap allocation
     /// after workspace and output buffers are warmed up.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x_train Column-major n x d training feature matrix in storage precision.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param x_query Column-major m x d query feature matrix in storage precision.
-    /// @param options Prediction configuration selecting latent or observation variance.
-    /// @param workspace Reusable query-time prediction workspace grown on demand.
-    /// @param out Destination Prediction structure populated with length-m mean and variance vectors.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation variance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[out] out Destination Prediction structure populated with length-m mean and variance vectors.
     /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or triangular solve failure.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
@@ -62,14 +62,14 @@ namespace cxxgpr
     /// @brief Computes posterior mean and diagonal predictive variance for query points x_query.
     /// @details Allocates a fresh Prediction<P::Refine> result and delegates to predict_into().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x_train Column-major n x d training feature matrix in storage precision.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param x_query Column-major m x d query feature matrix in storage precision.
-    /// @param options Prediction configuration selecting latent or observation variance.
-    /// @param workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation variance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
     /// @return Populated Prediction<P::Refine>, or GprError if predict_into() fails.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
@@ -94,15 +94,15 @@ namespace cxxgpr
     /// matrix K_**, and assembles the symmetric posterior covariance Sigma_* = K_** - V^T * V
     /// (+ sigma_n^2 * I when options.variance_kind == VarianceKind::Observation).
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x_train Column-major n x d training feature matrix in storage precision.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param x_query Column-major m x d query feature matrix in storage precision.
-    /// @param options Prediction configuration selecting latent or observation covariance.
-    /// @param workspace Reusable query-time prediction workspace grown on demand.
-    /// @param out Destination PredictiveCovariance structure populated with mean and m x m covariance.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation covariance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[out] out Destination PredictiveCovariance structure populated with mean and m x m covariance.
     /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
@@ -126,14 +126,14 @@ namespace cxxgpr
     /// @brief Computes posterior mean and full m x m column-major posterior covariance matrix.
     /// @details Allocates a fresh PredictiveCovariance<P::Refine> result and delegates to predict_covariance_into().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x_train Column-major n x d training feature matrix in storage precision.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param x_query Column-major m x d query feature matrix in storage precision.
-    /// @param options Prediction configuration selecting latent or observation covariance.
-    /// @param workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation covariance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
     /// @return Populated PredictiveCovariance<P::Refine>, or GprError if predict_covariance_into() fails.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
@@ -158,17 +158,17 @@ namespace cxxgpr
     /// L_* * L_*^T with Cholesky jitter fallback (CholeskyStage::Predict), and transforms Box-Muller
     /// standard normals from Xoshiro256PlusPlus(seed) as y_draw = mu_* + L_* * z packed at draw * m + i.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x_train Column-major n x d training feature matrix in storage precision.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param x_query Column-major m x d query feature matrix in storage precision.
-    /// @param n_draws Number of posterior function or observation draws to generate.
-    /// @param seed Deterministic 64-bit seed passed to Xoshiro256PlusPlus.
-    /// @param options Prediction configuration selecting latent or observation distribution.
-    /// @param workspace Reusable query-time prediction workspace grown on demand.
-    /// @param jitter Optional Cholesky jitter policy for Sigma_*; defaults to adaptive(1e-12, 10.0, 10, 1e-2).
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] n_draws Number of posterior function or observation draws to generate.
+    /// @param[in] seed Deterministic 64-bit seed passed to Xoshiro256PlusPlus.
+    /// @param[in] options Prediction configuration selecting latent or observation distribution.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[in] jitter Optional Cholesky jitter policy for Sigma_*; defaults to adaptive(1e-12, 10.0, 10, 1e-2).
     /// @return Vector of length n_draws * m (empty if n_draws == 0), or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
@@ -197,14 +197,14 @@ namespace cxxgpr
     /// sigma^2_LOO,i = 1 / q_ii (subtracting sigma_n^2 and clamping at 0 for VarianceKind::Latent),
     /// performing zero heap allocations when out already has capacity >= n.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param y_train Transformed training target vector y in refine precision (length n).
-    /// @param options Prediction configuration selecting latent or observation LOO variance.
-    /// @param scratch_n_by_n Caller-provided n x n mutable workspace for L^-1 computation.
-    /// @param scratch_diag Caller-provided length-n mutable span receiving [A^-1]_ii.
-    /// @param out Destination Prediction structure populated with LOO means and variances.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] y_train Transformed training target vector y in refine precision (length n).
+    /// @param[in] options Prediction configuration selecting latent or observation LOO variance.
+    /// @param[in,out] scratch_n_by_n Caller-provided n x n mutable workspace for L^-1 computation.
+    /// @param[in,out] scratch_diag Caller-provided length-n mutable span receiving [A^-1]_ii.
+    /// @param[out] out Destination Prediction structure populated with LOO means and variances.
     /// @return Empty expected on success, or GprError on invalid inputs, buffers, or non-positive q_ii.
     /// @retval GprErrorCode::EmptyInput When l_factor, alpha, or y_train is empty.
     /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train/scratch sizes mismatch.
@@ -225,11 +225,11 @@ namespace cxxgpr
     /// @brief Computes closed-form Leave-One-Out predictive mean and variance (GPML §5.4.2).
     /// @details Allocates temporary n x n and length-n scratch buffers and delegates to loo_predict_into().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
-    /// @param alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
-    /// @param y_train Transformed training target vector y in refine precision (length n).
-    /// @param options Prediction configuration selecting latent or observation LOO variance.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] y_train Transformed training target vector y in refine precision (length n).
+    /// @param[in] options Prediction configuration selecting latent or observation LOO variance.
     /// @return Populated LOO Prediction<P::Refine>, or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When l_factor, alpha, or y_train is empty.
     /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.

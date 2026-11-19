@@ -61,14 +61,14 @@ namespace
     public:
         /// @brief Constructs a fitted scaling transform bound to expected_cols feature columns.
         /// @details Stores expected_cols so apply() and inverse_apply() enforce dimension matching.
-        /// @param expected_cols Expected number of feature columns.
+        /// @param[in] expected_cols Expected number of feature columns.
         explicit FittedTimesTwo(std::size_t expected_cols) : expected_cols_(expected_cols) {}
 
         /// @brief Multiplies all feature entries by 2.0 after checking empty and column count.
         /// @details Returns EmptyInput on empty shapes and DimensionMismatch when n_cols != expected_cols_.
-        /// @param x Mutable column-major feature matrix span.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
+        /// @param[in,out] x Mutable column-major feature matrix span.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
         /// @return Empty expected on success, or validation error on invalid dimensions.
         [[nodiscard]] std::expected<void, GprError> apply(
             std::span<double> x, std::size_t n_rows, std::size_t n_cols
@@ -91,9 +91,9 @@ namespace
 
         /// @brief Halves all feature entries to invert apply().
         /// @details Returns EmptyInput on empty shapes and DimensionMismatch when n_cols != expected_cols_.
-        /// @param x Mutable column-major feature matrix span.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
+        /// @param[in,out] x Mutable column-major feature matrix span.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
         /// @return Empty expected on success, or validation error on invalid dimensions.
         [[nodiscard]] std::expected<void, GprError> inverse_apply(
             std::span<double> x, std::size_t n_rows, std::size_t n_cols
@@ -139,9 +139,9 @@ namespace
     public:
         /// @brief Fits FittedTimesTwo by recording n_cols after guarding against empty inputs.
         /// @details Returns EmptyInput if x is empty or either extent is zero.
-        /// @param x Training feature matrix span.
-        /// @param n_rows Number of training sample rows.
-        /// @param n_cols Number of training feature columns.
+        /// @param[in] x Training feature matrix span.
+        /// @param[in] n_rows Number of training sample rows.
+        /// @param[in] n_cols Number of training feature columns.
         /// @return FittedTimesTwo wrapped in unique_ptr, or EmptyInput on degenerate inputs.
         [[nodiscard]] std::expected<std::unique_ptr<FittedInputTransform>, GprError> fit(
             std::span<const double> x, std::size_t n_rows, std::size_t n_cols

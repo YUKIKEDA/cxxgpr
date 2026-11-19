@@ -46,7 +46,7 @@ namespace cxxgpr
 
     /// @brief Builds a Fixed jitter policy requiring a finite, non-negative offset.
     /// @details Rejects NaN, infinite, or negative offsets with GprErrorCode::InvalidConfig.
-    /// @param jitter Non-negative diagonal jitter offset to try once if j = 0 fails.
+    /// @param[in] jitter Non-negative diagonal jitter offset to try once if j = 0 fails.
     /// @return Validated JitterPolicy on success, or GprError on invalid input.
     /// @retval GprErrorCode::InvalidConfig When jitter is NaN, infinite, or negative.
     std::expected<JitterPolicy, GprError> JitterPolicy::fixed(double jitter)
@@ -64,10 +64,10 @@ namespace cxxgpr
     /// @brief Builds an Adaptive jitter policy with geometric escalation parameters.
     /// @details Validates initial > 0, multiplier > 1, max_retries >= 1, and max_jitter >= initial with all
     /// floating-point arguments finite.
-    /// @param initial Positive finite jitter offset for the first retry.
-    /// @param multiplier Finite growth factor strictly greater than 1.0.
-    /// @param max_retries Maximum number of retry attempts (must be at least 1).
-    /// @param max_jitter Finite upper cap on retry jitter (must be at least initial).
+    /// @param[in] initial Positive finite jitter offset for the first retry.
+    /// @param[in] multiplier Finite growth factor strictly greater than 1.0.
+    /// @param[in] max_retries Maximum number of retry attempts (must be at least 1).
+    /// @param[in] max_jitter Finite upper cap on retry jitter (must be at least initial).
     /// @return Validated JitterPolicy on success, or GprError on invalid configuration.
     /// @retval GprErrorCode::InvalidConfig When any parameter violates finiteness or range preconditions.
     std::expected<JitterPolicy, GprError> JitterPolicy::adaptive(

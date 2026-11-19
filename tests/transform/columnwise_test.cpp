@@ -58,9 +58,9 @@ namespace
     public:
         /// @brief Multiplies all entries of x by 2.0 in place.
         /// @details Rejects empty spans or zero dimensions with GprErrorCode::EmptyInput.
-        /// @param x Mutable column-major feature matrix span.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
+        /// @param[in,out] x Mutable column-major feature matrix span.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
         /// @return Empty expected on success, or EmptyInput on degenerate inputs.
         [[nodiscard]] std::expected<void, GprError> apply(
             std::span<double> x, std::size_t n_rows, std::size_t n_cols
@@ -79,9 +79,9 @@ namespace
 
         /// @brief Halves all entries of x in place to invert apply().
         /// @details Rejects empty spans or zero dimensions with GprErrorCode::EmptyInput.
-        /// @param x Mutable column-major feature matrix span.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns.
+        /// @param[in,out] x Mutable column-major feature matrix span.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns.
         /// @return Empty expected on success, or EmptyInput on degenerate inputs.
         [[nodiscard]] std::expected<void, GprError> inverse_apply(
             std::span<double> x, std::size_t n_rows, std::size_t n_cols
@@ -114,9 +114,9 @@ namespace
     public:
         /// @brief Produces a stateless FittedTimesTwoCol instance after checking for empty inputs.
         /// @details Rejects empty spans or zero dimensions with GprErrorCode::EmptyInput.
-        /// @param x Training feature matrix span.
-        /// @param n_rows Number of training sample rows.
-        /// @param n_cols Number of feature columns.
+        /// @param[in] x Training feature matrix span.
+        /// @param[in] n_rows Number of training sample rows.
+        /// @param[in] n_cols Number of feature columns.
         /// @return FittedTimesTwoCol wrapped in unique_ptr, or EmptyInput on degenerate inputs.
         [[nodiscard]] std::expected<std::unique_ptr<FittedInputTransform>, GprError> fit(
             std::span<const double> x, std::size_t n_rows, std::size_t n_cols

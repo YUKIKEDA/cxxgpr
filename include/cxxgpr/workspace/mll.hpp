@@ -28,13 +28,13 @@ namespace cxxgpr
     /// retries, solves A * alpha = y in buffers.core.rhs, and returns
     /// 0.5 * (y^T * alpha + log|A| + n * log(2 * pi)).
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
-    /// @param keep_products Number of top-level product terms whose factor Grams are kept for gradients.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
+    /// @param[in] keep_products Number of top-level product terms whose factor Grams are kept for gradients.
     /// @return Negative marginal log-likelihood, or GprError on invalid input or factorization failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from buffers.core.order().
@@ -59,13 +59,13 @@ namespace cxxgpr
     /// evaluates the log-noise gradient -0.5 * sigma_n^2 * tr(W), and restores L if CholeskyBuffer::Reuse
     /// overwrote k_matrix.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers receiving updated L, alpha, W, and scratch state.
-    /// @param out_grad Destination span of length kernel.num_params() + 1 receiving log-space gradients
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers receiving updated L, alpha, W, and scratch state.
+    /// @param[out] out_grad Destination span of length kernel.num_params() + 1 receiving log-space gradients
     /// (kernel parameters followed by log(sigma_n^2)).
     /// @return Negative marginal log-likelihood, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
@@ -90,13 +90,13 @@ namespace cxxgpr
     /// H_ij = -0.5 * tr(W * A_ij) - 0.5 * tr(S_i * S_j) + v_i^T * v_j, where W = alpha * alpha^T - A^-1,
     /// S_i = L^-1 * A_i * L^-T, and v_i = L^-1 * A_i * alpha.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers (core.hessian is lazily allocated on first call).
-    /// @param out_hess Destination span of length p * p (p = kernel.num_params() + 1) receiving the
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers (core.hessian is lazily allocated on first call).
+    /// @param[out] out_hess Destination span of length p * p (p = kernel.num_params() + 1) receiving the
     /// symmetric Hessian matrix in flattened column/row-major order.
     /// @return Empty expected on success, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
@@ -120,14 +120,14 @@ namespace cxxgpr
     /// @details Evaluates negative MLL and gradient via mll_and_gradient_into(), then populates out_hess
     /// from the already factored Cholesky decomposition and alpha solution.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers updated with factor state and Hessian scratch.
-    /// @param out_grad Destination span of length p = kernel.num_params() + 1 receiving log-space gradients.
-    /// @param out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers updated with factor state and Hessian scratch.
+    /// @param[out] out_grad Destination span of length p = kernel.num_params() + 1 receiving log-space gradients.
+    /// @param[out] out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
     /// @return Negative marginal log-likelihood, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When out_grad or out_hess length disagrees with p or n mismatches.

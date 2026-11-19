@@ -36,9 +36,9 @@ namespace
     {
     public:
         /// @brief Constructs a quadratic objective with target minimum, diagonal weights, and bounds.
-        /// @param target Target minimizer vector in log-parameter space.
-        /// @param weights Positive per-coordinate curvature weights.
-        /// @param bounds Parameter Interval constraints matching target.size().
+        /// @param[in] target Target minimizer vector in log-parameter space.
+        /// @param[in] weights Positive per-coordinate curvature weights.
+        /// @param[in] bounds Parameter Interval constraints matching target.size().
         QuadraticObjective(
             std::vector<double> target, std::vector<double> weights, std::vector<cxxgpr::Interval> bounds
         ) :
@@ -53,7 +53,7 @@ namespace
         [[nodiscard]] std::size_t dim() const noexcept override { return target_.size(); }
 
         /// @brief Evaluates the quadratic objective value and records evaluation count and last iterate.
-        /// @param params Current log-parameter vector of length dim().
+        /// @param[in] params Current log-parameter vector of length dim().
         /// @return Scalar objective value 0.5 * sum_i w_i * (params_i - target_i)^2.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> params) override
         {
@@ -69,8 +69,8 @@ namespace
         }
 
         /// @brief Evaluates the objective while verifying unlisted indices stay bitwise unchanged.
-        /// @param params Candidate log-parameter vector of length dim().
-        /// @param changed_indices Sorted parameter indices declared as mutated since the prior call.
+        /// @param[in] params Candidate log-parameter vector of length dim().
+        /// @param[in] changed_indices Sorted parameter indices declared as mutated since the prior call.
         /// @return Scalar objective value from value(params).
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_at_changes(
             std::span<const double> params, std::span<const std::size_t> changed_indices
@@ -95,7 +95,7 @@ namespace
         }
 
         /// @brief Copies parameter Interval bounds into out.
-        /// @param out Destination span of length dim().
+        /// @param[out] out Destination span of length dim().
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
@@ -106,8 +106,8 @@ namespace
         }
 
         /// @brief Writes analytical objective gradient into out_grad.
-        /// @param params Log-parameter vector of length dim().
-        /// @param out_grad Output gradient vector of length dim().
+        /// @param[in] params Log-parameter vector of length dim().
+        /// @param[out] out_grad Output gradient vector of length dim().
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> params, std::span<double> out_grad
@@ -121,8 +121,8 @@ namespace
         }
 
         /// @brief Evaluates both quadratic objective value and gradient into out_grad.
-        /// @param params Log-parameter vector of length dim().
-        /// @param out_grad Output gradient vector of length dim().
+        /// @param[in] params Log-parameter vector of length dim().
+        /// @param[out] out_grad Output gradient vector of length dim().
         /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> params, std::span<double> out_grad
@@ -141,8 +141,8 @@ namespace
         }
 
         /// @brief Writes the constant diagonal Hessian matrix into row/column-major out_hess.
-        /// @param params Log-parameter vector (unused because curvature is constant).
-        /// @param out_hess Output dim x dim Hessian matrix buffer.
+        /// @param[in] params Log-parameter vector (unused because curvature is constant).
+        /// @param[out] out_hess Output dim x dim Hessian matrix buffer.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
             [[maybe_unused]] std::span<const double> params, std::span<double> out_hess
@@ -180,7 +180,7 @@ namespace
     {
     public:
         /// @brief Constructs a Rosenbrock objective sharing interval iv on both coordinates.
-        /// @param iv Positive hyperparameter Interval applied to both coordinates.
+        /// @param[in] iv Positive hyperparameter Interval applied to both coordinates.
         explicit RosenbrockObjective(cxxgpr::Interval iv) : iv_(iv) {}
 
         /// @brief Returns dimensionality (always 2).
@@ -188,7 +188,7 @@ namespace
         [[nodiscard]] std::size_t dim() const noexcept override { return 2U; }
 
         /// @brief Evaluates (1 - x)^2 + 100 * (y - x^2)^2 at p.
-        /// @param p Two-element coordinate vector [x, y].
+        /// @param[in] p Two-element coordinate vector [x, y].
         /// @return Scalar Rosenbrock objective value.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
         {
@@ -200,7 +200,7 @@ namespace
         }
 
         /// @brief Copies interval iv_ into both elements of out.
-        /// @param out Destination interval span of length 2.
+        /// @param[out] out Destination interval span of length 2.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
@@ -212,8 +212,8 @@ namespace
         }
 
         /// @brief Computes analytical Rosenbrock gradient at p into g.
-        /// @param p Two-element coordinate vector [x, y].
-        /// @param g Output gradient vector of length 2.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] g Output gradient vector of length 2.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> p, std::span<double> g
@@ -227,8 +227,8 @@ namespace
         }
 
         /// @brief Evaluates Rosenbrock value and analytical gradient together.
-        /// @param p Two-element coordinate vector [x, y].
-        /// @param g Output gradient vector of length 2.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] g Output gradient vector of length 2.
         /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> p, std::span<double> g
@@ -243,8 +243,8 @@ namespace
         }
 
         /// @brief Computes exact 2x2 analytical Rosenbrock Hessian at p into h.
-        /// @param p Two-element coordinate vector [x, y].
-        /// @param h Output 2x2 Hessian buffer of length 4.
+        /// @param[in] p Two-element coordinate vector [x, y].
+        /// @param[out] h Output 2x2 Hessian buffer of length 4.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
             std::span<const double> p, std::span<double> h
@@ -271,7 +271,7 @@ namespace
     {
     public:
         /// @brief Constructs the 1D multi-modal objective with bound interval iv.
-        /// @param iv Positive hyperparameter Interval bound.
+        /// @param[in] iv Positive hyperparameter Interval bound.
         explicit MultiModalObjective(cxxgpr::Interval iv) : iv_(iv) {}
 
         /// @brief Returns problem dimensionality (always 1).
@@ -279,7 +279,7 @@ namespace
         [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
 
         /// @brief Evaluates (x^2 - 4)^2 - 0.6*x + 2 at p[0].
-        /// @param p Single-element coordinate vector [x].
+        /// @param[in] p Single-element coordinate vector [x].
         /// @return Scalar objective value.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
         {
@@ -289,7 +289,7 @@ namespace
         }
 
         /// @brief Copies bound interval iv_ into out[0].
-        /// @param out Destination interval span of length 1.
+        /// @param[out] out Destination interval span of length 1.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
             std::span<cxxgpr::Interval> out
@@ -300,8 +300,8 @@ namespace
         }
 
         /// @brief Computes analytical derivative 4*x*(x^2 - 4) - 0.6 at p[0].
-        /// @param p Single-element coordinate vector [x].
-        /// @param g Output gradient span of length 1.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
             std::span<const double> p, std::span<double> g
@@ -313,8 +313,8 @@ namespace
         }
 
         /// @brief Evaluates multi-modal value and analytical derivative together.
-        /// @param p Single-element coordinate vector [x].
-        /// @param g Output gradient span of length 1.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
         /// @return Scalar objective value on success, or propagated GprError on failure.
         [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
             std::span<const double> p, std::span<double> g

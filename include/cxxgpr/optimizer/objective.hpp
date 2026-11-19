@@ -52,7 +52,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Evaluates the scalar objective at log-space parameter vector params.
         /// @details Implementations evaluate the negative marginal log-likelihood or custom loss at params.
-        /// @param params Log-space parameter vector of length dim().
+        /// @param[in] params Log-space parameter vector of length dim().
         /// @return Finite objective value on success, or GprError if evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value(std::span<const double> params) = 0;
 
@@ -60,8 +60,8 @@ namespace cxxgpr::optimizer
         /// @details Optimizers supporting incremental coordinate proposals (such as FastSimulatedAnnealing)
         /// supply changed_indices so objectives backed by LeafCache recompute only dirty leaves; defaults
         /// to calling value(params).
-        /// @param params Candidate log-space parameter vector of length dim().
-        /// @param changed_indices Non-empty list of parameter indices modified relative to the previous call.
+        /// @param[in] params Candidate log-space parameter vector of length dim().
+        /// @param[in] changed_indices Non-empty list of parameter indices modified relative to the previous call.
         /// @return Finite objective value on success, or GprError if evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_at_changes(
             std::span<const double> params, [[maybe_unused]] std::span<const std::size_t> changed_indices
@@ -74,7 +74,7 @@ namespace cxxgpr::optimizer
         /// @brief Fills out with the open Interval (lo, hi) in user units for each parameter.
         /// @details Optimizer LogBounds transforms each interval via (log(lo), log(hi)) into unconstrained
         /// logit coordinates; implementations must enforce out.size() == dim().
-        /// @param out Destination span of length dim() receiving open user-space parameter intervals.
+        /// @param[out] out Destination span of length dim() receiving open user-space parameter intervals.
         /// @return Empty expected on success, or GprError on length mismatch or invalid bounds.
         [[nodiscard]] virtual std::expected<void, GprError> fill_intervals(std::span<Interval> out) const = 0;
     };
@@ -86,8 +86,8 @@ namespace cxxgpr::optimizer
     public:
         /// @brief Writes the analytical gradient with respect to log-space params into out_grad.
         /// @details Both params and out_grad must have length dim().
-        /// @param params Log-space parameter vector of length dim().
-        /// @param out_grad Destination span of length dim() receiving d(value)/d(params).
+        /// @param[in] params Log-space parameter vector of length dim().
+        /// @param[out] out_grad Destination span of length dim() receiving d(value)/d(params).
         /// @return Empty expected on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<void, GprError> gradient_into(
             std::span<const double> params, std::span<double> out_grad
@@ -95,8 +95,8 @@ namespace cxxgpr::optimizer
 
         /// @brief Evaluates both objective value and gradient into out_grad in a single pass.
         /// @details Shares the Cholesky factorization between objective value and gradient evaluation.
-        /// @param params Log-space parameter vector of length dim().
-        /// @param out_grad Destination span of length dim() receiving d(value)/d(params).
+        /// @param[in] params Log-space parameter vector of length dim().
+        /// @param[out] out_grad Destination span of length dim() receiving d(value)/d(params).
         /// @return Scalar objective value on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_and_gradient_into(
             std::span<const double> params, std::span<double> out_grad
@@ -110,8 +110,8 @@ namespace cxxgpr::optimizer
     public:
         /// @brief Writes the symmetric dim x dim Hessian matrix (row/col-major flattened) into out_hess.
         /// @details Entry (i, j) is stored at (i * dim()) + j (and symmetrically at (j * dim()) + i).
-        /// @param params Log-space parameter vector of length dim().
-        /// @param out_hess Destination span of length dim() * dim() receiving d^2(value)/(dtheta_i dtheta_j).
+        /// @param[in] params Log-space parameter vector of length dim().
+        /// @param[out] out_hess Destination span of length dim() * dim() receiving d^2(value)/(dtheta_i dtheta_j).
         /// @return Empty expected on success, or GprError if evaluation or validation fails.
         [[nodiscard]] virtual std::expected<void, GprError> hessian_into(
             std::span<const double> params, std::span<double> out_hess
@@ -120,9 +120,9 @@ namespace cxxgpr::optimizer
         /// @brief Evaluates value, gradient, and Hessian together; defaults to sequential calls.
         /// @details Evaluates value_and_gradient_into(params, out_grad) first and then hessian_into(params, out_hess);
         /// derived GPR objectives override this to reuse a single Cholesky factor across all three outputs.
-        /// @param params Log-space parameter vector of length dim().
-        /// @param out_grad Destination span of length dim() receiving the log-space gradient.
-        /// @param out_hess Destination span of length dim() * dim() receiving the symmetric Hessian.
+        /// @param[in] params Log-space parameter vector of length dim().
+        /// @param[out] out_grad Destination span of length dim() receiving the log-space gradient.
+        /// @param[out] out_hess Destination span of length dim() * dim() receiving the symmetric Hessian.
         /// @return Scalar objective value on success, or GprError if gradient or Hessian evaluation fails.
         [[nodiscard]] virtual std::expected<double, GprError> value_gradient_hessian_into(
             std::span<const double> params, std::span<double> out_grad, std::span<double> out_hess
@@ -158,7 +158,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two OptimizerResult instances.
         /// @details Compares params, value, iterations, and converged.
-        /// @param other OptimizerResult instance to compare against.
+        /// @param[in] other OptimizerResult instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const OptimizerResult& other) const noexcept = default;
     };
@@ -175,7 +175,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two RestartConfig instances.
         /// @details Compares both count and seed.
-        /// @param other RestartConfig instance to compare against.
+        /// @param[in] other RestartConfig instance to compare against.
         /// @return True if both restart configuration fields match.
         [[nodiscard]] constexpr bool operator==(const RestartConfig& other) const noexcept = default;
     };

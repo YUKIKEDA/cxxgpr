@@ -32,11 +32,11 @@ namespace
     /// @details Warms up FitBuffers under both prefer_speed() and prefer_memory() policies for
     /// precision P and asserts delta_allocations() == 0 inside NoAllocationScope.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param spec Kernel AST specification under audit.
-    /// @param n Number of training samples.
-    /// @param d Feature dimensionality.
-    /// @param x_raw Flattened column-major n x d training inputs in double precision.
-    /// @param y_raw Training target vector of length n in double precision.
+    /// @param[in] spec Kernel AST specification under audit.
+    /// @param[in] n Number of training samples.
+    /// @param[in] d Feature dimensionality.
+    /// @param[in] x_raw Flattened column-major n x d training inputs in double precision.
+    /// @param[in] y_raw Training target vector of length n in double precision.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_mll_grad_hess_zero_alloc(
         const cxxgpr::KernelSpec& spec,
@@ -140,10 +140,10 @@ namespace
     /// @details Fits a Fixed-optimizer GPR under precision policy P, runs one warmup predict_into(),
     /// and asserts delta_allocations() == 0 on the second predict_into() inside NoAllocationScope.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param spec Kernel AST specification under audit.
-    /// @param x_ref Column-major n x d training input view.
-    /// @param y_train Training target span of length n.
-    /// @param xq_ref Column-major m x d query input view.
+    /// @param[in] spec Kernel AST specification under audit.
+    /// @param[in] x_ref Column-major n x d training input view.
+    /// @param[in] y_train Training target span of length n.
+    /// @param[in] xq_ref Column-major m x d query input view.
     template <cxxgpr::PrecisionPolicyConcept P>
     void verify_predict_into_zero_alloc(
         const cxxgpr::KernelSpec& spec,

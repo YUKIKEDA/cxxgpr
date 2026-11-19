@@ -19,8 +19,8 @@ namespace cxxgpr::linalg
     /// @brief Adds a finite scalar offset to every diagonal entry of a square matrix in place.
     /// @details Validates squareness and finiteness of value before mutating a(i, i) across all indices.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Square mutable matrix view to modify in place.
-    /// @param value Finite scalar offset added to each diagonal entry.
+    /// @param[in,out] a Square mutable matrix view to modify in place.
+    /// @param[in] value Finite scalar offset added to each diagonal entry.
     /// @return Empty expected on success, or GprError on invalid input.
     /// @retval GprErrorCode::EmptyInput When a is empty or null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
@@ -48,8 +48,8 @@ namespace cxxgpr::linalg
     /// @brief Copies the lower triangle (including diagonal) of a square matrix src into dst.
     /// @details Validates both square views and matching order, then copies row >= col in column-major order.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param src Square read-only source matrix view.
-    /// @param dst Square mutable destination matrix view of matching order.
+    /// @param[in] src Square read-only source matrix view.
+    /// @param[out] dst Square mutable destination matrix view of matching order.
     /// @return Empty expected on success, or GprError on invalid dimensions or views.
     /// @retval GprErrorCode::EmptyInput When src or dst is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on either view.
@@ -85,7 +85,7 @@ namespace cxxgpr::linalg
     /// @brief Mirrors the strictly lower triangle of a square matrix into its strictly upper triangle.
     /// @details Leaves diagonal entries untouched and copies a(i, j) into a(j, i) for i > j.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Square mutable matrix view to symmetrize in place.
+    /// @param[in,out] a Square mutable matrix view to symmetrize in place.
     /// @return Empty expected on success, or GprError on invalid matrix view.
     /// @retval GprErrorCode::EmptyInput When a is empty or null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
@@ -112,8 +112,8 @@ namespace cxxgpr::linalg
     /// @details Validates views, dimensions, and lower-triangle finiteness before accumulating diagonal terms once and
     /// strictly lower terms twice in double precision.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a First square read-only symmetric matrix view (lower triangle read).
-    /// @param b Second square read-only symmetric matrix view (lower triangle read).
+    /// @param[in] a First square read-only symmetric matrix view (lower triangle read).
+    /// @param[in] b Second square read-only symmetric matrix view (lower triangle read).
     /// @return Symmetric Frobenius inner product in double precision, or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When a or b is empty or null.
     /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on either view.
@@ -160,8 +160,8 @@ namespace cxxgpr::linalg
     /// @details Validates non-emptiness, matching length, and element finiteness before accumulating in double
     /// precision.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a First read-only vector span.
-    /// @param b Second read-only vector span of equal length.
+    /// @param[in] a First read-only vector span.
+    /// @param[in] b Second read-only vector span of equal length.
     /// @return Euclidean inner product in double precision, or GprError on failure.
     /// @retval GprErrorCode::EmptyInput When either span is empty.
     /// @retval GprErrorCode::LengthMismatch When a.size() != b.size().
@@ -198,9 +198,9 @@ namespace cxxgpr::linalg
     /// @details Validates matrix geometry, span lengths, and finiteness of A and x, then zeroes out and accumulates
     /// column-by-column axpy updates.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param a Read-only column-major matrix view of shape m x n.
-    /// @param x Read-only input vector of length n.
-    /// @param out Preallocated mutable output vector of length m.
+    /// @param[in] a Read-only column-major matrix view of shape m x n.
+    /// @param[in] x Read-only input vector of length n.
+    /// @param[out] out Preallocated mutable output vector of length m.
     /// @return Empty expected on success, or GprError on invalid dimensions or non-finite inputs.
     /// @retval GprErrorCode::EmptyInput When a, x, or out is empty or null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.

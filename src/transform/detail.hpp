@@ -23,8 +23,8 @@ namespace cxxgpr::transform::detail
 
     /// @brief Validates that a min-max output interval [lo, hi] is finite and strictly ordered.
     /// @details Rejects NaN, infinity, or degenerate/inverted bounds where hi <= lo.
-    /// @param lo Lower endpoint of the target interval.
-    /// @param hi Upper endpoint of the target interval.
+    /// @param[in] lo Lower endpoint of the target interval.
+    /// @param[in] hi Upper endpoint of the target interval.
     /// @return Empty expected on success, or GprErrorCode::InvalidConfig on invalid bounds.
     /// @retval GprErrorCode::InvalidConfig When lo or hi is non-finite or hi <= lo.
     [[nodiscard]] inline std::expected<void, GprError> validate_feature_range(double lo, double hi)
@@ -44,11 +44,11 @@ namespace cxxgpr::transform::detail
     /// @brief Validates a column-major feature matrix buffer and optional column count and output buffer length.
     /// @details Enforces the canonical validation sequence EmptyInput -> SizeOverflow -> LengthMismatch ->
     /// DimensionMismatch -> NonFiniteInput.
-    /// @param x Read-only column-major feature buffer.
-    /// @param n_rows Number of sample rows.
-    /// @param n_cols Number of feature columns.
-    /// @param expected_cols Optional expected feature column count checked against n_cols.
-    /// @param out_size Optional output buffer length checked against n_rows * n_cols.
+    /// @param[in] x Read-only column-major feature buffer.
+    /// @param[in] n_rows Number of sample rows.
+    /// @param[in] n_cols Number of feature columns.
+    /// @param[in] expected_cols Optional expected feature column count checked against n_cols.
+    /// @param[in] out_size Optional output buffer length checked against n_rows * n_cols.
     /// @return Empty expected on success, or the highest-precedence GprError.
     /// @retval GprErrorCode::EmptyInput When n_rows == 0, n_cols == 0, or x is empty.
     /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -94,8 +94,8 @@ namespace cxxgpr::transform::detail
 
     /// @brief Validates a target or predictive vector buffer and optional output buffer length.
     /// @details Enforces the canonical validation sequence EmptyInput -> LengthMismatch -> NonFiniteInput.
-    /// @param y Read-only span of target or prediction values.
-    /// @param out_size Optional output buffer length checked against y.size().
+    /// @param[in] y Read-only span of target or prediction values.
+    /// @param[in] out_size Optional output buffer length checked against y.size().
     /// @return Empty expected on success, or the highest-precedence GprError.
     /// @retval GprErrorCode::EmptyInput When y is empty.
     /// @retval GprErrorCode::LengthMismatch When out_size is provided and *out_size != y.size().
@@ -122,7 +122,7 @@ namespace cxxgpr::transform::detail
     /// @brief Computes empirical mean and population standard deviation for a non-empty finite span.
     /// @details Uses a two-pass calculation dividing squared deviations by N and falls back to 1.0 when the population
     /// standard deviation is zero or non-finite.
-    /// @param values Non-empty finite span of sample observations.
+    /// @param[in] values Non-empty finite span of sample observations.
     /// @return Pair {mean, safe_population_std} where safe_population_std > 0.
     [[nodiscard]] inline std::pair<double, double> compute_mean_and_population_std(
         std::span<const double> values
@@ -149,8 +149,8 @@ namespace cxxgpr::transform::detail
 
     /// @brief Computes max_val - min_val with a 1.0 fallback for zero or non-finite spans.
     /// @details Prevents division by zero when transforming or inverting constant features or targets.
-    /// @param max_val Observed maximum value.
-    /// @param min_val Observed minimum value.
+    /// @param[in] max_val Observed maximum value.
+    /// @param[in] min_val Observed minimum value.
     /// @return Strictly positive finite span (max_val - min_val when positive and finite, otherwise 1.0).
     [[nodiscard]] inline double safe_span(double max_val, double min_val) noexcept
     {

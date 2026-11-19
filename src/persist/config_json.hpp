@@ -66,7 +66,7 @@ namespace cxxgpr::persist::detail
     /// @brief Serializes model metadata, kernel tree, likelihood, jitter, and transforms into config.json text.
     /// @details Encodes bounded parameters with open intervals and delegates custom kernel/transform state
     /// serialization while enforcing nesting depth and persist_id rules.
-    /// @param input Borrowed model configuration and transform references to serialize.
+    /// @param[in] input Borrowed model configuration and transform references to serialize.
     /// @return Formatted JSON string on success, or GprError if serialization or validation fails.
     /// @retval GprErrorCode::PersistFailed When custom components are not persistable or exceed depth limits.
     [[nodiscard]] std::expected<std::string, GprError> serialize_config_json(const SaveInput& input);
@@ -74,8 +74,8 @@ namespace cxxgpr::persist::detail
     /// @brief Reads, validates, and parses a persisted config.json file into ParsedConfig.
     /// @details Enforces MAX_JSON_NESTING_DEPTH prior to parsing, verifies format_version and factor_kind,
     /// rejects incompatible distance-only or non-Exact checkpoints, and reconstructs custom extensions via registry.
-    /// @param path Filesystem path to config.json.
-    /// @param registry Registry supplying factories for user-defined custom kernels and transforms.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying factories for user-defined custom kernels and transforms.
     /// @return Populated ParsedConfig on success, or GprError on I/O, schema, version, or registry failure.
     /// @retval GprErrorCode::PersistFailed When file I/O, JSON schema, model kind, or registry lookup fails.
     /// @retval GprErrorCode::UnsupportedPersistVersion When format_version does not match FORMAT_VERSION.

@@ -21,8 +21,8 @@ namespace cxxgpr
         /// @brief Combines two child CoordMode requirements into their composite node requirement.
         /// @details CoordMode::Either acts as the identity element; combining Dist with Points yields
         /// CoordMode::Mixed.
-        /// @param a Coordinate mode of the left child subtree.
-        /// @param b Coordinate mode of the right child subtree.
+        /// @param[in] a Coordinate mode of the left child subtree.
+        /// @param[in] b Coordinate mode of the right child subtree.
         /// @return Combined CoordMode covering both subtrees.
         [[nodiscard]] CoordMode combine_coord_mode(CoordMode a, CoordMode b) noexcept
         {
@@ -44,8 +44,8 @@ namespace cxxgpr
 
         /// @brief Delegates leaf log-space parameter extraction to detail::leaf_get_params.
         /// @details Preserves uniform variant dispatch for KernelSpecAccess.
-        /// @param leaf Kernel leaf variant to query.
-        /// @param out Destination span sized to detail::leaf_num_params(leaf).
+        /// @param[in] leaf Kernel leaf variant to query.
+        /// @param[out] out Destination span sized to detail::leaf_num_params(leaf).
         /// @return Empty expected on success or GprError from the leaf.
         /// @retval GprErrorCode::LengthMismatch When out.size() does not match leaf parameter count.
         [[nodiscard]] std::expected<void, GprError> leaf_get_params(const KernelLeaf& leaf, std::span<double> out)
@@ -55,8 +55,8 @@ namespace cxxgpr
 
         /// @brief Delegates leaf open-interval extraction to detail::leaf_bounds_into.
         /// @details Preserves uniform variant dispatch for KernelSpecAccess.
-        /// @param leaf Kernel leaf variant to query.
-        /// @param out Destination span sized to detail::leaf_num_params(leaf).
+        /// @param[in] leaf Kernel leaf variant to query.
+        /// @param[out] out Destination span sized to detail::leaf_num_params(leaf).
         /// @return Empty expected on success or GprError from the leaf.
         /// @retval GprErrorCode::LengthMismatch When out.size() does not match leaf parameter count.
         [[nodiscard]] std::expected<void, GprError> leaf_bounds_into(const KernelLeaf& leaf, std::span<Interval> out)
@@ -73,10 +73,10 @@ namespace cxxgpr
     {
         /// @brief Recursively writes flattened log-space parameters starting at offset.
         /// @details Short-circuits subsequent subtrees once status enters an error state.
-        /// @param spec Subtree root specification to traverse.
-        /// @param out Full flattened output parameter span.
-        /// @param offset Starting index in out for this subtree.
-        /// @param status In-out status updated if any leaf parameter query fails.
+        /// @param[in] spec Subtree root specification to traverse.
+        /// @param[out] out Full flattened output parameter span.
+        /// @param[in] offset Starting index in out for this subtree.
+        /// @param[in,out] status In-out status updated if any leaf parameter query fails.
         /// @return Updated offset immediately following this subtree's parameters.
         static std::size_t fill_params(
             const KernelSpec& spec, std::span<double> out, std::size_t offset, std::expected<void, GprError>& status
@@ -105,10 +105,10 @@ namespace cxxgpr
 
         /// @brief Recursively writes flattened open parameter intervals starting at offset.
         /// @details Short-circuits subsequent subtrees once status enters an error state.
-        /// @param spec Subtree root specification to traverse.
-        /// @param out Full flattened output interval span.
-        /// @param offset Starting index in out for this subtree.
-        /// @param status In-out status updated if any leaf bounds query fails.
+        /// @param[in] spec Subtree root specification to traverse.
+        /// @param[out] out Full flattened output interval span.
+        /// @param[in] offset Starting index in out for this subtree.
+        /// @param[in,out] status In-out status updated if any leaf bounds query fails.
         /// @return Updated offset immediately following this subtree's intervals.
         static std::size_t fill_bounds(
             const KernelSpec& spec, std::span<Interval> out, std::size_t offset, std::expected<void, GprError>& status
@@ -138,9 +138,9 @@ namespace cxxgpr
         /// @brief Constructs a new KernelSpec subtree with updated log-space leaf parameters.
         /// @details Performs copy-on-write traversal so any validation failure aborts without mutating
         /// the original shared AST nodes.
-        /// @param spec Source subtree root specification.
-        /// @param params Full flattened input parameter span.
-        /// @param offset In-out cursor tracking the current position in params.
+        /// @param[in] spec Source subtree root specification.
+        /// @param[in] params Full flattened input parameter span.
+        /// @param[in,out] offset In-out cursor tracking the current position in params.
         /// @return Updated KernelSpec subtree or GprError if any leaf rejects its slice.
         /// @retval GprErrorCode::NonFiniteInput When any log-space parameter is NaN or infinite.
         /// @retval GprErrorCode::InvalidInterval When any exponentiated value falls outside leaf bounds.
@@ -193,10 +193,10 @@ namespace cxxgpr
 
         /// @brief Recursively emits ParameterBinding entries in depth-first left-to-right leaf order.
         /// @details Assigns monotonically increasing leaf_id and global parameter index values.
-        /// @param spec Subtree root specification.
-        /// @param next_leaf_id In-out leaf counter incremented once per visited leaf.
-        /// @param next_param_idx In-out global parameter counter incremented once per parameter.
-        /// @param out Destination vector receiving ParameterBinding descriptors.
+        /// @param[in] spec Subtree root specification.
+        /// @param[in,out] next_leaf_id In-out leaf counter incremented once per visited leaf.
+        /// @param[in,out] next_param_idx In-out global parameter counter incremented once per parameter.
+        /// @param[in,out] out Destination vector receiving ParameterBinding descriptors.
         static void collect_bindings(
             const KernelSpec& spec,
             std::size_t& next_leaf_id,
@@ -235,12 +235,12 @@ namespace cxxgpr
 
     /// @brief Constructs a leaf specification from any built-in or custom kernel leaf.
     /// @details Moves leaf into the underlying NodeVariant.
-    /// @param leaf Built-in or custom kernel leaf value.
+    /// @param[in] leaf Built-in or custom kernel leaf value.
     KernelSpec::KernelSpec(KernelLeaf leaf) : node_(std::move(leaf)) {}
 
     /// @brief Constructs a leaf specification from a user-defined CustomKernel.
     /// @details Wraps leaf in KernelLeaf and returns a single-leaf KernelSpec.
-    /// @param leaf Validated CustomKernel value wrapper.
+    /// @param[in] leaf Validated CustomKernel value wrapper.
     /// @return Single-leaf KernelSpec holding leaf.
     KernelSpec KernelSpec::custom(CustomKernel leaf)
     {
@@ -249,8 +249,8 @@ namespace cxxgpr
 
     /// @brief Constructs a sum of two kernel specifications.
     /// @details Allocates shared immutable child nodes and wraps them in SumNode.
-    /// @param lhs Left kernel addend.
-    /// @param rhs Right kernel addend.
+    /// @param[in] lhs Left kernel addend.
+    /// @param[in] rhs Right kernel addend.
     /// @return Composite KernelSpec representing lhs + rhs.
     KernelSpec KernelSpec::sum(KernelSpec lhs, KernelSpec rhs)
     {
@@ -262,8 +262,8 @@ namespace cxxgpr
 
     /// @brief Constructs a product of two kernel specifications.
     /// @details Allocates shared immutable child nodes and wraps them in ProductNode.
-    /// @param lhs Left kernel factor.
-    /// @param rhs Right kernel factor.
+    /// @param[in] lhs Left kernel factor.
+    /// @param[in] rhs Right kernel factor.
     /// @return Composite KernelSpec representing lhs * rhs.
     KernelSpec KernelSpec::product(KernelSpec lhs, KernelSpec rhs)
     {
@@ -295,7 +295,7 @@ namespace cxxgpr
 
     /// @brief Writes flattened log-space hyperparameters in depth-first left-to-right leaf order.
     /// @details Validates out length before dispatching recursive depth-first traversal.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch or leaf failure.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> KernelSpec::get_params(std::span<double> out) const
@@ -312,7 +312,7 @@ namespace cxxgpr
     /// @brief Atomically updates all leaf parameters from log-space params.
     /// @details Validates input length, builds a complete replacement tree via copy-on-write, and
     /// commits *this only when all leaves accept their new values.
-    /// @param params Input span of unconstrained log-space parameters of length num_params().
+    /// @param[in] params Input span of unconstrained log-space parameters of length num_params().
     /// @return Empty expected on success or GprError if any validation step fails.
     /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
     /// @retval GprErrorCode::NonFiniteInput When any log-space parameter is NaN or infinite.
@@ -336,7 +336,7 @@ namespace cxxgpr
 
     /// @brief Writes flattened open intervals in depth-first left-to-right leaf order.
     /// @details Validates out length before traversing the tree in canonical parameter order.
-    /// @param out Destination span of length num_params().
+    /// @param[out] out Destination span of length num_params().
     /// @return Empty expected on success or GprError on length mismatch or leaf failure.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> KernelSpec::bounds_into(std::span<Interval> out) const
@@ -397,8 +397,8 @@ namespace cxxgpr
 
     /// @brief Combines two kernel specifications by addition.
     /// @details Moves both operands into KernelSpec::sum().
-    /// @param lhs Left kernel addend.
-    /// @param rhs Right kernel addend.
+    /// @param[in] lhs Left kernel addend.
+    /// @param[in] rhs Right kernel addend.
     /// @return Composite sum KernelSpec.
     KernelSpec operator+(KernelSpec lhs, KernelSpec rhs)
     {
@@ -407,8 +407,8 @@ namespace cxxgpr
 
     /// @brief Combines two kernel specifications by multiplication.
     /// @details Moves both operands into KernelSpec::product().
-    /// @param lhs Left kernel factor.
-    /// @param rhs Right kernel factor.
+    /// @param[in] lhs Left kernel factor.
+    /// @param[in] rhs Right kernel factor.
     /// @return Composite product KernelSpec.
     KernelSpec operator*(KernelSpec lhs, KernelSpec rhs)
     {

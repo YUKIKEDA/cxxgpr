@@ -34,6 +34,10 @@
 #include <utility>
 #include <vector>
 
+/// @defgroup cxxgpr_persist Model Persistence and Extension Registry
+/// @brief Directory-based serialization (`config.json` + `model.safetensors`) and mmap loading.
+/// @{
+
 /// @brief Model serialization, deserialization, and custom extension registry APIs.
 namespace cxxgpr::persist
 {
@@ -65,7 +69,7 @@ namespace cxxgpr::persist
 
     /// @brief Validates a user-supplied persist_id against empty and reserved prefix rules.
     /// @details Rejects empty strings and identifiers beginning with RESERVED_PREFIX ("cxxgpr.").
-    /// @param persist_id Candidate extension identifier string.
+    /// @param[in] persist_id Candidate extension identifier string.
     /// @return Empty expected on success, or PersistFailed(InvalidPersistId) when invalid.
     /// @retval GprErrorCode::PersistFailed When persist_id is empty or uses the reserved prefix.
     [[nodiscard]] std::expected<void, GprError> validate_persist_id(std::string_view persist_id);
@@ -79,8 +83,8 @@ namespace cxxgpr::persist
     public:
         /// @brief Registers a custom kernel leaf factory under persist_id.
         /// @details Rejects invalid or already registered identifiers before inserting into kernels_.
-        /// @param persist_id Unique user extension identifier outside the reserved prefix.
-        /// @param factory Deserialization callback accepting serialized state JSON.
+        /// @param[in] persist_id Unique user extension identifier outside the reserved prefix.
+        /// @param[in] factory Deserialization callback accepting serialized state JSON.
         /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on validation/duplicate failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is invalid or already registered.
         [[nodiscard]] std::expected<void, GprError> register_kernel(
@@ -89,8 +93,8 @@ namespace cxxgpr::persist
 
         /// @brief Registers a custom unfitted input transform factory under persist_id.
         /// @details Rejects invalid or already registered identifiers before inserting into unfitted_inputs_.
-        /// @param persist_id Unique user extension identifier outside the reserved prefix.
-        /// @param factory Deserialization callback accepting serialized state JSON.
+        /// @param[in] persist_id Unique user extension identifier outside the reserved prefix.
+        /// @param[in] factory Deserialization callback accepting serialized state JSON.
         /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on validation/duplicate failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is invalid or already registered.
         [[nodiscard]] std::expected<void, GprError> register_unfitted_input(
@@ -99,8 +103,8 @@ namespace cxxgpr::persist
 
         /// @brief Registers a custom fitted input transform factory under persist_id.
         /// @details Rejects invalid or already registered identifiers before inserting into fitted_inputs_.
-        /// @param persist_id Unique user extension identifier outside the reserved prefix.
-        /// @param factory Deserialization callback accepting serialized state JSON.
+        /// @param[in] persist_id Unique user extension identifier outside the reserved prefix.
+        /// @param[in] factory Deserialization callback accepting serialized state JSON.
         /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on validation/duplicate failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is invalid or already registered.
         [[nodiscard]] std::expected<void, GprError> register_fitted_input(
@@ -109,8 +113,8 @@ namespace cxxgpr::persist
 
         /// @brief Registers a custom unfitted target transform factory under persist_id.
         /// @details Rejects invalid or already registered identifiers before inserting into unfitted_targets_.
-        /// @param persist_id Unique user extension identifier outside the reserved prefix.
-        /// @param factory Deserialization callback accepting serialized state JSON.
+        /// @param[in] persist_id Unique user extension identifier outside the reserved prefix.
+        /// @param[in] factory Deserialization callback accepting serialized state JSON.
         /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on validation/duplicate failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is invalid or already registered.
         [[nodiscard]] std::expected<void, GprError> register_unfitted_target(
@@ -119,8 +123,8 @@ namespace cxxgpr::persist
 
         /// @brief Registers a custom fitted target transform factory under persist_id.
         /// @details Rejects invalid or already registered identifiers before inserting into fitted_targets_.
-        /// @param persist_id Unique user extension identifier outside the reserved prefix.
-        /// @param factory Deserialization callback accepting serialized state JSON.
+        /// @param[in] persist_id Unique user extension identifier outside the reserved prefix.
+        /// @param[in] factory Deserialization callback accepting serialized state JSON.
         /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on validation/duplicate failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is invalid or already registered.
         [[nodiscard]] std::expected<void, GprError> register_fitted_target(
@@ -129,8 +133,8 @@ namespace cxxgpr::persist
 
         /// @brief Looks up and invokes a registered custom kernel factory by persist_id.
         /// @details Returns PersistFailed(UnregisteredId) if no matching kernel factory is registered.
-        /// @param persist_id Identifier read from persisted config.json.
-        /// @param state_json Serialized JSON state string passed to the factory.
+        /// @param[in] persist_id Identifier read from persisted config.json.
+        /// @param[in] state_json Serialized JSON state string passed to the factory.
         /// @return Reconstructed CustomKernel or GprError on missing registration or factory failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is unregistered or factory validation fails.
         [[nodiscard]] std::expected<CustomKernel, GprError> create_kernel(
@@ -139,8 +143,8 @@ namespace cxxgpr::persist
 
         /// @brief Looks up and invokes a registered custom unfitted input transform factory by persist_id.
         /// @details Returns PersistFailed(UnregisteredId) if no matching factory is registered.
-        /// @param persist_id Identifier read from persisted config.json.
-        /// @param state_json Serialized JSON state string passed to the factory.
+        /// @param[in] persist_id Identifier read from persisted config.json.
+        /// @param[in] state_json Serialized JSON state string passed to the factory.
         /// @return Reconstructed UnfittedInputTransform pointer or GprError on failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is unregistered or factory validation fails.
         [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedInputTransform>, GprError> create_unfitted_input(
@@ -149,8 +153,8 @@ namespace cxxgpr::persist
 
         /// @brief Looks up and invokes a registered custom fitted input transform factory by persist_id.
         /// @details Returns PersistFailed(UnregisteredId) if no matching factory is registered.
-        /// @param persist_id Identifier read from persisted config.json.
-        /// @param state_json Serialized JSON state string passed to the factory.
+        /// @param[in] persist_id Identifier read from persisted config.json.
+        /// @param[in] state_json Serialized JSON state string passed to the factory.
         /// @return Reconstructed FittedInputTransform pointer or GprError on failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is unregistered or factory validation fails.
         [[nodiscard]] std::expected<std::unique_ptr<transform::FittedInputTransform>, GprError> create_fitted_input(
@@ -159,8 +163,8 @@ namespace cxxgpr::persist
 
         /// @brief Looks up and invokes a registered custom unfitted target transform factory by persist_id.
         /// @details Returns PersistFailed(UnregisteredId) if no matching factory is registered.
-        /// @param persist_id Identifier read from persisted config.json.
-        /// @param state_json Serialized JSON state string passed to the factory.
+        /// @param[in] persist_id Identifier read from persisted config.json.
+        /// @param[in] state_json Serialized JSON state string passed to the factory.
         /// @return Reconstructed UnfittedTargetTransform pointer or GprError on failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is unregistered or factory validation fails.
         [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedTargetTransform>, GprError>
@@ -168,8 +172,8 @@ namespace cxxgpr::persist
 
         /// @brief Looks up and invokes a registered custom fitted target transform factory by persist_id.
         /// @details Returns PersistFailed(UnregisteredId) if no matching factory is registered.
-        /// @param persist_id Identifier read from persisted config.json.
-        /// @param state_json Serialized JSON state string passed to the factory.
+        /// @param[in] persist_id Identifier read from persisted config.json.
+        /// @param[in] state_json Serialized JSON state string passed to the factory.
         /// @return Reconstructed FittedTargetTransform pointer or GprError on failure.
         /// @retval GprErrorCode::PersistFailed When persist_id is unregistered or factory validation fails.
         [[nodiscard]] std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError> create_fitted_target(
@@ -199,8 +203,8 @@ namespace cxxgpr::persist
         /// @brief Loads and validates a persisted Exact GPR directory (config.json + model.safetensors).
         /// @details Parses configuration, memory-maps model.safetensors, validates tensor shapes and
         /// finiteness, and either binds or reconstructs the Cholesky factor depending on has_factor.
-        /// @param dir Directory containing config.json and model.safetensors.
-        /// @param registry Optional custom extension registry for custom kernels and transforms.
+        /// @param[in] dir Directory containing config.json and model.safetensors.
+        /// @param[in] registry Optional custom extension registry for custom kernels and transforms.
         /// @return Validated LoadedGpr handle or GprError on I/O, schema, version, or factor failure.
         /// @retval GprErrorCode::PersistFailed When directory files, JSON, tensors, or registry lookup fail.
         /// @retval GprErrorCode::UnsupportedPersistVersion When artifact format_version is unsupported.
@@ -277,8 +281,8 @@ namespace cxxgpr::persist
         /// @brief Computes posterior mean and diagonal variance promoted to double precision.
         /// @details Validates xs, applies the restored input transform, evaluates posterior moments under
         /// the persisted precision policy, and applies the inverse target transform on the original scale.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param options Optional prediction controls (e.g., noiseless vs noisy variance).
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] options Optional prediction controls (e.g., noiseless vs noisy variance).
         /// @return Double-precision Prediction on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
@@ -289,10 +293,10 @@ namespace cxxgpr::persist
 
         /// @brief Computes posterior mean and diagonal variance from a raw column-major span.
         /// @details Wraps the raw column-major query buffer into a MatrixRef<double> and delegates to predict().
-        /// @param xs Contiguous column-major query data of length n_rows * n_cols.
-        /// @param n_rows Number of query points m.
-        /// @param n_cols Number of features per query point (must match d()).
-        /// @param options Optional prediction controls.
+        /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must match d()).
+        /// @param[in] options Optional prediction controls.
         /// @return Double-precision Prediction on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs has zero elements or null data.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != d().
@@ -306,9 +310,9 @@ namespace cxxgpr::persist
 
         /// @brief Computes posterior mean and diagonal variance into out (double-promoted).
         /// @details Reuses internal query scratch buffers and writes results into out on the original scale.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param out Destination prediction struct populated on success.
-        /// @param options Optional prediction controls.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[out] out Destination prediction struct populated on success.
+        /// @param[in] options Optional prediction controls.
         /// @return Empty expected on success, or GprError on validation or numerical failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
@@ -320,8 +324,8 @@ namespace cxxgpr::persist
         /// @brief Computes full m x m posterior covariance matrix (double-promoted).
         /// @details Transforms query coordinates, evaluates full posterior covariance under the persisted
         /// precision policy, and maps both mean and covariance back to the original target scale.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param options Optional prediction controls.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] options Optional prediction controls.
         /// @return Double-precision PredictiveCovariance or GprError on validation or numerical failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
@@ -332,11 +336,11 @@ namespace cxxgpr::persist
 
         /// @brief Draws n_draws deterministic posterior samples (double-promoted).
         /// @details Evaluates posterior draws using seed and maps each draw back to the original target scale.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param n_draws Number of posterior function draws to generate.
-        /// @param seed Deterministic PRNG seed for sampling.
-        /// @param options Optional prediction controls.
-        /// @param jitter Optional override jitter policy for predictive covariance Cholesky stabilization.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed for sampling.
+        /// @param[in] options Optional prediction controls.
+        /// @param[in] jitter Optional override jitter policy for predictive covariance Cholesky stabilization.
         /// @return Column-major sample matrix (m x n_draws) promoted to double, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
@@ -354,7 +358,7 @@ namespace cxxgpr::persist
         /// (double-promoted).
         /// @details Uses cached training Cholesky factor L and weights alpha to compute analytical LOO
         /// moments before applying inverse target transforms.
-        /// @param options Optional prediction controls.
+        /// @param[in] options Optional prediction controls.
         /// @return Double-precision LOO Prediction on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::NonFiniteKernelValue When inverse target transform encounters non-finite outputs.
         [[nodiscard]] std::expected<Prediction<double>, GprError> loo_predict(const PredictOptions& options = {}) const;
@@ -365,7 +369,7 @@ namespace cxxgpr::persist
         /// unfitted/fitted transforms so the resulting FittedGpr is completely decoupled from mmap lifetimes.
         /// @tparam O Optimizer type associated with the returned FittedGpr for refit/into_trainer.
         /// @tparam P Precision policy type that must match precision_kind().
-        /// @param optimizer Optimizer instance stored on the extracted FittedGpr.
+        /// @param[in] optimizer Optimizer instance stored on the extracted FittedGpr.
         /// @return Typed FittedGpr on precision match, or PersistFailed(WrongModel) on mismatch.
         /// @retval GprErrorCode::PersistFailed When P::persist_kind() != precision_kind().
         template <typename O = optimizer::Lbfgs, PrecisionPolicyConcept P = DoublePrecision>
@@ -376,13 +380,13 @@ namespace cxxgpr::persist
         struct Impl;
 
         /// @brief Private constructor wrapping a validated shared checkpoint implementation.
-        /// @param impl Shared immutable checkpoint payload.
+        /// @param[in] impl Shared immutable checkpoint payload.
         explicit LoadedGpr(std::shared_ptr<const Impl> impl) noexcept : impl_(std::move(impl)) {}
 
         /// @brief Materializes an owned FittedPayload<P> and clones unfitted transforms from impl_.
         /// @tparam P Target precision policy matching impl_->precision_kind.
-        /// @param out_unfitted_in Output pointer populated with cloned unfitted input transform.
-        /// @param out_unfitted_tgt Output pointer populated with cloned unfitted target transform.
+        /// @param[out] out_unfitted_in Output pointer populated with cloned unfitted input transform.
+        /// @param[out] out_unfitted_tgt Output pointer populated with cloned unfitted target transform.
         /// @return Owned FittedPayload<P> or GprError on extraction failure.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<detail::FittedPayload<P>, GprError> extract_payload(
@@ -399,7 +403,7 @@ namespace cxxgpr::persist
     /// tensors out of the loaded checkpoint.
     /// @tparam O Optimizer type attached to the returned FittedGpr.
     /// @tparam P Precision policy matching precision_kind().
-    /// @param optimizer Optimizer configuration forwarded to the returned FittedGpr.
+    /// @param[in] optimizer Optimizer configuration forwarded to the returned FittedGpr.
     /// @return Typed FittedGpr configured with CholeskyBuffer::Retain, or GprError on precision mismatch.
     /// @retval GprErrorCode::PersistFailed When P::persist_kind() does not match precision_kind().
     template <typename O, PrecisionPolicyConcept P>
@@ -481,9 +485,9 @@ namespace cxxgpr::persist
 
         /// @brief Validates inputs and writes config.json and model.safetensors atomically into dir.
         /// @details Stages temporary files inside dir and atomically renames them into place on success.
-        /// @param input Borrowed model configuration and raw/factor tensor spans.
-        /// @param dir Destination directory path created if absent.
-        /// @param registry Custom extension registry (currently unused during save; reserved for symmetry).
+        /// @param[in] input Borrowed model configuration and raw/factor tensor spans.
+        /// @param[in] dir Destination directory path created if absent.
+        /// @param[in] registry Custom extension registry (currently unused during save; reserved for symmetry).
         /// @return Empty expected on success, or GprError on validation, serialization, or I/O failure.
         /// @retval GprErrorCode::EmptyInput When n_train or n_features is zero.
         /// @retval GprErrorCode::NonFiniteInput When jitter or any persisted tensor entry is non-finite.
@@ -500,9 +504,9 @@ namespace cxxgpr::persist
     /// @tparam O Optimizer type held by model.
     /// @tparam P Precision policy used by model.
     /// @tparam K Kernel specification type (KernelSpec).
-    /// @param model Fitted GPR model to persist.
-    /// @param dir Target checkpoint directory path.
-    /// @param registry Optional custom extension registry.
+    /// @param[in] model Fitted GPR model to persist.
+    /// @param[in] dir Target checkpoint directory path.
+    /// @param[in] registry Optional custom extension registry.
     /// @return Empty expected on success, or GprError on non-persistable components or I/O failure.
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or I/O fails.
     template <typename O, PrecisionPolicyConcept P, typename K>
@@ -541,9 +545,9 @@ namespace cxxgpr::persist
     /// @tparam O Optimizer type held by model.
     /// @tparam P Precision policy used by model.
     /// @tparam K Kernel specification type (KernelSpec).
-    /// @param model Fitted GPR model to persist.
-    /// @param dir Target checkpoint directory path.
-    /// @param registry Optional custom extension registry.
+    /// @param[in] model Fitted GPR model to persist.
+    /// @param[in] dir Target checkpoint directory path.
+    /// @param[in] registry Optional custom extension registry.
     /// @return Empty expected on success, or GprError on non-persistable components or I/O failure.
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or I/O fails.
     template <typename O, PrecisionPolicyConcept P, typename K>
@@ -601,3 +605,5 @@ namespace cxxgpr::persist
     }
 
 }  // namespace cxxgpr::persist
+
+/// @}

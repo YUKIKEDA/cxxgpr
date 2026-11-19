@@ -43,7 +43,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Wraps a read-only MatrixRef view as an Eigen ConstEigenMap.
     /// @details Preserves column-major dimensions and outer column stride with zero copies.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param mat Validated read-only column-major matrix view.
+    /// @param[in] mat Validated read-only column-major matrix view.
     /// @return Strided read-only Eigen map aliasing mat.data().
     template <KernelScalarConcept T> [[nodiscard]] inline ConstEigenMap<T> to_eigen_map(MatrixRef<T> mat) noexcept
     {
@@ -56,7 +56,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Wraps a mutable MatrixMut view as an Eigen MutEigenMap.
     /// @details Preserves column-major dimensions and outer column stride with zero copies.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param mat Validated mutable column-major matrix view.
+    /// @param[in] mat Validated mutable column-major matrix view.
     /// @return Strided mutable Eigen map aliasing mat.data().
     template <KernelScalarConcept T> [[nodiscard]] inline MutEigenMap<T> to_eigen_map(MatrixMut<T> mat) noexcept
     {
@@ -69,8 +69,8 @@ namespace cxxgpr::linalg::detail
     /// @brief Validates non-emptiness, stride overflow, column stride, and optional squareness of a matrix view.
     /// @details Enforces the validation order EmptyInput -> SizeOverflow -> LengthMismatch before any indexing occurs.
     /// @tparam MatView Matrix view type (MatrixRef<T> or MatrixMut<T>).
-    /// @param mat Matrix view to validate.
-    /// @param require_square When true, rejects non-square matrices with LengthMismatch.
+    /// @param[in] mat Matrix view to validate.
+    /// @param[in] require_square When true, rejects non-square matrices with LengthMismatch.
     /// @return Empty expected on success, or GprError on invalid view geometry.
     /// @retval GprErrorCode::EmptyInput When the view is empty or its base pointer is null.
     /// @retval GprErrorCode::SizeOverflow When col_stride * cols overflows std::size_t.
@@ -104,7 +104,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Verifies that all entries in the lower triangle (including diagonal) of mat are finite.
     /// @details Sweeps column by column with row >= col so uninitialized upper-triangular entries are ignored.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param mat Validated square read-only matrix view.
+    /// @param[in] mat Validated square read-only matrix view.
     /// @return Empty expected when all lower-triangular elements are finite, or GprError otherwise.
     /// @retval GprErrorCode::NonFiniteInput When any lower-triangular entry is NaN or infinite.
     template <KernelScalarConcept T>
@@ -128,7 +128,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Verifies that every entry in mat is finite.
     /// @details Scans all rows across every column in column-major order.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param mat Validated read-only matrix view.
+    /// @param[in] mat Validated read-only matrix view.
     /// @return Empty expected when all elements are finite, or GprError otherwise.
     /// @retval GprErrorCode::NonFiniteInput When any matrix element is NaN or infinite.
     template <KernelScalarConcept T>
@@ -153,7 +153,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Verifies that every element in a contiguous scalar span is finite.
     /// @details Rejects NaN and infinity while permitting subnormal finite numbers.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param values Contiguous span of scalar values to inspect.
+    /// @param[in] values Contiguous span of scalar values to inspect.
     /// @return Empty expected when all elements are finite, or GprError otherwise.
     /// @retval GprErrorCode::NonFiniteInput When any element in values is NaN or infinite.
     template <KernelScalarConcept T>
@@ -173,7 +173,7 @@ namespace cxxgpr::linalg::detail
     /// @brief Converts a mutable MatrixMut view into an aliasing read-only MatrixRef view.
     /// @details Copies pointer, dimensions, and column stride with zero allocations.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param mat Mutable matrix view to alias as read-only.
+    /// @param[in] mat Mutable matrix view to alias as read-only.
     /// @return Read-only MatrixRef aliasing the same underlying buffer.
     template <KernelScalarConcept T> [[nodiscard]] inline MatrixRef<T> as_ref(MatrixMut<T> mat) noexcept
     {

@@ -30,17 +30,17 @@ namespace cxxgpr::transform
 
         /// @brief Constructs a fitted columnwise transform from per-feature fitted maps.
         /// @details Takes ownership of the provided per-column transform pointers.
-        /// @param maps Ordered vector of fitted per-column input transforms.
+        /// @param[in] maps Ordered vector of fitted per-column input transforms.
         explicit FittedColumnwiseInput(std::vector<std::unique_ptr<FittedInputTransform>> maps) noexcept;
 
         /// @brief Deep-copies the fitted columnwise transform.
         /// @details Clones each non-null per-column map into a newly owned vector.
-        /// @param other Source FittedColumnwiseInput to copy.
+        /// @param[in] other Source FittedColumnwiseInput to copy.
         FittedColumnwiseInput(const FittedColumnwiseInput& other);
 
         /// @brief Deep-copy assigns the fitted columnwise transform.
         /// @details Replaces owned column maps with deep clones of other's maps, guarding self-assignment.
-        /// @param other Source FittedColumnwiseInput to copy from.
+        /// @param[in] other Source FittedColumnwiseInput to copy from.
         /// @return Reference to *this.
         FittedColumnwiseInput& operator=(const FittedColumnwiseInput& other);
 
@@ -75,9 +75,9 @@ namespace cxxgpr::transform
         /// @brief Applies each column's fitted map to its corresponding column in place.
         /// @details Validates matrix dimensions against size() and invokes maps_[col]->apply on each contiguous column
         /// slice.
-        /// @param x Mutable column-major feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
+        /// @param[in,out] x Mutable column-major feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
         /// @return Empty expected on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -91,10 +91,10 @@ namespace cxxgpr::transform
 
         /// @brief Applies each column's fitted map from x into out without allocation.
         /// @details Validates input/output sizes against size() and invokes maps_[col]->apply_into per column slice.
-        /// @param x Read-only column-major feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
-        /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+        /// @param[in] x Read-only column-major feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
+        /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
         /// @return Empty expected on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -108,9 +108,9 @@ namespace cxxgpr::transform
 
         /// @brief Inverts each column's fitted map on its corresponding column in place.
         /// @details Validates matrix dimensions against size() and invokes maps_[col]->inverse_apply per column slice.
-        /// @param x Mutable column-major transformed feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
+        /// @param[in,out] x Mutable column-major transformed feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
         /// @return Empty expected on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -125,10 +125,10 @@ namespace cxxgpr::transform
         /// @brief Inverts each column's fitted map from x into out without allocation.
         /// @details Validates input/output sizes against size() and invokes maps_[col]->inverse_apply_into per column
         /// slice.
-        /// @param x Read-only column-major transformed feature buffer of size n_rows * n_cols.
-        /// @param n_rows Number of sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
-        /// @param out Preallocated mutable output buffer of size n_rows * n_cols.
+        /// @param[in] x Read-only column-major transformed feature buffer of size n_rows * n_cols.
+        /// @param[in] n_rows Number of sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
+        /// @param[out] out Preallocated mutable output buffer of size n_rows * n_cols.
         /// @return Empty expected on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -161,17 +161,17 @@ namespace cxxgpr::transform
 
         /// @brief Constructs a columnwise transform from per-feature unfitted maps.
         /// @details Takes ownership of the provided vector of unfitted column maps.
-        /// @param maps Ordered vector of unfitted per-column input transforms.
+        /// @param[in] maps Ordered vector of unfitted per-column input transforms.
         explicit ColumnwiseInput(std::vector<std::unique_ptr<UnfittedInputTransform>> maps) noexcept;
 
         /// @brief Deep-copies the unfitted columnwise transform.
         /// @details Clones each non-null unfitted column map into a newly owned vector.
-        /// @param other Source ColumnwiseInput to copy.
+        /// @param[in] other Source ColumnwiseInput to copy.
         ColumnwiseInput(const ColumnwiseInput& other);
 
         /// @brief Deep-copy assigns the unfitted columnwise transform.
         /// @details Replaces owned column maps with deep clones of other's maps, guarding self-assignment.
-        /// @param other Source ColumnwiseInput to copy from.
+        /// @param[in] other Source ColumnwiseInput to copy from.
         /// @return Reference to *this.
         ColumnwiseInput& operator=(const ColumnwiseInput& other);
 
@@ -190,25 +190,25 @@ namespace cxxgpr::transform
 
         /// @brief Appends a map for the next feature column by cloning it.
         /// @details Lvalue overload supporting chained calls on a named ColumnwiseInput variable.
-        /// @param map Unfitted input transform to clone and append for the next feature column.
+        /// @param[in] map Unfitted input transform to clone and append for the next feature column.
         /// @return Reference to *this.
         ColumnwiseInput& then(const UnfittedInputTransform& map) &;
 
         /// @brief Appends a map for the next feature column by cloning it onto an rvalue.
         /// @details Rvalue overload supporting fluent construction expressions.
-        /// @param map Unfitted input transform to clone and append for the next feature column.
+        /// @param[in] map Unfitted input transform to clone and append for the next feature column.
         /// @return Rvalue reference to *this.
         ColumnwiseInput&& then(const UnfittedInputTransform& map) &&;
 
         /// @brief Appends an owned map for the next feature column.
         /// @details Ignores null pointers rather than storing empty slots.
-        /// @param map Owned unfitted input transform for the next feature column.
+        /// @param[in] map Owned unfitted input transform for the next feature column.
         /// @return Reference to *this.
         ColumnwiseInput& then(std::unique_ptr<UnfittedInputTransform> map) &;
 
         /// @brief Appends an owned map for the next feature column onto an rvalue.
         /// @details Ignores null pointers rather than storing empty slots.
-        /// @param map Owned unfitted input transform for the next feature column.
+        /// @param[in] map Owned unfitted input transform for the next feature column.
         /// @return Rvalue reference to *this.
         ColumnwiseInput&& then(std::unique_ptr<UnfittedInputTransform> map) &&;
 
@@ -230,9 +230,9 @@ namespace cxxgpr::transform
         /// @brief Fits each column map independently on its column of x (requires n_cols == size()).
         /// @details Validates matrix packing and column count against size(), then fits each column map on its
         /// contiguous n_rows x 1 slice.
-        /// @param x Read-only column-major training feature matrix.
-        /// @param n_rows Number of training sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
+        /// @param[in] x Read-only column-major training feature matrix.
+        /// @param[in] n_rows Number of training sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
         /// @return FittedColumnwiseInput on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
@@ -246,9 +246,9 @@ namespace cxxgpr::transform
 
         /// @brief Fits each column map independently and returns a boxed fitted columnwise transform.
         /// @details Delegates to fit_typed and boxes the result in std::unique_ptr<FittedInputTransform>.
-        /// @param x Read-only column-major training feature matrix.
-        /// @param n_rows Number of training sample rows.
-        /// @param n_cols Number of feature columns (must equal size()).
+        /// @param[in] x Read-only column-major training feature matrix.
+        /// @param[in] n_rows Number of training sample rows.
+        /// @param[in] n_cols Number of feature columns (must equal size()).
         /// @return Boxed FittedColumnwiseInput on success, or GprError on validation failure or null map entry.
         /// @retval GprErrorCode::EmptyInput When x, n_rows, or n_cols is empty/zero.
         /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.

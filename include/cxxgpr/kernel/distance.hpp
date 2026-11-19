@@ -62,15 +62,15 @@ namespace cxxgpr
 
         /// @brief Compares two slot identifiers for equality.
         /// @details Compares underlying numeric slot identifiers.
-        /// @param lhs Left-hand SlotId operand.
-        /// @param rhs Right-hand SlotId operand.
+        /// @param[in] lhs Left-hand SlotId operand.
+        /// @param[in] rhs Right-hand SlotId operand.
         /// @return True if both SlotId instances refer to the same slot.
         [[nodiscard]] friend constexpr bool operator==(const SlotId& lhs, const SlotId& rhs) noexcept = default;
 
         /// @brief Three-way comparison between two slot identifiers.
         /// @details Orders SlotId instances deterministically by numeric identifier value.
-        /// @param lhs Left-hand SlotId operand.
-        /// @param rhs Right-hand SlotId operand.
+        /// @param[in] lhs Left-hand SlotId operand.
+        /// @param[in] rhs Right-hand SlotId operand.
         /// @return Strong ordering result comparing numeric values.
         [[nodiscard]] friend constexpr auto operator<=>(const SlotId& lhs, const SlotId& rhs) noexcept = default;
 
@@ -80,7 +80,7 @@ namespace cxxgpr
 
         /// @brief Constructs a SlotId wrapping an assigned unique integer value.
         /// @details Private so callers can obtain SlotId values only through ScalarDistance or ArdDistance.
-        /// @param value Monotonically assigned process-unique identifier.
+        /// @param[in] value Monotonically assigned process-unique identifier.
         explicit constexpr SlotId(std::uint64_t value) noexcept : value_(value) {}
 
         /// @brief Monotonic process-unique numeric identifier.
@@ -101,8 +101,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two SlotDescriptor instances.
         /// @details Compares id, ard_dims, and shape-local index at.
-        /// @param lhs Left-hand SlotDescriptor operand.
-        /// @param rhs Right-hand SlotDescriptor operand.
+        /// @param[in] lhs Left-hand SlotDescriptor operand.
+        /// @param[in] rhs Right-hand SlotDescriptor operand.
         /// @return True if all fields match.
         [[nodiscard]] friend constexpr bool operator==(
             const SlotDescriptor& lhs, const SlotDescriptor& rhs
@@ -136,31 +136,31 @@ namespace cxxgpr
 
         /// @brief Binds an isotropic RBF leaf to this scalar distance slot.
         /// @details Evaluates exp(-d^2 / (2 * l^2)) over the supplied squared distances d^2.
-        /// @param leaf Configured RbfKernel leaf.
+        /// @param[in] leaf Configured RbfKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> reading this slot.
         [[nodiscard]] DistanceKernel<DistanceOnly> rbf(RbfKernel leaf) const;
 
         /// @brief Binds an isotropic Matern leaf to this scalar distance slot.
         /// @details Evaluates Matern(nu) over sqrt(d^2) from the supplied squared distances.
-        /// @param leaf Configured MaternKernel leaf.
+        /// @param[in] leaf Configured MaternKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> reading this slot.
         [[nodiscard]] DistanceKernel<DistanceOnly> matern(MaternKernel leaf) const;
 
         /// @brief Binds an isotropic Periodic leaf to this scalar distance slot.
         /// @details Evaluates exp(-2 * sin^2(pi * sqrt(d^2) / p) / l^2) over the supplied squared distances.
-        /// @param leaf Configured PeriodicKernel leaf.
+        /// @param[in] leaf Configured PeriodicKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> reading this slot.
         [[nodiscard]] DistanceKernel<DistanceOnly> periodic(PeriodicKernel leaf) const;
 
         /// @brief Binds an isotropic RationalQuadratic leaf to this scalar distance slot.
         /// @details Evaluates (1 + d^2 / (2 * alpha * l^2))^(-alpha) over the supplied squared distances.
-        /// @param leaf Configured RationalQuadraticKernel leaf.
+        /// @param[in] leaf Configured RationalQuadraticKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> reading this slot.
         [[nodiscard]] DistanceKernel<DistanceOnly> rational_quadratic(RationalQuadraticKernel leaf) const;
 
         /// @brief Binds a user-defined CustomKernel leaf to this scalar distance slot.
         /// @details Feeds the supplied squared-distance block directly into CustomKernel::term<T>().
-        /// @param leaf Validated CustomKernel wrapper.
+        /// @param[in] leaf Validated CustomKernel wrapper.
         /// @return Single-leaf DistanceKernel<DistanceOnly> reading this slot.
         [[nodiscard]] DistanceKernel<DistanceOnly> custom(CustomKernel leaf) const;
 
@@ -176,7 +176,7 @@ namespace cxxgpr
     public:
         /// @brief Creates an ARD distance slot for dims > 0 dimensions.
         /// @details Rejects dims == 0 with EmptyInput and assigns a fresh process-unique SlotId.
-        /// @param dims Expected number of per-dimension squared-distance tables.
+        /// @param[in] dims Expected number of per-dimension squared-distance tables.
         /// @return Validated ArdDistance handle or GprError if dims == 0.
         /// @retval GprErrorCode::EmptyInput When dims == 0.
         [[nodiscard]] static std::expected<ArdDistance, GprError> create(std::size_t dims);
@@ -193,21 +193,21 @@ namespace cxxgpr
 
         /// @brief Binds an ARD RBF leaf whose dimensionality matches dims().
         /// @details Rejects leaves whose lengthscale count differs from dims().
-        /// @param leaf Configured RbfArdKernel leaf.
+        /// @param[in] leaf Configured RbfArdKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> or GprError on dimension mismatch.
         /// @retval GprErrorCode::DimensionMismatch When leaf.num_params() != dims().
         [[nodiscard]] std::expected<DistanceKernel<DistanceOnly>, GprError> rbf_ard(RbfArdKernel leaf) const;
 
         /// @brief Binds an ARD Matern leaf whose dimensionality matches dims().
         /// @details Rejects leaves whose lengthscale count differs from dims().
-        /// @param leaf Configured MaternArdKernel leaf.
+        /// @param[in] leaf Configured MaternArdKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> or GprError on dimension mismatch.
         /// @retval GprErrorCode::DimensionMismatch When leaf.num_params() != dims().
         [[nodiscard]] std::expected<DistanceKernel<DistanceOnly>, GprError> matern_ard(MaternArdKernel leaf) const;
 
         /// @brief Binds an ARD RationalQuadratic leaf whose dimensionality matches dims().
         /// @details Rejects leaves whose lengthscale count differs from dims().
-        /// @param leaf Configured RationalQuadraticArdKernel leaf.
+        /// @param[in] leaf Configured RationalQuadraticArdKernel leaf.
         /// @return Single-leaf DistanceKernel<DistanceOnly> or GprError on dimension mismatch.
         /// @retval GprErrorCode::DimensionMismatch When leaf.lengthscales().size() != dims().
         [[nodiscard]] std::expected<DistanceKernel<DistanceOnly>, GprError> rational_quadratic_ard(
@@ -217,8 +217,8 @@ namespace cxxgpr
     private:
         /// @brief Constructs an ArdDistance handle from a validated SlotId and dimension count.
         /// @details Invoked by ArdDistance::create() after verifying dims > 0.
-        /// @param id Assigned process-unique SlotId.
-        /// @param dims Positive feature dimensionality.
+        /// @param[in] id Assigned process-unique SlotId.
+        /// @param[in] dims Positive feature dimensionality.
         ArdDistance(SlotId id, std::size_t dims) noexcept : id_(id), dims_(dims) {}
 
         /// @brief Assigned process-unique slot identifier.
@@ -260,24 +260,24 @@ namespace cxxgpr
         /// @brief Constructs a DistanceKernel from a ConstantKernel leaf.
         /// @details Available in both DistanceOnly and WithPoints modes because ConstantKernel requires
         /// neither supplied distances nor coordinates.
-        /// @param leaf ConstantKernel amplitude leaf.
+        /// @param[in] leaf ConstantKernel amplitude leaf.
         /* implicit */ DistanceKernel(ConstantKernel leaf);
 
         /// @brief Constructs a DistanceKernel from a WhiteKernel leaf.
         /// @details Available in both DistanceOnly and WithPoints modes because WhiteKernel applies
         /// only to the square training diagonal.
-        /// @param leaf WhiteKernel noise leaf.
+        /// @param[in] leaf WhiteKernel noise leaf.
         /* implicit */ DistanceKernel(WhiteKernel leaf);
 
         /// @brief Promotes a DistanceKernel<DistanceOnly> into DistanceKernel<WithPoints>.
         /// @details Deeply converts internal AST nodes to the WithPoints specialization.
-        /// @param other Source DistanceOnly distance kernel expression.
+        /// @param[in] other Source DistanceOnly distance kernel expression.
         /* implicit */ DistanceKernel(const DistanceKernel<DistanceOnly>& other)
             requires std::same_as<Mode, WithPoints>;
 
         /// @brief Constructs a DistanceKernel<WithPoints> from a coordinate KernelSpec.
         /// @details Wraps all leaves in coord_spec as coordinate-evaluated subtrees.
-        /// @param coord_spec Coordinate-evaluated kernel expression tree.
+        /// @param[in] coord_spec Coordinate-evaluated kernel expression tree.
         /* implicit */ DistanceKernel(const KernelSpec& coord_spec)
             requires std::same_as<Mode, WithPoints>;
 
@@ -293,7 +293,7 @@ namespace cxxgpr
 
         /// @brief Writes flattened log-space hyperparameters in depth-first left-to-right order.
         /// @details Validates out.size() == num_params() before traversing the tree.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on length mismatch or leaf error.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> get_params(std::span<double> out) const;
@@ -301,7 +301,7 @@ namespace cxxgpr
         /// @brief Atomically updates all leaf parameters from log-space params.
         /// @details Rebuilds a validated immutable AST and swaps root_ only when every leaf succeeds,
         /// leaving *this unchanged on failure.
-        /// @param params Input span of unconstrained log-space parameters of length num_params().
+        /// @param[in] params Input span of unconstrained log-space parameters of length num_params().
         /// @return Empty expected on success or GprError on count mismatch, non-finite value, or bound error.
         /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
         /// @retval GprErrorCode::NonFiniteInput When any log-space parameter is NaN or infinite.
@@ -310,7 +310,7 @@ namespace cxxgpr
 
         /// @brief Writes flattened open intervals in depth-first left-to-right order.
         /// @details Order matches get_params() and set_params().
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on length mismatch or leaf error.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> bounds_into(std::span<Interval> out) const;
@@ -349,7 +349,7 @@ namespace cxxgpr
 
         /// @brief Private constructor initializing DistanceKernel from a shared immutable root node.
         /// @details Used internally by factories, composition operators, and promotion constructors.
-        /// @param root Shared immutable root AST node.
+        /// @param[in] root Shared immutable root AST node.
         explicit DistanceKernel(std::shared_ptr<const InternalNode> root) noexcept : root_(std::move(root)) {}
 
         /// @brief Shared immutable root node of the distance kernel AST.
@@ -364,8 +364,8 @@ namespace cxxgpr
 
     /// @brief Combines two DistanceOnly kernels by addition.
     /// @details Produces a composite sum node k_lhs + k_rhs in DistanceOnly mode.
-    /// @param lhs Left DistanceOnly addend.
-    /// @param rhs Right DistanceOnly addend.
+    /// @param[in] lhs Left DistanceOnly addend.
+    /// @param[in] rhs Right DistanceOnly addend.
     /// @return Composite DistanceKernel<DistanceOnly>.
     [[nodiscard]] DistanceKernel<DistanceOnly> operator+(
         DistanceKernel<DistanceOnly> lhs, DistanceKernel<DistanceOnly> rhs
@@ -373,8 +373,8 @@ namespace cxxgpr
 
     /// @brief Combines two DistanceOnly kernels by multiplication.
     /// @details Produces a composite product node k_lhs * k_rhs in DistanceOnly mode.
-    /// @param lhs Left DistanceOnly factor.
-    /// @param rhs Right DistanceOnly factor.
+    /// @param[in] lhs Left DistanceOnly factor.
+    /// @param[in] rhs Right DistanceOnly factor.
     /// @return Composite DistanceKernel<DistanceOnly>.
     [[nodiscard]] DistanceKernel<DistanceOnly> operator*(
         DistanceKernel<DistanceOnly> lhs, DistanceKernel<DistanceOnly> rhs
@@ -382,43 +382,43 @@ namespace cxxgpr
 
     /// @brief Combines two WithPoints kernels by addition.
     /// @details Produces a composite sum node k_lhs + k_rhs in WithPoints mode.
-    /// @param lhs Left WithPoints addend.
-    /// @param rhs Right WithPoints addend.
+    /// @param[in] lhs Left WithPoints addend.
+    /// @param[in] rhs Right WithPoints addend.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator+(DistanceKernel<WithPoints> lhs, DistanceKernel<WithPoints> rhs);
 
     /// @brief Combines two WithPoints kernels by multiplication.
     /// @details Produces a composite product node k_lhs * k_rhs in WithPoints mode.
-    /// @param lhs Left WithPoints factor.
-    /// @param rhs Right WithPoints factor.
+    /// @param[in] lhs Left WithPoints factor.
+    /// @param[in] rhs Right WithPoints factor.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator*(DistanceKernel<WithPoints> lhs, DistanceKernel<WithPoints> rhs);
 
     /// @brief Combines a DistanceKernel and a coordinate KernelSpec by addition in WithPoints mode.
     /// @details Promotes lhs and converts rhs into WithPoints subtrees before summing.
-    /// @param lhs Supplied-distance kernel addend.
-    /// @param rhs Coordinate-evaluated KernelSpec addend.
+    /// @param[in] lhs Supplied-distance kernel addend.
+    /// @param[in] rhs Coordinate-evaluated KernelSpec addend.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator+(const DistanceKernel<DistanceOnly>& lhs, const KernelSpec& rhs);
 
     /// @brief Combines a coordinate KernelSpec and a DistanceKernel by addition in WithPoints mode.
     /// @details Converts lhs and promotes rhs into WithPoints subtrees before summing.
-    /// @param lhs Coordinate-evaluated KernelSpec addend.
-    /// @param rhs Supplied-distance kernel addend.
+    /// @param[in] lhs Coordinate-evaluated KernelSpec addend.
+    /// @param[in] rhs Supplied-distance kernel addend.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator+(const KernelSpec& lhs, const DistanceKernel<DistanceOnly>& rhs);
 
     /// @brief Combines a DistanceKernel and a coordinate KernelSpec by multiplication in WithPoints mode.
     /// @details Promotes lhs and converts rhs into WithPoints subtrees before multiplying.
-    /// @param lhs Supplied-distance kernel factor.
-    /// @param rhs Coordinate-evaluated KernelSpec factor.
+    /// @param[in] lhs Supplied-distance kernel factor.
+    /// @param[in] rhs Coordinate-evaluated KernelSpec factor.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator*(const DistanceKernel<DistanceOnly>& lhs, const KernelSpec& rhs);
 
     /// @brief Combines a coordinate KernelSpec and a DistanceKernel by multiplication in WithPoints mode.
     /// @details Converts lhs and promotes rhs into WithPoints subtrees before multiplying.
-    /// @param lhs Coordinate-evaluated KernelSpec factor.
-    /// @param rhs Supplied-distance kernel factor.
+    /// @param[in] lhs Coordinate-evaluated KernelSpec factor.
+    /// @param[in] rhs Supplied-distance kernel factor.
     /// @return Composite DistanceKernel<WithPoints>.
     [[nodiscard]] DistanceKernel<WithPoints> operator*(const KernelSpec& lhs, const DistanceKernel<DistanceOnly>& rhs);
 
@@ -430,15 +430,15 @@ namespace cxxgpr
     public:
         /// @brief Binds a single scalar squared-distance table (n x n for square, n x m for cross) to slot.
         /// @details Appends a scalar slot binding validated later during prepare_square() or prepare_cross().
-        /// @param slot Target scalar SlotId obtained from ScalarDistance::slot().
-        /// @param d2 Column-major squared-distance matrix view in double precision.
+        /// @param[in] slot Target scalar SlotId obtained from ScalarDistance::slot().
+        /// @param[in] d2 Column-major squared-distance matrix view in double precision.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& bind_scalar(SlotId slot, MatrixRef<double> d2);
 
         /// @brief Binds per-dimension ARD squared-distance tables (length dims) to slot.
         /// @details Copies the span of MatrixRef<double> views into internal entry storage.
-        /// @param slot Target ARD SlotId obtained from ArdDistance::slot().
-        /// @param d2_per_dim Span of column-major squared-distance matrices, one per ARD dimension.
+        /// @param[in] slot Target ARD SlotId obtained from ArdDistance::slot().
+        /// @param[in] d2_per_dim Span of column-major squared-distance matrices, one per ARD dimension.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& bind_ard(SlotId slot, std::span<const MatrixRef<double>> d2_per_dim);
 
@@ -446,7 +446,7 @@ namespace cxxgpr
         /// @details Permits negative entries >= -rel_tol * max_abs, diagonal |d2(i,i)| <= rel_tol * max_abs,
         /// and asymmetry |d2(i,j) - d2(j,i)| <= rel_tol * max_abs, clamping negative values to 0, zeroing
         /// square diagonals, and symmetrizing off-diagonal pairs by averaging.
-        /// @param rel_tol Non-negative finite relative tolerance multiplier against max_abs.
+        /// @param[in] rel_tol Non-negative finite relative tolerance multiplier against max_abs.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& tidy(double rel_tol);
 
@@ -493,23 +493,23 @@ namespace cxxgpr
     public:
         /// @brief Copy-constructs a checked distance store.
         /// @details Deep-copies the validated distance buffers.
-        /// @param other CheckedDistanceStore instance to copy.
+        /// @param[in] other CheckedDistanceStore instance to copy.
         CheckedDistanceStore(const CheckedDistanceStore& other);
 
         /// @brief Copy-assigns a checked distance store.
         /// @details Deep-copies the validated distance buffers.
-        /// @param other CheckedDistanceStore instance to copy.
+        /// @param[in] other CheckedDistanceStore instance to copy.
         /// @return Reference to this CheckedDistanceStore.
         CheckedDistanceStore& operator=(const CheckedDistanceStore& other);
 
         /// @brief Move-constructs a checked distance store.
         /// @details Transfers ownership of the internal validated store state.
-        /// @param other CheckedDistanceStore instance to move from.
+        /// @param[in] other CheckedDistanceStore instance to move from.
         CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
 
         /// @brief Move-assigns a checked distance store.
         /// @details Transfers ownership of the internal validated store state.
-        /// @param other CheckedDistanceStore instance to move from.
+        /// @param[in] other CheckedDistanceStore instance to move from.
         /// @return Reference to this CheckedDistanceStore.
         CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept = default;
 
@@ -538,7 +538,7 @@ namespace cxxgpr
 
         /// @brief Private constructor taking ownership of a built Impl state.
         /// @details Invoked by DistanceStoreBuilder after validation succeeds.
-        /// @param impl Heap-allocated validated store state.
+        /// @param[in] impl Heap-allocated validated store state.
         explicit CheckedDistanceStore(std::unique_ptr<Impl> impl) noexcept;
 
         /// @brief Owning pointer to the validated distance store implementation.
@@ -557,23 +557,23 @@ namespace cxxgpr
     public:
         /// @brief Copy-constructs a compiled distance kernel with independent mutable leaf state.
         /// @details Deep-copies flattened execution AST, leaves, slot descriptors, and cached lengthscales.
-        /// @param other CompiledDistanceKernel instance to copy.
+        /// @param[in] other CompiledDistanceKernel instance to copy.
         CompiledDistanceKernel(const CompiledDistanceKernel& other);
 
         /// @brief Copy-assigns a compiled distance kernel with independent mutable leaf state.
         /// @details Deep-copies flattened execution AST and leaves when not self-assigned.
-        /// @param other CompiledDistanceKernel instance to copy.
+        /// @param[in] other CompiledDistanceKernel instance to copy.
         /// @return Reference to this CompiledDistanceKernel.
         CompiledDistanceKernel& operator=(const CompiledDistanceKernel& other);
 
         /// @brief Move-constructs a compiled distance kernel.
         /// @details Transfers ownership of the internal compiled implementation pointer.
-        /// @param other CompiledDistanceKernel instance to move from.
+        /// @param[in] other CompiledDistanceKernel instance to move from.
         CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept = default;
 
         /// @brief Move-assigns a compiled distance kernel.
         /// @details Transfers ownership of the internal compiled implementation pointer.
-        /// @param other CompiledDistanceKernel instance to move from.
+        /// @param[in] other CompiledDistanceKernel instance to move from.
         /// @return Reference to this CompiledDistanceKernel.
         CompiledDistanceKernel& operator=(CompiledDistanceKernel&& other) noexcept = default;
 
@@ -608,19 +608,19 @@ namespace cxxgpr
 
         /// @brief Sets the exponential evaluation backend used during kernel evaluation.
         /// @details Selects KernelExp::Accurate or KernelExp::FastApprox for built-in exponential leaves.
-        /// @param mode New exponential evaluation backend.
+        /// @param[in] mode New exponential evaluation backend.
         void set_kernel_exp(KernelExp mode) noexcept;
 
         /// @brief Allocates NestedBuffers sized for this kernel and an output matrix of shape rows x cols.
         /// @details Allocates nested_depth() intermediate matrices of dimensions rows x cols.
-        /// @param rows Target matrix row count.
-        /// @param cols Target matrix column count.
+        /// @param[in] rows Target matrix row count.
+        /// @param[in] cols Target matrix column count.
         /// @return Pre-sized NestedBuffers<T> ready for zero-allocation evaluation calls.
         [[nodiscard]] NestedBuffers<T> make_nested_buffers(std::size_t rows, std::size_t cols) const;
 
         /// @brief Writes flattened log-space hyperparameters into out.
         /// @details Traverses leaves in depth-first left-to-right order.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on span length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> get_params(std::span<double> out) const;
@@ -628,7 +628,7 @@ namespace cxxgpr
         /// @brief Atomically updates all leaf parameters from log-space params.
         /// @details Stages all leaf updates and refreshes cached ARD lengthscales before committing;
         /// failed updates leave parameters unchanged.
-        /// @param params Input span of unconstrained log-space parameters of length num_params().
+        /// @param[in] params Input span of unconstrained log-space parameters of length num_params().
         /// @return Empty expected on success or GprError on count mismatch, non-finite input, or bound error.
         /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
         /// @retval GprErrorCode::NonFiniteInput When any parameter is NaN or infinite.
@@ -637,7 +637,7 @@ namespace cxxgpr
 
         /// @brief Writes flattened open intervals into out.
         /// @details Populates intervals in depth-first left-to-right parameter order.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on span length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> bounds_into(std::span<Interval> out) const;
@@ -655,7 +655,7 @@ namespace cxxgpr
         /// @brief Validates (and optionally repairs via tidy) square training distance supplies and packs ARD tables.
         /// @details Verifies slot coverage, shapes, finiteness, non-negativity, zero diagonals, and symmetry,
         /// packs square ARD blocks in lower-triangular order, and converts values to scalar T.
-        /// @param source Bound DistanceSource tables and optional tidy relative tolerance.
+        /// @param[in] source Bound DistanceSource tables and optional tidy relative tolerance.
         /// @return Validated CheckedDistanceStore<T> or GprError if slots, shapes, or distances are invalid.
         /// @retval GprErrorCode::InvalidConfig When tidy relative tolerance is negative or non-finite.
         /// @retval GprErrorCode::UnsupportedKernelOperation When source binds an unknown slot or kernel has no slots.
@@ -673,7 +673,7 @@ namespace cxxgpr
         /// @brief Validates (and optionally repairs via tidy) rectangular cross-distance supplies.
         /// @details Verifies slot coverage, matching n1 x n2 block shapes, finiteness, and non-negativity
         /// (with optional tidy clamping), converting blocks into scalar T.
-        /// @param source Bound DistanceSource tables and optional tidy relative tolerance.
+        /// @param[in] source Bound DistanceSource tables and optional tidy relative tolerance.
         /// @return Validated rectangular CheckedDistanceStore<T> or GprError on invalid source.
         /// @retval GprErrorCode::InvalidConfig When tidy relative tolerance is negative or non-finite.
         /// @retval GprErrorCode::UnsupportedKernelOperation When source binds an unknown slot or kernel has no slots.
@@ -690,12 +690,12 @@ namespace cxxgpr
 
         /// @brief Evaluates the training Gram matrix from a validated store (and optional points).
         /// @details Uses caller-supplied scratch and nested buffers for zero-allocation execution.
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param out Column-major n x n destination Gram matrix.
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch Non-aliasing n x n scratch matrix buffer.
-        /// @param nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] out Column-major n x n destination Gram matrix.
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch Non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
         /// @return Empty expected on success or GprError on store, point, or buffer validation failure.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch or nested buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -715,11 +715,11 @@ namespace cxxgpr
 
         /// @brief Evaluates the training Gram matrix from a validated store (and optional points).
         /// @details Convenience overload allocating temporary NestedBuffers via make_nested_buffers().
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param out Column-major n x n destination Gram matrix.
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch Non-aliasing n x n scratch matrix buffer.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] out Column-major n x n destination Gram matrix.
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch Non-aliasing n x n scratch matrix buffer.
         /// @return Empty expected on success or GprError on store, point, or buffer validation failure.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch is undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -738,12 +738,12 @@ namespace cxxgpr
 
         /// @brief Evaluates the cross-covariance matrix from a validated rectangular store.
         /// @details Uses caller-supplied scratch and nested buffers for zero-allocation execution.
-        /// @param store Validated rectangular CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x1 Optional n1 x d first point matrix (required when requires_points() is true).
-        /// @param x2 Optional n2 x d second point matrix (required when requires_points() is true).
-        /// @param out Column-major n1 x n2 destination cross-covariance matrix.
-        /// @param scratch Non-aliasing n1 x n2 scratch matrix buffer.
-        /// @param nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n1 x n2.
+        /// @param[in] store Validated rectangular CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x1 Optional n1 x d first point matrix (required when requires_points() is true).
+        /// @param[in] x2 Optional n2 x d second point matrix (required when requires_points() is true).
+        /// @param[out] out Column-major n1 x n2 destination cross-covariance matrix.
+        /// @param[in,out] scratch Non-aliasing n1 x n2 scratch matrix buffer.
+        /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n1 x n2.
         /// @return Empty expected on success or GprError on store, point, or buffer validation failure.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch or nested buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -763,11 +763,11 @@ namespace cxxgpr
 
         /// @brief Evaluates the cross-covariance matrix from a validated rectangular store.
         /// @details Convenience overload allocating temporary NestedBuffers via make_nested_buffers().
-        /// @param store Validated rectangular CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x1 Optional n1 x d first point matrix (required when requires_points() is true).
-        /// @param x2 Optional n2 x d second point matrix (required when requires_points() is true).
-        /// @param out Column-major n1 x n2 destination cross-covariance matrix.
-        /// @param scratch Non-aliasing n1 x n2 scratch matrix buffer.
+        /// @param[in] store Validated rectangular CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x1 Optional n1 x d first point matrix (required when requires_points() is true).
+        /// @param[in] x2 Optional n2 x d second point matrix (required when requires_points() is true).
+        /// @param[out] out Column-major n1 x n2 destination cross-covariance matrix.
+        /// @param[in,out] scratch Non-aliasing n1 x n2 scratch matrix buffer.
         /// @return Empty expected on success or GprError on store, point, or buffer validation failure.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch is undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -787,9 +787,9 @@ namespace cxxgpr
         /// @brief Fills the diagonal k(x_i, x_i) for n points.
         /// @details Requires x when coordinate leaves are present; supplied stationary leaves evaluate at
         /// zero distance without requiring a CheckedDistanceStore.
-        /// @param n Number of diagonal entries to evaluate.
-        /// @param x Optional n x d coordinate matrix (required when requires_points() is true).
-        /// @param out Destination span of length n receiving k(x_i, x_i).
+        /// @param[in] n Number of diagonal entries to evaluate.
+        /// @param[in] x Optional n x d coordinate matrix (required when requires_points() is true).
+        /// @param[out] out Destination span of length n receiving k(x_i, x_i).
         /// @return Empty expected on success or GprError on invalid count, missing x, or invalid coordinates.
         /// @retval GprErrorCode::EmptyInput When n == 0 or x is empty.
         /// @retval GprErrorCode::LengthMismatch When out.size() != n or x.rows() != n.
@@ -803,14 +803,14 @@ namespace cxxgpr
         /// @brief Evaluates the first derivative wrt parameter param_idx.
         /// @details Differentiates supplied distance and coordinate leaves with caller-supplied scratch
         /// and nested buffers.
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param d_k Column-major n x n destination derivative matrix.
-        /// @param param_idx Zero-based flattened hyperparameter index in [0, num_params()).
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch_a First non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_b Second non-aliasing n x n scratch matrix buffer.
-        /// @param nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] d_k Column-major n x n destination derivative matrix.
+        /// @param[in] param_idx Zero-based flattened hyperparameter index in [0, num_params()).
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch_a First non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_b Second non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
         /// @return Empty expected on success or GprError on store, point, buffer, or index error.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch or nested buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch buffers alias d_k or each other.
@@ -833,13 +833,13 @@ namespace cxxgpr
 
         /// @brief Evaluates the first derivative wrt parameter param_idx.
         /// @details Convenience overload allocating temporary NestedBuffers via make_nested_buffers().
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param d_k Column-major n x n destination derivative matrix.
-        /// @param param_idx Zero-based flattened hyperparameter index in [0, num_params()).
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch_a First non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_b Second non-aliasing n x n scratch matrix buffer.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] d_k Column-major n x n destination derivative matrix.
+        /// @param[in] param_idx Zero-based flattened hyperparameter index in [0, num_params()).
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch_a First non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_b Second non-aliasing n x n scratch matrix buffer.
         /// @return Empty expected on success or GprError on store, point, buffer, or index error.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch buffers alias d_k or each other.
@@ -862,16 +862,16 @@ namespace cxxgpr
         /// @brief Evaluates the second derivative wrt parameters (i, j).
         /// @details Differentiates supplied distance and coordinate leaves with three non-aliasing
         /// scratch matrices and caller-supplied nested buffers.
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param d2_k Column-major n x n destination second-derivative matrix.
-        /// @param i First flattened hyperparameter index in [0, num_params()).
-        /// @param j Second flattened hyperparameter index in [0, num_params()).
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch_a First non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_b Second non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_c Third non-aliasing n x n scratch matrix buffer.
-        /// @param nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] d2_k Column-major n x n destination second-derivative matrix.
+        /// @param[in] i First flattened hyperparameter index in [0, num_params()).
+        /// @param[in] j Second flattened hyperparameter index in [0, num_params()).
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch_a First non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_b Second non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_c Third non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
         /// @return Empty expected on success or GprError on store, point, buffer, or index error.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch or nested buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When any scratch buffers alias d2_k or each other.
@@ -896,15 +896,15 @@ namespace cxxgpr
 
         /// @brief Evaluates the second derivative wrt parameters (i, j).
         /// @details Convenience overload allocating temporary NestedBuffers via make_nested_buffers().
-        /// @param store Validated square CheckedDistanceStore<T> matching this kernel's slots.
-        /// @param x Optional n x d training coordinate matrix (required when requires_points() is true).
-        /// @param d2_k Column-major n x n destination second-derivative matrix.
-        /// @param i First flattened hyperparameter index in [0, num_params()).
-        /// @param j Second flattened hyperparameter index in [0, num_params()).
-        /// @param uplo Matrix triangle or full region to populate.
-        /// @param scratch_a First non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_b Second non-aliasing n x n scratch matrix buffer.
-        /// @param scratch_c Third non-aliasing n x n scratch matrix buffer.
+        /// @param[in] store Validated square CheckedDistanceStore<T> matching this kernel's slots.
+        /// @param[in] x Optional n x d training coordinate matrix (required when requires_points() is true).
+        /// @param[out] d2_k Column-major n x n destination second-derivative matrix.
+        /// @param[in] i First flattened hyperparameter index in [0, num_params()).
+        /// @param[in] j Second flattened hyperparameter index in [0, num_params()).
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] scratch_a First non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_b Second non-aliasing n x n scratch matrix buffer.
+        /// @param[in,out] scratch_c Third non-aliasing n x n scratch matrix buffer.
         /// @return Empty expected on success or GprError on store, point, buffer, or index error.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch buffers are undersized.
         /// @retval GprErrorCode::InvalidConfig When any scratch buffers alias d2_k or each other.
@@ -932,7 +932,7 @@ namespace cxxgpr
 
         /// @brief Private constructor taking ownership of a compiled Impl state.
         /// @details Invoked by DistanceKernel<Mode>::compile<T>().
-        /// @param impl Heap-allocated compiled distance kernel implementation.
+        /// @param[in] impl Heap-allocated compiled distance kernel implementation.
         explicit CompiledDistanceKernel(std::unique_ptr<Impl> impl) noexcept;
 
         /// @brief Owning pointer to the compiled distance kernel implementation.

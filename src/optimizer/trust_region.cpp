@@ -21,9 +21,9 @@ namespace cxxgpr::optimizer
 
         /// @brief Computes out = H * v for a flattened d x d symmetric Hessian matrix h.
         /// @details Reads entry (row, col) at (col * d) + row across all columns of h.
-        /// @param h Flattened d x d Hessian span.
-        /// @param v Input vector span of length d.
-        /// @param out Destination span of length d receiving H * v.
+        /// @param[in] h Flattened d x d Hessian span.
+        /// @param[in] v Input vector span of length d.
+        /// @param[out] out Destination span of length d receiving H * v.
         void sym_matvec(std::span<const double> h, std::span<const double> v, std::span<double> out) noexcept
         {
             const std::size_t d = v.size();
@@ -41,9 +41,9 @@ namespace cxxgpr::optimizer
         /// @brief Computes the positive scalar tau >= 0 solving ||p + tau * d||_2^2 = radius^2.
         /// @details Evaluates the positive root of the quadratic dd * tau^2 + 2*(p^T d)*tau + (pp - r^2) = 0
         /// so the truncated CG step lands cleanly on the trust-region sphere boundary.
-        /// @param p Current interior CG iterate vector.
-        /// @param d Search direction along which to extend p.
-        /// @param radius Current trust-region radius > ||p||_2.
+        /// @param[in] p Current interior CG iterate vector.
+        /// @param[in] d Search direction along which to extend p.
+        /// @param[in] radius Current trust-region radius > ||p||_2.
         /// @return Non-negative boundary intersection distance tau along d (0.0 if ||d||_2 == 0).
         [[nodiscard]] double step_to_boundary(
             std::span<const double> p, std::span<const double> d, double radius
@@ -66,10 +66,10 @@ namespace cxxgpr::optimizer
         /// jumps to the trust-region boundary upon encountering non-positive curvature (d^T H d <= 0) or
         /// when ||p_next||_2 >= radius, and stops early when residual norm satisfies Eisenstat-Walker forcing
         /// min(0.5, sqrt(||g||)) * ||g||.
-        /// @param grad Unconstrained gradient g_z of length d.
-        /// @param hess Flattened d x d unconstrained Hessian H_z.
-        /// @param radius Current trust-region radius.
-        /// @param out_step Destination span of length d receiving the computed trial step p.
+        /// @param[in] grad Unconstrained gradient g_z of length d.
+        /// @param[in] hess Flattened d x d unconstrained Hessian H_z.
+        /// @param[in] radius Current trust-region radius.
+        /// @param[out] out_step Destination span of length d receiving the computed trial step p.
         void steihaug_toint_cg(
             std::span<const double> grad, std::span<const double> hess, double radius, std::span<double> out_step
         )
@@ -154,16 +154,16 @@ namespace cxxgpr::optimizer
         /// @brief Evaluates objective value, gradient, and Hessian at unconstrained z using logit chain rules.
         /// @details Maps z -> (theta, d1, d2), evaluates obj.value_gradient_hessian_into(), checks finiteness
         /// of value, gradient, and Hessian, and transforms g_theta, H_theta into unconstrained g_z, H_z.
-        /// @param obj TwiceDifferentiable objective evaluated in log-theta space.
-        /// @param bounds Log-space bounds governing the z <-> theta transform.
-        /// @param z Unconstrained logit parameter vector of length bounds.dim().
-        /// @param theta_buf Caller-supplied scratch span of length d for constrained theta.
-        /// @param d1_buf Caller-supplied scratch span of length d for first derivatives d(theta)/dz.
-        /// @param d2_buf Caller-supplied scratch span of length d for second derivatives d^2(theta)/dz^2.
-        /// @param g_theta_buf Caller-supplied scratch span of length d for constrained gradient.
-        /// @param h_theta_buf Caller-supplied scratch span of length d * d for constrained Hessian.
-        /// @param out_g_z Destination span of length d receiving unconstrained gradient g_z.
-        /// @param out_h_z Destination span of length d * d receiving unconstrained Hessian H_z.
+        /// @param[in,out] obj TwiceDifferentiable objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+        /// @param[in] z Unconstrained logit parameter vector of length bounds.dim().
+        /// @param[in,out] theta_buf Caller-supplied scratch span of length d for constrained theta.
+        /// @param[in,out] d1_buf Caller-supplied scratch span of length d for first derivatives d(theta)/dz.
+        /// @param[in,out] d2_buf Caller-supplied scratch span of length d for second derivatives d^2(theta)/dz^2.
+        /// @param[in,out] g_theta_buf Caller-supplied scratch span of length d for constrained gradient.
+        /// @param[in,out] h_theta_buf Caller-supplied scratch span of length d * d for constrained Hessian.
+        /// @param[out] out_g_z Destination span of length d receiving unconstrained gradient g_z.
+        /// @param[out] out_h_z Destination span of length d * d receiving unconstrained Hessian H_z.
         /// @return Finite objective scalar value at z, or GprError if evaluation or finiteness checks fail.
         /// @retval GprErrorCode::NonFiniteInput When objective value, gradient, or Hessian contains non-finite values.
         [[nodiscard]] std::expected<double, GprError> eval_vgh_unconstrained(
@@ -214,13 +214,13 @@ namespace cxxgpr::optimizer
         /// @details Maps initial_theta into unconstrained z, solves Steihaug-Toint trust-region subproblems,
         /// compares actual vs predicted quadratic model reduction rho, adapts trust-region radius within
         /// (0, max_radius], accepts steps with rho > 1e-4, and stops on gradient/reduction tolerance.
-        /// @param obj TwiceDifferentiable objective evaluated in log-theta space.
-        /// @param bounds Log-space bounds governing the z <-> theta transform.
-        /// @param initial_theta Starting log-space parameter vector strictly inside bounds.
-        /// @param max_iterations Maximum outer trust-region iterations.
-        /// @param tolerance Gradient norm and relative reduction convergence tolerance.
-        /// @param initial_radius Starting trust-region radius (> 0).
-        /// @param max_radius Maximum allowed trust-region radius (>= initial_radius).
+        /// @param[in,out] obj TwiceDifferentiable objective evaluated in log-theta space.
+        /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
+        /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
+        /// @param[in] max_iterations Maximum outer trust-region iterations.
+        /// @param[in] tolerance Gradient norm and relative reduction convergence tolerance.
+        /// @param[in] initial_radius Starting trust-region radius (> 0).
+        /// @param[in] max_radius Maximum allowed trust-region radius (>= initial_radius).
         /// @return OptimizerResult with best feasible log-space parameters found, or GprError if initial eval fails.
         /// @retval GprErrorCode::NonFiniteInput When initial objective, gradient, or Hessian is non-finite.
         [[nodiscard]] std::expected<OptimizerResult, GprError> run_trust_region_single(
@@ -354,8 +354,8 @@ namespace cxxgpr::optimizer
     /// @brief Minimizes obj starting from log-space initial_params.
     /// @details Validates tolerance_ >= 0 and 0 < initial_radius_ <= max_radius_, then delegates to
     /// detail::run_with_restarts() running run_trust_region_single().
-    /// @param obj TwiceDifferentiable objective providing value, analytical gradient, and Hessian.
-    /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+    /// @param[in,out] obj TwiceDifferentiable objective providing value, analytical gradient, and Hessian.
+    /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
     /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
     /// @retval GprErrorCode::InvalidConfig When tolerance or radius configuration is invalid.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.

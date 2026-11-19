@@ -144,11 +144,11 @@ namespace cxxgpr
         /// FittedPayload.
         /// @details Instantiated explicitly in gpr_engine.cpp for all four supported precision policies.
         /// @tparam P Precision policy determining storage, MLL, and refinement arithmetic.
-        /// @param cfg Borrowed trainer configuration and transform prototypes.
-        /// @param x Column-major training feature matrix (n x d).
-        /// @param y Training target vector of length n.
-        /// @param optimize_cb Callback bridging to the concrete optimizer type O.
-        /// @param optimize_ctx Opaque pointer to the concrete optimizer instance.
+        /// @param[in] cfg Borrowed trainer configuration and transform prototypes.
+        /// @param[in] x Column-major training feature matrix (n x d).
+        /// @param[in] y Training target vector of length n.
+        /// @param[in] optimize_cb Callback bridging to the concrete optimizer type O.
+        /// @param[in,out] optimize_ctx Opaque pointer to the concrete optimizer instance.
         /// @return Constructed FittedPayload<P> on success, or GprError on validation, optimization, or Cholesky
         /// failure.
         /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
@@ -167,11 +167,11 @@ namespace cxxgpr
         /// @brief Validates query matrix xs, runs posterior prediction into out, and applies inverse target scaling.
         /// @details Reuses workspace buffers to avoid heap allocations once warmed up on matching query sizes.
         /// @tparam P Precision policy matching payload.
-        /// @param payload Fitted model payload containing factor, weights, and transforms.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param options Prediction variance options.
-        /// @param workspace Mutable query workspace resized if needed.
-        /// @param out Destination prediction buffers populated on the original target scale.
+        /// @param[in] payload Fitted model payload containing factor, weights, and transforms.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] options Prediction variance options.
+        /// @param[in,out] workspace Mutable query workspace resized if needed.
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @return Empty expected on success, or GprError on input or transform error.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
@@ -189,10 +189,10 @@ namespace cxxgpr
         /// @details Transforms query points, evaluates posterior covariance via predict_covariance<P>(),
         /// and applies inverse target scaling to both mean and covariance.
         /// @tparam P Precision policy matching payload.
-        /// @param payload Fitted model payload.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param options Prediction variance options.
-        /// @param workspace Mutable query workspace reused for query transform and kernel blocks.
+        /// @param[in] payload Fitted model payload.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] options Prediction variance options.
+        /// @param[in,out] workspace Mutable query workspace reused for query transform and kernel blocks.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
@@ -208,13 +208,13 @@ namespace cxxgpr
         /// @brief Draws deterministic posterior samples at xs and scales them back to the original target space.
         /// @details Uses seed and optional jitter override for predictive covariance Cholesky decomposition.
         /// @tparam P Precision policy matching payload.
-        /// @param payload Fitted model payload.
-        /// @param xs Column-major query feature matrix (m x d).
-        /// @param n_draws Number of posterior draws to generate.
-        /// @param seed Deterministic PRNG seed.
-        /// @param options Prediction variance options.
-        /// @param workspace Mutable query workspace.
-        /// @param jitter Optional predictive covariance jitter override.
+        /// @param[in] payload Fitted model payload.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] n_draws Number of posterior draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Prediction variance options.
+        /// @param[in,out] workspace Mutable query workspace.
+        /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample buffer (m x n_draws) on the original scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
@@ -234,8 +234,8 @@ namespace cxxgpr
         /// @brief Computes closed-form Leave-One-Out prediction on the original target scale.
         /// @details Evaluates GPML analytical LOO moments in transformed space and applies inverse target transforms.
         /// @tparam P Precision policy matching payload.
-        /// @param payload Fitted model payload.
-        /// @param options Prediction variance options.
+        /// @param[in] payload Fitted model payload.
+        /// @param[in] options Prediction variance options.
         /// @return Prediction<Refine> containing LOO means and variances, or GprError on failure.
         /// @retval GprErrorCode::NonFiniteKernelValue When inverse scaling yields non-finite values.
         template <PrecisionPolicyConcept P>
@@ -246,9 +246,9 @@ namespace cxxgpr
         /// @brief Dispatches hyperparameter optimization to the concrete optimizer policy O.
         /// @details Keeps all optimizer call sites uniform while preserving static dispatch per optimizer type.
         /// @tparam O Optimizer type providing optimize(TwiceDifferentiable&, std::span<const double>).
-        /// @param opt Configured optimizer instance.
-        /// @param obj Twice-differentiable negative marginal log-likelihood objective.
-        /// @param initial_params Starting unconstrained log-space hyperparameter vector.
+        /// @param[in] opt Configured optimizer instance.
+        /// @param[in,out] obj Twice-differentiable negative marginal log-likelihood objective.
+        /// @param[in] initial_params Starting unconstrained log-space hyperparameter vector.
         /// @return OptimizerResult with final parameters and convergence flags, or GprError on failure.
         /// @retval GprErrorCode::OptimizationNotConverged When optimizer exhausts iteration budget without converging.
         template <typename O>
@@ -410,10 +410,23 @@ namespace cxxgpr
 
     }  // namespace detail
 
+    /// @defgroup cxxgpr_gpr Exact GPR Trainer and Inference Model
+    /// @brief High-level type-safe training and posterior prediction APIs.
+    /// @{
+
+    /// @ingroup cxxgpr_gpr
     /// @brief Unfitted Exact Gaussian Process Regression trainer parameterized by optimizer O, precision
     /// policy P, and kernel specification K. Does not expose prediction or LOO operations until fitted.
     /// @details Uses immutable builder setters returning copies with updated configuration, and treats
     /// fit() and factor() as const operations that leave *this unchanged even if training fails.
+    /// @code
+    /// const auto kernel = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+    /// const auto model = cxxgpr::Gpr<>(kernel).fit(x_train, n_samples, n_features, y_train).value();
+    /// const auto pred = model.predict(x_query, m_queries, n_features).value();
+    /// @endcode
+    /// @note Input coordinate buffers are interpreted strictly in column-major order.
+    /// @attention Pre-1.0 versions (0.x) may refine template defaults and auxiliary diagnostic fields.
+    /// @see FittedGpr, KernelSpec
     /// @tparam O Hyperparameter optimizer type (defaults to optimizer::Lbfgs).
     /// @tparam P Precision policy (defaults to DoublePrecision).
     /// @tparam K Kernel specification type (defaults to KernelSpec).
@@ -426,8 +439,8 @@ namespace cxxgpr
         /// @brief Constructs an unfitted GPR trainer from a kernel specification and optional optimizer.
         /// @details Initializes noise variance to 1e-2, identity input/target transforms, adaptive jitter,
         /// accurate exponential math, and FitPolicy::prefer_speed().
-        /// @param kernel_spec Initial kernel expression and parameter bounds.
-        /// @param optimizer Optional hyperparameter optimizer configuration.
+        /// @param[in] kernel_spec Initial kernel expression and parameter bounds.
+        /// @param[in] optimizer Optional hyperparameter optimizer configuration.
         explicit Gpr(KernelSpec kernel_spec, O optimizer = O{}) :
             kernel_spec_(std::move(kernel_spec)),
             optimizer_(std::move(optimizer)),
@@ -439,7 +452,7 @@ namespace cxxgpr
 
         /// @brief Copy-constructs a trainer cloning its polymorphic transform configurations.
         /// @details Deep-copies unfitted input and target transform unique_ptr configurations.
-        /// @param other Trainer instance to copy.
+        /// @param[in] other Trainer instance to copy.
         Gpr(const Gpr& other) :
             kernel_spec_(other.kernel_spec_),
             optimizer_(other.optimizer_),
@@ -454,7 +467,7 @@ namespace cxxgpr
 
         /// @brief Copy-assigns a trainer cloning its polymorphic transform configurations.
         /// @details Guards against self-assignment and delegates via copy-and-move swap.
-        /// @param other Trainer instance to assign from.
+        /// @param[in] other Trainer instance to assign from.
         /// @return Reference to this Gpr trainer.
         Gpr& operator=(const Gpr& other)
         {
@@ -479,7 +492,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated optimizer configuration.
         /// @details Leaves *this unmodified.
-        /// @param optimizer New optimizer instance.
+        /// @param[in] optimizer New optimizer instance.
         /// @return Copy of *this configured with optimizer.
         [[nodiscard]] Gpr with_optimizer(O optimizer) const
         {
@@ -490,7 +503,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated Gaussian observation noise likelihood.
         /// @details Leaves *this unmodified.
-        /// @param likelihood Validated GaussianLikelihood instance.
+        /// @param[in] likelihood Validated GaussianLikelihood instance.
         /// @return Copy of *this configured with likelihood.
         [[nodiscard]] Gpr with_likelihood(GaussianLikelihood likelihood) const
         {
@@ -501,7 +514,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated observation noise variance after validating positivity.
         /// @details Constructs a GaussianLikelihood from noise_variance and leaves *this unchanged on failure.
-        /// @param noise_variance Positive finite observation noise variance.
+        /// @param[in] noise_variance Positive finite observation noise variance.
         /// @return Copy of *this with updated noise variance, or InvalidNoiseVariance on invalid input.
         /// @retval GprErrorCode::InvalidNoiseVariance When noise_variance is non-finite or not strictly positive.
         [[nodiscard]] std::expected<Gpr, GprError> with_noise_variance(double noise_variance) const
@@ -517,7 +530,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated Cholesky jitter stabilization policy.
         /// @details Leaves *this unmodified.
-        /// @param jitter New JitterPolicy (fixed or adaptive).
+        /// @param[in] jitter New JitterPolicy (fixed or adaptive).
         /// @return Copy of *this configured with jitter.
         [[nodiscard]] Gpr with_jitter(JitterPolicy jitter) const
         {
@@ -528,7 +541,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated unfitted input feature transform.
         /// @details Clones input_transform polymorphically and leaves *this unmodified.
-        /// @param input_transform Unfitted input feature transform to clone.
+        /// @param[in] input_transform Unfitted input feature transform to clone.
         /// @return Copy of *this configured with a clone of input_transform.
         [[nodiscard]] Gpr with_input_transform(const transform::UnfittedInputTransform& input_transform) const
         {
@@ -539,7 +552,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated unfitted target transform.
         /// @details Clones target_transform polymorphically and leaves *this unmodified.
-        /// @param target_transform Unfitted target transform to clone.
+        /// @param[in] target_transform Unfitted target transform to clone.
         /// @return Copy of *this configured with a clone of target_transform.
         [[nodiscard]] Gpr with_target_transform(const transform::UnfittedTargetTransform& target_transform) const
         {
@@ -550,7 +563,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated exponential evaluation backend.
         /// @details Selects KernelExp::Accurate or KernelExp::FastApprox while leaving *this unmodified.
-        /// @param mode Exponential evaluation mode.
+        /// @param[in] mode Exponential evaluation mode.
         /// @return Copy of *this configured with mode.
         [[nodiscard]] Gpr with_kernel_exp(KernelExp mode) const
         {
@@ -561,7 +574,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated distance cache retention policy.
         /// @details Leaves *this unmodified.
-        /// @param policy Distance matrix caching policy for training.
+        /// @param[in] policy Distance matrix caching policy for training.
         /// @return Copy of *this with updated FitPolicy::distance_cache.
         [[nodiscard]] Gpr with_distance_cache_policy(DistanceCachePolicy policy) const
         {
@@ -572,7 +585,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with an updated Cholesky buffer retention policy.
         /// @details Controls whether intermediate Cholesky and LeafCache buffers are retained across steps.
-        /// @param policy Cholesky buffer retention policy.
+        /// @param[in] policy Cholesky buffer retention policy.
         /// @return Copy of *this with updated FitPolicy::cholesky_buffer.
         [[nodiscard]] Gpr with_cholesky_buffer(CholeskyBuffer policy) const
         {
@@ -629,13 +642,16 @@ namespace cxxgpr
         /// *this unchanged on failure.
         /// @details Validates column-major inputs, fits input/target transforms, optimizes negative MLL
         /// (unless O is optimizer::Fixed), re-factors at final parameters, and returns an owned FittedGpr.
-        /// @param x Column-major training feature matrix (n x d).
-        /// @param y Training target vector of length n.
+        /// @param[in] x Column-major training feature matrix (n x d).
+        /// @param[in] y Training target vector of length n.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
         /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or Inf.
         /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
+        /// @pre `x` must point to finite column-major data of shape `(n, d)` and `y.size() == x.rows()`.
+        /// @post On error, `*this` remains completely unchanged.
+        /// @see factor(), FittedGpr::predict(), FittedGpr::predict_into()
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
             MatrixRef<double> x, std::span<const double> y
         ) const
@@ -645,10 +661,10 @@ namespace cxxgpr
 
         /// @brief Fits transforms and optimizes hyperparameters from a raw column-major feature span.
         /// @details Wraps x_col_major as a MatrixRef<double> with leading dimension n_rows and calls fit().
-        /// @param x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
-        /// @param n_rows Number of training samples n.
-        /// @param n_cols Number of feature columns d.
-        /// @param y Training target vector of length n_rows.
+        /// @param[in] x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Training target vector of length n_rows.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != n_rows.
@@ -664,8 +680,8 @@ namespace cxxgpr
         /// @brief Fits transforms and factors the exact system at the current hyperparameters without running
         /// optimization iterations, leaving *this unchanged on failure.
         /// @details Computes Cholesky factor L, refined weights alpha, and MLL at the initial parameters.
-        /// @param x Column-major training feature matrix (n x d).
-        /// @param y Training target vector of length n.
+        /// @param[in] x Column-major training feature matrix (n x d).
+        /// @param[in] y Training target vector of length n.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
@@ -680,10 +696,10 @@ namespace cxxgpr
 
         /// @brief Fits transforms and factors the exact system from a raw column-major feature span.
         /// @details Wraps x_col_major as a MatrixRef<double> with leading dimension n_rows and calls factor().
-        /// @param x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
-        /// @param n_rows Number of training samples n.
-        /// @param n_cols Number of feature columns d.
-        /// @param y Training target vector of length n_rows.
+        /// @param[in] x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Training target vector of length n_rows.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != n_rows.
@@ -700,14 +716,14 @@ namespace cxxgpr
         friend class FittedGpr<O, P, K>;
 
         /// @brief Private full-state constructor used by FittedGpr::into_trainer().
-        /// @param kernel_spec Initial or fitted kernel specification.
-        /// @param optimizer Optimizer configuration.
-        /// @param likelihood Gaussian observation noise likelihood.
-        /// @param jitter Cholesky jitter stabilization policy.
-        /// @param input_transform Owned unfitted input transform.
-        /// @param target_transform Owned unfitted target transform.
-        /// @param kernel_exp Exponential evaluation backend.
-        /// @param fit_policy Workspace distance-cache and Cholesky-buffer policy.
+        /// @param[in] kernel_spec Initial or fitted kernel specification.
+        /// @param[in] optimizer Optimizer configuration.
+        /// @param[in] likelihood Gaussian observation noise likelihood.
+        /// @param[in] jitter Cholesky jitter stabilization policy.
+        /// @param[in] input_transform Owned unfitted input transform.
+        /// @param[in] target_transform Owned unfitted target transform.
+        /// @param[in] kernel_exp Exponential evaluation backend.
+        /// @param[in] fit_policy Workspace distance-cache and Cholesky-buffer policy.
         Gpr(KernelSpec kernel_spec,
             O optimizer,
             GaussianLikelihood likelihood,
@@ -730,9 +746,9 @@ namespace cxxgpr
         /// @brief Executes fit() or factor() via train_or_factor_payload() while keeping *this const.
         /// @details Bridges the concrete optimizer O through a type-erased callback and constructs FittedGpr
         /// atomically only after training succeeds.
-        /// @param x Column-major training feature matrix (n x d).
-        /// @param y Training target vector of length n.
-        /// @param optimize True to optimize hyperparameters (ignored when O is optimizer::Fixed).
+        /// @param[in] x Column-major training feature matrix (n x d).
+        /// @param[in] y Training target vector of length n.
+        /// @param[in] optimize True to optimize hyperparameters (ignored when O is optimizer::Fixed).
         /// @return Constructed FittedGpr on success, or GprError leaving *this unchanged.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> run_impl(
             MatrixRef<double> x, std::span<const double> y, bool optimize
@@ -805,7 +821,7 @@ namespace cxxgpr
         /// @brief Copy-constructs a fitted model with an independent QueryWorkspace.
         /// @details Deep-copies payload vectors, clones fitted and unfitted transforms, and leaves
         /// query_ws_ freshly initialized for independent use.
-        /// @param other Fitted model instance to copy.
+        /// @param[in] other Fitted model instance to copy.
         FittedGpr(const FittedGpr& other) :
             payload_{
                 .kernel_spec = other.payload_.kernel_spec,
@@ -837,7 +853,7 @@ namespace cxxgpr
 
         /// @brief Copy-assigns a fitted model with an independent QueryWorkspace.
         /// @details Uses copy-and-move to ensure clean resource cloning.
-        /// @param other Fitted model instance to assign from.
+        /// @param[in] other Fitted model instance to assign from.
         /// @return Reference to this FittedGpr.
         FittedGpr& operator=(const FittedGpr& other)
         {
@@ -861,8 +877,8 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and diagonal variance on the original target scale.
         /// @details Delegates to predict_with() with default or caller-supplied PredictOptions.
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] options Optional prediction variance controls.
         /// @return Prediction<Refine> on the original target scale, or GprError on validation failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -876,10 +892,10 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and diagonal variance from a raw column-major query span.
         /// @details Wraps xs as a MatrixRef<double> with leading dimension n_rows and calls predict_with().
-        /// @param xs Contiguous column-major query data of length n_rows * n_cols.
-        /// @param n_rows Number of query points m.
-        /// @param n_cols Number of features per query point (must equal n_features()).
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] options Optional prediction variance controls.
         /// @return Prediction<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
@@ -893,8 +909,8 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and diagonal variance with explicit PredictOptions.
         /// @details Allocates a Prediction<Refine> and delegates to predict_with_into().
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param options Prediction variance controls.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
         /// @return Prediction<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -912,16 +928,20 @@ namespace cxxgpr
             return out;
         }
 
+        /// @ingroup cxxgpr_gpr
         /// @brief Computes posterior mean and diagonal variance into out (zero heap allocations after warmup
         /// on matching query shape).
         /// @details Delegates to predict_with_into().
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param out Destination prediction buffers populated on the original target scale.
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
+        /// @param[in] options Optional prediction variance controls.
         /// @return Empty expected on success, or GprError on validation or transform failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @pre `xs.cols() == n_features()` and all query coordinates are finite.
+        /// @note Calling repeatedly with `xs.rows()` at most the warmed query capacity performs zero heap allocations.
+        /// @see predict(), predict_covariance_into()
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
@@ -931,11 +951,11 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and diagonal variance into out from a raw column-major query span.
         /// @details Wraps xs as a MatrixRef<double> with leading dimension n_rows and calls predict_with_into().
-        /// @param xs Contiguous column-major query data of length n_rows * n_cols.
-        /// @param n_rows Number of query points m.
-        /// @param n_cols Number of features per query point (must equal n_features()).
-        /// @param out Destination prediction buffers populated on the original target scale.
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
+        /// @param[in] options Optional prediction variance controls.
         /// @return Empty expected on success, or GprError on validation or transform failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
@@ -953,9 +973,9 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and diagonal variance into out with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_predict_into<P>() using mutable query_ws_.
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param options Prediction variance controls.
-        /// @param out Destination prediction buffers populated on the original target scale.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @return Empty expected on success, or GprError on validation or transform failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -969,8 +989,8 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and full m x m posterior covariance matrix on the original scale.
         /// @details Delegates to predict_covariance_with().
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] options Optional prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -985,10 +1005,10 @@ namespace cxxgpr
         /// @brief Computes posterior mean and full m x m posterior covariance from a raw column-major span.
         /// @details Wraps xs as a MatrixRef<double> with leading dimension n_rows and calls
         /// predict_covariance_with().
-        /// @param xs Contiguous column-major query data of length n_rows * n_cols.
-        /// @param n_rows Number of query points m.
-        /// @param n_cols Number of features per query point (must equal n_features()).
-        /// @param options Optional prediction variance controls.
+        /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] options Optional prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
@@ -1002,8 +1022,8 @@ namespace cxxgpr
 
         /// @brief Computes posterior mean and full m x m posterior covariance with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_predict_covariance<P>() using mutable query_ws_.
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param options Prediction variance controls.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -1017,11 +1037,11 @@ namespace cxxgpr
 
         /// @brief Draws n_draws deterministic posterior samples on the original target scale.
         /// @details Delegates to sample_with().
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param n_draws Number of posterior function draws to generate.
-        /// @param seed Deterministic PRNG seed.
-        /// @param options Optional prediction variance controls.
-        /// @param jitter Optional predictive covariance jitter override.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Optional prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -1040,13 +1060,13 @@ namespace cxxgpr
 
         /// @brief Draws n_draws deterministic posterior samples from a raw column-major query span.
         /// @details Wraps xs as a MatrixRef<double> with leading dimension n_rows and calls sample_with().
-        /// @param xs Contiguous column-major query data of length n_rows * n_cols.
-        /// @param n_rows Number of query points m.
-        /// @param n_cols Number of features per query point (must equal n_features()).
-        /// @param n_draws Number of posterior function draws to generate.
-        /// @param seed Deterministic PRNG seed.
-        /// @param options Optional prediction variance controls.
-        /// @param jitter Optional predictive covariance jitter override.
+        /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Optional prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
@@ -1069,11 +1089,11 @@ namespace cxxgpr
 
         /// @brief Draws n_draws deterministic posterior samples with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_sample<P>() using mutable query_ws_.
-        /// @param xs Column-major query feature matrix (m x n_features()).
-        /// @param n_draws Number of posterior function draws to generate.
-        /// @param seed Deterministic PRNG seed.
-        /// @param options Prediction variance controls.
-        /// @param jitter Optional predictive covariance jitter override.
+        /// @param[in] xs Column-major query feature matrix (m x n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
@@ -1093,7 +1113,7 @@ namespace cxxgpr
         /// @brief Computes closed-form Leave-One-Out predictive mean and variance on the original target
         /// scale (GPML §5.4.2).
         /// @details Delegates to loo_predict_with().
-        /// @param options Optional prediction variance controls.
+        /// @param[in] options Optional prediction variance controls.
         /// @return Prediction<Refine> containing LOO means and variances, or GprError on failure.
         /// @retval GprErrorCode::NonFiniteKernelValue When inverse scaling produces non-finite moments.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> loo_predict(const PredictOptions& options = {}) const
@@ -1104,7 +1124,7 @@ namespace cxxgpr
         /// @brief Computes closed-form Leave-One-Out predictive mean and variance with explicit
         /// PredictOptions.
         /// @details Forwards directly to detail::fitted_loo_predict<P>().
-        /// @param options Prediction variance controls.
+        /// @param[in] options Prediction variance controls.
         /// @return Prediction<Refine> containing LOO means and variances, or GprError on failure.
         /// @retval GprErrorCode::NonFiniteKernelValue When inverse scaling produces non-finite moments.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> loo_predict_with(const PredictOptions& options) const
@@ -1127,8 +1147,8 @@ namespace cxxgpr
         /// @brief Re-optimizes a new model on (x, y) starting from this fitted model's hyperparameters and
         /// configuration.
         /// @details Warm-starts via into_trainer().fit(x, y) without mutating *this.
-        /// @param x Column-major training feature matrix (n x d).
-        /// @param y Training target vector of length n.
+        /// @param[in] x Column-major training feature matrix (n x d).
+        /// @param[in] y Training target vector of length n.
         /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
@@ -1143,10 +1163,10 @@ namespace cxxgpr
 
         /// @brief Re-optimizes a new model from a raw column-major feature span.
         /// @details Wraps x_col_major as a MatrixRef<double> with leading dimension n_rows and calls refit().
-        /// @param x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
-        /// @param n_rows Number of training samples n.
-        /// @param n_cols Number of feature columns d.
-        /// @param y Training target vector of length n_rows.
+        /// @param[in] x_col_major Contiguous column-major feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Training target vector of length n_rows.
         /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
         /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty or null.
         /// @retval GprErrorCode::LengthMismatch When y.size() != n_rows.
@@ -1261,13 +1281,13 @@ namespace cxxgpr
         friend class persist::LoadedGpr;
 
         /// @brief Private constructor invoked by Gpr::run_impl() and LoadedGpr::into_fitted().
-        /// @param payload Validated fitted payload containing factor, weights, and fitted transforms.
-        /// @param optimizer Optimizer configuration preserved for into_trainer() and refit().
-        /// @param jitter Cholesky jitter stabilization policy.
-        /// @param unfitted_input Cloned unfitted input transform for persistence and refit.
-        /// @param unfitted_target Cloned unfitted target transform for persistence and refit.
-        /// @param kernel_exp Exponential evaluation backend mode.
-        /// @param fit_policy Workspace distance-cache and Cholesky-buffer policy.
+        /// @param[in] payload Validated fitted payload containing factor, weights, and fitted transforms.
+        /// @param[in] optimizer Optimizer configuration preserved for into_trainer() and refit().
+        /// @param[in] jitter Cholesky jitter stabilization policy.
+        /// @param[in] unfitted_input Cloned unfitted input transform for persistence and refit.
+        /// @param[in] unfitted_target Cloned unfitted target transform for persistence and refit.
+        /// @param[in] kernel_exp Exponential evaluation backend mode.
+        /// @param[in] fit_policy Workspace distance-cache and Cholesky-buffer policy.
         FittedGpr(
             detail::FittedPayload<P> payload,
             O optimizer,
@@ -1304,5 +1324,7 @@ namespace cxxgpr
         /// @brief Mutable reusable query scratch buffers avoiding allocations during predict_into().
         mutable QueryWorkspace<P> query_ws_;
     };
+
+    /// @}
 
 }  // namespace cxxgpr

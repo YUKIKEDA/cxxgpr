@@ -35,7 +35,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated maximum simplex iterations.
         /// @details Bounds the number of simplex reflection/contraction/shrink iterations per start.
-        /// @param max_iterations Maximum number of simplex iterations per start.
+        /// @param[in] max_iterations Maximum number of simplex iterations per start.
         /// @return Updated NelderMead configuration copy.
         [[nodiscard]] NelderMead with_max_iterations(std::size_t max_iterations) const noexcept
         {
@@ -46,7 +46,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated simplex value and diameter convergence tolerance.
         /// @details Validated at optimize() time to be finite and non-negative.
-        /// @param tolerance Convergence threshold for both function spread and simplex infinity-norm radius (>= 0).
+        /// @param[in] tolerance Convergence threshold for both function spread and simplex infinity-norm radius (>= 0).
         /// @return Updated NelderMead configuration copy.
         [[nodiscard]] NelderMead with_tolerance(double tolerance) const noexcept
         {
@@ -57,8 +57,8 @@ namespace cxxgpr::optimizer
 
         /// @brief Configures deterministic multi-start restarts sampled log-uniformly via Xoshiro256++.
         /// @details Runs count additional starts from log-uniform samples after evaluating initial_params.
-        /// @param count Number of extra random restarts.
-        /// @param seed Seed used to generate restart starting points.
+        /// @param[in] count Number of extra random restarts.
+        /// @param[in] seed Seed used to generate restart starting points.
         /// @return Updated NelderMead configuration copy.
         [[nodiscard]] NelderMead with_restarts(std::size_t count, std::uint64_t seed = 0U) const noexcept
         {
@@ -85,8 +85,8 @@ namespace cxxgpr::optimizer
         /// @brief Minimizes obj starting from log-space initial_params.
         /// @details Validates tolerance_ >= 0, validates bounds and initial_params, and runs single or
         /// multi-start Nelder-Mead optimization in unconstrained logit coordinates.
-        /// @param obj Objective evaluated in log-theta space.
-        /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+        /// @param[in,out] obj Objective evaluated in log-theta space.
+        /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
         /// @return Best OptimizerResult across initial run and restarts, or GprError on invalid config/input.
         /// @retval GprErrorCode::InvalidConfig When tolerance is non-finite or negative.
         /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
@@ -99,7 +99,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two NelderMead configurations.
         /// @details Compares max_iterations_, tolerance_, and restarts_.
-        /// @param other NelderMead instance to compare against.
+        /// @param[in] other NelderMead instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const NelderMead& other) const noexcept = default;
 

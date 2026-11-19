@@ -24,7 +24,7 @@ namespace
 
     /// @brief Reads pinned dependency versions from the repository vcpkg.json overrides array.
     /// @details Parses the manifest at path and maps each override package name to its version string.
-    /// @param path Null-terminated filesystem path to the vcpkg.json manifest file.
+    /// @param[in] path Null-terminated filesystem path to the vcpkg.json manifest file.
     /// @return Map from vcpkg override package name to pinned version string, or empty if unreadable.
     std::map<std::string, std::string> read_manifest_overrides(const char* path)
     {

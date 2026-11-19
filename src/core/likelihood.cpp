@@ -20,7 +20,7 @@ namespace cxxgpr
         /// @brief Safely exponentiates log(sigma_n^2) while rejecting non-finite, overflowing, or underflowing inputs.
         /// @details Distinguishes invalid log inputs from overflow to +Inf and underflow to 0.0 before
         /// checking interval bounds.
-        /// @param log_noise_variance Candidate natural-log noise variance theta.
+        /// @param[in] log_noise_variance Candidate natural-log noise variance theta.
         /// @return Strictly positive finite noise variance exp(theta), or GprError.
         /// @retval GprErrorCode::InvalidNoiseVariance When log_noise_variance is non-finite, exp
         /// overflows, or exp underflows to zero.
@@ -50,7 +50,7 @@ namespace cxxgpr
 
     /// @brief Builds a likelihood from a positive finite observation noise variance inside the default bounds.
     /// @details Enforces finiteness and positivity checks before testing Interval::default_positive().
-    /// @param noise_variance Candidate observation noise variance sigma_n^2.
+    /// @param[in] noise_variance Candidate observation noise variance sigma_n^2.
     /// @return Validated GaussianLikelihood, or GprError on invalid input.
     /// @retval GprErrorCode::InvalidNoiseVariance When noise_variance is non-finite or <= 0.
     /// @retval GprErrorCode::InvalidInterval When noise_variance lies outside Interval::default_positive().
@@ -75,7 +75,7 @@ namespace cxxgpr
 
     /// @brief Builds a likelihood from log(sigma_n^2) inside the default bounds.
     /// @details Exponentiates via exp_validated_log_noise_variance() and validates against default bounds.
-    /// @param log_noise_variance Candidate log noise variance theta = log(sigma_n^2).
+    /// @param[in] log_noise_variance Candidate log noise variance theta = log(sigma_n^2).
     /// @return Validated GaussianLikelihood, or GprError on invalid input.
     /// @retval GprErrorCode::InvalidNoiseVariance When log_noise_variance fails finiteness or exp() checks.
     /// @retval GprErrorCode::InvalidInterval When exp(log_noise_variance) lies outside Interval::default_positive().
@@ -97,7 +97,7 @@ namespace cxxgpr
 
     /// @brief Returns a copy with updated noise-variance bounds after verifying the current value stays inside.
     /// @details Delegates interval checking to BoundedParam::with_interval().
-    /// @param bounds Replacement open interval for sigma_n^2.
+    /// @param[in] bounds Replacement open interval for sigma_n^2.
     /// @return Updated GaussianLikelihood, or GprError if current variance falls outside bounds.
     /// @retval GprErrorCode::InvalidInterval When noise_variance() is outside bounds.
     std::expected<GaussianLikelihood, GprError> GaussianLikelihood::with_bounds(Interval bounds) const
@@ -113,7 +113,7 @@ namespace cxxgpr
 
     /// @brief Writes log(sigma_n^2) into a length-1 output span without modifying out on length error.
     /// @details Validates out.size() == 1 prior to writing.
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success, or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> GaussianLikelihood::get_params(std::span<double> out) const
@@ -128,7 +128,7 @@ namespace cxxgpr
 
     /// @brief Updates theta from a length-1 span atomically; leaves *this unchanged on error.
     /// @details Checks length, exponentiates params[0], and verifies bounds() before assigning noise_variance_.
-    /// @param params Input span of length 1 holding candidate log(sigma_n^2).
+    /// @param[in] params Input span of length 1 holding candidate log(sigma_n^2).
     /// @return Empty expected on success, or GprError on validation failure.
     /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
     /// @retval GprErrorCode::InvalidNoiseVariance When params[0] is non-finite or exp() overflows/underflows.
@@ -156,7 +156,7 @@ namespace cxxgpr
 
     /// @brief Writes the noise-variance Interval into a length-1 output span.
     /// @details Validates out.size() == 1 prior to writing.
-    /// @param out Destination span of length 1.
+    /// @param[out] out Destination span of length 1.
     /// @return Empty expected on success, or GprError on length mismatch.
     /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
     std::expected<void, GprError> GaussianLikelihood::bounds_into(std::span<Interval> out) const
@@ -171,7 +171,7 @@ namespace cxxgpr
 
     /// @brief Adds sigma_n^2 to each diagonal entry of a kernel matrix diagonal.
     /// @details Updates k_diag[i] += sigma_n^2 in place.
-    /// @param k_diag Mutable span over the kernel diagonal elements.
+    /// @param[in,out] k_diag Mutable span over the kernel diagonal elements.
     void GaussianLikelihood::add_noise_diag(std::span<double> k_diag) const noexcept
     {
         // Cache scalar noise_variance() outside the loop to add sigma_n^2 uniformly to every diagonal entry.
@@ -184,8 +184,8 @@ namespace cxxgpr
 
     /// @brief Writes the diagonal of dK/dtheta_i (= sigma_n^2 for i = 0) into dk_diag.
     /// @details Sets every element of dk_diag to sigma_n^2 when param_idx == 0.
-    /// @param dk_diag Mutable span receiving the diagonal gradient entries.
-    /// @param param_idx Parameter index within the likelihood (must be 0).
+    /// @param[out] dk_diag Mutable span receiving the diagonal gradient entries.
+    /// @param[in] param_idx Parameter index within the likelihood (must be 0).
     /// @return Empty expected on success, or GprError if param_idx != 0.
     /// @retval GprErrorCode::IndexOutOfRange When param_idx != 0.
     std::expected<void, GprError> GaussianLikelihood::noise_grad_diag(

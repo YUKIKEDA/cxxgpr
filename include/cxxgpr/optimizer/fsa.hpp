@@ -45,7 +45,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated maximum annealing iterations.
         /// @details Controls the cooling schedule horizon and number of single-coordinate proposals per run.
-        /// @param max_iterations Maximum number of annealing iterations per start.
+        /// @param[in] max_iterations Maximum number of annealing iterations per start.
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_max_iterations(std::size_t max_iterations) const noexcept
         {
@@ -56,7 +56,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated initial annealing temperature (> 0).
         /// @details Validated at optimize() time to be finite and strictly positive.
-        /// @param initial_temperature Initial scale T_0 > 0 for Cauchy steps and Metropolis acceptance.
+        /// @param[in] initial_temperature Initial scale T_0 > 0 for Cauchy steps and Metropolis acceptance.
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_initial_temperature(double initial_temperature) const noexcept
         {
@@ -67,7 +67,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated Ingber exponential cooling rate (>= 0).
         /// @details Validated at optimize() time to be finite and non-negative.
-        /// @param cooling_rate Exponential cooling factor c >= 0 in T_0 * exp(-c * progress^(1/d)).
+        /// @param[in] cooling_rate Exponential cooling factor c >= 0 in T_0 * exp(-c * progress^(1/d)).
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_cooling_rate(double cooling_rate) const noexcept
         {
@@ -79,7 +79,7 @@ namespace cxxgpr::optimizer
         /// @brief Returns a copy with updated Xoshiro256++ seed for proposals and acceptance.
         /// @details Each multi-start restart adds its zero-based run index to seed to stay independent and
         /// deterministic.
-        /// @param seed Deterministic 64-bit PRNG seed.
+        /// @param[in] seed Deterministic 64-bit PRNG seed.
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_seed(std::uint64_t seed) const noexcept
         {
@@ -90,7 +90,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Returns a copy with updated boundary handling policy (Clamp or Reflect).
         /// @details Governs how out-of-bounds single-coordinate proposals are mapped back inside (lo_log, hi_log).
-        /// @param boundary_policy Boundary projection strategy.
+        /// @param[in] boundary_policy Boundary projection strategy.
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_boundary_policy(BoundaryPolicy boundary_policy) const noexcept
         {
@@ -101,8 +101,8 @@ namespace cxxgpr::optimizer
 
         /// @brief Configures deterministic multi-start restarts sampled log-uniformly via Xoshiro256++.
         /// @details Runs count additional restarts from log-uniform samples after evaluating initial_params.
-        /// @param count Number of extra random restarts.
-        /// @param seed Seed used to generate restart starting points.
+        /// @param[in] count Number of extra random restarts.
+        /// @param[in] seed Seed used to generate restart starting points.
         /// @return Updated FastSimulatedAnnealing configuration copy.
         [[nodiscard]] FastSimulatedAnnealing with_restarts(std::size_t count, std::uint64_t seed = 0U) const noexcept
         {
@@ -145,8 +145,8 @@ namespace cxxgpr::optimizer
         /// @details Validates initial_temperature_ > 0 and cooling_rate_ >= 0, validates bounds and
         /// initial_params, runs single or multi-start Fast Simulated Annealing, and returns the lowest
         /// feasible objective parameters observed.
-        /// @param obj Objective evaluated in log-theta space (supports value_at_changes()).
-        /// @param initial_params Starting log-space parameter vector strictly inside objective bounds.
+        /// @param[in,out] obj Objective evaluated in log-theta space (supports value_at_changes()).
+        /// @param[in] initial_params Starting log-space parameter vector strictly inside objective bounds.
         /// @return Best OptimizerResult across the initial run and restarts, or GprError on invalid config/input.
         /// @retval GprErrorCode::InvalidConfig When initial_temperature <= 0 or cooling_rate < 0 or non-finite.
         /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
@@ -159,7 +159,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two FastSimulatedAnnealing configurations.
         /// @details Compares all configuration parameters and restart settings.
-        /// @param other FastSimulatedAnnealing instance to compare against.
+        /// @param[in] other FastSimulatedAnnealing instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const FastSimulatedAnnealing& other) const noexcept = default;
 

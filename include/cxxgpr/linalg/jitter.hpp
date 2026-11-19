@@ -28,7 +28,7 @@ namespace cxxgpr
 
         /// @brief Constructs a fixed jitter configuration from a validated non-negative offset.
         /// @details Callers outside JitterPolicy::fixed must ensure the offset is finite and non-negative.
-        /// @param jitter Non-negative diagonal jitter offset to add on retry.
+        /// @param[in] jitter Non-negative diagonal jitter offset to add on retry.
         explicit constexpr FixedJitter(double jitter) noexcept : jitter_(jitter) {}
 
         /// @brief Returns the configured diagonal jitter offset.
@@ -38,8 +38,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two FixedJitter instances.
         /// @details Compares the underlying diagonal jitter offset for exact equality.
-        /// @param lhs Left-hand FixedJitter instance.
-        /// @param rhs Right-hand FixedJitter instance.
+        /// @param[in] lhs Left-hand FixedJitter instance.
+        /// @param[in] rhs Right-hand FixedJitter instance.
         /// @return True if both instances store equal jitter offsets.
         [[nodiscard]] friend constexpr bool operator==(
             const FixedJitter& lhs, const FixedJitter& rhs
@@ -58,10 +58,10 @@ namespace cxxgpr
     public:
         /// @brief Constructs an adaptive jitter schedule configuration from validated parameters.
         /// @details Callers must obtain validated parameters through JitterPolicy::adaptive.
-        /// @param initial Positive finite jitter offset for the first retry attempt.
-        /// @param multiplier Multiplicative growth factor greater than 1.0 applied after each failed retry.
-        /// @param max_retries Maximum number of jittered retry attempts allowed (at least 1).
-        /// @param max_jitter Finite upper bound on generated retry jitter offsets (at least initial).
+        /// @param[in] initial Positive finite jitter offset for the first retry attempt.
+        /// @param[in] multiplier Multiplicative growth factor greater than 1.0 applied after each failed retry.
+        /// @param[in] max_retries Maximum number of jittered retry attempts allowed (at least 1).
+        /// @param[in] max_jitter Finite upper bound on generated retry jitter offsets (at least initial).
         constexpr AdaptiveJitter(double initial, double multiplier, std::size_t max_retries, double max_jitter) noexcept
             :
             initial_(initial),
@@ -93,8 +93,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two AdaptiveJitter instances.
         /// @details Compares initial, multiplier, max_retries, and max_jitter fields for equality.
-        /// @param lhs Left-hand AdaptiveJitter instance.
-        /// @param rhs Right-hand AdaptiveJitter instance.
+        /// @param[in] lhs Left-hand AdaptiveJitter instance.
+        /// @param[in] rhs Right-hand AdaptiveJitter instance.
         /// @return True if all adaptive jitter parameters match.
         [[nodiscard]] friend constexpr bool operator==(
             const AdaptiveJitter& lhs, const AdaptiveJitter& rhs
@@ -123,10 +123,10 @@ namespace cxxgpr
 
         /// @brief Constructs a retry schedule with explicit progression state.
         /// @details Typically created by JitterPolicy::retry_schedule.
-        /// @param next Candidate jitter offset for the upcoming retry, or std::nullopt if exhausted.
-        /// @param multiplier Multiplicative growth factor applied to advance to the following offset.
-        /// @param remaining Remaining number of retries allowed by the budget.
-        /// @param max_jitter Inclusive upper bound beyond which candidate offsets are rejected.
+        /// @param[in] next Candidate jitter offset for the upcoming retry, or std::nullopt if exhausted.
+        /// @param[in] multiplier Multiplicative growth factor applied to advance to the following offset.
+        /// @param[in] remaining Remaining number of retries allowed by the budget.
+        /// @param[in] max_jitter Inclusive upper bound beyond which candidate offsets are rejected.
         constexpr JitterSchedule(
             std::optional<double> next, double multiplier, std::size_t remaining, double max_jitter
         ) noexcept :
@@ -176,7 +176,7 @@ namespace cxxgpr
 
         /// @brief Builds a Fixed jitter policy requiring a finite, non-negative offset.
         /// @details Passing 0.0 creates a zero-retry policy that leaves the matrix unperturbed.
-        /// @param jitter Non-negative diagonal jitter offset to try once if j = 0 fails.
+        /// @param[in] jitter Non-negative diagonal jitter offset to try once if j = 0 fails.
         /// @return Validated JitterPolicy on success, or GprError on invalid input.
         /// @retval GprErrorCode::InvalidConfig When jitter is NaN, infinite, or negative.
         [[nodiscard]] static std::expected<JitterPolicy, GprError> fixed(double jitter);
@@ -184,10 +184,10 @@ namespace cxxgpr
         /// @brief Builds an Adaptive jitter policy with geometric escalation parameters.
         /// @details Validates finiteness, positivity, growth factor, retry count, and cap before constructing the
         /// policy.
-        /// @param initial Positive finite jitter offset for the first retry.
-        /// @param multiplier Finite growth factor strictly greater than 1.0.
-        /// @param max_retries Maximum number of retry attempts (must be at least 1).
-        /// @param max_jitter Finite upper cap on retry jitter (must be at least initial).
+        /// @param[in] initial Positive finite jitter offset for the first retry.
+        /// @param[in] multiplier Finite growth factor strictly greater than 1.0.
+        /// @param[in] max_retries Maximum number of retry attempts (must be at least 1).
+        /// @param[in] max_jitter Finite upper cap on retry jitter (must be at least initial).
         /// @return Validated JitterPolicy on success, or GprError on invalid configuration.
         /// @retval GprErrorCode::InvalidConfig When any parameter violates finiteness or range preconditions.
         [[nodiscard]] static std::expected<JitterPolicy, GprError> adaptive(
@@ -245,8 +245,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two JitterPolicy instances.
         /// @details Compares active kind and both stored configuration payloads.
-        /// @param lhs Left-hand JitterPolicy instance.
-        /// @param rhs Right-hand JitterPolicy instance.
+        /// @param[in] lhs Left-hand JitterPolicy instance.
+        /// @param[in] rhs Right-hand JitterPolicy instance.
         /// @return True if both policies have the same kind and configuration values.
         [[nodiscard]] friend constexpr bool operator==(
             const JitterPolicy& lhs, const JitterPolicy& rhs
@@ -255,12 +255,12 @@ namespace cxxgpr
     private:
         /// @brief Constructs a fixed jitter policy from validated settings.
         /// @details Initializes kind_ to Kind::Fixed and stores fixed_cfg.
-        /// @param fixed_cfg Validated fixed jitter settings.
+        /// @param[in] fixed_cfg Validated fixed jitter settings.
         constexpr explicit JitterPolicy(FixedJitter fixed_cfg) noexcept : kind_(Kind::Fixed), fixed_(fixed_cfg) {}
 
         /// @brief Constructs an adaptive jitter policy from validated settings.
         /// @details Initializes kind_ to Kind::Adaptive and stores adaptive_cfg.
-        /// @param adaptive_cfg Validated adaptive jitter settings.
+        /// @param[in] adaptive_cfg Validated adaptive jitter settings.
         constexpr explicit JitterPolicy(AdaptiveJitter adaptive_cfg) noexcept :
             kind_(Kind::Adaptive),
             adaptive_(adaptive_cfg)

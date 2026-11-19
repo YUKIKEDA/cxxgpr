@@ -58,12 +58,12 @@ namespace
     public:
         /// @brief Constructs a mean-centering target transform with the given empirical offset.
         /// @details Stores mean so transform() subtracts it and inverse_transform_mean() adds it back.
-        /// @param mean Empirical training target mean.
+        /// @param[in] mean Empirical training target mean.
         explicit FittedCenterY(double mean) : mean_(mean) {}
 
         /// @brief Subtracts the fitted mean from every element of y in place.
         /// @details Rejects empty spans with GprErrorCode::EmptyInput.
-        /// @param y Mutable span of target values to center.
+        /// @param[in,out] y Mutable span of target values to center.
         /// @return Empty expected on success, or EmptyInput when y is empty.
         [[nodiscard]] std::expected<void, GprError> transform(std::span<double> y) const override
         {
@@ -80,7 +80,7 @@ namespace
 
         /// @brief Adds the fitted mean back to every predicted mean entry in place.
         /// @details Rejects empty spans with GprErrorCode::EmptyInput.
-        /// @param mean Mutable span of standardized predictive means.
+        /// @param[in,out] mean Mutable span of standardized predictive means.
         /// @return Empty expected on success, or EmptyInput when mean is empty.
         [[nodiscard]] std::expected<void, GprError> inverse_transform_mean(std::span<double> mean) const override
         {
@@ -97,7 +97,7 @@ namespace
 
         /// @brief Leaves predictive variances unchanged because mean centering has unit Jacobian.
         /// @details Rejects empty spans with GprErrorCode::EmptyInput.
-        /// @param var Mutable span of predictive variances.
+        /// @param[in,out] var Mutable span of predictive variances.
         /// @return Empty expected on success, or EmptyInput when var is empty.
         [[nodiscard]] std::expected<void, GprError> inverse_transform_variance(std::span<double> var) const override
         {
@@ -128,7 +128,7 @@ namespace
     public:
         /// @brief Computes the empirical target mean and returns a FittedCenterY transform.
         /// @details Rejects empty spans with GprErrorCode::EmptyInput.
-        /// @param y Training target vector span.
+        /// @param[in] y Training target vector span.
         /// @return FittedCenterY wrapped in unique_ptr, or EmptyInput when y is empty.
         [[nodiscard]] std::expected<std::unique_ptr<FittedTargetTransform>, GprError> fit(
             std::span<const double> y

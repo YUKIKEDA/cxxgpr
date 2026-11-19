@@ -6,6 +6,9 @@
 /// backends, and custom user-defined kernel interfaces.
 #pragma once
 
+/// @defgroup cxxgpr_kernel Kernel Expressions and Evaluators
+/// @brief Built-in kernels, expression composition, distance caches, and custom kernel extensions.
+/// @{
 #include "cxxgpr/kernel/compiled.hpp"
 #include "cxxgpr/kernel/custom.hpp"
 #include "cxxgpr/kernel/distance.hpp"
@@ -13,3 +16,4 @@
 #include "cxxgpr/kernel/exp.hpp"
 #include "cxxgpr/kernel/leaves.hpp"
 #include "cxxgpr/kernel/spec.hpp"
+/// @}

@@ -23,8 +23,8 @@ namespace
 
     /// @brief Computes a column-major rectangular pairwise squared Euclidean distance matrix.
     /// @details Evaluates ||x1_i - x2_j||_2^2 for cross-covariance and square distance tests.
-    /// @param x1 Left point matrix of shape n1 x d.
-    /// @param x2 Right point matrix of shape n2 x d.
+    /// @param[in] x1 Left point matrix of shape n1 x d.
+    /// @param[in] x2 Right point matrix of shape n2 x d.
     /// @return Column-major n1 x n2 vector of squared Euclidean distances.
     std::vector<double> make_sq_dist_rect(cxxgpr::MatrixRef<double> x1, cxxgpr::MatrixRef<double> x2)
     {
@@ -48,9 +48,9 @@ namespace
 
     /// @brief Computes per-dimension pairwise squared coordinate differences (x1_{i,dim} - x2_{j,dim})^2.
     /// @details Produces one column-major n1 x n2 difference slice for binding into an ArdDistance slot.
-    /// @param x1 Left point matrix of shape n1 x d.
-    /// @param x2 Right point matrix of shape n2 x d.
-    /// @param dim Zero-based feature dimension index.
+    /// @param[in] x1 Left point matrix of shape n1 x d.
+    /// @param[in] x2 Right point matrix of shape n2 x d.
+    /// @param[in] dim Zero-based feature dimension index.
     /// @return Column-major n1 x n2 vector of single-dimension squared differences.
     std::vector<double> make_dim_sq_diff_rect(
         cxxgpr::MatrixRef<double> x1, cxxgpr::MatrixRef<double> x2, std::size_t dim

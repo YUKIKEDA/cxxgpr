@@ -61,8 +61,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two FitPolicy values.
         /// @details Compares both distance_cache and cholesky_buffer policies.
-        /// @param lhs Left-hand FitPolicy operand.
-        /// @param rhs Right-hand FitPolicy operand.
+        /// @param[in] lhs Left-hand FitPolicy operand.
+        /// @param[in] rhs Right-hand FitPolicy operand.
         /// @return True if both policy fields match.
         [[nodiscard]] friend constexpr bool operator==(const FitPolicy& lhs, const FitPolicy& rhs) noexcept = default;
     };
@@ -77,8 +77,8 @@ namespace cxxgpr
         /// @brief Ensures storage for p matrices S_i of size n x n, matrix V (n x p), and scratch vectors.
         /// @details Checks integer multiplication bounds before growing buffers; existing allocations are
         /// preserved when capacity already suffices.
-        /// @param n Training sample count (matrix order).
-        /// @param p Total hyperparameter count (kernel parameters plus noise parameter).
+        /// @param[in] n Training sample count (matrix order).
+        /// @param[in] p Total hyperparameter count (kernel parameters plus noise parameter).
         /// @return Empty expected on success, or GprError on empty dimensions or overflow.
         /// @retval GprErrorCode::EmptyInput When n == 0 or p == 0.
         /// @retval GprErrorCode::SizeOverflow When n * n, p * n * n, or n * p overflows std::size_t.
@@ -91,25 +91,25 @@ namespace cxxgpr
 
         /// @brief Returns a mutable n x n column-major view of S_i for parameter index i.
         /// @details Caller must ensure is_allocated() is true and i < num_params_.
-        /// @param i Zero-based parameter index in [0, num_params_).
+        /// @param[in] i Zero-based parameter index in [0, num_params_).
         /// @return Mutable n x n column-major view of S_i.
         [[nodiscard]] MatrixMut<S> s_mut(std::size_t i) noexcept;
 
         /// @brief Returns an immutable n x n column-major view of S_i for parameter index i.
         /// @details Caller must ensure is_allocated() is true and i < num_params_.
-        /// @param i Zero-based parameter index in [0, num_params_).
+        /// @param[in] i Zero-based parameter index in [0, num_params_).
         /// @return Immutable n x n column-major view of S_i.
         [[nodiscard]] MatrixRef<S> s_ref(std::size_t i) const noexcept;
 
         /// @brief Returns a mutable span over column i of V (length n).
         /// @details Stores v_i = L^-1 A_i alpha for parameter index i.
-        /// @param i Zero-based parameter index in [0, num_params_).
+        /// @param[in] i Zero-based parameter index in [0, num_params_).
         /// @return Mutable length-n span over column i of V.
         [[nodiscard]] std::span<S> v_col_mut(std::size_t i) noexcept;
 
         /// @brief Returns an immutable span over column i of V (length n).
         /// @details Reads v_i = L^-1 A_i alpha populated during analytical Hessian evaluation.
-        /// @param i Zero-based parameter index in [0, num_params_).
+        /// @param[in] i Zero-based parameter index in [0, num_params_).
         /// @return Immutable length-n span over column i of V.
         [[nodiscard]] std::span<const S> v_col_ref(std::size_t i) const noexcept;
 
@@ -144,7 +144,7 @@ namespace cxxgpr
         /// @brief Allocates core buffers sized for n training points.
         /// @details Validates n > 0 and checks n * n against std::size_t overflow before allocating k_matrix,
         /// exp_buf, rhs, and col_partials; kernel_scratch, weighted, and hessian remain lazily allocated.
-        /// @param n Training sample count (matrix order).
+        /// @param[in] n Training sample count (matrix order).
         /// @return Allocated WorkspaceCore<P>, or GprError if n == 0 or n * n overflows.
         /// @retval GprErrorCode::EmptyInput When n == 0.
         /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -185,7 +185,7 @@ namespace cxxgpr
 
         /// @brief Ensures weighted holds at least n_bufs n x n buffers without reallocating when sufficient.
         /// @details Sizes NestedBuffers for keep_plan factor-Gram retention and single-pass weighted_grads().
-        /// @param n_bufs Minimum number of n x n buffer levels required in weighted.
+        /// @param[in] n_bufs Minimum number of n x n buffer levels required in weighted.
         /// @return Empty expected on success, or GprError if workspace order is zero.
         /// @retval GprErrorCode::EmptyInput When order_ == 0.
         [[nodiscard]] std::expected<void, GprError> ensure_weighted(std::size_t n_bufs);
@@ -225,9 +225,9 @@ namespace cxxgpr
         /// @brief Allocates training buffers for n points under the given cache and Cholesky buffer policies.
         /// @details Allocates WorkspaceCore<P>, constructs an empty DistanceCache if cache == Cached, and
         /// allocates w_matrix of size n x n if buffer == Retain.
-        /// @param n Training sample count.
-        /// @param cache Distance caching policy (Cached or Uncached).
-        /// @param buffer Cholesky buffer retention policy (Retain or Reuse).
+        /// @param[in] n Training sample count.
+        /// @param[in] cache Distance caching policy (Cached or Uncached).
+        /// @param[in] buffer Cholesky buffer retention policy (Retain or Reuse).
         /// @return Allocated FitBuffers<P>, or GprError if n == 0 or size calculation overflows.
         /// @retval GprErrorCode::EmptyInput When n == 0.
         /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -239,8 +239,8 @@ namespace cxxgpr
 
         /// @brief Allocates training buffers for n points using a FitPolicy preset.
         /// @details Convenience overload forwarding policy.distance_cache and policy.cholesky_buffer.
-        /// @param n Training sample count.
-        /// @param policy Combined distance-cache and Cholesky-buffer preset.
+        /// @param[in] n Training sample count.
+        /// @param[in] policy Combined distance-cache and Cholesky-buffer preset.
         /// @return Allocated FitBuffers<P>, or GprError if n == 0 or size calculation overflows.
         /// @retval GprErrorCode::EmptyInput When n == 0.
         /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -285,10 +285,10 @@ namespace cxxgpr
         /// @brief Ensures buffers can accommodate n training points, m queries, d features, and depth.
         /// @details Checks dimension multiplication bounds first and resizes vectors only when current sizes
         /// are smaller than required, preserving existing heap capacity across matching or smaller queries.
-        /// @param n Training sample count.
-        /// @param m Query point count.
-        /// @param d Feature dimension count.
-        /// @param nested_depth Kernel tree nested buffer depth.
+        /// @param[in] n Training sample count.
+        /// @param[in] m Query point count.
+        /// @param[in] d Feature dimension count.
+        /// @param[in] nested_depth Kernel tree nested buffer depth.
         /// @return Empty expected on success, or GprError on empty extents or size overflow.
         /// @retval GprErrorCode::EmptyInput When n == 0, m == 0, or d == 0.
         /// @retval GprErrorCode::SizeOverflow When m * d, n * m, or (nested_depth + 1) * m overflows std::size_t.

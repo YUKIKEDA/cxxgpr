@@ -17,8 +17,8 @@ namespace cxxgpr::optimizer
     /// @brief Evaluates the objective once at initial_params without taking any optimization steps.
     /// @details Constructs LogBounds from obj, checks initial_params strictly inside open bounds,
     /// calls obj.value(initial_params), rejects non-finite outputs, and returns iterations = 0.
-    /// @param obj Objective instance to evaluate.
-    /// @param initial_params Fixed log-space hyperparameter vector of length obj.dim().
+    /// @param[in,out] obj Objective instance to evaluate.
+    /// @param[in] initial_params Fixed log-space hyperparameter vector of length obj.dim().
     /// @return OptimizerResult with initial_params, evaluated value, iterations = 0, and converged = true,
     /// or GprError if bounds, initial parameters, or objective evaluation fail.
     /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.

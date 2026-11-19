@@ -13,8 +13,8 @@ namespace cxxgpr
 
     /// @brief Builds a finite open interval requiring lo < hi and both endpoints finite.
     /// @details Returns InvalidInterval with InvalidBounds when either endpoint is non-finite or lo >= hi.
-    /// @param lo Exclusive lower bound.
-    /// @param hi Exclusive upper bound.
+    /// @param[in] lo Exclusive lower bound.
+    /// @param[in] hi Exclusive upper bound.
     /// @return Validated Interval, or GprError on invalid bounds.
     /// @retval GprErrorCode::InvalidInterval When lo or hi is non-finite or lo >= hi.
     std::expected<Interval, GprError> Interval::create(double lo, double hi)
@@ -29,8 +29,8 @@ namespace cxxgpr
 
     /// @brief Builds a strictly positive finite open interval requiring 0 < lo < hi.
     /// @details Enforces lo > 0.0 in addition to finiteness and strict endpoint ordering.
-    /// @param lo Exclusive positive lower bound.
-    /// @param hi Exclusive upper bound.
+    /// @param[in] lo Exclusive positive lower bound.
+    /// @param[in] hi Exclusive upper bound.
     /// @return Validated strictly positive Interval, or GprError on invalid bounds.
     /// @retval GprErrorCode::InvalidInterval When lo or hi is non-finite, lo <= 0, or lo >= hi.
     std::expected<Interval, GprError> Interval::positive(double lo, double hi)
@@ -45,7 +45,7 @@ namespace cxxgpr
 
     /// @brief Returns true if value is finite and strictly inside (lo, hi).
     /// @details Tests open-interval bounds strictly (lo_ < value < hi_).
-    /// @param value Scalar value to test.
+    /// @param[in] value Scalar value to test.
     /// @return True iff value is finite and strictly between lo_ and hi_.
     bool Interval::contains(double value) const noexcept
     {
@@ -55,8 +55,8 @@ namespace cxxgpr
 
     /// @brief Builds a parameter strictly inside interval.
     /// @details Rejects values outside the open interval with InvalidInterval (OutOfRange).
-    /// @param value Candidate parameter value in user units.
-    /// @param interval Bounding open interval.
+    /// @param[in] value Candidate parameter value in user units.
+    /// @param[in] interval Bounding open interval.
     /// @return Validated BoundedParam, or GprError when value is out of range.
     /// @retval GprErrorCode::InvalidInterval When interval.contains(value) is false.
     std::expected<BoundedParam, GprError> BoundedParam::create(double value, Interval interval)
@@ -71,7 +71,7 @@ namespace cxxgpr
 
     /// @brief Builds a parameter strictly inside Interval::default_positive().
     /// @details Delegates to create() using Interval::default_positive().
-    /// @param value Candidate positive parameter value in user units.
+    /// @param[in] value Candidate positive parameter value in user units.
     /// @return Validated BoundedParam, or GprError when outside default bounds.
     /// @retval GprErrorCode::InvalidInterval When value is outside (1e-5, 1e5).
     std::expected<BoundedParam, GprError> BoundedParam::default_positive(double value)
@@ -89,7 +89,7 @@ namespace cxxgpr
 
     /// @brief Rebuilds this parameter with a new value against the existing interval.
     /// @details Validates value against interval_ without mutating *this.
-    /// @param value Candidate replacement scalar value.
+    /// @param[in] value Candidate replacement scalar value.
     /// @return New BoundedParam with updated value, or GprError on range violation.
     /// @retval GprErrorCode::InvalidInterval When value is outside interval_.
     std::expected<BoundedParam, GprError> BoundedParam::with_value(double value) const
@@ -99,7 +99,7 @@ namespace cxxgpr
 
     /// @brief Rebuilds this parameter with a new interval checking the current value remains inside.
     /// @details Validates value_ against the replacement interval without mutating *this.
-    /// @param interval Replacement bounding interval.
+    /// @param[in] interval Replacement bounding interval.
     /// @return New BoundedParam with updated interval, or GprError if value_ falls outside.
     /// @retval GprErrorCode::InvalidInterval When value_ is outside interval.
     std::expected<BoundedParam, GprError> BoundedParam::with_interval(Interval interval) const

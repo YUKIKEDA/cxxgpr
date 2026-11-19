@@ -39,7 +39,7 @@ namespace
         std::filesystem::path path;
 
         /// @brief Creates a fresh temporary directory named with prefix `cxxgpr_test_`.
-        /// @param name Unique test identifier suffix appended to the directory name.
+        /// @param[in] name Unique test identifier suffix appended to the directory name.
         explicit TempDirGuard(const std::string& name)
         {
             path = std::filesystem::temp_directory_path() / ("cxxgpr_test_" + name);
@@ -70,7 +70,7 @@ namespace
     {
     public:
         /// @brief Constructs the double-precision custom kernel with initial scale factor.
-        /// @param scale Positive kernel output scale parameter.
+        /// @param[in] scale Positive kernel output scale parameter.
         explicit CustomScaleKernel(double scale) : scale_(scale) {}
 
         /// @brief Clones this custom kernel preserving its scale_ value.
@@ -85,7 +85,7 @@ namespace
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
         /// @brief Writes log(scale_) into out[0].
-        /// @param out Destination span of length 1 receiving log-transformed scale.
+        /// @param[out] out Destination span of length 1 receiving log-transformed scale.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
@@ -94,7 +94,7 @@ namespace
         }
 
         /// @brief Updates scale_ from log-parameter params[0].
-        /// @param params Input span containing log(scale) at index 0.
+        /// @param[in] params Input span containing log(scale) at index 0.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
@@ -103,7 +103,7 @@ namespace
         }
 
         /// @brief Populates default positive bounds for the scale parameter.
-        /// @param out Destination Interval span of length 1.
+        /// @param[out] out Destination Interval span of length 1.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
@@ -112,9 +112,9 @@ namespace
         }
 
         /// @brief Evaluates scale_ * exp(-d2) over the requested square matrix triangle.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param out Output kernel Gram matrix buffer.
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output kernel Gram matrix buffer.
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<double> dist, cxxgpr::MatrixMut<double> out, cxxgpr::Triangle uplo
@@ -134,8 +134,8 @@ namespace
         }
 
         /// @brief Evaluates rectangular cross-covariance scale_ * exp(-d2).
-        /// @param dist Rectangular pairwise squared Euclidean distance matrix.
-        /// @param out Output cross-covariance matrix buffer.
+        /// @param[in] dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output cross-covariance matrix buffer.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<double> dist, cxxgpr::MatrixMut<double> out
@@ -152,7 +152,7 @@ namespace
         }
 
         /// @brief Fills the prior kernel diagonal with scale_.
-        /// @param out Destination diagonal span of length n.
+        /// @param[out] out Destination diagonal span of length n.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<double> out) const override
         {
@@ -161,10 +161,10 @@ namespace
         }
 
         /// @brief Computes derivative dk / d(log scale), which equals k itself.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d_k Output gradient matrix buffer.
-        /// @param param_idx Local parameter index (unused because num_params() == 1).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d_k Output gradient matrix buffer.
+        /// @param[in] param_idx Local parameter index (unused because num_params() == 1).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<double> dist,
@@ -177,11 +177,11 @@ namespace
         }
 
         /// @brief Computes second derivative d^2 k / d(log scale)^2, which equals k itself.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d2_k Output Hessian matrix buffer.
-        /// @param i First local parameter index (unused because num_params() == 1).
-        /// @param j Second local parameter index (unused because num_params() == 1).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d2_k Output Hessian matrix buffer.
+        /// @param[in] i First local parameter index (unused because num_params() == 1).
+        /// @param[in] j Second local parameter index (unused because num_params() == 1).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<double> dist,
@@ -217,7 +217,7 @@ namespace
     {
     public:
         /// @brief Constructs the single-precision custom kernel with initial scale factor.
-        /// @param scale Positive kernel output scale parameter.
+        /// @param[in] scale Positive kernel output scale parameter.
         explicit CustomScaleKernelFloat(float scale) : scale_(scale) {}
 
         /// @brief Clones this float custom kernel preserving its scale_ value.
@@ -232,7 +232,7 @@ namespace
         [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
 
         /// @brief Writes log(scale_) cast to double into out[0].
-        /// @param out Destination span of length 1 receiving log-transformed scale.
+        /// @param[out] out Destination span of length 1 receiving log-transformed scale.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
         {
@@ -241,7 +241,7 @@ namespace
         }
 
         /// @brief Updates float scale_ from log-parameter params[0].
-        /// @param params Input span containing log(scale) at index 0.
+        /// @param[in] params Input span containing log(scale) at index 0.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
         {
@@ -250,7 +250,7 @@ namespace
         }
 
         /// @brief Populates default positive bounds for the scale parameter.
-        /// @param out Destination Interval span of length 1.
+        /// @param[out] out Destination Interval span of length 1.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
@@ -259,9 +259,9 @@ namespace
         }
 
         /// @brief Evaluates float scale_ * exp(-d2) over the requested square matrix triangle.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param out Output kernel Gram matrix buffer.
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output kernel Gram matrix buffer.
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
             cxxgpr::MatrixRef<float> dist, cxxgpr::MatrixMut<float> out, cxxgpr::Triangle uplo
@@ -281,8 +281,8 @@ namespace
         }
 
         /// @brief Evaluates float rectangular cross-covariance scale_ * exp(-d2).
-        /// @param dist Rectangular pairwise squared Euclidean distance matrix.
-        /// @param out Output cross-covariance matrix buffer.
+        /// @param[in] dist Rectangular pairwise squared Euclidean distance matrix.
+        /// @param[out] out Output cross-covariance matrix buffer.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
             cxxgpr::MatrixRef<float> dist, cxxgpr::MatrixMut<float> out
@@ -299,7 +299,7 @@ namespace
         }
 
         /// @brief Fills the prior float kernel diagonal with scale_.
-        /// @param out Destination diagonal span of length n.
+        /// @param[out] out Destination diagonal span of length n.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<float> out) const override
         {
@@ -308,10 +308,10 @@ namespace
         }
 
         /// @brief Computes derivative dk / d(log scale) in single precision.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d_k Output gradient matrix buffer.
-        /// @param param_idx Local parameter index (unused because num_params() == 1).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d_k Output gradient matrix buffer.
+        /// @param[in] param_idx Local parameter index (unused because num_params() == 1).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
             cxxgpr::MatrixRef<float> dist,
@@ -324,11 +324,11 @@ namespace
         }
 
         /// @brief Computes second derivative d^2 k / d(log scale)^2 in single precision.
-        /// @param dist Pairwise squared Euclidean distance matrix.
-        /// @param d2_k Output Hessian matrix buffer.
-        /// @param i First local parameter index (unused because num_params() == 1).
-        /// @param j Second local parameter index (unused because num_params() == 1).
-        /// @param uplo Triangle mask controlling which entries are written.
+        /// @param[in] dist Pairwise squared Euclidean distance matrix.
+        /// @param[out] d2_k Output Hessian matrix buffer.
+        /// @param[in] i First local parameter index (unused because num_params() == 1).
+        /// @param[in] j Second local parameter index (unused because num_params() == 1).
+        /// @param[in] uplo Triangle mask controlling which entries are written.
         /// @return Empty expected on success.
         [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
             cxxgpr::MatrixRef<float> dist,

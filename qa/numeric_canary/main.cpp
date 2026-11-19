@@ -23,8 +23,8 @@ namespace
 {
 
     /// @brief Prints one named IEEE-754 probe value in exact C++ hex-float notation.
-    /// @param name Probe identifier key.
-    /// @param value Scalar floating-point result formatted with `std::format("{:a}")`.
+    /// @param[in] name Probe identifier key.
+    /// @param[in] value Scalar floating-point result formatted with `std::format("{:a}")`.
     void emit(std::string_view name, double value)
     {
         std::cout << std::format("{} {:a}\n", name, value);

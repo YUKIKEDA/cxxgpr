@@ -15,8 +15,8 @@ namespace cxxgpr
 
     /// @brief Constructs a CustomKernel from paired double and float KernelTerm implementations.
     /// @details Rejects null implementations, parameter-count mismatches, and mismatched persist_id values.
-    /// @param term_double Heap-allocated double-precision leaf implementation.
-    /// @param term_float Heap-allocated float-precision leaf implementation.
+    /// @param[in] term_double Heap-allocated double-precision leaf implementation.
+    /// @param[in] term_float Heap-allocated float-precision leaf implementation.
     /// @return Constructed CustomKernel or GprError if the pair is inconsistent.
     /// @retval GprErrorCode::InvalidConfig When either pointer is null or persist_id values differ.
     /// @retval GprErrorCode::LengthMismatch When parameter counts of the two terms differ.
@@ -46,7 +46,7 @@ namespace cxxgpr
 
     /// @brief Copy-constructs a CustomKernel by cloning both underlying scalar implementations.
     /// @details Ensures value semantics across KernelSpec and CompiledKernel copies.
-    /// @param other Source CustomKernel to clone.
+    /// @param[in] other Source CustomKernel to clone.
     CustomKernel::CustomKernel(const CustomKernel& other) :
         term_double_(other.term_double_->clone()),
         term_float_(other.term_float_->clone())
@@ -55,7 +55,7 @@ namespace cxxgpr
 
     /// @brief Copy-assigns a CustomKernel by cloning both underlying scalar implementations.
     /// @details Guards against self-assignment before replacing both owned leaf pointers.
-    /// @param other Source CustomKernel to clone.
+    /// @param[in] other Source CustomKernel to clone.
     /// @return Reference to this CustomKernel.
     CustomKernel& CustomKernel::operator=(const CustomKernel& other)
     {
@@ -77,7 +77,7 @@ namespace cxxgpr
 
     /// @brief Writes log-space hyperparameters into out.
     /// @details Delegates to the authoritative double-precision KernelTerm.
-    /// @param out Destination span receiving log-space parameters.
+    /// @param[out] out Destination span receiving log-space parameters.
     /// @return Empty expected on success or GprError returned by the wrapped term.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> CustomKernel::get_params(std::span<double> out) const
@@ -88,7 +88,7 @@ namespace cxxgpr
     /// @brief Atomically updates parameters from log-space params on both scalar implementations.
     /// @details Clones both double and float terms, applies set_params() to each clone, and commits
     /// both only if both succeed so neither term becomes desynchronized on partial failure.
-    /// @param params Input span of unconstrained log-space parameters.
+    /// @param[in] params Input span of unconstrained log-space parameters.
     /// @return Empty expected on success or GprError if count checking or either term fails.
     /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
     /// @retval GprErrorCode::NonFiniteInput When any log-space parameter is NaN or infinite.
@@ -118,7 +118,7 @@ namespace cxxgpr
 
     /// @brief Writes open parameter intervals into out.
     /// @details Delegates to the double-precision KernelTerm.
-    /// @param out Destination span receiving parameter intervals.
+    /// @param[out] out Destination span receiving parameter intervals.
     /// @return Empty expected on success or GprError returned by the wrapped term.
     /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
     std::expected<void, GprError> CustomKernel::bounds_into(std::span<Interval> out) const
@@ -146,8 +146,8 @@ namespace cxxgpr
     /// @brief Checks value equality between two CustomKernel wrappers.
     /// @details Compares parameter counts, persistence identifiers, and IEEE-754 bit representations of
     /// all log-space hyperparameters.
-    /// @param lhs Left-hand CustomKernel operand.
-    /// @param rhs Right-hand CustomKernel operand.
+    /// @param[in] lhs Left-hand CustomKernel operand.
+    /// @param[in] rhs Right-hand CustomKernel operand.
     /// @return True when metadata and every log-space parameter bit pattern match.
     bool operator==(const CustomKernel& lhs, const CustomKernel& rhs)
     {

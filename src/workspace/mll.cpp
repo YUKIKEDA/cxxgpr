@@ -27,7 +27,7 @@ namespace cxxgpr
         /// @brief Populates a square mutable matrix view with the n x n identity matrix I_n.
         /// @details Writes 1 along the main diagonal and 0 elsewhere prior to solving A * X = I_n.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param mat Square mutable n x n column-major matrix view.
+        /// @param[out] mat Square mutable n x n column-major matrix view.
         template <KernelScalarConcept T> void fill_identity(MatrixMut<T> mat) noexcept
         {
             const std::size_t n = mat.rows();
@@ -44,8 +44,8 @@ namespace cxxgpr
         /// @details Writes diag_val on the diagonal and 0 strictly below it, representing dA/d(log sigma_n^2)
         /// and d^2A/d(log sigma_n^2)^2 = sigma_n^2 * I_n.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param mat Square mutable n x n column-major matrix view.
-        /// @param diag_val Scalar multiplier applied to main diagonal entries.
+        /// @param[out] mat Square mutable n x n column-major matrix view.
+        /// @param[in] diag_val Scalar multiplier applied to main diagonal entries.
         template <KernelScalarConcept T> void fill_diagonal_scaled(MatrixMut<T> mat, T diag_val) noexcept
         {
             const std::size_t n = mat.rows();
@@ -62,16 +62,16 @@ namespace cxxgpr
         /// @details Reads alpha and the lower triangle of a_inv (which may alias w_out under
         /// CholeskyBuffer::Reuse) and writes column-major lower entries in parallel.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param alpha Pre-solved weight vector A^-1 * y (length n).
-        /// @param a_inv Immutable view of A^-1 (only lower triangle read).
-        /// @param w_out Mutable destination matrix view receiving lower triangle of W.
+        /// @param[in] alpha Pre-solved weight vector A^-1 * y (length n).
+        /// @param[in] a_inv Immutable view of A^-1 (only lower triangle read).
+        /// @param[out] w_out Mutable destination matrix view receiving lower triangle of W.
         template <KernelScalarConcept T>
         void build_w_lower_from_inv(std::span<const T> alpha, MatrixRef<T> a_inv, MatrixMut<T> w_out) noexcept
         {
             const std::size_t n = alpha.size();
             const auto n_cols = static_cast<std::ptrdiff_t>(n);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(static) if (n >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
@@ -88,9 +88,9 @@ namespace cxxgpr
         /// @details Traverses lower-triangular entries once to accumulate both row and symmetric column
         /// contributions into u without touching the strictly upper triangle of a_lower.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param a_lower Square read-only view whose lower triangle stores symmetric matrix A_i.
-        /// @param alpha Input vector of length n.
-        /// @param u Mutable output vector of length n receiving A_i * alpha.
+        /// @param[in] a_lower Square read-only view whose lower triangle stores symmetric matrix A_i.
+        /// @param[in] alpha Input vector of length n.
+        /// @param[out] u Mutable output vector of length n receiving A_i * alpha.
         template <KernelScalarConcept T>
         void gemv_sym_lower(MatrixRef<T> a_lower, std::span<const T> alpha, std::span<T> u) noexcept
         {
@@ -115,7 +115,7 @@ namespace cxxgpr
         /// @brief Transposes a square column-major matrix view in place.
         /// @details Swaps strictly lower and strictly upper entries for col < row.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param mat Square mutable n x n column-major matrix view.
+        /// @param[in,out] mat Square mutable n x n column-major matrix view.
         template <KernelScalarConcept T> void transpose_square_in_place(MatrixMut<T> mat) noexcept
         {
             const std::size_t n = mat.rows();
@@ -134,9 +134,9 @@ namespace cxxgpr
         /// @details Evaluates column sums diag + 2 * strictly_lower in double precision in parallel into
         /// col_partials, then folds columns in fixed ascending order for bitwise thread-count invariance.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param a First symmetric n x n matrix view (lower triangle read).
-        /// @param b Second symmetric n x n matrix view (lower triangle read).
-        /// @param col_partials Pre-allocated length-n scratch span for deterministic per-column reduction.
+        /// @param[in] a First symmetric n x n matrix view (lower triangle read).
+        /// @param[in] b Second symmetric n x n matrix view (lower triangle read).
+        /// @param[in,out] col_partials Pre-allocated length-n scratch span for deterministic per-column reduction.
         /// @return Trace(a * b) computed deterministically in double precision.
         template <KernelScalarConcept T>
         [[nodiscard]] double frobenius_lower_det(
@@ -146,7 +146,7 @@ namespace cxxgpr
             const std::size_t n = a.rows();
             const auto n_cols = static_cast<std::ptrdiff_t>(n);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(static) if (n >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
@@ -172,9 +172,9 @@ namespace cxxgpr
         /// @details Accumulates each column inner product in double precision into col_partials in parallel,
         /// then folds columns sequentially in ascending order for bitwise determinism.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param a First n x n column-major matrix view.
-        /// @param b Second n x n column-major matrix view.
-        /// @param col_partials Pre-allocated length-n scratch span for deterministic per-column reduction.
+        /// @param[in] a First n x n column-major matrix view.
+        /// @param[in] b Second n x n column-major matrix view.
+        /// @param[in,out] col_partials Pre-allocated length-n scratch span for deterministic per-column reduction.
         /// @return Full Frobenius inner product in double precision.
         template <KernelScalarConcept T>
         [[nodiscard]] double frobenius_full_det(MatrixRef<T> a, MatrixRef<T> b, std::span<double> col_partials) noexcept
@@ -182,7 +182,7 @@ namespace cxxgpr
             const std::size_t n = a.rows();
             const auto n_cols = static_cast<std::ptrdiff_t>(n);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(static) if (n >= 384U)
 #endif
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
@@ -207,9 +207,9 @@ namespace cxxgpr
         /// @details Returns nullptr immediately when buffers.dist is disabled (Uncached policy), skips
         /// recomputation when existing dimensions and cache flags already match x, and populates on demand.
         /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-        /// @param kernel Compiled execution-layer kernel tree queried for distance/ARD needs.
-        /// @param x Column-major n x d training feature matrix.
-        /// @param buffers Training buffers owning optional DistanceCache<Storage>.
+        /// @param[in] kernel Compiled execution-layer kernel tree queried for distance/ARD needs.
+        /// @param[in] x Column-major n x d training feature matrix.
+        /// @param[in,out] buffers Training buffers owning optional DistanceCache<Storage>.
         /// @return Pointer to ready DistanceCache, nullptr if uncached, or GprError if ensure() fails.
         /// @retval GprErrorCode::EmptyInput When x is empty.
         /// @retval GprErrorCode::NonFiniteInput When x contains non-finite entries.
@@ -249,13 +249,13 @@ namespace cxxgpr
         /// solves v_i = L^-1 A_i alpha and S_i = L^-1 A_i L^-T for each parameter i, and adds
         /// -0.5 * tr(S_i * S_j) + v_i^T * v_j symmetrically into out_hess.
         /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-        /// @param kernel Compiled execution-layer kernel tree.
-        /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-        /// @param x Column-major n x d training coordinate matrix.
-        /// @param y Training target vector (length n), used to restore L under CholeskyBuffer::Reuse.
-        /// @param jitter Diagonal jitter policy used if L must be refactored under Reuse.
-        /// @param buffers Factored FitBuffers owning L, alpha, W buffer, and lazy HessianScratch.
-        /// @param out_hess Destination span of length p * p receiving the symmetric analytical Hessian.
+        /// @param[in] kernel Compiled execution-layer kernel tree.
+        /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+        /// @param[in] x Column-major n x d training coordinate matrix.
+        /// @param[in] y Training target vector (length n), used to restore L under CholeskyBuffer::Reuse.
+        /// @param[in] jitter Diagonal jitter policy used if L must be refactored under Reuse.
+        /// @param[in,out] buffers Factored FitBuffers owning L, alpha, W buffer, and lazy HessianScratch.
+        /// @param[out] out_hess Destination span of length p * p receiving the symmetric analytical Hessian.
         /// @return Empty expected on success, or GprError on solve, kernel derivative, or allocation failure.
         /// @retval GprErrorCode::EmptyInput When dimensions are empty.
         /// @retval GprErrorCode::SizeOverflow When HessianScratch sizing overflows std::size_t.
@@ -466,13 +466,13 @@ namespace cxxgpr
     /// adds likelihood.noise_variance() to the diagonal, performs jittered lower Cholesky decomposition,
     /// solves L * L^T * alpha = y into buffers.core.rhs, and returns 0.5 * (y^T * alpha + log|A| + n * log(2*pi)).
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
-    /// @param keep_products Number of top-level product terms whose factor Grams are kept for gradients.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
+    /// @param[in] keep_products Number of top-level product terms whose factor Grams are kept for gradients.
     /// @return Negative marginal log-likelihood, or GprError on invalid input or factorization failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from buffers.core.order().
@@ -595,13 +595,13 @@ namespace cxxgpr
     /// buffers.w_mut(), runs single-pass weighted_grads() scaled by -0.5, computes the log-noise gradient
     /// -0.5 * sigma_n^2 * tr(W), and restores L if CholeskyBuffer::Reuse overwrote k_matrix.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers receiving updated L, alpha, W, and scratch state.
-    /// @param out_grad Destination span of length kernel.num_params() + 1 receiving log-space gradients.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers receiving updated L, alpha, W, and scratch state.
+    /// @param[out] out_grad Destination span of length kernel.num_params() + 1 receiving log-space gradients.
     /// @return Negative marginal log-likelihood, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When out_grad.size() != kernel.num_params() + 1 or n mismatches.
@@ -697,13 +697,13 @@ namespace cxxgpr
     /// @brief Computes the analytical log-space Hessian matrix of the negative marginal log-likelihood.
     /// @details Verifies out_hess length p * p, runs factor_and_mll(), and delegates to fill_hessian_from_factor().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers (core.hessian is lazily allocated on first call).
-    /// @param out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers (core.hessian is lazily allocated on first call).
+    /// @param[out] out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
     /// @return Empty expected on success, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When out_hess.size() != p * p or n mismatches.
@@ -739,14 +739,14 @@ namespace cxxgpr
     /// @details Verifies out_hess length p * p, runs mll_and_gradient_into() (which leaves L intact even
     /// under CholeskyBuffer::Reuse), and evaluates out_hess via fill_hessian_from_factor().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param kernel Compiled execution-layer kernel tree in storage precision.
-    /// @param likelihood Observation Gaussian noise likelihood providing sigma_n^2.
-    /// @param x Column-major n x d training coordinate matrix in storage precision.
-    /// @param y Training target vector in storage precision (length n).
-    /// @param jitter Diagonal jitter escalation policy for Cholesky factorization.
-    /// @param buffers Pre-allocated FitBuffers updated with factor state and Hessian scratch.
-    /// @param out_grad Destination span of length p = kernel.num_params() + 1 receiving log-space gradients.
-    /// @param out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers updated with factor state and Hessian scratch.
+    /// @param[out] out_grad Destination span of length p = kernel.num_params() + 1 receiving log-space gradients.
+    /// @param[out] out_hess Destination span of length p * p receiving the symmetric log-space Hessian.
     /// @return Negative marginal log-likelihood, or GprError on invalid inputs, size mismatch, or solve failure.
     /// @retval GprErrorCode::EmptyInput When x or y is empty.
     /// @retval GprErrorCode::LengthMismatch When out_grad or out_hess length disagrees with p or n mismatches.

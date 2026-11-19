@@ -47,7 +47,7 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two PredictOptions instances.
         /// @details Compares variance_kind directly.
-        /// @param other PredictOptions instance to compare against.
+        /// @param[in] other PredictOptions instance to compare against.
         /// @return True if options match.
         [[nodiscard]] constexpr bool operator==(const PredictOptions& other) const noexcept = default;
     };
@@ -66,7 +66,7 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two Prediction instances.
         /// @details Compares mean, variance, and variance_kind elementwise.
-        /// @param other Prediction instance to compare against.
+        /// @param[in] other Prediction instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const Prediction& other) const noexcept = default;
     };
@@ -87,7 +87,7 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two PredictiveCovariance instances.
         /// @details Compares mean, covariance, n_points, and variance_kind.
-        /// @param other PredictiveCovariance instance to compare against.
+        /// @param[in] other PredictiveCovariance instance to compare against.
         /// @return True if all fields compare equal.
         [[nodiscard]] bool operator==(const PredictiveCovariance& other) const noexcept = default;
     };
@@ -105,10 +105,10 @@ namespace cxxgpr
 
         /// @brief Constructs a column-major view from raw pointer, dimensions, and column stride.
         /// @details Allows non-tightly-packed strided submatrix views when col_stride >= rows.
-        /// @param data Pointer to element (0, 0) in column-major layout.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
-        /// @param col_stride Distance in elements between consecutive columns.
+        /// @param[in] data Pointer to element (0, 0) in column-major layout.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
+        /// @param[in] col_stride Distance in elements between consecutive columns.
         constexpr MatrixRef(const T* data, std::size_t rows, std::size_t cols, std::size_t col_stride) noexcept :
             data_(data),
             rows_(rows),
@@ -119,9 +119,9 @@ namespace cxxgpr
 
         /// @brief Constructs a tightly packed column-major view where col_stride equals rows.
         /// @details Delegates to the strided constructor with col_stride == rows.
-        /// @param data Pointer to tightly packed column-major buffer.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
+        /// @param[in] data Pointer to tightly packed column-major buffer.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
         constexpr MatrixRef(const T* data, std::size_t rows, std::size_t cols) noexcept :
             MatrixRef(data, rows, cols, rows)
         {
@@ -129,9 +129,9 @@ namespace cxxgpr
 
         /// @brief Constructs a tightly packed column-major view over a contiguous span.
         /// @details Binds data.data() with col_stride == rows; caller ensures data.size() >= rows * cols.
-        /// @param data Contiguous span backing the column-major matrix.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
+        /// @param[in] data Contiguous span backing the column-major matrix.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
         constexpr MatrixRef(std::span<const T> data, std::size_t rows, std::size_t cols) noexcept :
             MatrixRef(data.data(), rows, cols, rows)
         {
@@ -174,8 +174,8 @@ namespace cxxgpr
 
         /// @brief Returns a const reference to element (row, col) using column-major addressing.
         /// @details Caller must ensure row < rows() and col < cols().
-        /// @param row Zero-based row index.
-        /// @param col Zero-based column index.
+        /// @param[in] row Zero-based row index.
+        /// @param[in] col Zero-based column index.
         /// @return Const reference to element (row, col).
         [[nodiscard]] constexpr const T& operator()(std::size_t row, std::size_t col) const noexcept
         {
@@ -185,7 +185,7 @@ namespace cxxgpr
 
         /// @brief Returns a contiguous read-only span over column col_idx.
         /// @details Returns an empty span when the view is null/empty or col_idx >= cols().
-        /// @param col_idx Zero-based column index.
+        /// @param[in] col_idx Zero-based column index.
         /// @return Contiguous span of length rows() for column col_idx, or empty span if invalid.
         [[nodiscard]] constexpr std::span<const T> col(std::size_t col_idx) const noexcept
         {
@@ -221,10 +221,10 @@ namespace cxxgpr
 
         /// @brief Constructs a column-major mutable view from raw pointer, dimensions, and column stride.
         /// @details Supports strided submatrix targets where col_stride >= rows.
-        /// @param data Mutable pointer to element (0, 0) in column-major layout.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
-        /// @param col_stride Distance in elements between consecutive columns.
+        /// @param[in] data Mutable pointer to element (0, 0) in column-major layout.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
+        /// @param[in] col_stride Distance in elements between consecutive columns.
         constexpr MatrixMut(T* data, std::size_t rows, std::size_t cols, std::size_t col_stride) noexcept :
             data_(data),
             rows_(rows),
@@ -235,16 +235,16 @@ namespace cxxgpr
 
         /// @brief Constructs a tightly packed mutable column-major view where col_stride equals rows.
         /// @details Delegates to the strided constructor with col_stride == rows.
-        /// @param data Mutable pointer to tightly packed column-major buffer.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
+        /// @param[in] data Mutable pointer to tightly packed column-major buffer.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
         constexpr MatrixMut(T* data, std::size_t rows, std::size_t cols) noexcept : MatrixMut(data, rows, cols, rows) {}
 
         /// @brief Constructs a tightly packed mutable column-major view over a contiguous span.
         /// @details Binds data.data() with col_stride == rows; caller ensures data.size() >= rows * cols.
-        /// @param data Contiguous mutable span backing the column-major matrix.
-        /// @param rows Number of matrix rows.
-        /// @param cols Number of matrix columns.
+        /// @param[in] data Contiguous mutable span backing the column-major matrix.
+        /// @param[in] rows Number of matrix rows.
+        /// @param[in] cols Number of matrix columns.
         constexpr MatrixMut(std::span<T> data, std::size_t rows, std::size_t cols) noexcept :
             MatrixMut(data.data(), rows, cols, rows)
         {
@@ -287,8 +287,8 @@ namespace cxxgpr
 
         /// @brief Returns a mutable reference to element (row, col) using column-major addressing.
         /// @details Caller must ensure row < rows() and col < cols().
-        /// @param row Zero-based row index.
-        /// @param col Zero-based column index.
+        /// @param[in] row Zero-based row index.
+        /// @param[in] col Zero-based column index.
         /// @return Mutable reference to element (row, col).
         [[nodiscard]] constexpr T& operator()(std::size_t row, std::size_t col) const noexcept
         {
@@ -298,7 +298,7 @@ namespace cxxgpr
 
         /// @brief Returns a contiguous mutable span over column col_idx.
         /// @details Returns an empty span when the view is null/empty or col_idx >= cols().
-        /// @param col_idx Zero-based column index.
+        /// @param[in] col_idx Zero-based column index.
         /// @return Contiguous mutable span of length rows() for column col_idx, or empty span if invalid.
         [[nodiscard]] constexpr std::span<T> col(std::size_t col_idx) const noexcept
         {

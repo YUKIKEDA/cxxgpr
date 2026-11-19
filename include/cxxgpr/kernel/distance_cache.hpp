@@ -46,10 +46,10 @@ namespace cxxgpr
 
         /// @brief Builds a distance cache for training points x according to cache flags and policy.
         /// @details Validates x and populates requested distance and/or ARD buffers when policy is Cached.
-        /// @param x Training input matrix of shape n x d in column-major order.
-        /// @param cache_dist Whether to populate the dense n x n squared-distance matrix.
-        /// @param cache_ard Whether to populate the packed lower-triangular ARD squared-difference array.
-        /// @param policy Caching policy governing whether buffers are allocated or left empty.
+        /// @param[in] x Training input matrix of shape n x d in column-major order.
+        /// @param[in] cache_dist Whether to populate the dense n x n squared-distance matrix.
+        /// @param[in] cache_ard Whether to populate the packed lower-triangular ARD squared-difference array.
+        /// @param[in] policy Caching policy governing whether buffers are allocated or left empty.
         /// @return Populated DistanceCache<T> on success or GprError on invalid input.
         /// @retval GprErrorCode::EmptyInput When x has zero rows, zero columns, or null data.
         /// @retval GprErrorCode::NonFiniteInput When any entry of x is NaN or infinite.
@@ -61,10 +61,10 @@ namespace cxxgpr
         /// @brief Populates or reuses this cache in place for training points x.
         /// @details Validates x before modifying internal buffers; when policy is Uncached or a flag is
         /// false, the corresponding internal vector is cleared.
-        /// @param x Training input matrix of shape n x d in column-major order.
-        /// @param cache_dist Whether to populate the dense n x n squared-distance matrix.
-        /// @param cache_ard Whether to populate the packed lower-triangular ARD squared-difference array.
-        /// @param policy Caching policy governing whether buffers are allocated or cleared.
+        /// @param[in] x Training input matrix of shape n x d in column-major order.
+        /// @param[in] cache_dist Whether to populate the dense n x n squared-distance matrix.
+        /// @param[in] cache_ard Whether to populate the packed lower-triangular ARD squared-difference array.
+        /// @param[in] policy Caching policy governing whether buffers are allocated or cleared.
         /// @return Empty expected on success or GprError if x is invalid or allocation size overflows.
         /// @retval GprErrorCode::EmptyInput When x has zero rows, zero columns, or null data.
         /// @retval GprErrorCode::NonFiniteInput When any entry of x is NaN or infinite.

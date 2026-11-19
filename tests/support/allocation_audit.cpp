@@ -23,7 +23,7 @@ namespace
 
     /// @brief Allocates unaligned storage via std::malloc and increments the thread allocation counter.
     /// @details Requests at least 1 byte when size is zero to satisfy C++ unique-pointer allocation rules.
-    /// @param size Requested allocation size in bytes.
+    /// @param[in] size Requested allocation size in bytes.
     /// @return Pointer to allocated storage, or nullptr on allocation failure.
     void* alloc_unaligned(std::size_t size) noexcept
     {
@@ -35,8 +35,8 @@ namespace
 
     /// @brief Allocates over-aligned storage via platform aligned malloc and increments the thread counter.
     /// @details Enforces a minimum alignment of sizeof(void*) as required by posix_memalign and _aligned_malloc.
-    /// @param size Requested allocation size in bytes.
-    /// @param alignment Requested alignment in bytes.
+    /// @param[in] size Requested allocation size in bytes.
+    /// @param[in] alignment Requested alignment in bytes.
     /// @return Pointer to aligned storage, or nullptr on allocation failure.
     void* alloc_aligned(std::size_t size, std::size_t alignment) noexcept
     {
@@ -58,7 +58,7 @@ namespace
 
     /// @brief Releases storage allocated by alloc_aligned() using the matching platform deallocator.
     /// @details Dispatches to _aligned_free on Windows and std::free on POSIX platforms.
-    /// @param ptr Pointer previously returned by alloc_aligned(), or nullptr.
+    /// @param[in,out] ptr Pointer previously returned by alloc_aligned(), or nullptr.
     void free_aligned(void* ptr) noexcept
     {
         // Match _aligned_malloc on Windows because std::free is invalid for _aligned_malloc pointers.
@@ -74,7 +74,7 @@ namespace
 // NOLINTBEGIN(readability-inconsistent-declaration-parameter-name)
 /// @brief Replaces global throwing single-object operator new with audited unaligned allocation.
 /// @details Increments the thread-local allocation count and throws std::bad_alloc on failure.
-/// @param size Number of bytes to allocate.
+/// @param[in] size Number of bytes to allocate.
 /// @return Non-null pointer to allocated storage.
 void* operator new(std::size_t size)
 {
@@ -87,7 +87,7 @@ void* operator new(std::size_t size)
 
 /// @brief Replaces global throwing array operator new[] by delegating to single-object operator new.
 /// @details Shares the same audited allocation counter and bad_alloc behavior.
-/// @param size Number of bytes to allocate.
+/// @param[in] size Number of bytes to allocate.
 /// @return Non-null pointer to allocated array storage.
 void* operator new[](std::size_t size)
 {
@@ -96,7 +96,7 @@ void* operator new[](std::size_t size)
 
 /// @brief Replaces global nothrow single-object operator new with audited unaligned allocation.
 /// @details Increments the thread-local allocation count and returns nullptr on failure.
-/// @param size Number of bytes to allocate.
+/// @param[in] size Number of bytes to allocate.
 /// @return Pointer to allocated storage, or nullptr if allocation fails.
 void* operator new(std::size_t size, const std::nothrow_t&) noexcept
 {
@@ -105,7 +105,7 @@ void* operator new(std::size_t size, const std::nothrow_t&) noexcept
 
 /// @brief Replaces global nothrow array operator new[] with audited unaligned allocation.
 /// @details Increments the thread-local allocation count and returns nullptr on failure.
-/// @param size Number of bytes to allocate.
+/// @param[in] size Number of bytes to allocate.
 /// @return Pointer to allocated array storage, or nullptr if allocation fails.
 void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
 {
@@ -114,7 +114,7 @@ void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
 
 /// @brief Replaces global unsized single-object operator delete using std::free.
 /// @details Pairs with unaligned operator new overrides backed by std::malloc.
-/// @param ptr Pointer to storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to storage to free, or nullptr.
 void operator delete(void* ptr) noexcept
 {
     std::free(ptr);
@@ -122,7 +122,7 @@ void operator delete(void* ptr) noexcept
 
 /// @brief Replaces global unsized array operator delete[] using std::free.
 /// @details Pairs with unaligned operator new[] overrides backed by std::malloc.
-/// @param ptr Pointer to array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to array storage to free, or nullptr.
 void operator delete[](void* ptr) noexcept
 {
     std::free(ptr);
@@ -130,7 +130,7 @@ void operator delete[](void* ptr) noexcept
 
 /// @brief Replaces global sized single-object operator delete using std::free.
 /// @details Ignores size because std::malloc tracks block extents internally.
-/// @param ptr Pointer to storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to storage to free, or nullptr.
 void operator delete(void* ptr, std::size_t) noexcept
 {
     std::free(ptr);
@@ -138,7 +138,7 @@ void operator delete(void* ptr, std::size_t) noexcept
 
 /// @brief Replaces global sized array operator delete[] using std::free.
 /// @details Ignores size because std::malloc tracks block extents internally.
-/// @param ptr Pointer to array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to array storage to free, or nullptr.
 void operator delete[](void* ptr, std::size_t) noexcept
 {
     std::free(ptr);
@@ -146,7 +146,7 @@ void operator delete[](void* ptr, std::size_t) noexcept
 
 /// @brief Replaces global nothrow single-object operator delete using std::free.
 /// @details Pairs with nothrow unaligned operator new on constructor unwinds.
-/// @param ptr Pointer to storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to storage to free, or nullptr.
 void operator delete(void* ptr, const std::nothrow_t&) noexcept
 {
     std::free(ptr);
@@ -154,7 +154,7 @@ void operator delete(void* ptr, const std::nothrow_t&) noexcept
 
 /// @brief Replaces global nothrow array operator delete[] using std::free.
 /// @details Pairs with nothrow unaligned operator new[] on constructor unwinds.
-/// @param ptr Pointer to array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to array storage to free, or nullptr.
 void operator delete[](void* ptr, const std::nothrow_t&) noexcept
 {
     std::free(ptr);
@@ -162,8 +162,8 @@ void operator delete[](void* ptr, const std::nothrow_t&) noexcept
 
 /// @brief Replaces global throwing aligned single-object operator new with audited aligned allocation.
 /// @details Increments the thread-local allocation count and throws std::bad_alloc on failure.
-/// @param size Number of bytes to allocate.
-/// @param alignment Required alignment in bytes.
+/// @param[in] size Number of bytes to allocate.
+/// @param[in] alignment Required alignment in bytes.
 /// @return Non-null pointer to aligned storage.
 void* operator new(std::size_t size, std::align_val_t alignment)
 {
@@ -176,8 +176,8 @@ void* operator new(std::size_t size, std::align_val_t alignment)
 
 /// @brief Replaces global throwing aligned array operator new[] by delegating to aligned operator new.
 /// @details Shares the same audited aligned allocation counter and bad_alloc behavior.
-/// @param size Number of bytes to allocate.
-/// @param alignment Required alignment in bytes.
+/// @param[in] size Number of bytes to allocate.
+/// @param[in] alignment Required alignment in bytes.
 /// @return Non-null pointer to aligned array storage.
 void* operator new[](std::size_t size, std::align_val_t alignment)
 {
@@ -186,8 +186,8 @@ void* operator new[](std::size_t size, std::align_val_t alignment)
 
 /// @brief Replaces global nothrow aligned single-object operator new with audited aligned allocation.
 /// @details Increments the thread-local allocation count and returns nullptr on failure.
-/// @param size Number of bytes to allocate.
-/// @param alignment Required alignment in bytes.
+/// @param[in] size Number of bytes to allocate.
+/// @param[in] alignment Required alignment in bytes.
 /// @return Pointer to aligned storage, or nullptr if allocation fails.
 void* operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
 {
@@ -196,8 +196,8 @@ void* operator new(std::size_t size, std::align_val_t alignment, const std::noth
 
 /// @brief Replaces global nothrow aligned array operator new[] with audited aligned allocation.
 /// @details Increments the thread-local allocation count and returns nullptr on failure.
-/// @param size Number of bytes to allocate.
-/// @param alignment Required alignment in bytes.
+/// @param[in] size Number of bytes to allocate.
+/// @param[in] alignment Required alignment in bytes.
 /// @return Pointer to aligned array storage, or nullptr if allocation fails.
 void* operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
 {
@@ -206,7 +206,7 @@ void* operator new[](std::size_t size, std::align_val_t alignment, const std::no
 
 /// @brief Replaces global unsized aligned single-object operator delete using free_aligned().
 /// @details Pairs with aligned operator new overrides using platform aligned allocation.
-/// @param ptr Pointer to aligned storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned storage to free, or nullptr.
 void operator delete(void* ptr, std::align_val_t) noexcept
 {
     free_aligned(ptr);
@@ -214,7 +214,7 @@ void operator delete(void* ptr, std::align_val_t) noexcept
 
 /// @brief Replaces global unsized aligned array operator delete[] using free_aligned().
 /// @details Pairs with aligned operator new[] overrides using platform aligned allocation.
-/// @param ptr Pointer to aligned array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned array storage to free, or nullptr.
 void operator delete[](void* ptr, std::align_val_t) noexcept
 {
     free_aligned(ptr);
@@ -222,7 +222,7 @@ void operator delete[](void* ptr, std::align_val_t) noexcept
 
 /// @brief Replaces global sized aligned single-object operator delete using free_aligned().
 /// @details Ignores size and alignment because the platform aligned allocator tracks block extents.
-/// @param ptr Pointer to aligned storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned storage to free, or nullptr.
 void operator delete(void* ptr, std::size_t, std::align_val_t) noexcept
 {
     free_aligned(ptr);
@@ -230,7 +230,7 @@ void operator delete(void* ptr, std::size_t, std::align_val_t) noexcept
 
 /// @brief Replaces global sized aligned array operator delete[] using free_aligned().
 /// @details Ignores size and alignment because the platform aligned allocator tracks block extents.
-/// @param ptr Pointer to aligned array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned array storage to free, or nullptr.
 void operator delete[](void* ptr, std::size_t, std::align_val_t) noexcept
 {
     free_aligned(ptr);
@@ -238,7 +238,7 @@ void operator delete[](void* ptr, std::size_t, std::align_val_t) noexcept
 
 /// @brief Replaces global nothrow aligned single-object operator delete using free_aligned().
 /// @details Pairs with nothrow aligned operator new on constructor unwinds.
-/// @param ptr Pointer to aligned storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned storage to free, or nullptr.
 void operator delete(void* ptr, std::align_val_t, const std::nothrow_t&) noexcept
 {
     free_aligned(ptr);
@@ -246,7 +246,7 @@ void operator delete(void* ptr, std::align_val_t, const std::nothrow_t&) noexcep
 
 /// @brief Replaces global nothrow aligned array operator delete[] using free_aligned().
 /// @details Pairs with nothrow aligned operator new[] on constructor unwinds.
-/// @param ptr Pointer to aligned array storage to free, or nullptr.
+/// @param[in,out] ptr Pointer to aligned array storage to free, or nullptr.
 void operator delete[](void* ptr, std::align_val_t, const std::nothrow_t&) noexcept
 {
     free_aligned(ptr);
@@ -267,7 +267,7 @@ namespace cxxgpr::test_support
 
     /// @brief Observes a pointer via a volatile sink to inhibit dead-store elimination.
     /// @details Writes ptr into a global volatile sink without reading or dereferencing the pointee.
-    /// @param ptr Pointer to test data that must remain live.
+    /// @param[in] ptr Pointer to test data that must remain live.
     void touch_for_test(const void* ptr) noexcept
     {
         g_escape_sink = ptr;
@@ -275,7 +275,7 @@ namespace cxxgpr::test_support
 
     /// @brief Snapshots thread_allocation_count() and optionally disables Eigen runtime malloc.
     /// @details Saves Eigen::internal::is_malloc_allowed() prior to disabling it so nested scopes restore properly.
-    /// @param mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
+    /// @param[in] mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
     NoAllocationScope::NoAllocationScope(AuditMode mode) noexcept :
         start_count_(g_thread_alloc_count),
         mode_(mode),

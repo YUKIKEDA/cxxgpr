@@ -27,8 +27,8 @@ namespace cxxgpr::optimizer
         /// @brief Evaluates the objective once at initial_params without taking any optimization steps.
         /// @details Validates objective intervals and initial_params containment via LogBounds before
         /// evaluating obj.value(initial_params) and confirming finiteness.
-        /// @param obj Objective instance to evaluate.
-        /// @param initial_params Fixed log-space hyperparameter vector of length obj.dim().
+        /// @param[in,out] obj Objective instance to evaluate.
+        /// @param[in] initial_params Fixed log-space hyperparameter vector of length obj.dim().
         /// @return OptimizerResult with initial_params, evaluated value, iterations = 0, and converged = true,
         /// or GprError if bounds, initial parameters, or objective evaluation fail.
         /// @retval GprErrorCode::EmptyInput When obj.dim() == 0 or initial_params is empty.
@@ -41,7 +41,7 @@ namespace cxxgpr::optimizer
 
         /// @brief Checks value equality between two Fixed instances.
         /// @details Stateless marker instances always compare equal.
-        /// @param other Fixed instance to compare against.
+        /// @param[in] other Fixed instance to compare against.
         /// @return Always true.
         [[nodiscard]] constexpr bool operator==(const Fixed& other) const noexcept = default;
     };

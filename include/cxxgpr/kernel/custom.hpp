@@ -48,7 +48,7 @@ namespace cxxgpr
 
         /// @brief Writes log-space hyperparameters into out.
         /// @details Output vector length must match num_params().
-        /// @param out Destination span receiving unconstrained log-space parameter values.
+        /// @param[out] out Destination span receiving unconstrained log-space parameter values.
         /// @return Empty expected on success or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] virtual std::expected<void, GprError> get_params(std::span<double> out) const = 0;
@@ -56,7 +56,7 @@ namespace cxxgpr
         /// @brief Atomically updates parameters from log-space params.
         /// @details Must validate finiteness, count, and bounds before mutating observable leaf state so
         /// failed updates leave parameters unchanged.
-        /// @param params Input span of unconstrained log-space parameter values.
+        /// @param[in] params Input span of unconstrained log-space parameter values.
         /// @return Empty expected on success or GprError on invalid count, non-finite value, or out-of-range bound.
         /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
         /// @retval GprErrorCode::NonFiniteInput When any log-space value is NaN or infinite.
@@ -65,16 +65,16 @@ namespace cxxgpr
 
         /// @brief Writes open parameter intervals in user units into out.
         /// @details Interval order matches the log-space parameter order used by get_params() and set_params().
-        /// @param out Destination span receiving open Interval descriptors.
+        /// @param[out] out Destination span receiving open Interval descriptors.
         /// @return Empty expected on success or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] virtual std::expected<void, GprError> bounds_into(std::span<Interval> out) const = 0;
 
         /// @brief Evaluates the training Gram matrix from squared distances into out for triangle uplo.
         /// @details Only entries in the requested triangle uplo need to be written when out is square.
-        /// @param dist Column-major n x n squared-distance matrix.
-        /// @param out Column-major n x n destination Gram matrix.
-        /// @param uplo Triangular or full matrix region to populate.
+        /// @param[in] dist Column-major n x n squared-distance matrix.
+        /// @param[out] out Column-major n x n destination Gram matrix.
+        /// @param[in] uplo Triangular or full matrix region to populate.
         /// @return Empty expected on success or GprError if inputs or shapes are invalid.
         [[nodiscard]] virtual std::expected<void, GprError> apply(
             MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo
@@ -82,23 +82,23 @@ namespace cxxgpr
 
         /// @brief Evaluates rectangular cross-covariance from squared distances into out.
         /// @details Computes k(x1_i, x2_j) for every pair in the n1 x n2 squared-distance matrix dist.
-        /// @param dist Column-major n1 x n2 squared-distance matrix between query/training point sets.
-        /// @param out Column-major n1 x n2 destination cross-covariance matrix.
+        /// @param[in] dist Column-major n1 x n2 squared-distance matrix between query/training point sets.
+        /// @param[out] out Column-major n1 x n2 destination cross-covariance matrix.
         /// @return Empty expected on success or GprError if inputs or shapes are invalid.
         [[nodiscard]] virtual std::expected<void, GprError> apply_cross(MatrixRef<T> dist, MatrixMut<T> out) const = 0;
 
         /// @brief Fills the training diagonal k(x_i, x_i) into out.
         /// @details Implementations evaluate the zero-distance kernel diagonal without requiring full points.
-        /// @param out Destination span of length n receiving diagonal kernel variances.
+        /// @param[out] out Destination span of length n receiving diagonal kernel variances.
         /// @return Empty expected on success or GprError if output span is invalid.
         [[nodiscard]] virtual std::expected<void, GprError> fill_diag(std::span<T> out) const = 0;
 
         /// @brief Evaluates the first derivative with respect to log parameter param_idx from squared distances.
         /// @details Computes dK / d(log theta_{param_idx}) for the requested triangle uplo.
-        /// @param dist Column-major n x n squared-distance matrix.
-        /// @param d_k Column-major n x n destination matrix for the first derivative.
-        /// @param param_idx Zero-based index of the log-space hyperparameter.
-        /// @param uplo Triangular or full matrix region to populate.
+        /// @param[in] dist Column-major n x n squared-distance matrix.
+        /// @param[out] d_k Column-major n x n destination matrix for the first derivative.
+        /// @param[in] param_idx Zero-based index of the log-space hyperparameter.
+        /// @param[in] uplo Triangular or full matrix region to populate.
         /// @return Empty expected on success or GprError on invalid index or matrix mismatch.
         [[nodiscard]] virtual std::expected<void, GprError> grad(
             MatrixRef<T> dist, MatrixMut<T> d_k, std::size_t param_idx, Triangle uplo
@@ -106,11 +106,11 @@ namespace cxxgpr
 
         /// @brief Evaluates the second derivative with respect to log parameters (i, j) from squared distances.
         /// @details Computes d^2 K / (d(log theta_i) d(log theta_j)) for the requested triangle uplo.
-        /// @param dist Column-major n x n squared-distance matrix.
-        /// @param d2_k Column-major n x n destination matrix for the second derivative.
-        /// @param i Zero-based index of the first log-space hyperparameter.
-        /// @param j Zero-based index of the second log-space hyperparameter.
-        /// @param uplo Triangular or full matrix region to populate.
+        /// @param[in] dist Column-major n x n squared-distance matrix.
+        /// @param[out] d2_k Column-major n x n destination matrix for the second derivative.
+        /// @param[in] i Zero-based index of the first log-space hyperparameter.
+        /// @param[in] j Zero-based index of the second log-space hyperparameter.
+        /// @param[in] uplo Triangular or full matrix region to populate.
         /// @return Empty expected on success or GprError on invalid indices or matrix mismatch.
         [[nodiscard]] virtual std::expected<void, GprError> hess(
             MatrixRef<T> dist, MatrixMut<T> d2_k, std::size_t i, std::size_t j, Triangle uplo
@@ -145,8 +145,8 @@ namespace cxxgpr
     public:
         /// @brief Constructs a CustomKernel from paired double and float KernelTerm implementations.
         /// @details Verifies that both pointers are non-null and agree on num_params() and persist_id().
-        /// @param term_double Heap-allocated double-precision leaf implementation.
-        /// @param term_float Heap-allocated float-precision leaf implementation.
+        /// @param[in] term_double Heap-allocated double-precision leaf implementation.
+        /// @param[in] term_float Heap-allocated float-precision leaf implementation.
         /// @return Constructed CustomKernel or GprError on mismatched or null terms.
         /// @retval GprErrorCode::InvalidConfig When either term is null or persist_id values differ.
         /// @retval GprErrorCode::LengthMismatch When double and float terms report different parameter counts.
@@ -156,23 +156,23 @@ namespace cxxgpr
 
         /// @brief Copy-constructs a CustomKernel by cloning both underlying scalar implementations.
         /// @details Produces independent double and float KernelTerm instances via clone().
-        /// @param other CustomKernel instance to copy.
+        /// @param[in] other CustomKernel instance to copy.
         CustomKernel(const CustomKernel& other);
 
         /// @brief Copy-assigns a CustomKernel by cloning both underlying scalar implementations.
         /// @details Guards against self-assignment and clones both scalar terms.
-        /// @param other CustomKernel instance to copy.
+        /// @param[in] other CustomKernel instance to copy.
         /// @return Reference to this CustomKernel.
         CustomKernel& operator=(const CustomKernel& other);
 
         /// @brief Move-constructs a CustomKernel.
         /// @details Transfers ownership of the paired double and float leaf terms.
-        /// @param other CustomKernel instance to move from.
+        /// @param[in] other CustomKernel instance to move from.
         CustomKernel(CustomKernel&& other) noexcept = default;
 
         /// @brief Move-assigns a CustomKernel.
         /// @details Transfers ownership of the paired double and float leaf terms.
-        /// @param other CustomKernel instance to move from.
+        /// @param[in] other CustomKernel instance to move from.
         /// @return Reference to this CustomKernel.
         CustomKernel& operator=(CustomKernel&& other) noexcept = default;
 
@@ -187,7 +187,7 @@ namespace cxxgpr
 
         /// @brief Writes log-space hyperparameters into out.
         /// @details Delegates to the authoritative double-precision KernelTerm implementation.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError from the underlying leaf.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> get_params(std::span<double> out) const;
@@ -195,7 +195,7 @@ namespace cxxgpr
         /// @brief Atomically updates parameters from log-space params on both scalar implementations.
         /// @details Clones both terms first and commits only if both updates succeed, preserving atomic
         /// rollback when either double or float validation fails.
-        /// @param params Input span of unconstrained log-space parameters of length num_params().
+        /// @param[in] params Input span of unconstrained log-space parameters of length num_params().
         /// @return Empty expected on success or GprError if either term rejects params.
         /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
         /// @retval GprErrorCode::NonFiniteInput When any parameter is non-finite.
@@ -204,7 +204,7 @@ namespace cxxgpr
 
         /// @brief Writes open parameter intervals into out.
         /// @details Delegates to the double-precision KernelTerm implementation.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> bounds_into(std::span<Interval> out) const;
@@ -239,16 +239,16 @@ namespace cxxgpr
 
         /// @brief Checks value equality via persistence identifier, parameter count, and log parameters.
         /// @details Compares log-space parameter vectors bitwise so NaN or signed-zero differences are exact.
-        /// @param lhs Left-hand CustomKernel operand.
-        /// @param rhs Right-hand CustomKernel operand.
+        /// @param[in] lhs Left-hand CustomKernel operand.
+        /// @param[in] rhs Right-hand CustomKernel operand.
         /// @return True if persist_id(), num_params(), and all bitwise log parameters match.
         friend bool operator==(const CustomKernel& lhs, const CustomKernel& rhs);
 
     private:
         /// @brief Private constructor storing validated double and float KernelTerm pairs.
         /// @details Called only by CustomKernel::create() after verifying invariants.
-        /// @param term_double Validated double-precision leaf term.
-        /// @param term_float Validated float-precision leaf term.
+        /// @param[in] term_double Validated double-precision leaf term.
+        /// @param[in] term_float Validated float-precision leaf term.
         CustomKernel(
             std::unique_ptr<KernelTerm<double>> term_double, std::unique_ptr<KernelTerm<float>> term_float
         ) noexcept :
@@ -268,7 +268,7 @@ namespace cxxgpr
     /// validates the pair through CustomKernel::create().
     /// @tparam TermTemplate Class template accepting a scalar type parameter T and deriving from KernelTerm<T>.
     /// @tparam Args Constructor argument types forwarded by const reference to both instantiations.
-    /// @param args Arguments forwarded to both TermTemplate<double> and TermTemplate<float> constructors.
+    /// @param[in] args Arguments forwarded to both TermTemplate<double> and TermTemplate<float> constructors.
     /// @return Validated CustomKernel or GprError from CustomKernel::create().
     /// @retval GprErrorCode::InvalidConfig When persist_id values differ or construction yields null.
     /// @retval GprErrorCode::LengthMismatch When double and float parameter counts differ.

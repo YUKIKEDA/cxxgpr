@@ -74,12 +74,12 @@ namespace
     /// @details Converts inputs to P::Storage, invokes factor_and_mll() with zero fixed jitter, and
     /// copies the resulting lower Cholesky factor L and dual vector alpha into the returned fixture.
     /// @tparam P Precision policy type governing storage and refinement scalar types.
-    /// @param compiled Precompiled kernel evaluated at its current parameters.
-    /// @param x_vals Flattened column-major n x d training coordinate array.
-    /// @param y_vals Training target vector of length n.
-    /// @param n Number of training observations.
-    /// @param d Number of input feature dimensions.
-    /// @param noise_sd Gaussian noise standard deviation passed to GaussianLikelihood::create().
+    /// @param[in] compiled Precompiled kernel evaluated at its current parameters.
+    /// @param[in] x_vals Flattened column-major n x d training coordinate array.
+    /// @param[in] y_vals Training target vector of length n.
+    /// @param[in] n Number of training observations.
+    /// @param[in] d Number of input feature dimensions.
+    /// @param[in] noise_sd Gaussian noise standard deviation passed to GaussianLikelihood::create().
     /// @return Populated FittedFixture containing L, alpha, and casted training data.
     template <typename P>
     FittedFixture<P> make_fitted_fixture(

@@ -36,8 +36,8 @@ namespace
         std::size_t m;
 
         /// @brief Populates Forrester training targets and midpoint query grid.
-        /// @param n_pts Number of training observations generated on [0, 1].
-        /// @param m_pts Number of query coordinates generated at cell midpoints.
+        /// @param[in] n_pts Number of training observations generated on [0, 1].
+        /// @param[in] m_pts Number of query coordinates generated at cell midpoints.
         explicit ForresterDataset(std::size_t n_pts = 256U, std::size_t m_pts = 64U) :
             x_train(n_pts),
             y_train(n_pts),
@@ -75,8 +75,8 @@ namespace
         std::size_t d;
 
         /// @brief Populates deterministic column-major 8D ARD inputs and weighted sphere targets.
-        /// @param n_pts Number of training observations.
-        /// @param d_dims Input feature dimensionality.
+        /// @param[in] n_pts Number of training observations.
+        /// @param[in] d_dims Input feature dimensionality.
         ArdSphereDataset(std::size_t n_pts = 128U, std::size_t d_dims = 8U) :
             x_train(n_pts * d_dims),
             y_train(n_pts),
@@ -99,7 +99,7 @@ namespace
     };
 
     /// @brief Benchmarks cxxgpr::build_info() metadata lookup overhead.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_build_info(benchmark::State& state)
     {
         for (auto _ : state)
@@ -110,7 +110,7 @@ namespace
     }
 
     /// @brief Benchmarks fixed-hyperparameter Cholesky factorization on n = 256 Forrester data.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_forrester_256_factor_double(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -129,7 +129,7 @@ namespace
 
     /// @brief Benchmarks L-BFGS hyperparameter fitting on n = 256 Forrester data for precision P.
     /// @tparam P Precision policy type (DoublePrecision or MixedPrecision).
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     template <cxxgpr::PrecisionPolicyConcept P> void bm_forrester_256_fit_lbfgs(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -151,7 +151,7 @@ namespace
     }
 
     /// @brief Benchmarks zero-allocation predict_into() on n = 256 training and m = 64 query points.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_forrester_256_predict_into_double(benchmark::State& state)
     {
         const ForresterDataset data(256U, 64U);
@@ -177,7 +177,7 @@ namespace
     }
 
     /// @brief Benchmarks 8D ARD Constant * RbfArd fitting with L-BFGS on n = 128 points.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_ard_sphere_fit_lbfgs_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -200,7 +200,7 @@ namespace
     }
 
     /// @brief Benchmarks 8D ARD fitting with FastSimulatedAnnealing and incremental LeafCache.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_ard_sphere_fit_fsa_cached(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -226,7 +226,7 @@ namespace
     /// @brief Benchmarks lower-triangle Gram evaluation for scalar type T and KernelExp mode.
     /// @tparam T Kernel evaluation scalar type (float or double).
     /// @tparam ExpMode Exponential implementation policy (Accurate or FastApprox).
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     template <cxxgpr::KernelScalarConcept T, cxxgpr::KernelExp ExpMode> void bm_kernel_exp_eval(benchmark::State& state)
     {
         constexpr std::size_t n = 256U;
@@ -257,7 +257,7 @@ namespace
     }
 
     /// @brief Benchmarks coordinate-based RbfArd + Matern-5/2 lower-triangle Gram evaluation.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_coord_apply_points_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -283,7 +283,7 @@ namespace
     }
 
     /// @brief Benchmarks supplied-distance ARD + scalar DistanceKernel lower-triangle Gram evaluation.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_distance_supply_apply_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -341,7 +341,7 @@ namespace
     }
 
     /// @brief Benchmarks supplied-distance scalar-only DistanceKernel lower-triangle Gram evaluation.
-    /// @param state Google Benchmark iteration state.
+    /// @param[in,out] state Google Benchmark iteration state.
     void bm_distance_supply_scalar_only_double(benchmark::State& state)
     {
         const ArdSphereDataset data(128U, 8U);
@@ -407,8 +407,8 @@ namespace
 }  // namespace
 
 /// @brief Initializes Google Benchmark and executes all registered Exact GPR benchmarks.
-/// @param argc Command-line argument count forwarded to benchmark::Initialize().
-/// @param argv Command-line argument vector forwarded to benchmark::Initialize().
+/// @param[in,out] argc Command-line argument count forwarded to benchmark::Initialize().
+/// @param[in,out] argv Command-line argument vector forwarded to benchmark::Initialize().
 /// @return Zero exit status after benchmark shutdown.
 int main(int argc, char** argv)
 {

@@ -25,7 +25,7 @@ namespace cxxgpr
     public:
         /// @brief Builds a likelihood from a positive finite observation noise variance inside the default bounds.
         /// @details Validates finiteness and positivity first, then checks Interval::default_positive().
-        /// @param noise_variance Observation noise variance sigma_n^2 in user units.
+        /// @param[in] noise_variance Observation noise variance sigma_n^2 in user units.
         /// @return Validated GaussianLikelihood, or GprError on invalid variance.
         /// @retval GprErrorCode::InvalidNoiseVariance When noise_variance is non-finite or <= 0.
         /// @retval GprErrorCode::InvalidInterval When noise_variance lies outside Interval::default_positive().
@@ -34,7 +34,7 @@ namespace cxxgpr
         /// @brief Builds a likelihood from log(sigma_n^2) inside the default bounds.
         /// @details Exponentiates log_noise_variance safely, guarding overflow and underflow before
         /// checking Interval::default_positive().
-        /// @param log_noise_variance Natural logarithm theta = log(sigma_n^2).
+        /// @param[in] log_noise_variance Natural logarithm theta = log(sigma_n^2).
         /// @return Validated GaussianLikelihood, or GprError on invalid log variance.
         /// @retval GprErrorCode::InvalidNoiseVariance When log_noise_variance is non-finite or
         /// exp() overflows/underflows.
@@ -61,7 +61,7 @@ namespace cxxgpr
 
         /// @brief Returns a copy with updated noise-variance bounds after verifying the current value stays inside.
         /// @details Leaves *this unchanged and returns an error if noise_variance() lies outside bounds.
-        /// @param bounds New open bounding interval for sigma_n^2.
+        /// @param[in] bounds New open bounding interval for sigma_n^2.
         /// @return Updated GaussianLikelihood, or GprError if current variance is outside bounds.
         /// @retval GprErrorCode::InvalidInterval When noise_variance() is not strictly inside bounds.
         [[nodiscard]] std::expected<GaussianLikelihood, GprError> with_bounds(Interval bounds) const;
@@ -73,14 +73,14 @@ namespace cxxgpr
 
         /// @brief Writes log(sigma_n^2) into a length-1 output span without modifying out on length error.
         /// @details Requires out.size() == 1.
-        /// @param out Destination span of length 1 receiving theta = log(sigma_n^2).
+        /// @param[out] out Destination span of length 1 receiving theta = log(sigma_n^2).
         /// @return Empty expected on success, or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
         [[nodiscard]] std::expected<void, GprError> get_params(std::span<double> out) const;
 
         /// @brief Updates theta from a length-1 span atomically; leaves *this unchanged on error.
         /// @details Validates span length, finiteness/exp range, and current bounds() before committing.
-        /// @param params Input span of length 1 holding candidate log(sigma_n^2).
+        /// @param[in] params Input span of length 1 holding candidate log(sigma_n^2).
         /// @return Empty expected on success, or GprError if validation fails.
         /// @retval GprErrorCode::LengthMismatch When params.size() != 1.
         /// @retval GprErrorCode::InvalidNoiseVariance When params[0] is non-finite or
@@ -90,20 +90,20 @@ namespace cxxgpr
 
         /// @brief Writes the noise-variance Interval into a length-1 output span.
         /// @details Requires out.size() == 1; leaves out unmodified on length mismatch.
-        /// @param out Destination span of length 1 receiving bounds().
+        /// @param[out] out Destination span of length 1 receiving bounds().
         /// @return Empty expected on success, or GprError on length mismatch.
         /// @retval GprErrorCode::LengthMismatch When out.size() != 1.
         [[nodiscard]] std::expected<void, GprError> bounds_into(std::span<Interval> out) const;
 
         /// @brief Adds sigma_n^2 to each diagonal entry of a kernel matrix diagonal.
         /// @details Performs an in-place elementwise addition entry += noise_variance() with zero allocation.
-        /// @param k_diag Mutable span over the n diagonal entries of the Gram matrix.
+        /// @param[in,out] k_diag Mutable span over the n diagonal entries of the Gram matrix.
         void add_noise_diag(std::span<double> k_diag) const noexcept;
 
         /// @brief Writes the diagonal of dK/dtheta_i (= sigma_n^2 for i = 0) into dk_diag.
         /// @details Uses d(sigma_n^2)/d(log(sigma_n^2)) = sigma_n^2; rejects param_idx != 0.
-        /// @param dk_diag Mutable span receiving the n diagonal derivative entries.
-        /// @param param_idx Zero-based likelihood parameter index (must be 0).
+        /// @param[out] dk_diag Mutable span receiving the n diagonal derivative entries.
+        /// @param[in] param_idx Zero-based likelihood parameter index (must be 0).
         /// @return Empty expected on success, or GprError if param_idx is out of range.
         /// @retval GprErrorCode::IndexOutOfRange When param_idx != 0.
         [[nodiscard]] std::expected<void, GprError> noise_grad_diag(
@@ -112,14 +112,14 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two GaussianLikelihood instances.
         /// @details Compares underlying BoundedParam value and interval.
-        /// @param other GaussianLikelihood instance to compare against.
+        /// @param[in] other GaussianLikelihood instance to compare against.
         /// @return True if noise variance and bounds match.
         [[nodiscard]] constexpr bool operator==(const GaussianLikelihood& other) const noexcept = default;
 
     private:
         /// @brief Constructs a GaussianLikelihood from a validated BoundedParam.
         /// @details Private so public factories guarantee valid positivity and interval invariants.
-        /// @param noise_variance Validated observation noise variance bounded parameter.
+        /// @param[in] noise_variance Validated observation noise variance bounded parameter.
         explicit constexpr GaussianLikelihood(BoundedParam noise_variance) noexcept : noise_variance_(noise_variance) {}
 
         /// @brief Bounded observation noise variance sigma_n^2 in user units.

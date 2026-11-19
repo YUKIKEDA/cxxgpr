@@ -43,8 +43,8 @@ namespace cxxgpr
 
         /// @brief Checks value equality between two ParameterBinding descriptors.
         /// @details Compares flattened index, leaf_id, and local_index.
-        /// @param lhs Left-hand ParameterBinding operand.
-        /// @param rhs Right-hand ParameterBinding operand.
+        /// @param[in] lhs Left-hand ParameterBinding operand.
+        /// @param[in] rhs Right-hand ParameterBinding operand.
         /// @return True if all three binding indices match.
         [[nodiscard]] friend constexpr bool operator==(
             const ParameterBinding& lhs, const ParameterBinding& rhs
@@ -88,26 +88,26 @@ namespace cxxgpr
     public:
         /// @brief Constructs a leaf specification from any built-in or custom kernel leaf.
         /// @details Implicitly converts any leaf type in KernelLeaf into a single-leaf KernelSpec.
-        /// @param leaf Built-in or custom kernel leaf value.
+        /// @param[in] leaf Built-in or custom kernel leaf value.
         /* implicit */ KernelSpec(KernelLeaf leaf);
 
         /// @brief Constructs a leaf specification from a user-defined CustomKernel.
         /// @details Convenience factory wrapping a CustomKernel inside a leaf KernelSpec.
-        /// @param leaf Validated CustomKernel value wrapper.
+        /// @param[in] leaf Validated CustomKernel value wrapper.
         /// @return Single-leaf KernelSpec holding leaf.
         [[nodiscard]] static KernelSpec custom(CustomKernel leaf);
 
         /// @brief Constructs a sum of two kernel specifications.
         /// @details Combines k_sum(x, x') = lhs(x, x') + rhs(x, x') as an immutable binary AST node.
-        /// @param lhs Left kernel addend.
-        /// @param rhs Right kernel addend.
+        /// @param[in] lhs Left kernel addend.
+        /// @param[in] rhs Right kernel addend.
         /// @return Composite KernelSpec representing lhs + rhs.
         [[nodiscard]] static KernelSpec sum(KernelSpec lhs, KernelSpec rhs);
 
         /// @brief Constructs a product of two kernel specifications.
         /// @details Combines k_prod(x, x') = lhs(x, x') * rhs(x, x') as an immutable binary AST node.
-        /// @param lhs Left kernel factor.
-        /// @param rhs Right kernel factor.
+        /// @param[in] lhs Left kernel factor.
+        /// @param[in] rhs Right kernel factor.
         /// @return Composite KernelSpec representing lhs * rhs.
         [[nodiscard]] static KernelSpec product(KernelSpec lhs, KernelSpec rhs);
 
@@ -118,7 +118,7 @@ namespace cxxgpr
 
         /// @brief Writes flattened log-space hyperparameters in depth-first left-to-right leaf order.
         /// @details Verifies out.size() == num_params() before populating out.
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on length mismatch or leaf query error.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> get_params(std::span<double> out) const;
@@ -126,7 +126,7 @@ namespace cxxgpr
         /// @brief Atomically updates all leaf parameters from log-space params.
         /// @details Rebuilds a validated copy of the expression tree and replaces *this only if every
         /// leaf accepts its parameter slice, leaving *this unchanged on any error.
-        /// @param params Input span of unconstrained log-space parameters of length num_params().
+        /// @param[in] params Input span of unconstrained log-space parameters of length num_params().
         /// @return Empty expected on success or GprError on count mismatch, non-finite input, or bound violation.
         /// @retval GprErrorCode::LengthMismatch When params.size() != num_params().
         /// @retval GprErrorCode::NonFiniteInput When any log-space parameter is NaN or infinite.
@@ -135,7 +135,7 @@ namespace cxxgpr
 
         /// @brief Writes flattened open intervals in depth-first left-to-right leaf order.
         /// @details Order matches get_params() and set_params().
-        /// @param out Destination span of length num_params().
+        /// @param[out] out Destination span of length num_params().
         /// @return Empty expected on success or GprError on length mismatch or leaf query error.
         /// @retval GprErrorCode::LengthMismatch When out.size() != num_params().
         [[nodiscard]] std::expected<void, GprError> bounds_into(std::span<Interval> out) const;
@@ -158,15 +158,15 @@ namespace cxxgpr
 
         /// @brief Combines two kernel specifications by addition.
         /// @details Equivalent to KernelSpec::sum(lhs, rhs).
-        /// @param lhs Left kernel addend.
-        /// @param rhs Right kernel addend.
+        /// @param[in] lhs Left kernel addend.
+        /// @param[in] rhs Right kernel addend.
         /// @return Composite sum KernelSpec.
         friend KernelSpec operator+(KernelSpec lhs, KernelSpec rhs);
 
         /// @brief Combines two kernel specifications by multiplication.
         /// @details Equivalent to KernelSpec::product(lhs, rhs).
-        /// @param lhs Left kernel factor.
-        /// @param rhs Right kernel factor.
+        /// @param[in] lhs Left kernel factor.
+        /// @param[in] rhs Right kernel factor.
         /// @return Composite product KernelSpec.
         friend KernelSpec operator*(KernelSpec lhs, KernelSpec rhs);
 
@@ -201,7 +201,7 @@ namespace cxxgpr
 
         /// @brief Private constructor initializing a composite SumNode or ProductNode.
         /// @details Disambiguated by InternalTag for internal factory methods.
-        /// @param node Constructed NodeVariant payload.
+        /// @param[in] node Constructed NodeVariant payload.
         KernelSpec(InternalTag, NodeVariant node) noexcept : node_(std::move(node)) {}
 
         /// @brief Stored AST variant node (leaf, sum, or product).
@@ -215,15 +215,15 @@ namespace cxxgpr
 
     /// @brief Combines two kernel specifications by addition.
     /// @details Equivalent to KernelSpec::sum(lhs, rhs).
-    /// @param lhs Left kernel addend.
-    /// @param rhs Right kernel addend.
+    /// @param[in] lhs Left kernel addend.
+    /// @param[in] rhs Right kernel addend.
     /// @return Composite sum KernelSpec.
     [[nodiscard]] KernelSpec operator+(KernelSpec lhs, KernelSpec rhs);
 
     /// @brief Combines two kernel specifications by multiplication.
     /// @details Equivalent to KernelSpec::product(lhs, rhs).
-    /// @param lhs Left kernel factor.
-    /// @param rhs Right kernel factor.
+    /// @param[in] lhs Left kernel factor.
+    /// @param[in] rhs Right kernel factor.
     /// @return Composite product KernelSpec.
     [[nodiscard]] KernelSpec operator*(KernelSpec lhs, KernelSpec rhs);
 

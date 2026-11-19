@@ -6,11 +6,14 @@
 #include "cxxgpr/kernel/distance_cache.hpp"
 
 #include "cxxgpr/core/checked.hpp"
+#include "cxxgpr/linalg/parallel.hpp"
 
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <utility>
+
+#include "kernel/exp_simd.hpp"
 
 #ifdef _OPENMP
 #    include <omp.h>
@@ -25,7 +28,7 @@ namespace cxxgpr
         /// @brief Validates that the point matrix x is non-empty and contains only finite values.
         /// @details Scans column-major columns sequentially so cache building fails early before allocating.
         /// @tparam T Kernel scalar type (double or float).
-        /// @param x Input coordinate matrix of shape n x d.
+        /// @param[in] x Input coordinate matrix of shape n x d.
         /// @return Empty expected on success or GprError on invalid input.
         /// @retval GprErrorCode::EmptyInput When x has zero size or null data pointer.
         /// @retval GprErrorCode::NonFiniteInput When any coordinate entry is NaN or infinite.
@@ -53,8 +56,8 @@ namespace cxxgpr
 
         /// @brief Computes d * n * (n + 1) / 2 with std::size_t overflow checking.
         /// @details Guards n + 1, n * (n + 1), and d * tri separately before allocating ARD cache storage.
-        /// @param n Number of training points.
-        /// @param d Number of feature dimensions.
+        /// @param[in] n Number of training points.
+        /// @param[in] d Number of feature dimensions.
         /// @return Total packed element count or GprError on overflow.
         /// @retval GprErrorCode::SizeOverflow When any intermediate product or sum exceeds std::size_t.
         [[nodiscard]] std::expected<std::size_t, GprError> checked_packed_ard_len(std::size_t n, std::size_t d)
@@ -77,35 +80,48 @@ namespace cxxgpr
         /// @details Computes each lower-triangular entry sum_k (x_{ik} - x_{jk})^2 once and mirrors to
         /// both triangles, zeroing the diagonal.
         /// @tparam T Kernel scalar type (double or float).
-        /// @param x Validated training coordinate matrix of shape n x d.
-        /// @param dst Pre-sized destination buffer of length n * n in column-major layout.
+        /// @param[in] x Validated training coordinate matrix of shape n x d.
+        /// @param[out] dst Pre-sized destination buffer of length n * n in column-major layout.
         template <KernelScalarConcept T> void fill_square_dist_matrix(MatrixRef<T> x, std::span<T> dst) noexcept
         {
             const std::size_t n = x.rows();
             const std::size_t d = x.cols();
             MatrixMut<T> dist(dst.data(), n, n, n);
-            const auto n_cols = static_cast<std::ptrdiff_t>(n);
-            // Parallelize across columns for sufficiently large matrices; each column pair writes unique cells.
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
-#endif
-            for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
+            // Accumulate contiguous column slices feature-by-feature via SSE2 using area-balanced blocks for large n.
+            auto fill_lower_range = [&](std::size_t col_begin, std::size_t col_end)
             {
-                const auto col = static_cast<std::size_t>(col_s);
-                dist(col, col) = T{0};
+                for (std::size_t col = col_begin; col < col_end; ++col)
+                {
+                    dist(col, col) = T{0};
+                    const std::size_t len = n - (col + 1U);
+                    if (len == 0U)
+                    {
+                        continue;
+                    }
+                    T* col_ptr = dst.data() + (col * n) + (col + 1U);
+                    detail::set_scaled_sq_diff_slice(col_ptr, x.col(0U).data() + col + 1U, x(col, 0U), T{1}, len);
+                    for (std::size_t k = 1U; k < d; ++k)
+                    {
+                        detail::add_scaled_sq_diff_slice(col_ptr, x.col(k).data() + col + 1U, x(col, k), T{1}, len);
+                    }
+                }
+            };
+            if (n >= 256U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, fill_lower_range);
+            }
+            else
+            {
+                fill_lower_range(0U, n);
+            }
+            // Mirror lower triangle into upper triangle in tiled passes so either Triangle view reads it directly.
+            for (std::size_t col = 0U; col < n; ++col)
+            {
                 for (std::size_t row = col + 1U; row < n; ++row)
                 {
                     const std::size_t r1 = row;
                     const std::size_t r2 = col;
-                    T acc = T{0};
-                    for (std::size_t k = 0; k < d; ++k)
-                    {
-                        const T diff = x(r1, k) - x(r2, k);
-                        acc += diff * diff;
-                    }
-                    // Mirror lower-triangular result into upper triangle so either Triangle view reads it directly.
-                    dist(r1, r2) = acc;
-                    dist(r2, r1) = acc;
+                    dist(r2, r1) = dist(r1, r2);
                 }
             }
         }
@@ -114,34 +130,33 @@ namespace cxxgpr
         /// @details For each dimension dim in [0, d), stores n * (n + 1) / 2 entries in packed
         /// column-major lower-triangular order where column col starts at dim_base + col * (2n - col + 1) / 2.
         /// @tparam T Kernel scalar type (double or float).
-        /// @param x Validated training coordinate matrix of shape n x d.
-        /// @param dst Pre-sized packed destination buffer of length d * n * (n + 1) / 2.
+        /// @param[in] x Validated training coordinate matrix of shape n x d.
+        /// @param[out] dst Pre-sized packed destination buffer of length d * n * (n + 1) / 2.
         template <KernelScalarConcept T> void fill_packed_ard_sq_diff(MatrixRef<T> x, std::span<T> dst) noexcept
         {
             const std::size_t n = x.rows();
             const std::size_t d = x.cols();
             const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const auto n_cols = static_cast<std::ptrdiff_t>(n);
-            // Lay out one contiguous lower-triangular block per feature dimension for sequential leaf reads.
-            for (std::size_t dim = 0; dim < d; ++dim)
-            {
-                const auto x_col = x.col(dim);
-                const std::size_t dim_base = dim * per_dim;
+            const std::size_t total_jobs = d * n;
+            const auto jobs_s = static_cast<std::ptrdiff_t>(total_jobs);
+            // Flatten (dim, col) work so large multi-dimensional caches use one OpenMP region instead of d barriers.
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 64U)
+#    pragma omp parallel for schedule(dynamic, 16) if ((d * per_dim) >= 32768U)
 #endif
-                for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
+            for (std::ptrdiff_t job_s = 0; job_s < jobs_s; ++job_s)
+            {
+                const auto job = static_cast<std::size_t>(job_s);
+                const std::size_t dim = job / n;
+                const std::size_t col = job % n;
+                const auto x_col = x.col(dim);
+                const std::size_t col_base = (dim * per_dim) + ((col * ((2U * n) - col + 1U)) / 2U);
+                dst[col_base] = T{0};
+                const std::size_t len = n - (col + 1U);
+                if (len > 0U)
                 {
-                    const auto col = static_cast<std::size_t>(col_s);
-                    // Column col has (n - col) lower entries; preceding columns sum to col*(2n - col + 1)/2.
-                    const std::size_t col_base = dim_base + ((col * ((2U * n) - col + 1U)) / 2U);
-                    const T x_col_val = x_col[col];
-                    dst[col_base] = T{0};
-                    for (std::size_t row = col + 1U; row < n; ++row)
-                    {
-                        const T diff = x_col[row] - x_col_val;
-                        dst[col_base + (row - col)] = diff * diff;
-                    }
+                    detail::set_scaled_sq_diff_slice(
+                        dst.data() + col_base + 1U, x_col.data() + col + 1U, x_col[col], T{1}, len
+                    );
                 }
             }
         }
@@ -151,10 +166,10 @@ namespace cxxgpr
     /// @brief Builds a distance cache for training points x according to cache flags and policy.
     /// @details Allocates a fresh DistanceCache<T> and delegates validation and population to ensure().
     /// @tparam T Kernel evaluation scalar type (double or float).
-    /// @param x Training input matrix of shape n x d.
-    /// @param cache_dist Whether to populate the dense n x n squared-distance matrix.
-    /// @param cache_ard Whether to populate the packed lower-triangular ARD squared-difference buffer.
-    /// @param policy Caching policy governing allocation vs uncached operation.
+    /// @param[in] x Training input matrix of shape n x d.
+    /// @param[in] cache_dist Whether to populate the dense n x n squared-distance matrix.
+    /// @param[in] cache_ard Whether to populate the packed lower-triangular ARD squared-difference buffer.
+    /// @param[in] policy Caching policy governing allocation vs uncached operation.
     /// @return Populated DistanceCache<T> on success or GprError on invalid input or overflow.
     /// @retval GprErrorCode::EmptyInput When x is empty or null.
     /// @retval GprErrorCode::NonFiniteInput When any coordinate of x is NaN or infinite.
@@ -175,10 +190,10 @@ namespace cxxgpr
     /// @brief Populates or reuses this cache in place for training points x.
     /// @details Validates points and checks buffer sizes before mutating existing cache state.
     /// @tparam T Kernel evaluation scalar type (double or float).
-    /// @param x Training input matrix of shape n x d.
-    /// @param cache_dist Whether to populate the dense n x n squared-distance matrix.
-    /// @param cache_ard Whether to populate the packed lower-triangular ARD squared-difference buffer.
-    /// @param policy Caching policy governing allocation vs uncached clearing.
+    /// @param[in] x Training input matrix of shape n x d.
+    /// @param[in] cache_dist Whether to populate the dense n x n squared-distance matrix.
+    /// @param[in] cache_ard Whether to populate the packed lower-triangular ARD squared-difference buffer.
+    /// @param[in] policy Caching policy governing allocation vs uncached clearing.
     /// @return Empty expected on success or GprError if validation or size checks fail.
     /// @retval GprErrorCode::EmptyInput When x is empty or null.
     /// @retval GprErrorCode::NonFiniteInput When any coordinate of x is NaN or infinite.

@@ -17,8 +17,8 @@ namespace cxxgpr
     /// @details Guards n * n, p * n * n, and n * p against std::size_t overflow before monotonically
     /// growing vectors so existing capacity is retained across repeated Hessian evaluations.
     /// @tparam S Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param n Training sample count (matrix order).
-    /// @param p Total hyperparameter count (kernel parameters plus noise parameter).
+    /// @param[in] n Training sample count (matrix order).
+    /// @param[in] p Total hyperparameter count (kernel parameters plus noise parameter).
     /// @return Empty expected on success, or GprError on empty dimensions or size overflow.
     /// @retval GprErrorCode::EmptyInput When n == 0 or p == 0.
     /// @retval GprErrorCode::SizeOverflow When n * n, p * n * n, or n * p overflows std::size_t.
@@ -72,7 +72,7 @@ namespace cxxgpr
     /// @brief Returns a mutable n x n column-major view of S_i for parameter index i.
     /// @details Indexes contiguous p * n * n storage at offset i * (order_ * order_).
     /// @tparam S Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param i Zero-based parameter index in [0, num_params_).
+    /// @param[in] i Zero-based parameter index in [0, num_params_).
     /// @return Mutable n x n column-major view of S_i.
     template <KernelScalarConcept S> MatrixMut<S> HessianScratch<S>::s_mut(std::size_t i) noexcept
     {
@@ -83,7 +83,7 @@ namespace cxxgpr
     /// @brief Returns an immutable n x n column-major view of S_i for parameter index i.
     /// @details Indexes contiguous p * n * n storage at offset i * (order_ * order_).
     /// @tparam S Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param i Zero-based parameter index in [0, num_params_).
+    /// @param[in] i Zero-based parameter index in [0, num_params_).
     /// @return Immutable n x n column-major view of S_i.
     template <KernelScalarConcept S> MatrixRef<S> HessianScratch<S>::s_ref(std::size_t i) const noexcept
     {
@@ -94,7 +94,7 @@ namespace cxxgpr
     /// @brief Returns a mutable span over column i of V (length n).
     /// @details Indexes contiguous n x p storage at offset i * order_.
     /// @tparam S Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param i Zero-based parameter index in [0, num_params_).
+    /// @param[in] i Zero-based parameter index in [0, num_params_).
     /// @return Mutable length-n span over column i of V.
     template <KernelScalarConcept S> std::span<S> HessianScratch<S>::v_col_mut(std::size_t i) noexcept
     {
@@ -104,7 +104,7 @@ namespace cxxgpr
     /// @brief Returns an immutable span over column i of V (length n).
     /// @details Indexes contiguous n x p storage at offset i * order_.
     /// @tparam S Floating-point kernel scalar type satisfying KernelScalarConcept.
-    /// @param i Zero-based parameter index in [0, num_params_).
+    /// @param[in] i Zero-based parameter index in [0, num_params_).
     /// @return Immutable length-n span over column i of V.
     template <KernelScalarConcept S> std::span<const S> HessianScratch<S>::v_col_ref(std::size_t i) const noexcept
     {
@@ -124,7 +124,7 @@ namespace cxxgpr
     /// @details Validates n > 0 and checks n * n overflow before zero-initializing k_matrix, exp_buf,
     /// rhs, and col_partials.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param n Training sample count (matrix order).
+    /// @param[in] n Training sample count (matrix order).
     /// @return Allocated WorkspaceCore<P>, or GprError if n == 0 or n * n overflows.
     /// @retval GprErrorCode::EmptyInput When n == 0.
     /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -229,7 +229,7 @@ namespace cxxgpr
     /// @brief Ensures weighted holds at least n_bufs n x n buffers without reallocating when sufficient.
     /// @details Grows NestedBuffers only if depth, rows, or cols fall below the requested shape.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param n_bufs Minimum number of n x n buffer levels required in weighted.
+    /// @param[in] n_bufs Minimum number of n x n buffer levels required in weighted.
     /// @return Empty expected on success, or GprError if order_ == 0.
     /// @retval GprErrorCode::EmptyInput When order_ == 0.
     template <PrecisionPolicyConcept P>
@@ -251,9 +251,9 @@ namespace cxxgpr
     /// @details Creates WorkspaceCore<P>, optionally constructs DistanceCache, and allocates w_matrix
     /// only when buffer == CholeskyBuffer::Retain.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param n Training sample count.
-    /// @param cache Distance caching policy (Cached or Uncached).
-    /// @param buffer Cholesky buffer retention policy (Retain or Reuse).
+    /// @param[in] n Training sample count.
+    /// @param[in] cache Distance caching policy (Cached or Uncached).
+    /// @param[in] buffer Cholesky buffer retention policy (Retain or Reuse).
     /// @return Allocated FitBuffers<P>, or GprError if n == 0 or size calculation overflows.
     /// @retval GprErrorCode::EmptyInput When n == 0.
     /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -288,8 +288,8 @@ namespace cxxgpr
     /// @brief Allocates training buffers for n points using a FitPolicy preset.
     /// @details Delegates to the policy-pair overload of FitBuffers<P>::create().
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param n Training sample count.
-    /// @param policy Combined distance-cache and Cholesky-buffer preset.
+    /// @param[in] n Training sample count.
+    /// @param[in] policy Combined distance-cache and Cholesky-buffer preset.
     /// @return Allocated FitBuffers<P>, or GprError if n == 0 or size calculation overflows.
     /// @retval GprErrorCode::EmptyInput When n == 0.
     /// @retval GprErrorCode::SizeOverflow When n * n overflows std::size_t.
@@ -329,10 +329,10 @@ namespace cxxgpr
     /// @details Checks overflow bounds on m * d, n * m, and (nested_depth + 1) * m, then grows each
     /// workspace vector only if its current size is insufficient so warmed queries perform zero allocations.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
-    /// @param n Training sample count.
-    /// @param m Query point count.
-    /// @param d Feature dimension count.
-    /// @param nested_depth Kernel tree nested buffer depth.
+    /// @param[in] n Training sample count.
+    /// @param[in] m Query point count.
+    /// @param[in] d Feature dimension count.
+    /// @param[in] nested_depth Kernel tree nested buffer depth.
     /// @return Empty expected on success, or GprError on empty extents or size overflow.
     /// @retval GprErrorCode::EmptyInput When n == 0, m == 0, or d == 0.
     /// @retval GprErrorCode::SizeOverflow When m * d, n * m, or (nested_depth + 1) * m overflows std::size_t.
