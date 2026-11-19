@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Spec: REQ-06, REQ-11, DES-02, DES-03, DES-04
+// Spec: REQ-06, REQ-11, DES-02, DES-03, DES-04, DES-20
 /// @file cholesky_test.cpp
 /// @brief Unit tests for lower Cholesky factorization, jitter escalation, triangular solves, and inv_diag.
 /// @details Verifies analytical Cholesky factors, log-determinant, solves, and diagonal inverse
@@ -377,9 +377,28 @@ namespace
                     }
                 }
             }
+
+            // Verify ||L * L^T - A||_inf reconstruction accuracy across the lower triangle.
+            double max_recon_err = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    double dot = 0.0;
+                    for (std::size_t p = 0U; p <= col; ++p)
+                    {
+                        dot += static_cast<double>(r1[(p * n) + row]) * static_cast<double>(r1[(p * n) + col]);
+                    }
+                    max_recon_err = std::max(max_recon_err, std::abs(dot - static_cast<double>(src[(col * n) + row])));
+                }
+            }
+            const double recon_tol = std::same_as<Scalar, double> ? 1e-11 : 1e-3;
+            EXPECT_LT(max_recon_err, recon_tol);
         };
 
         check_blocked.template operator()<double>(260U, 1e-2);
+        check_blocked.template operator()<double>(263U, 1e-2);
+        check_blocked.template operator()<float>(260U, 5e-2F);
         check_blocked.template operator()<float>(520U, 5e-2F);
     }
 
@@ -460,6 +479,346 @@ namespace
             }
             EXPECT_NEAR(ax, rhs_init[row], 1e-11);
         }
+    }
+
+    /// @brief Verifies deterministic SIMD triangular solves across single/multi-RHS, strides, NaN upper triangles,
+    /// zero allocations, and OpenMP thread counts.
+    TEST(CholeskyLinalgTest, TriangularSolvesDeterministicAcrossSingleAndMultiRhsAndThreads)
+    {
+        // Spec: REQ-06, REQ-11, DES-03, DES-20
+        auto check_scalar_sizes = []<typename Scalar>(Scalar shift, double tol)
+        {
+            const std::array<std::size_t, 7> sizes = {1U, 3U, 4U, 7U, 33U, 65U, 257U};
+            constexpr std::size_t m = 9U;
+            const Scalar qnan = std::numeric_limits<Scalar>::quiet_NaN();
+
+            for (const std::size_t n : sizes)
+            {
+                const auto gram = make_rbf_gram<Scalar>(n, shift);
+                std::vector<Scalar> l_packed = gram;
+                ASSERT_TRUE(
+                    cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<Scalar>(l_packed.data(), n, n)).has_value()
+                );
+                // Poison strictly upper triangle to prove solves and inv_diag never read above the diagonal.
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = 0U; row < col; ++row)
+                    {
+                        l_packed[(col * n) + row] = qnan;
+                    }
+                }
+                const MatrixRef<Scalar> l_ref(l_packed.data(), n, n);
+
+                const std::size_t l_stride = n + 5U;
+                std::vector<Scalar> l_strided_buf(l_stride * n, qnan);
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        l_strided_buf[(col * l_stride) + row] = l_packed[(col * n) + row];
+                    }
+                }
+                const MatrixRef<Scalar> l_strided_ref(l_strided_buf.data(), n, n, l_stride);
+
+                std::vector<Scalar> rhs_init(n * m, Scalar{0});
+                const std::size_t rhs_stride = n + 3U;
+                std::vector<Scalar> rhs_strided_init(rhs_stride * m, qnan);
+                for (std::size_t col = 0U; col < m; ++col)
+                {
+                    for (std::size_t row = 0U; row < n; ++row)
+                    {
+                        const auto val = static_cast<Scalar>(
+                            std::sin((0.19 * static_cast<double>(row + 1U)) + (0.29 * static_cast<double>(col + 1U)))
+                        );
+                        rhs_init[(col * n) + row] = val;
+                        rhs_strided_init[(col * rhs_stride) + row] = val;
+                    }
+                }
+
+                std::vector<Scalar> fwd_multi = rhs_init;
+                std::vector<Scalar> bwd_multi = rhs_init;
+                std::vector<Scalar> llt_multi = rhs_init;
+                std::vector<Scalar> fwd_strided = rhs_strided_init;
+                std::vector<Scalar> bwd_strided = rhs_strided_init;
+                std::vector<Scalar> llt_strided = rhs_strided_init;
+                std::vector<Scalar> diag_inv(n, Scalar{0});
+                std::vector<Scalar> scratch(n * n, qnan);
+
+                {
+                    const NoAllocationScope audit(AuditMode::CppAndEigen);
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_lower_in_place(l_ref, MatrixMut<Scalar>(fwd_multi.data(), n, m))
+                            .has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_lower_transpose_in_place(l_ref, MatrixMut<Scalar>(bwd_multi.data(), n, m))
+                            .has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_llt_in_place(l_ref, MatrixMut<Scalar>(llt_multi.data(), n, m)).has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_lower_in_place(
+                            l_strided_ref, MatrixMut<Scalar>(fwd_strided.data(), n, m, rhs_stride)
+                        )
+                            .has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_lower_transpose_in_place(
+                            l_strided_ref, MatrixMut<Scalar>(bwd_strided.data(), n, m, rhs_stride)
+                        )
+                            .has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::solve_llt_in_place(
+                            l_strided_ref, MatrixMut<Scalar>(llt_strided.data(), n, m, rhs_stride)
+                        )
+                            .has_value()
+                    );
+                    ASSERT_TRUE(
+                        cxxgpr::linalg::inv_diag_from_chol_l(
+                            l_ref, std::span<Scalar>(diag_inv), MatrixMut<Scalar>(scratch.data(), n, n)
+                        )
+                            .has_value()
+                    );
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+
+                // Verify forward, backward, and LLT residuals plus bitwise parity against single-RHS solves.
+                std::vector<Scalar> single_fwd(n);
+                std::vector<Scalar> single_bwd(n);
+                std::vector<Scalar> single_llt(n);
+                std::vector<Scalar> unit_col(n);
+                for (std::size_t col = 0U; col < m; ++col)
+                {
+                    std::copy_n(rhs_init.data() + (col * n), n, single_fwd.data());
+                    std::copy_n(rhs_init.data() + (col * n), n, single_bwd.data());
+                    std::copy_n(rhs_init.data() + (col * n), n, single_llt.data());
+                    {
+                        const NoAllocationScope audit(AuditMode::CppAndEigen);
+                        ASSERT_TRUE(
+                            cxxgpr::linalg::solve_lower_in_place(l_ref, std::span<Scalar>(single_fwd)).has_value()
+                        );
+                        ASSERT_TRUE(
+                            cxxgpr::linalg::solve_lower_transpose_in_place(l_ref, std::span<Scalar>(single_bwd))
+                                .has_value()
+                        );
+                        ASSERT_TRUE(
+                            cxxgpr::linalg::solve_llt_in_place(l_ref, std::span<Scalar>(single_llt)).has_value()
+                        );
+                        EXPECT_EQ(audit.delta_allocations(), 0U);
+                    }
+
+                    for (std::size_t row = 0U; row < n; ++row)
+                    {
+                        const std::size_t p_idx = (col * n) + row;
+                        const std::size_t s_idx = (col * rhs_stride) + row;
+                        if constexpr (std::same_as<Scalar, double>)
+                        {
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(fwd_multi[p_idx]),
+                                std::bit_cast<std::uint64_t>(single_fwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(fwd_strided[s_idx]),
+                                std::bit_cast<std::uint64_t>(single_fwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(bwd_multi[p_idx]),
+                                std::bit_cast<std::uint64_t>(single_bwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(bwd_strided[s_idx]),
+                                std::bit_cast<std::uint64_t>(single_bwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(llt_multi[p_idx]),
+                                std::bit_cast<std::uint64_t>(single_llt[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint64_t>(llt_strided[s_idx]),
+                                std::bit_cast<std::uint64_t>(single_llt[row])
+                            );
+                        }
+                        else
+                        {
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(fwd_multi[p_idx]),
+                                std::bit_cast<std::uint32_t>(single_fwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(fwd_strided[s_idx]),
+                                std::bit_cast<std::uint32_t>(single_fwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(bwd_multi[p_idx]),
+                                std::bit_cast<std::uint32_t>(single_bwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(bwd_strided[s_idx]),
+                                std::bit_cast<std::uint32_t>(single_bwd[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(llt_multi[p_idx]),
+                                std::bit_cast<std::uint32_t>(single_llt[row])
+                            );
+                            EXPECT_EQ(
+                                std::bit_cast<std::uint32_t>(llt_strided[s_idx]),
+                                std::bit_cast<std::uint32_t>(single_llt[row])
+                            );
+                        }
+
+                        // Verify Forward: (L * x)_row == b_row using only lower-triangular entries of L.
+                        double lx = 0.0;
+                        for (std::size_t k = 0U; k <= row; ++k)
+                        {
+                            lx += static_cast<double>(l_packed[(k * n) + row]) * static_cast<double>(single_fwd[k]);
+                        }
+                        EXPECT_NEAR(lx, static_cast<double>(rhs_init[p_idx]), tol);
+
+                        // Verify Backward: (L^T * x)_row == b_row using only lower-triangular entries of L.
+                        double ltx = 0.0;
+                        for (std::size_t k = row; k < n; ++k)
+                        {
+                            ltx += static_cast<double>(l_packed[(row * n) + k]) * static_cast<double>(single_bwd[k]);
+                        }
+                        EXPECT_NEAR(ltx, static_cast<double>(rhs_init[p_idx]), tol);
+
+                        // Verify LLT: (A * x)_row == b_row against exact dense SPD matrix A.
+                        double ax = 0.0;
+                        for (std::size_t k = 0U; k < n; ++k)
+                        {
+                            ax += static_cast<double>(gram[(k * n) + row]) * static_cast<double>(single_llt[k]);
+                        }
+                        EXPECT_NEAR(ax, static_cast<double>(rhs_init[p_idx]), tol);
+                    }
+                }
+
+                // Verify inv_diag_from_chol_l against columnwise L^-1 solves.
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    std::fill(unit_col.begin(), unit_col.end(), Scalar{0});
+                    unit_col[col] = Scalar{1};
+                    ASSERT_TRUE(cxxgpr::linalg::solve_lower_in_place(l_ref, std::span<Scalar>(unit_col)).has_value());
+                    double sum_sq = 0.0;
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        const auto val = static_cast<double>(unit_col[row]);
+                        sum_sq += val * val;
+                    }
+                    EXPECT_NEAR(static_cast<double>(diag_inv[col]), sum_sq, tol);
+                }
+            }
+        };
+
+        check_scalar_sizes.template operator()<double>(1e-2, 1e-10);
+        check_scalar_sizes.template operator()<float>(5e-2F, 1e-3);
+
+        // Exercise OpenMP parallel branch (n^2 * m = 260^2 * 256 >= 2^24) for both float and double.
+        auto check_parallel_threads = []<typename Scalar>(Scalar shift, double tol)
+        {
+            constexpr std::size_t n = 260U;
+            constexpr std::size_t m = 256U;
+            const auto gram = make_rbf_gram<Scalar>(n, shift);
+            std::vector<Scalar> l_buf = gram;
+            ASSERT_TRUE(cxxgpr::linalg::cholesky_lower_in_place(MatrixMut<Scalar>(l_buf.data(), n, n)).has_value());
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = 0U; row < col; ++row)
+                {
+                    l_buf[(col * n) + row] = std::numeric_limits<Scalar>::quiet_NaN();
+                }
+            }
+            const MatrixRef<Scalar> l_ref(l_buf.data(), n, n);
+
+            std::vector<Scalar> rhs_init(n * m, Scalar{0});
+            for (std::size_t col = 0U; col < m; ++col)
+            {
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    rhs_init[(col * n) + row] = static_cast<Scalar>(
+                        std::sin((0.11 * static_cast<double>(row + 1U)) + (0.05 * static_cast<double>(col + 1U)))
+                    );
+                }
+            }
+
+            auto run_all = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                std::vector<Scalar> fwd = rhs_init;
+                std::vector<Scalar> bwd = rhs_init;
+                std::vector<Scalar> llt = rhs_init;
+                {
+                    const NoAllocationScope audit(AuditMode::CppAndEigen);
+                    EXPECT_TRUE(
+                        cxxgpr::linalg::solve_lower_in_place(l_ref, MatrixMut<Scalar>(fwd.data(), n, m)).has_value()
+                    );
+                    EXPECT_TRUE(
+                        cxxgpr::linalg::solve_lower_transpose_in_place(l_ref, MatrixMut<Scalar>(bwd.data(), n, m))
+                            .has_value()
+                    );
+                    EXPECT_TRUE(
+                        cxxgpr::linalg::solve_llt_in_place(l_ref, MatrixMut<Scalar>(llt.data(), n, m)).has_value()
+                    );
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+                return std::array<std::vector<Scalar>, 3>{std::move(fwd), std::move(bwd), std::move(llt)};
+            };
+
+#ifdef _OPENMP
+            const int saved_threads = omp_get_max_threads();
+#endif
+            const auto t1 = run_all(1);
+            const auto t2 = run_all(2);
+            const auto t4 = run_all(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved_threads);
+#endif
+
+            for (std::size_t mode = 0U; mode < 3U; ++mode)
+            {
+                for (std::size_t idx = 0U; idx < n * m; ++idx)
+                {
+                    if constexpr (std::same_as<Scalar, double>)
+                    {
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint64_t>(t1[mode][idx]), std::bit_cast<std::uint64_t>(t2[mode][idx])
+                        );
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint64_t>(t1[mode][idx]), std::bit_cast<std::uint64_t>(t4[mode][idx])
+                        );
+                    }
+                    else
+                    {
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint32_t>(t1[mode][idx]), std::bit_cast<std::uint32_t>(t2[mode][idx])
+                        );
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint32_t>(t1[mode][idx]), std::bit_cast<std::uint32_t>(t4[mode][idx])
+                        );
+                    }
+                }
+            }
+
+            // Spot-check A * x = b residual on the final column of LLT solve.
+            const std::size_t check_col = m - 1U;
+            for (std::size_t row = 0U; row < n; ++row)
+            {
+                double ax = 0.0;
+                for (std::size_t k = 0U; k < n; ++k)
+                {
+                    ax += static_cast<double>(gram[(k * n) + row]) * static_cast<double>(t1[2][(check_col * n) + k]);
+                }
+                EXPECT_NEAR(ax, static_cast<double>(rhs_init[(check_col * n) + row]), tol);
+            }
+        };
+
+        check_parallel_threads.template operator()<double>(1e-2, 1e-10);
+        check_parallel_threads.template operator()<float>(5e-2F, 1e-3);
     }
 
 }  // namespace

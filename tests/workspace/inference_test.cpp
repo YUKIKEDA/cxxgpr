@@ -599,4 +599,137 @@ namespace
         EXPECT_EQ(err_diag.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
     }
 
+    /// @brief Verifies parallel predict_covariance_into() stays bit-identical across 1/2/4 threads for odd m.
+    /// @details Evaluates DoublePrecision and MixedPrecision<PromoteStorage> full covariance at n = 128, m = 67
+    /// (n * m^2 >= 262,144) under 1, 2, and 4 OpenMP threads, verifies exact bitwise equality across all mean and
+    /// matrix elements, and checks accuracy against an independent naive K_** - V^T V reference.
+    TEST(WorkspaceInferenceTest, PredictCovarianceBitwiseDeterministicAcrossThreads)
+    {
+        // Spec: DES-16, DES-20
+        auto check_cov_policy = []<typename Policy>()
+        {
+            using Storage = Policy::Storage;
+            constexpr std::size_t n = 128U;
+            constexpr std::size_t m = 67U;
+            constexpr std::size_t d = 2U;
+            std::vector<double> x_vals(n * d);
+            std::vector<double> y_vals(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                const double x0 = -1.5 + (3.0 * static_cast<double>(i) / static_cast<double>(n - 1U));
+                const double x1 = 0.8 * std::sin(0.19 * static_cast<double>(i));
+                x_vals[i] = x0;
+                x_vals[n + i] = x1;
+                y_vals[i] = std::cos(1.3 * x0) + (0.4 * x1);
+            }
+            std::vector<Storage> q_vals(m * d);
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                q_vals[j] = static_cast<Storage>(-1.4 + (2.8 * static_cast<double>(j) / static_cast<double>(m - 1U)));
+                q_vals[m + j] = static_cast<Storage>(0.6 * std::cos(0.23 * static_cast<double>(j)));
+            }
+            const cxxgpr::MatrixRef<Storage> q_ref(q_vals.data(), m, d, m);
+
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.75).value())
+                * cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.3).value());
+            const auto kernel = spec.compile<Storage>();
+            auto fix = make_fitted_fixture<Policy>(kernel, x_vals, y_vals, n, d, 0.25);
+
+            auto run_threads = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                cxxgpr::QueryWorkspace<Policy> qws;
+                cxxgpr::PredictiveCovariance<double> out;
+                EXPECT_TRUE(
+                    cxxgpr::predict_covariance_into<Policy>(
+                        kernel, fix.likelihood, fix.x_ref(), fix.l_ref(), fix.alpha, q_ref,
+                        cxxgpr::PredictOptions{cxxgpr::VarianceKind::Observation}, qws, out
+                    )
+                        .has_value()
+                );
+                return out;
+            };
+
+#ifdef _OPENMP
+            const int saved_threads = omp_get_max_threads();
+#endif
+            const auto c1 = run_threads(1);
+            const auto c2 = run_threads(2);
+            const auto c4 = run_threads(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved_threads);
+#endif
+
+            ASSERT_EQ(c1.mean.size(), m);
+            ASSERT_EQ(c1.covariance.size(), m * m);
+            for (std::size_t i = 0U; i < m; ++i)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c2.mean[i]));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c4.mean[i]));
+            }
+            for (std::size_t idx = 0U; idx < m * m; ++idx)
+            {
+                EXPECT_EQ(
+                    std::bit_cast<std::uint64_t>(c1.covariance[idx]), std::bit_cast<std::uint64_t>(c2.covariance[idx])
+                );
+                EXPECT_EQ(
+                    std::bit_cast<std::uint64_t>(c1.covariance[idx]), std::bit_cast<std::uint64_t>(c4.covariance[idx])
+                );
+            }
+
+            // Compare against an explicit naive K_** - V^T V (+ sigma_n^2 I) oracle.
+            std::vector<Storage> k_star(n * m, Storage{0});
+            std::vector<Storage> k_star_scratch(n * m, Storage{0});
+            auto nested_cross = kernel.make_nested_buffers(n, m);
+            ASSERT_TRUE(kernel
+                    .apply_cross_points(
+                        fix.x_ref(), q_ref, cxxgpr::MatrixMut<Storage>(k_star.data(), n, m),
+                        cxxgpr::MatrixMut<Storage>(k_star_scratch.data(), n, m), nested_cross
+                    )
+                    .has_value());
+            ASSERT_TRUE(
+                cxxgpr::linalg::solve_lower_in_place(fix.l_ref(), cxxgpr::MatrixMut<Storage>(k_star.data(), n, m))
+                    .has_value()
+            );
+
+            std::vector<Storage> kss(m * m, Storage{0});
+            std::vector<Storage> kss_scratch(m * m, Storage{0});
+            auto nested_kss = kernel.make_nested_buffers(m, m);
+            ASSERT_TRUE(kernel
+                    .apply_points(
+                        q_ref, cxxgpr::MatrixMut<Storage>(kss.data(), m, m), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<Storage>(kss_scratch.data(), m, m), nested_kss
+                    )
+                    .has_value());
+
+            const double noise_var = fix.likelihood.noise_variance();
+            const double oracle_tol = std::same_as<Storage, double> ? 1e-12 : 1e-11;
+            for (std::size_t col = 0U; col < m; ++col)
+            {
+                for (std::size_t row = col; row < m; ++row)
+                {
+                    double vtv = 0.0;
+                    for (std::size_t r = 0U; r < n; ++r)
+                    {
+                        vtv += static_cast<double>(k_star[(row * n) + r]) * static_cast<double>(k_star[(col * n) + r]);
+                    }
+                    double ref_entry = static_cast<double>(kss[(col * m) + row]) - vtv;
+                    if (row == col)
+                    {
+                        ref_entry += noise_var;
+                    }
+                    EXPECT_NEAR(c1.covariance[(col * m) + row], ref_entry, oracle_tol);
+                    EXPECT_NEAR(c1.covariance[(row * m) + col], ref_entry, oracle_tol);
+                }
+            }
+        };
+
+        check_cov_policy.template operator()<cxxgpr::DoublePrecision>();
+        check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>();
+    }
+
 }  // namespace

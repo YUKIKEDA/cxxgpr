@@ -619,4 +619,138 @@ namespace
         }
     }
 
+    /// @brief Verifies parallel W construction and MLL+grad match bitwise across 1/2/4 threads for odd n >= 96.
+    /// @details Evaluates DoublePrecision and SinglePrecision mll_and_gradient_into at n = 99 and n = 131 with
+    /// zero heap allocations under NoAllocationScope(AuditMode::CppAndEigen), checks exact bitwise invariance of MLL,
+    /// gradients, and lower-triangular W across 1/2/4 OpenMP threads, and verifies parity with CholeskyBuffer::Reuse.
+    TEST(WorkspaceMllTest, MllAndGradBitwiseDeterministicAcrossThreadsAndOddSizes)
+    {
+        // Spec: DES-13, DES-15, DES-20
+        auto check_policy = []<typename Policy>(std::size_t n)
+        {
+            using Scalar = Policy::Storage;
+            constexpr std::size_t d = 2U;
+            std::vector<Scalar> x_vals(n * d);
+            std::vector<Scalar> y_vals(n);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                const double x0 = -1.2 + (2.4 * static_cast<double>(i) / static_cast<double>(n - 1U));
+                const double x1 = 0.7 * std::cos(0.11 * static_cast<double>(i));
+                x_vals[i] = static_cast<Scalar>(x0);
+                x_vals[n + i] = static_cast<Scalar>(x1);
+                y_vals[i] = static_cast<Scalar>(std::sin(2.0 * x0) + (0.25 * x1));
+            }
+            const cxxgpr::MatrixRef<Scalar> x(x_vals.data(), n, d, n);
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value())
+                * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.6).value());
+            const auto compiled = spec.compile<Scalar>();
+            const auto lik = cxxgpr::GaussianLikelihood::create(0.15).value();
+            const auto jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+            auto bufs = cxxgpr::FitBuffers<Policy>::create(
+                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain
+            );
+            ASSERT_TRUE(bufs.has_value());
+            const std::size_t p_tot = compiled.num_params() + 1U;
+            std::vector<double> warmup_grad(p_tot, 0.0);
+            ASSERT_TRUE(
+                cxxgpr::mll_and_gradient_into(compiled, lik, x, y_vals, jitter, *bufs, warmup_grad).has_value()
+            );
+
+            struct ThreadSnapshot
+            {
+                double mll = 0.0;
+                std::vector<double> grad;
+                std::vector<Scalar> w_lower;
+            };
+
+            auto run_threads = [&](int threads)
+            {
+#ifdef _OPENMP
+                omp_set_num_threads(threads);
+#else
+                (void)threads;
+#endif
+                ThreadSnapshot snap;
+                snap.grad.assign(p_tot, 0.0);
+                {
+                    const cxxgpr::test_support::NoAllocationScope audit(cxxgpr::test_support::AuditMode::CppAndEigen);
+                    auto res = cxxgpr::mll_and_gradient_into(compiled, lik, x, y_vals, jitter, *bufs, snap.grad);
+                    EXPECT_TRUE(res.has_value());
+                    EXPECT_EQ(audit.delta_allocations(), 0U);
+                    snap.mll = *res;
+                }
+                const auto w_ref = bufs->w_ref();
+                snap.w_lower.reserve((n * (n + 1U)) / 2U);
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        snap.w_lower.push_back(w_ref(row, col));
+                    }
+                }
+                return snap;
+            };
+
+#ifdef _OPENMP
+            const int saved_threads = omp_get_max_threads();
+#endif
+            const auto s1 = run_threads(1);
+            const auto s2 = run_threads(2);
+            const auto s4 = run_threads(4);
+#ifdef _OPENMP
+            omp_set_num_threads(saved_threads);
+#endif
+
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s2.mll));
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s4.mll));
+            for (std::size_t p = 0U; p < p_tot; ++p)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s2.grad[p]));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s4.grad[p]));
+            }
+            for (std::size_t idx = 0U; idx < s1.w_lower.size(); ++idx)
+            {
+                if constexpr (std::same_as<Scalar, double>)
+                {
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s2.w_lower[idx])
+                    );
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s4.w_lower[idx])
+                    );
+                }
+                else
+                {
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s2.w_lower[idx])
+                    );
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s4.w_lower[idx])
+                    );
+                }
+            }
+
+            // Verify parity with CholeskyBuffer::Reuse under matching parameters.
+            auto bufs_reuse = cxxgpr::FitBuffers<Policy>::create(
+                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Reuse
+            );
+            ASSERT_TRUE(bufs_reuse.has_value());
+            std::vector<double> grad_reuse(p_tot, 0.0);
+            auto mll_reuse = cxxgpr::mll_and_gradient_into(compiled, lik, x, y_vals, jitter, *bufs_reuse, grad_reuse);
+            ASSERT_TRUE(mll_reuse.has_value());
+            const double parity_tol = std::same_as<Scalar, double> ? 1e-12 : 1e-4;
+            EXPECT_NEAR(*mll_reuse, s1.mll, parity_tol);
+            for (std::size_t p = 0U; p < p_tot; ++p)
+            {
+                EXPECT_NEAR(grad_reuse[p], s1.grad[p], parity_tol);
+            }
+        };
+
+        check_policy.template operator()<cxxgpr::DoublePrecision>(99U);
+        check_policy.template operator()<cxxgpr::DoublePrecision>(131U);
+        check_policy.template operator()<cxxgpr::SinglePrecision>(99U);
+        check_policy.template operator()<cxxgpr::SinglePrecision>(131U);
+    }
+
 }  // namespace

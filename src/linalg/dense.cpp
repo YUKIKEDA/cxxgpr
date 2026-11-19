@@ -8,6 +8,7 @@
 
 #include "cxxgpr/core/checked.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -74,10 +75,7 @@ namespace cxxgpr::linalg
         const std::size_t n = src.rows();
         for (std::size_t col = 0; col < n; ++col)
         {
-            for (std::size_t row = col; row < n; ++row)
-            {
-                dst(row, col) = src(row, col);
-            }
+            std::copy_n(&src(col, col), n - col, &dst(col, col));
         }
         return {};
     }

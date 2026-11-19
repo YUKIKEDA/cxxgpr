@@ -143,10 +143,107 @@ namespace
                 .with_prefer_speed();
 
         // Measure up to 20 L-BFGS steps under prefer_speed() workspace policy.
+        std::size_t last_iters = 0U;
         for (auto _ : state)
         {
             auto fit = trainer.fit(x_ref, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
             benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter Cholesky factorization on n = 512 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_forrester_512_factor_double(benchmark::State& state)
+    {
+        const ForresterDataset data(512U, 64U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, 1U, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+
+        // Measure repeated Cholesky factorization for n = 512 without hyperparameter optimization.
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(x_ref, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter Cholesky factorization on n = 1024 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_forrester_1024_factor_double(benchmark::State& state)
+    {
+        const ForresterDataset data(1024U, 64U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, 1U, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+
+        // Measure large-scale O(n^3) Cholesky factorization for n = 1024.
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(x_ref, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks L-BFGS hyperparameter fitting on n = 512 Forrester data for precision P.
+    /// @tparam P Precision policy type (DoublePrecision or MixedPrecision).
+    /// @param[in,out] state Google Benchmark iteration state.
+    template <cxxgpr::PrecisionPolicyConcept P> void bm_forrester_512_fit_lbfgs(benchmark::State& state)
+    {
+        const ForresterDataset data(512U, 64U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, 1U, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer =
+            cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs, P>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(10U))
+                .with_noise_variance(1e-3)
+                .value()
+                .with_prefer_speed();
+
+        // Measure up to 10 L-BFGS iterations at n = 512 and record iteration count.
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(x_ref, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks full m x m posterior predict_covariance() on n = 512 training and m = 256 query points.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_forrester_512_predict_cov_double(benchmark::State& state)
+    {
+        const ForresterDataset data(512U, 256U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, 1U, data.n);
+        const auto xq_ref = cxxgpr::MatrixRef<double>(data.x_query.data(), data.m, 1U, data.m);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        auto fit_res =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value().factor(x_ref, data.y_train);
+        if (!fit_res.has_value())
+        {
+            state.SkipWithError("factor failed");
+            return;
+        }
+        const auto& fit = *fit_res;
+
+        // Measure V = L^-1 K_* and Sigma_* = K_** - V^T V at n = 512, m = 256.
+        for (auto _ : state)
+        {
+            auto cov = fit.predict_covariance(xq_ref);
+            benchmark::DoNotOptimize(cov);
         }
     }
 
@@ -197,6 +294,35 @@ namespace
             auto fit = trainer.fit(x_ref, data.y_train);
             benchmark::DoNotOptimize(fit);
         }
+    }
+
+    /// @brief Benchmarks 32D ARD Constant * RbfArd fitting with L-BFGS on n = 256 points.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_ard_sphere_highdim_fit_lbfgs_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(256U, 32U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, data.d, data.n);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(ls).value());
+        const auto trainer =
+            cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(10U))
+                .with_noise_variance(1e-2)
+                .value()
+                .with_prefer_speed();
+
+        // Measure 33-parameter 32D ARD MLL + gradient optimization via L-BFGS.
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(x_ref, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
     }
 
     /// @brief Benchmarks 8D ARD fitting with FastSimulatedAnnealing and incremental LeafCache.
@@ -394,7 +520,13 @@ namespace
     BENCHMARK_TEMPLATE(bm_forrester_256_fit_lbfgs, cxxgpr::DoublePrecision);
     BENCHMARK_TEMPLATE(bm_forrester_256_fit_lbfgs, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>);
     BENCHMARK(bm_forrester_256_predict_into_double);
+    BENCHMARK(bm_forrester_512_factor_double);
+    BENCHMARK(bm_forrester_1024_factor_double);
+    BENCHMARK_TEMPLATE(bm_forrester_512_fit_lbfgs, cxxgpr::DoublePrecision);
+    BENCHMARK_TEMPLATE(bm_forrester_512_fit_lbfgs, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>);
+    BENCHMARK(bm_forrester_512_predict_cov_double);
     BENCHMARK(bm_ard_sphere_fit_lbfgs_double);
+    BENCHMARK(bm_ard_sphere_highdim_fit_lbfgs_double);
     BENCHMARK(bm_ard_sphere_fit_fsa_cached);
     BENCHMARK_TEMPLATE(bm_kernel_exp_eval, double, cxxgpr::KernelExp::Accurate);
     BENCHMARK_TEMPLATE(bm_kernel_exp_eval, double, cxxgpr::KernelExp::FastApprox);

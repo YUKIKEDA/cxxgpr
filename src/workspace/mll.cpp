@@ -11,6 +11,7 @@
 #include "cxxgpr/linalg/parallel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numbers>
 #include <utility>
@@ -18,6 +19,8 @@
 #ifdef _OPENMP
 #    include <omp.h>
 #endif
+
+#include "linalg/simd_blas3.hpp"
 
 namespace cxxgpr
 {
@@ -70,27 +73,145 @@ namespace cxxgpr
                 }
             }
 
-            // Stage 1: Invert lower-triangular L into Z = L^-1 (n^3 / 3 FLOPs, column-independent).
+            // Stage 1: Invert lower-triangular L into Z = L^-1 (n^3 / 3 FLOPs, column-independent) using blocked
+            // 4-column SIMD panel/trailing updates matching 1-column remainders bit-for-bit across thread partitions.
             auto invert_range = [n, l, z_scratch](std::size_t col_begin, std::size_t col_end) mutable noexcept
             {
-                for (std::size_t j = col_begin; j < col_end; ++j)
+                constexpr std::size_t k_block = 32U;
+                constexpr std::size_t row_tile = 256U;
+                std::array<const T*, k_block> l_ptrs{};
+                std::array<T, k_block> v0_arr{};
+                std::array<T, k_block> v1_arr{};
+                std::array<T, k_block> v2_arr{};
+                std::array<T, k_block> v3_arr{};
+
+                std::size_t j = col_begin;
+                for (; j + 4U <= col_end; j += 4U)
+                {
+                    const std::size_t j0 = j;
+                    const std::size_t j1 = j + 1U;
+                    const std::size_t j2 = j + 2U;
+                    const std::size_t j3 = j + 3U;
+                    T* const z0 = z_scratch.col(j0).data();
+                    T* const z1 = z_scratch.col(j1).data();
+                    T* const z2 = z_scratch.col(j2).data();
+                    T* const z3 = z_scratch.col(j3).data();
+
+                    for (std::size_t c = 0U; c < 4U; ++c)
+                    {
+                        const std::size_t jc = j + c;
+                        T* const zc = z_scratch.col(jc).data();
+                        const T* const l_col_jc = l.col(jc).data();
+                        const T z_jj = T{1} / l_col_jc[jc];
+                        zc[jc] = z_jj;
+                        detail::scale_neg_set_simd(zc, l_col_jc, z_jj, jc + 1U, n);
+                    }
+
+                    // Resolve columns [j0..j2] through row j3 so all 4 columns share synchronized kb blocks from j3
+                    // + 1.
+                    for (std::size_t c = 0U; c < 3U; ++c)
+                    {
+                        const std::size_t jc = j + c;
+                        T* const zc = z_scratch.col(jc).data();
+                        const std::size_t lead_w = j3 - jc;
+                        for (std::size_t p = 0U; p < lead_w; ++p)
+                        {
+                            const std::size_t k = jc + 1U + p;
+                            const T* const lk = l.col(k).data();
+                            const T zck = zc[k] / lk[k];
+                            zc[k] = zck;
+                            l_ptrs[p] = lk;
+                            v0_arr[p] = zck;
+                            for (std::size_t r = k + 1U; r <= j3; ++r)
+                            {
+                                zc[r] = detail::scalar_fnmadd(lk[r], zck, zc[r]);
+                            }
+                        }
+                        for (std::size_t r_start = j3 + 1U; r_start < n; r_start += row_tile)
+                        {
+                            const std::size_t r_stop = std::min(r_start + row_tile, n);
+                            detail::rank_k_update_1col_simd(zc, l_ptrs.data(), lead_w, v0_arr.data(), r_start, r_stop);
+                        }
+                    }
+
+                    for (std::size_t kb = j3 + 1U; kb < n; kb += k_block)
+                    {
+                        const std::size_t ke = std::min(kb + k_block, n);
+                        const std::size_t bs = ke - kb;
+                        for (std::size_t p = 0U; p < bs; ++p)
+                        {
+                            const std::size_t k = kb + p;
+                            const T* const lk = l.col(k).data();
+                            const T lkk = lk[k];
+                            const T v0p = z0[k] / lkk;
+                            const T v1p = z1[k] / lkk;
+                            const T v2p = z2[k] / lkk;
+                            const T v3p = z3[k] / lkk;
+                            z0[k] = v0p;
+                            z1[k] = v1p;
+                            z2[k] = v2p;
+                            z3[k] = v3p;
+                            l_ptrs[p] = lk;
+                            v0_arr[p] = v0p;
+                            v1_arr[p] = v1p;
+                            v2_arr[p] = v2p;
+                            v3_arr[p] = v3p;
+                            for (std::size_t r = k + 1U; r < ke; ++r)
+                            {
+                                const T lrk = lk[r];
+                                z0[r] = detail::scalar_fnmadd(lrk, v0p, z0[r]);
+                                z1[r] = detail::scalar_fnmadd(lrk, v1p, z1[r]);
+                                z2[r] = detail::scalar_fnmadd(lrk, v2p, z2[r]);
+                                z3[r] = detail::scalar_fnmadd(lrk, v3p, z3[r]);
+                            }
+                        }
+                        if (ke < n)
+                        {
+                            for (std::size_t r_start = ke; r_start < n; r_start += row_tile)
+                            {
+                                const std::size_t r_stop = std::min(r_start + row_tile, n);
+                                detail::rank_k_update_4cols_simd(
+                                    z0, z1, z2, z3, l_ptrs.data(), bs, v0_arr.data(), v1_arr.data(), v2_arr.data(),
+                                    v3_arr.data(), r_start, r_stop
+                                );
+                            }
+                        }
+                    }
+                }
+
+                for (; j < col_end; ++j)
                 {
                     T* const z_col = z_scratch.col(j).data();
                     const T* const l_col_j = l.col(j).data();
                     const T z_jj = T{1} / l_col_j[j];
                     z_col[j] = z_jj;
-                    for (std::size_t r = j + 1U; r < n; ++r)
+                    detail::scale_neg_set_simd(z_col, l_col_j, z_jj, j + 1U, n);
+                    for (std::size_t kb = j + 1U; kb < n; kb += k_block)
                     {
-                        z_col[r] = -(l_col_j[r] * z_jj);
-                    }
-                    for (std::size_t k = j + 1U; k < n; ++k)
-                    {
-                        const T* const l_col_k = l.col(k).data();
-                        const T z_kj = z_col[k] / l_col_k[k];
-                        z_col[k] = z_kj;
-                        for (std::size_t r = k + 1U; r < n; ++r)
+                        const std::size_t ke = std::min(kb + k_block, n);
+                        const std::size_t bs = ke - kb;
+                        for (std::size_t p = 0U; p < bs; ++p)
                         {
-                            z_col[r] -= l_col_k[r] * z_kj;
+                            const std::size_t k = kb + p;
+                            const T* const lk = l.col(k).data();
+                            const T z_kj = z_col[k] / lk[k];
+                            z_col[k] = z_kj;
+                            l_ptrs[p] = lk;
+                            v0_arr[p] = z_kj;
+                            for (std::size_t r = k + 1U; r < ke; ++r)
+                            {
+                                z_col[r] = detail::scalar_fnmadd(lk[r], z_kj, z_col[r]);
+                            }
+                        }
+                        if (ke < n)
+                        {
+                            for (std::size_t r_start = ke; r_start < n; r_start += row_tile)
+                            {
+                                const std::size_t r_stop = std::min(r_start + row_tile, n);
+                                detail::rank_k_update_1col_simd(
+                                    z_col, l_ptrs.data(), bs, v0_arr.data(), r_start, r_stop
+                                );
+                            }
                         }
                     }
                 }
@@ -105,17 +226,84 @@ namespace cxxgpr
             }
 
             // Stage 2: Contract lower-triangular W_ij = alpha_i * alpha_j - <Z_{i:, i}, Z_{i:, j}>.
-            // Reading only z_scratch and alpha keeps CholeskyBuffer::Reuse safe when w_out aliases l.
+            // Row-block boundaries are anchored strictly to absolute 4-row multiples (row % 4 == 0) so any OpenMP
+            // column split yields bitwise-identical rounding across all thread counts while using 4x2 SIMD kernels.
             auto contract_range =
                 [n, alpha, z_scratch, w_out](std::size_t col_begin, std::size_t col_end) mutable noexcept
             {
-                for (std::size_t j = col_begin; j < col_end; ++j)
+                auto eval_single = [n, &alpha, &z_scratch, &w_out](std::size_t row, std::size_t col_idx) noexcept
                 {
-                    const T* const z_col_j = z_scratch.col(j).data();
-                    T* const w_col_j = w_out.col(j).data();
-                    const T alpha_j = alpha[j];
+                    const T* const z_row = z_scratch.col(row).data();
+                    const T* const z_col = z_scratch.col(col_idx).data();
+                    const T acc = detail::dot_1x1_simd(z_row + row, z_col + row, n - row);
+                    w_out.col(col_idx)[row] = (alpha[row] * alpha[col_idx]) - acc;
+                };
 
-                    std::size_t row = j;
+                auto eval_4x1 = [n, &alpha, &z_scratch, &w_out](std::size_t row, std::size_t col_idx) noexcept
+                {
+                    const std::size_t i0 = row;
+                    const std::size_t i1 = row + 1U;
+                    const std::size_t i2 = row + 2U;
+                    const std::size_t i3 = row + 3U;
+                    const T* const z0 = z_scratch.col(i0).data();
+                    const T* const z1 = z_scratch.col(i1).data();
+                    const T* const z2 = z_scratch.col(i2).data();
+                    const T* const z3 = z_scratch.col(i3).data();
+                    const T* const zj = z_scratch.col(col_idx).data();
+                    std::array<T, 4> tail_dots{};
+                    detail::dot_4x1_simd(z0 + i3, z1 + i3, z2 + i3, z3 + i3, zj + i3, n - i3, tail_dots);
+                    const T lead0 = ((z0[i0] * zj[i0]) + (z0[i1] * zj[i1])) + (z0[i2] * zj[i2]);
+                    const T lead1 = (z1[i1] * zj[i1]) + (z1[i2] * zj[i2]);
+                    const T lead2 = z2[i2] * zj[i2];
+                    const T alpha_j = alpha[col_idx];
+                    T* const w_col = w_out.col(col_idx).data();
+                    w_col[i0] = (alpha[i0] * alpha_j) - (lead0 + tail_dots[0]);
+                    w_col[i1] = (alpha[i1] * alpha_j) - (lead1 + tail_dots[1]);
+                    w_col[i2] = (alpha[i2] * alpha_j) - (lead2 + tail_dots[2]);
+                    w_col[i3] = (alpha[i3] * alpha_j) - tail_dots[3];
+                };
+
+                std::size_t j = col_begin;
+                for (; j + 2U <= col_end; j += 2U)
+                {
+                    const std::size_t j0 = j;
+                    const std::size_t j1 = j + 1U;
+                    const std::size_t r4_0 = std::min(n, (j0 + 3U) & ~std::size_t{3U});
+                    const std::size_t r4_1 = std::min(n, (j1 + 3U) & ~std::size_t{3U});
+
+                    for (std::size_t row = j0; row < r4_0; ++row)
+                    {
+                        eval_single(row, j0);
+                    }
+                    std::size_t row_pair_start = r4_1;
+                    if (r4_0 < r4_1)
+                    {
+                        if (r4_0 + 4U <= n)
+                        {
+                            eval_4x1(r4_0, j0);
+                        }
+                        else
+                        {
+                            for (std::size_t row = r4_0; row < n; ++row)
+                            {
+                                eval_single(row, j0);
+                            }
+                            row_pair_start = n;
+                        }
+                    }
+                    for (std::size_t row = j1; row < std::min(n, row_pair_start); ++row)
+                    {
+                        eval_single(row, j1);
+                    }
+
+                    const T* const z_j0 = z_scratch.col(j0).data();
+                    const T* const z_j1 = z_scratch.col(j1).data();
+                    T* const w_col0 = w_out.col(j0).data();
+                    T* const w_col1 = w_out.col(j1).data();
+                    const T alpha_j0 = alpha[j0];
+                    const T alpha_j1 = alpha[j1];
+
+                    std::size_t row = row_pair_start;
                     for (; row + 4U <= n; row += 4U)
                     {
                         const std::size_t i0 = row;
@@ -127,35 +315,51 @@ namespace cxxgpr
                         const T* const z2 = z_scratch.col(i2).data();
                         const T* const z3 = z_scratch.col(i3).data();
 
-                        // Accumulate lead-in terms so each row maintains exact ascending k = i..n-1 order.
-                        T acc0 = (z0[i0] * z_col_j[i0]) + (z0[i1] * z_col_j[i1]) + (z0[i2] * z_col_j[i2]);
-                        T acc1 = (z1[i1] * z_col_j[i1]) + (z1[i2] * z_col_j[i2]);
-                        T acc2 = z2[i2] * z_col_j[i2];
-                        T acc3{0};
+                        std::array<std::array<T, 2>, 4> tail_dots{};
+                        detail::dot_4x2_simd(
+                            z0 + i3, z1 + i3, z2 + i3, z3 + i3, z_j0 + i3, z_j1 + i3, n - i3, tail_dots
+                        );
 
-                        for (std::size_t k = i3; k < n; ++k)
-                        {
-                            const T zjk = z_col_j[k];
-                            acc0 += z0[k] * zjk;
-                            acc1 += z1[k] * zjk;
-                            acc2 += z2[k] * zjk;
-                            acc3 += z3[k] * zjk;
-                        }
+                        const T lead0_0 = ((z0[i0] * z_j0[i0]) + (z0[i1] * z_j0[i1])) + (z0[i2] * z_j0[i2]);
+                        const T lead1_0 = (z1[i1] * z_j0[i1]) + (z1[i2] * z_j0[i2]);
+                        const T lead2_0 = z2[i2] * z_j0[i2];
 
-                        w_col_j[i0] = (alpha[i0] * alpha_j) - acc0;
-                        w_col_j[i1] = (alpha[i1] * alpha_j) - acc1;
-                        w_col_j[i2] = (alpha[i2] * alpha_j) - acc2;
-                        w_col_j[i3] = (alpha[i3] * alpha_j) - acc3;
+                        const T lead0_1 = ((z0[i0] * z_j1[i0]) + (z0[i1] * z_j1[i1])) + (z0[i2] * z_j1[i2]);
+                        const T lead1_1 = (z1[i1] * z_j1[i1]) + (z1[i2] * z_j1[i2]);
+                        const T lead2_1 = z2[i2] * z_j1[i2];
+
+                        w_col0[i0] = (alpha[i0] * alpha_j0) - (lead0_0 + tail_dots[0][0]);
+                        w_col0[i1] = (alpha[i1] * alpha_j0) - (lead1_0 + tail_dots[1][0]);
+                        w_col0[i2] = (alpha[i2] * alpha_j0) - (lead2_0 + tail_dots[2][0]);
+                        w_col0[i3] = (alpha[i3] * alpha_j0) - tail_dots[3][0];
+
+                        w_col1[i0] = (alpha[i0] * alpha_j1) - (lead0_1 + tail_dots[0][1]);
+                        w_col1[i1] = (alpha[i1] * alpha_j1) - (lead1_1 + tail_dots[1][1]);
+                        w_col1[i2] = (alpha[i2] * alpha_j1) - (lead2_1 + tail_dots[2][1]);
+                        w_col1[i3] = (alpha[i3] * alpha_j1) - tail_dots[3][1];
                     }
                     for (; row < n; ++row)
                     {
-                        const T* const zi = z_scratch.col(row).data();
-                        T acc{0};
-                        for (std::size_t k = row; k < n; ++k)
-                        {
-                            acc += zi[k] * z_col_j[k];
-                        }
-                        w_col_j[row] = (alpha[row] * alpha_j) - acc;
+                        eval_single(row, j0);
+                        eval_single(row, j1);
+                    }
+                }
+
+                for (; j < col_end; ++j)
+                {
+                    const std::size_t r4 = std::min(n, (j + 3U) & ~std::size_t{3U});
+                    for (std::size_t row = j; row < r4; ++row)
+                    {
+                        eval_single(row, j);
+                    }
+                    std::size_t row = r4;
+                    for (; row + 4U <= n; row += 4U)
+                    {
+                        eval_4x1(row, j);
+                    }
+                    for (; row < n; ++row)
+                    {
+                        eval_single(row, j);
                     }
                 }
             };
@@ -257,11 +461,12 @@ namespace cxxgpr
             {
                 const auto col = static_cast<std::size_t>(col_s);
                 const auto diag = static_cast<double>(a(col, col)) * static_cast<double>(b(col, col));
-                double off = 0.0;
-                for (std::size_t row = col + 1U; row < n; ++row)
-                {
-                    off += static_cast<double>(a(row, col)) * static_cast<double>(b(row, col));
-                }
+                const std::size_t tail_len = n - (col + 1U);
+                const double off = (tail_len > 0U)
+                    ? detail::dot_storage_to_refine_simd<T, double>(
+                          a.col(col).data() + col + 1U, b.col(col).data() + col + 1U, tail_len
+                      )
+                    : 0.0;
                 col_partials[col] = diag + (2.0 * off);
             }
             // Sum per-column partials sequentially in ascending column order for deterministic OpenMP results.
@@ -292,12 +497,8 @@ namespace cxxgpr
             for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
             {
                 const auto col = static_cast<std::size_t>(col_s);
-                double sum = 0.0;
-                for (std::size_t row = 0; row < n; ++row)
-                {
-                    sum += static_cast<double>(a(row, col)) * static_cast<double>(b(row, col));
-                }
-                col_partials[col] = sum;
+                col_partials[col] =
+                    detail::dot_storage_to_refine_simd<T, double>(a.col(col).data(), b.col(col).data(), n);
             }
             // Fold column sums in ascending index order for bitwise thread-count invariance.
             double total = 0.0;

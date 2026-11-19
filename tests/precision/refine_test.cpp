@@ -1087,4 +1087,68 @@ namespace
         }
     }
 
+    /// @brief Verifies promoted_residual_into() across SIMD boundary dimensions with zero heap allocations.
+    /// @details Tests n in {1, 3, 4, 7, 8, 15, 16, 33, 65} with mixed-sign, zero, and subnormal float matrix entries
+    /// under NoAllocationScope(AuditMode::CppAndEigen) and checks residual vectors and operator infinity norms against
+    /// a naive double-precision scalar reference.
+    TEST(PrecisionRefineTest, PromotedResidualSimdBoundaries)
+    {
+        // Spec: DES-05
+        const std::array<std::size_t, 9> dims = {1U, 3U, 4U, 7U, 8U, 15U, 16U, 33U, 65U};
+        for (const std::size_t n : dims)
+        {
+            std::vector<float> a_f32(n * n, 0.0F);
+            std::vector<double> alpha(n, 0.0);
+            std::vector<double> y(n, 0.0);
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                alpha[col] = std::sin(0.27 * static_cast<double>(col + 1U)) * 0.5;
+                y[col] = std::cos(0.31 * static_cast<double>(col + 1U));
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    if ((row + col) % 7U == 0U)
+                    {
+                        a_f32[(col * n) + row] = ((row & 1U) == 0U) ? 0.0F : -std::numeric_limits<float>::denorm_min();
+                    }
+                    else
+                    {
+                        const double v = std::sin(0.13 * static_cast<double>(row + (col * 3U) + 1U));
+                        a_f32[(col * n) + row] = static_cast<float>(v);
+                    }
+                }
+            }
+
+            std::vector<double> residual(n, 0.0);
+            std::vector<double> row_abs_scratch(n, 0.0);
+            std::vector<double> sum_scratch(n, 0.0);
+
+            std::expected<double, cxxgpr::GprError> res;
+            {
+                const cxxgpr::test_support::NoAllocationScope audit(cxxgpr::test_support::AuditMode::CppAndEigen);
+                res = cxxgpr::promoted_residual_into(
+                    cxxgpr::MatrixRef<float>(a_f32.data(), n, n, n), alpha, y, residual, row_abs_scratch, sum_scratch
+                );
+                EXPECT_EQ(audit.delta_allocations(), 0U);
+            }
+            ASSERT_TRUE(res.has_value());
+
+            double ref_b_inf = 0.0;
+            for (std::size_t row = 0U; row < n; ++row)
+            {
+                double row_abs = 0.0;
+                double mv = 0.0;
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    const auto entry = static_cast<double>(a_f32[(col * n) + row]);
+                    row_abs += std::abs(entry);
+                    mv += entry * alpha[col];
+                }
+                ref_b_inf = std::max(ref_b_inf, row_abs);
+                const double ref_r = y[row] - mv;
+                EXPECT_NEAR(residual[row], ref_r, 1e-13) << "n=" << n << " row=" << row;
+            }
+            EXPECT_NEAR(*res, ref_b_inf, 1e-13) << "n=" << n;
+        }
+    }
+
 }  // namespace

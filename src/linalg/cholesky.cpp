@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /// @file cholesky.cpp
 /// @brief Implementations of in-place Cholesky factorization, jitter retries, solves, and log-determinants.
-/// @details Wraps Eigen in-place LLT decomposition and triangular solvers over column-major MatrixRef/MatrixMut views,
-/// with backup-restoring jitter escalation and Neumaier compensated log-determinant summation.
+/// @details Wraps Eigen in-place LLT decomposition and deterministic SIMD triangular solvers over column-major
+/// MatrixRef/MatrixMut views, with backup-restoring jitter escalation and Neumaier compensated log-determinant
+/// summation.
 
 #include "cxxgpr/linalg/cholesky.hpp"
 
@@ -13,6 +14,7 @@
 #include <Eigen/Cholesky>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,7 @@
 #endif
 
 #include "linalg/eigen_map.hpp"
+#include "linalg/simd_blas3.hpp"
 
 namespace cxxgpr::linalg
 {
@@ -146,10 +149,12 @@ namespace cxxgpr::linalg
         }
 
         /// @brief Solves lower-panel rows [r_begin, r_end) x cols [k, k + bs) against the factored diagonal block.
+        /// @details Tiles trailing panel rows in cache-friendly chunks of 64 and executes fused SIMD column updates
+        /// via rank_k_update_1col_simd() and scale_in_place_simd() while preserving ascending p order.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Target n x n matrix view owning factored diagonal block and trailing panel rows.
         /// @param[in] k Starting column of the active panel.
-        /// @param[in] bs Width of the active panel.
+        /// @param[in] bs Width of the active panel (at most 32).
         /// @param[in] r_begin Inclusive starting row owned by the calling thread.
         /// @param[in] r_end Exclusive ending row owned by the calling thread.
         template <KernelScalarConcept T>
@@ -157,34 +162,42 @@ namespace cxxgpr::linalg
             MatrixMut<T> a, std::size_t k, std::size_t bs, std::size_t r_begin, std::size_t r_end
         ) noexcept
         {
-            for (std::size_t col = 0; col < bs; ++col)
+            constexpr std::size_t row_tile = 64U;
+            std::array<const T*, 32> l_ptrs{};
+            std::array<T, 32> coeffs{};
+            for (std::size_t r_tile = r_begin; r_tile < r_end; r_tile += row_tile)
             {
-                const std::size_t gc = k + col;
-                T* const col_c = a.col(gc).data();
-                for (std::size_t p = 0; p < col; ++p)
+                const std::size_t r_stop = std::min(r_tile + row_tile, r_end);
+                const std::size_t tile_len = r_stop - r_tile;
+                for (std::size_t col = 0U; col < bs; ++col)
                 {
-                    const T factor = a(gc, k + p);
-                    const T* const col_p = a.col(k + p).data();
-                    for (std::size_t r = r_begin; r < r_end; ++r)
+                    const std::size_t gc = k + col;
+                    T* const col_c = a.col(gc).data();
+                    for (std::size_t p = 0U; p < col; ++p)
                     {
-                        col_c[r] -= col_p[r] * factor;
+                        l_ptrs[p] = a.col(k + p).data();
+                        coeffs[p] = a(gc, k + p);
                     }
-                }
-                const T inv_diag = T{1} / col_c[gc];
-                for (std::size_t r = r_begin; r < r_end; ++r)
-                {
-                    col_c[r] *= inv_diag;
+                    if (col > 0U)
+                    {
+                        cxxgpr::detail::rank_k_update_1col_simd(
+                            col_c, l_ptrs.data(), col, coeffs.data(), r_tile, r_stop
+                        );
+                    }
+                    const T inv_diag = T{1} / col_c[gc];
+                    cxxgpr::detail::scale_in_place_simd(col_c + r_tile, tile_len, inv_diag);
                 }
             }
         }
 
         /// @brief Applies the trailing symmetric rank-bs update to lower-triangular columns [j_begin, j_end).
-        /// @details Tiles rows in cache-resident blocks of 256 and unrolls 4 columns at a time while preserving exact
-        /// ascending p = 0..bs-1 accumulation order per matrix entry for OpenMP thread-count bitwise invariance.
+        /// @details Tiles rows in cache-resident blocks of 256 and delegates 4-column blocks and trailing 1-column
+        /// remainders to 8-accumulator register-blocked SIMD kernels while preserving exact ascending p = 0..bs-1
+        /// accumulation order for OpenMP thread-count bitwise invariance.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Target n x n matrix view whose trailing lower columns [j_begin, j_end) are updated.
         /// @param[in] k Starting column of the finished panel.
-        /// @param[in] bs Panel width.
+        /// @param[in] bs Panel width (at most 32).
         /// @param[in] j_begin Inclusive first trailing column assigned to this thread.
         /// @param[in] j_end Exclusive last trailing column assigned to this thread.
         /// @param[in] n Matrix order.
@@ -194,6 +207,12 @@ namespace cxxgpr::linalg
         ) noexcept
         {
             constexpr std::size_t row_tile = 256U;
+            std::array<const T*, 32> l_ptrs{};
+            std::array<T, 32> v0_arr{};
+            std::array<T, 32> v1_arr{};
+            std::array<T, 32> v2_arr{};
+            std::array<T, 32> v3_arr{};
+
             std::size_t j = j_begin;
             for (; j + 4U <= j_end; j += 4U)
             {
@@ -206,58 +225,49 @@ namespace cxxgpr::linalg
                 T* const col2 = a.col(j2).data();
                 T* const col3 = a.col(j3).data();
 
-                // Update the 6 lower-triangle entries inside rows [j0, j3) in ascending p order.
-                for (std::size_t p = 0; p < bs; ++p)
+                // Update the 6 upper entries in rows [j0, j3) and pack panel multipliers for SIMD trailing blocks.
+                for (std::size_t p = 0U; p < bs; ++p)
                 {
                     const T* const lp = a.col(k + p).data();
                     const T v0 = lp[j0];
                     const T v1 = lp[j1];
                     const T v2 = lp[j2];
-                    col0[j0] -= v0 * v0;
-                    col0[j1] -= v1 * v0;
-                    col0[j2] -= v2 * v0;
-                    col1[j1] -= v1 * v1;
-                    col1[j2] -= v2 * v1;
-                    col2[j2] -= v2 * v2;
+                    l_ptrs[p] = lp;
+                    v0_arr[p] = v0;
+                    v1_arr[p] = v1;
+                    v2_arr[p] = v2;
+                    v3_arr[p] = lp[j3];
+                    col0[j0] = cxxgpr::detail::scalar_fnmadd(v0, v0, col0[j0]);
+                    col0[j1] = cxxgpr::detail::scalar_fnmadd(v1, v0, col0[j1]);
+                    col0[j2] = cxxgpr::detail::scalar_fnmadd(v2, v0, col0[j2]);
+                    col1[j1] = cxxgpr::detail::scalar_fnmadd(v1, v1, col1[j1]);
+                    col1[j2] = cxxgpr::detail::scalar_fnmadd(v2, v1, col1[j2]);
+                    col2[j2] = cxxgpr::detail::scalar_fnmadd(v2, v2, col2[j2]);
                 }
 
-                // Update rows [j3, n) across all 4 columns in cache-friendly row tiles.
+                // Update rows [j3, n) across all 4 columns in register-blocked SIMD row tiles.
                 for (std::size_t r_start = j3; r_start < n; r_start += row_tile)
                 {
                     const std::size_t r_stop = std::min(r_start + row_tile, n);
-                    for (std::size_t p = 0; p < bs; ++p)
-                    {
-                        const T* const lp = a.col(k + p).data();
-                        const T v0 = lp[j0];
-                        const T v1 = lp[j1];
-                        const T v2 = lp[j2];
-                        const T v3 = lp[j3];
-                        for (std::size_t row = r_start; row < r_stop; ++row)
-                        {
-                            const T l_rp = lp[row];
-                            col0[row] -= l_rp * v0;
-                            col1[row] -= l_rp * v1;
-                            col2[row] -= l_rp * v2;
-                            col3[row] -= l_rp * v3;
-                        }
-                    }
+                    cxxgpr::detail::rank_k_update_4cols_simd(
+                        col0, col1, col2, col3, l_ptrs.data(), bs, v0_arr.data(), v1_arr.data(), v2_arr.data(),
+                        v3_arr.data(), r_start, r_stop
+                    );
                 }
             }
             for (; j < j_end; ++j)
             {
                 T* const col_j = a.col(j).data();
+                for (std::size_t p = 0U; p < bs; ++p)
+                {
+                    const T* const lp = a.col(k + p).data();
+                    l_ptrs[p] = lp;
+                    v0_arr[p] = lp[j];
+                }
                 for (std::size_t r_start = j; r_start < n; r_start += row_tile)
                 {
                     const std::size_t r_stop = std::min(r_start + row_tile, n);
-                    for (std::size_t p = 0; p < bs; ++p)
-                    {
-                        const T* const lp = a.col(k + p).data();
-                        const T vj = lp[j];
-                        for (std::size_t row = r_start; row < r_stop; ++row)
-                        {
-                            col_j[row] -= lp[row] * vj;
-                        }
-                    }
+                    cxxgpr::detail::rank_k_update_1col_simd(col_j, l_ptrs.data(), bs, v0_arr.data(), r_start, r_stop);
                 }
             }
         }
@@ -273,100 +283,308 @@ namespace cxxgpr::linalg
             Llt,
         };
 
-        /// @brief Dispatches triangular solve over packed or strided L and B views, optionally column-parallel.
+        /// @brief Solves `L * X = B` in place across column range `[col_begin, col_end)` via blocked SIMD panel/rank-k
+        /// updates.
+        /// @details Processes 4 RHS columns simultaneously (`rank_k_update_4cols_simd`) followed by 1-column
+        /// remainders (`rank_k_update_1col_simd`) in fixed `k_block = 32` panels and `row_tile = 256` L1 strips without
+        /// runtime CPU cache queries or reading the strictly upper triangle of `l`.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @tparam LMap Eigen matrix or map type representing lower factor L.
-        /// @tparam RhsMap Eigen matrix or map type representing mutable right-hand side B.
-        /// @param[in] l_map Eigen view over lower Cholesky factor L.
-        /// @param[in,out] rhs_map Eigen view over mutable right-hand side B.
-        /// @param[in] n_rows Row count of L and B.
-        /// @param[in] n_cols Column count of B.
-        /// @param[in] mode Triangular substitution direction or combined LLT solve.
-        template <KernelScalarConcept T, typename LMap, typename RhsMap>
-        void dispatch_tri_solve(
-            const LMap& l_map, RhsMap&& rhs_map, std::size_t n_rows, std::size_t n_cols, TriSolveMode mode
-        )
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view updated in place.
+        /// @param[in] col_begin Inclusive starting column index in `rhs`.
+        /// @param[in] col_end Exclusive ending column index in `rhs`.
+        template <KernelScalarConcept T>
+        void solve_lower_cols(MatrixRef<T> l, MatrixMut<T> rhs, std::size_t col_begin, std::size_t col_end) noexcept
         {
-            auto solve_slice = [&l_map, mode](auto&& rhs_slice)
+            const std::size_t n = l.rows();
+            constexpr std::size_t k_block = 32U;
+            constexpr std::size_t row_tile = 256U;
+            std::array<const T*, k_block> l_ptrs{};
+            std::array<T, k_block> v0_arr{};
+            std::array<T, k_block> v1_arr{};
+            std::array<T, k_block> v2_arr{};
+            std::array<T, k_block> v3_arr{};
+
+            std::size_t c = col_begin;
+            for (; c + 4U <= col_end; c += 4U)
+            {
+                T* const x0 = rhs.col(c).data();
+                T* const x1 = rhs.col(c + 1U).data();
+                T* const x2 = rhs.col(c + 2U).data();
+                T* const x3 = rhs.col(c + 3U).data();
+
+                for (std::size_t kb = 0U; kb < n; kb += k_block)
+                {
+                    const std::size_t ke = std::min(kb + k_block, n);
+                    const std::size_t bs = ke - kb;
+                    for (std::size_t p = 0U; p < bs; ++p)
+                    {
+                        const std::size_t k = kb + p;
+                        const T* const lk = l.col(k).data();
+                        const T lkk = lk[k];
+                        const T v0p = x0[k] / lkk;
+                        const T v1p = x1[k] / lkk;
+                        const T v2p = x2[k] / lkk;
+                        const T v3p = x3[k] / lkk;
+                        x0[k] = v0p;
+                        x1[k] = v1p;
+                        x2[k] = v2p;
+                        x3[k] = v3p;
+                        l_ptrs[p] = lk;
+                        v0_arr[p] = v0p;
+                        v1_arr[p] = v1p;
+                        v2_arr[p] = v2p;
+                        v3_arr[p] = v3p;
+                        for (std::size_t r = k + 1U; r < ke; ++r)
+                        {
+                            const T lrk = lk[r];
+                            x0[r] = cxxgpr::detail::scalar_fnmadd(lrk, v0p, x0[r]);
+                            x1[r] = cxxgpr::detail::scalar_fnmadd(lrk, v1p, x1[r]);
+                            x2[r] = cxxgpr::detail::scalar_fnmadd(lrk, v2p, x2[r]);
+                            x3[r] = cxxgpr::detail::scalar_fnmadd(lrk, v3p, x3[r]);
+                        }
+                    }
+                    if (ke < n)
+                    {
+                        for (std::size_t r_start = ke; r_start < n; r_start += row_tile)
+                        {
+                            const std::size_t r_stop = std::min(r_start + row_tile, n);
+                            cxxgpr::detail::rank_k_update_4cols_simd(
+                                x0, x1, x2, x3, l_ptrs.data(), bs, v0_arr.data(), v1_arr.data(), v2_arr.data(),
+                                v3_arr.data(), r_start, r_stop
+                            );
+                        }
+                    }
+                }
+            }
+
+            for (; c < col_end; ++c)
+            {
+                T* const xc = rhs.col(c).data();
+                for (std::size_t kb = 0U; kb < n; kb += k_block)
+                {
+                    const std::size_t ke = std::min(kb + k_block, n);
+                    const std::size_t bs = ke - kb;
+                    for (std::size_t p = 0U; p < bs; ++p)
+                    {
+                        const std::size_t k = kb + p;
+                        const T* const lk = l.col(k).data();
+                        const T v0p = xc[k] / lk[k];
+                        xc[k] = v0p;
+                        l_ptrs[p] = lk;
+                        v0_arr[p] = v0p;
+                        for (std::size_t r = k + 1U; r < ke; ++r)
+                        {
+                            xc[r] = cxxgpr::detail::scalar_fnmadd(lk[r], v0p, xc[r]);
+                        }
+                    }
+                    if (ke < n)
+                    {
+                        for (std::size_t r_start = ke; r_start < n; r_start += row_tile)
+                        {
+                            const std::size_t r_stop = std::min(r_start + row_tile, n);
+                            cxxgpr::detail::rank_k_update_1col_simd(
+                                xc, l_ptrs.data(), bs, v0_arr.data(), r_start, r_stop
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// @brief Resolves one 4-row backward-substitution step given precomputed tail dot products.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] x Destination solution column pointer.
+        /// @param[in] l0 Column `i0` of lower factor `l`.
+        /// @param[in] l1 Column `i1 = i0 + 1` of lower factor `l`.
+        /// @param[in] l2 Column `i2 = i0 + 2` of lower factor `l`.
+        /// @param[in] l3 Column `i3 = i0 + 3` of lower factor `l`.
+        /// @param[in] i0 Starting row index of the 4-row block.
+        /// @param[in] d0 Precomputed tail dot product `dot(l0[i0+4:], x[i0+4:])`.
+        /// @param[in] d1 Precomputed tail dot product `dot(l1[i0+4:], x[i0+4:])`.
+        /// @param[in] d2 Precomputed tail dot product `dot(l2[i0+4:], x[i0+4:])`.
+        /// @param[in] d3 Precomputed tail dot product `dot(l3[i0+4:], x[i0+4:])`.
+        template <KernelScalarConcept T>
+        inline void finish_backward_4rows(
+            T* x, const T* l0, const T* l1, const T* l2, const T* l3, std::size_t i0, T d0, T d1, T d2, T d3
+        ) noexcept
+        {
+            const std::size_t i1 = i0 + 1U;
+            const std::size_t i2 = i0 + 2U;
+            const std::size_t i3 = i0 + 3U;
+
+            const T s3 = (x[i3] - d3) / l3[i3];
+            x[i3] = s3;
+
+            const T a2 = cxxgpr::detail::scalar_fmadd(l2[i3], s3, d2);
+            const T s2 = (x[i2] - a2) / l2[i2];
+            x[i2] = s2;
+
+            const T a1 = cxxgpr::detail::scalar_fmadd(l1[i2], s2, cxxgpr::detail::scalar_fmadd(l1[i3], s3, d1));
+            const T s1 = (x[i1] - a1) / l1[i1];
+            x[i1] = s1;
+
+            const T a0 = cxxgpr::detail::scalar_fmadd(
+                l0[i1], s1, cxxgpr::detail::scalar_fmadd(l0[i2], s2, cxxgpr::detail::scalar_fmadd(l0[i3], s3, d0))
+            );
+            x[i0] = (x[i0] - a0) / l0[i0];
+        }
+
+        /// @brief Solves `L^T * X = B` in place across column range `[col_begin, col_end)` via deterministic SIMD dots.
+        /// @details Uses 4x2 (`dot_4x2_simd`), 4x1 (`dot_4x1_simd`), and 1x1 (`dot_1x1_simd`) dot kernels reading
+        /// contiguous lower-triangular column slices of `l`, guaranteeing bitwise identical rounding across single-RHS,
+        /// multi-RHS, OpenMP thread counts, and hybrid CPU cache topologies.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view updated in place.
+        /// @param[in] col_begin Inclusive starting column index in `rhs`.
+        /// @param[in] col_end Exclusive ending column index in `rhs`.
+        template <KernelScalarConcept T>
+        void solve_lower_transpose_cols(
+            MatrixRef<T> l, MatrixMut<T> rhs, std::size_t col_begin, std::size_t col_end
+        ) noexcept
+        {
+            const std::size_t n = l.rows();
+            std::size_t c = col_begin;
+            for (; c + 2U <= col_end; c += 2U)
+            {
+                T* const x0 = rhs.col(c).data();
+                T* const x1 = rhs.col(c + 1U).data();
+                std::size_t rem = n;
+                while (rem >= 4U)
+                {
+                    const std::size_t i0 = rem - 4U;
+                    const std::size_t i1 = rem - 3U;
+                    const std::size_t i2 = rem - 2U;
+                    const std::size_t i3 = rem - 1U;
+                    const std::size_t tail_start = rem;
+                    const std::size_t tail_len = n - tail_start;
+                    const T* const l0 = l.col(i0).data();
+                    const T* const l1 = l.col(i1).data();
+                    const T* const l2 = l.col(i2).data();
+                    const T* const l3 = l.col(i3).data();
+                    std::array<std::array<T, 2>, 4> dots{};
+                    if (tail_len > 0U)
+                    {
+                        cxxgpr::detail::dot_4x2_simd(
+                            l0 + tail_start, l1 + tail_start, l2 + tail_start, l3 + tail_start, x0 + tail_start,
+                            x1 + tail_start, tail_len, dots
+                        );
+                    }
+                    finish_backward_4rows(x0, l0, l1, l2, l3, i0, dots[0][0], dots[1][0], dots[2][0], dots[3][0]);
+                    finish_backward_4rows(x1, l0, l1, l2, l3, i0, dots[0][1], dots[1][1], dots[2][1], dots[3][1]);
+                    rem -= 4U;
+                }
+                while (rem > 0U)
+                {
+                    --rem;
+                    const std::size_t i = rem;
+                    const T* const li = l.col(i).data();
+                    const std::size_t tail_start = i + 1U;
+                    const std::size_t tail_len = n - tail_start;
+                    const T acc0 = (tail_len > 0U)
+                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, x0 + tail_start, tail_len)
+                        : T{0};
+                    const T acc1 = (tail_len > 0U)
+                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, x1 + tail_start, tail_len)
+                        : T{0};
+                    x0[i] = (x0[i] - acc0) / li[i];
+                    x1[i] = (x1[i] - acc1) / li[i];
+                }
+            }
+
+            for (; c < col_end; ++c)
+            {
+                T* const xc = rhs.col(c).data();
+                std::size_t rem = n;
+                while (rem >= 4U)
+                {
+                    const std::size_t i0 = rem - 4U;
+                    const std::size_t i1 = rem - 3U;
+                    const std::size_t i2 = rem - 2U;
+                    const std::size_t i3 = rem - 1U;
+                    const std::size_t tail_start = rem;
+                    const std::size_t tail_len = n - tail_start;
+                    const T* const l0 = l.col(i0).data();
+                    const T* const l1 = l.col(i1).data();
+                    const T* const l2 = l.col(i2).data();
+                    const T* const l3 = l.col(i3).data();
+                    std::array<T, 4> dots{};
+                    if (tail_len > 0U)
+                    {
+                        cxxgpr::detail::dot_4x1_simd(
+                            l0 + tail_start, l1 + tail_start, l2 + tail_start, l3 + tail_start, xc + tail_start,
+                            tail_len, dots
+                        );
+                    }
+                    finish_backward_4rows(xc, l0, l1, l2, l3, i0, dots[0], dots[1], dots[2], dots[3]);
+                    rem -= 4U;
+                }
+                while (rem > 0U)
+                {
+                    --rem;
+                    const std::size_t i = rem;
+                    const T* const li = l.col(i).data();
+                    const std::size_t tail_start = i + 1U;
+                    const std::size_t tail_len = n - tail_start;
+                    const T acc = (tail_len > 0U)
+                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, xc + tail_start, tail_len)
+                        : T{0};
+                    xc[i] = (xc[i] - acc) / li[i];
+                }
+            }
+        }
+
+        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
+        /// @details Uses deterministic SIMD column-blocked triangular solvers and parallelizes fixed 4-column blocks
+        /// across OpenMP threads when n_rows^2 * n_cols >= 2^24.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
+        /// @param[in] mode Triangular substitution direction or combined LLT solve.
+        template <KernelScalarConcept T>
+        void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode) noexcept
+        {
+            auto solve_range = [l, rhs, mode](std::size_t col_begin, std::size_t col_end) mutable noexcept
             {
                 if (mode == TriSolveMode::Forward)
                 {
-                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
+                    solve_lower_cols(l, rhs, col_begin, col_end);
                 }
                 else if (mode == TriSolveMode::Backward)
                 {
-                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                    solve_lower_transpose_cols(l, rhs, col_begin, col_end);
                 }
                 else
                 {
-                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
-                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                    solve_lower_cols(l, rhs, col_begin, col_end);
+                    solve_lower_transpose_cols(l, rhs, col_begin, col_end);
                 }
             };
 
+            const std::size_t n_rows = l.rows();
+            const std::size_t n_cols = rhs.cols();
 #ifdef _OPENMP
             const double approx_flops =
                 static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
             if (n_cols >= 4U && approx_flops >= 16777216.0)
             {
-                // Use fixed column-block width so rounding order is invariant to OpenMP thread count.
+                // Use fixed 4-column blocks so forward/backward SIMD grouping stays invariant to thread count.
                 constexpr std::size_t col_block = 4U;
                 const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
-#    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U) shared(rhs_map, n_cols, solve_slice)
+#    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U)
                 for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(n_blocks); ++b)
                 {
                     const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
-                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
-                    auto slice =
-                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
-                    solve_slice(slice);
+                    const std::size_t col_end = std::min(col_begin + col_block, n_cols);
+                    solve_range(col_begin, col_end);
                 }
                 return;
             }
 #else
-            const double approx_flops =
-                static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
-            if (n_cols >= 4U && approx_flops >= 16777216.0)
-            {
-                constexpr std::size_t col_block = 4U;
-                for (std::size_t col_begin = 0U; col_begin < n_cols; col_begin += col_block)
-                {
-                    const std::size_t col_width = std::min(col_block, n_cols - col_begin);
-                    auto slice =
-                        rhs_map.middleCols(static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_width));
-                    solve_slice(slice);
-                }
-                return;
-            }
+            (void)n_rows;
 #endif
-            solve_slice(rhs_map);
-        }
-
-        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
-        /// @details Uses unit-stride Eigen::Map views when both L and B are contiguous and parallelizes independent
-        /// right-hand side column slices across OpenMP threads when n_rows^2 * n_cols >= 2^24.
-        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[in] l Square read-only lower Cholesky factor matrix view.
-        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
-        /// @param[in] mode Triangular substitution direction or combined LLT solve.
-        template <KernelScalarConcept T> void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode)
-        {
-            const std::size_t n_rows = l.rows();
-            const std::size_t n_cols = rhs.cols();
-            if (l.is_contiguous() && rhs.is_contiguous())
-            {
-                const Eigen::Map<const detail::ColMajorDynamic<T>> l_map(
-                    l.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_rows)
-                );
-                Eigen::Map<detail::ColMajorDynamic<T>> rhs_map(
-                    rhs.data(), static_cast<Eigen::Index>(n_rows), static_cast<Eigen::Index>(n_cols)
-                );
-                dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
-                return;
-            }
-            const auto l_map = detail::to_eigen_map(l);
-            auto rhs_map = detail::to_eigen_map(rhs);
-            dispatch_tri_solve<T>(l_map, rhs_map, n_rows, n_cols, mode);
+            solve_range(0U, n_cols);
         }
 
         /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.
@@ -400,10 +618,10 @@ namespace cxxgpr::linalg
         }
 
         /// @brief Executes Eigen::LLT or deterministic blocked Cholesky in place on the lower triangle of a.
-        /// @details Uses blocked panel/rank-32 updates with Eigen::LLT subblock tail finishing whenever row byte size
-        /// `n * sizeof(T) >= 2048` (`n >= 256` for `double`, `n >= 512` for `float`), running inside a single
-        /// persistent OpenMP region when multiple threads are active so 1-thread and multi-thread runs stay
-        /// bit-identical. For smaller matrices runs Eigen::LLT strictly in place and verifies positive finite pivots.
+        /// @details Uses blocked panel/rank-32 SIMD updates with Eigen::LLT subblock tail finishing whenever matrix
+        /// order `n >= 256` (covering both `float` and `double`), running inside a single persistent OpenMP region when
+        /// multiple threads are active so 1-thread and multi-thread runs stay bit-identical. For smaller matrices runs
+        /// Eigen::LLT strictly in place and verifies positive finite pivots.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
         /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
@@ -413,7 +631,7 @@ namespace cxxgpr::linalg
         [[nodiscard]] std::expected<void, GprError> run_eigen_llt_in_place(MatrixMut<T> a, CholeskyStage stage)
         {
             const std::size_t n = a.rows();
-            if ((n * sizeof(T)) >= 2048U)
+            if (n >= 256U)
             {
                 bool failed = false;
                 constexpr std::size_t panel_block = 32U;
@@ -681,8 +899,8 @@ namespace cxxgpr::linalg
     }
 
     /// @brief Solves L * X = B in place for a lower-triangular Cholesky factor L.
-    /// @details Validates factor and right-hand side views, then performs lower-triangular forward substitution via
-    /// Eigen.
+    /// @details Validates factor and right-hand side views, then performs deterministic blocked lower-triangular
+    /// forward substitution.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
     /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
@@ -860,9 +1078,7 @@ namespace cxxgpr::linalg
             }
         }
 
-        const auto l_map = detail::to_eigen_map(l);
-        auto scratch_map = detail::to_eigen_map(scratch_n_by_n);
-        l_map.template triangularView<Eigen::Lower>().solveInPlace(scratch_map);
+        apply_tri_solve(l, scratch_n_by_n, TriSolveMode::Forward);
 
         // Since (L L^T)^-1 = (L^-1)^T L^-1, the col-th diagonal equals ||L^-1 e_col||_2^2.
         for (std::size_t col = 0; col < n; ++col)
