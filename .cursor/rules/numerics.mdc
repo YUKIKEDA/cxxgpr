@@ -12,5 +12,5 @@ alwaysApply: true
 - **混合精度反復改良（MixedPrecision）**：`Single` 格納 `f32` で分解し、`PromoteStorage` または `ReevaluateKernel` で `f64` 残差を取って $\alpha$ のみ反復改良する（最大 10 回、相対閾値 $10 \cdot n \cdot \varepsilon_{64}$、停滞 2 連続で打切り）。不収束でも失敗にせず、同じ $(A + jI)$ 系を `f64` Cholesky で解き直す。Jitter を増やして IR を「直す」ことはしない。
 - **非有限ガードと順序比較の罠**：IEEE 754 では `NaN > 0.0` が `false` となるため、`prev > 0.0 ? cur / prev : 0.0` のような三項演算を先に行うと `NaN` が `0.0` に化けて停滞打切りや異常検出を取り逃す（BAD：`ratio = (*prev > 0.0) ? (r / *prev) : 0.0`、GOOD：先に `!std::isfinite(r) || !std::isfinite(*prev)` を判定する。PR #9 指摘 3 の教訓）。
 - **空入力と長さ不一致の検査順序（`DES-02`）**：`copy_storage_to_refine`・`compute_storage_means`・`promoted_residual_into` 等を含む全入口で、必ず先頭にて空入力・ヌルポインタ（`EmptyInput`）を検査し、その後に `require_count`（`LengthMismatch`）を評価する（PR #9 指摘 2 の教訓）。
-- **浮動小数点ポリシー**：MSVC `/fp:strict`、GCC/Clang `-ffp-contract=off -fno-fast-math` を強制し、コンパイラによる FMA 縮約や再結合で丸め挙動が変わることを防ぐ。
+- **浮動小数点ポリシー**：MSVC `/fp:precise`、GCC/Clang `-fno-fast-math` を課し、SIMD 自動ベクトル化と FMA 縮約を有効にしつつ IEEE 754 の `NaN` / `±∞` 判定規則を守る。
 - **対数ユーティリティ**：`0.5 * sum(2 log L_ii)` などの集約は直列・決定順で行い、MLL と解析勾配の一貫性を保つ。

@@ -8,6 +8,7 @@
 
 #include "cxxgpr/linalg/cholesky.hpp"
 #include "cxxgpr/linalg/dense.hpp"
+#include "cxxgpr/linalg/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,20 +25,150 @@ namespace cxxgpr
     namespace
     {
 
-        /// @brief Populates a square mutable matrix view with the n x n identity matrix I_n.
-        /// @details Writes 1 along the main diagonal and 0 elsewhere prior to solving A * X = I_n.
+        /// @brief Computes lower-triangular W = alpha * alpha^T - A^-1 directly from Cholesky factor L.
+        /// @details Executes two area-balanced OpenMP stages with contiguous column-slice vectorization:
+        /// 1. Forward-substitutes Z = L^-1 into z_scratch in parallel (n^3 / 3 FLOPs, unit-stride column AXPYs).
+        /// 2. Forms lower-triangular W_ij = alpha_i * alpha_j - dot(Z_{i:, i}, Z_{i:, j}) in parallel with 4-row
+        /// unrolling (n^3 / 3 FLOPs). Because Stage 2 reads only z_scratch and alpha, w_out may safely alias l
+        /// under CholeskyBuffer::Reuse.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[out] mat Square mutable n x n column-major matrix view.
-        template <KernelScalarConcept T> void fill_identity(MatrixMut<T> mat) noexcept
+        /// @param[in] l Square read-only lower Cholesky factor L of A = L * L^T.
+        /// @param[in] alpha Pre-solved weight vector A^-1 * y (length n).
+        /// @param[out] z_scratch Mutable n x n workspace receiving lower-triangular Z = L^-1.
+        /// @param[out] w_out Mutable n x n destination matrix receiving lower-triangular W (may alias l).
+        /// @return Empty expected on success, or GprError on invalid dimensions, non-finite inputs, or singular L.
+        /// @retval GprErrorCode::EmptyInput When any matrix view or alpha span is empty or null.
+        /// @retval GprErrorCode::LengthMismatch When dimensions are non-square or inconsistent across arguments.
+        /// @retval GprErrorCode::NonFiniteInput When any diagonal entry of l is non-finite.
+        /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> compute_w_lower_from_cholesky(
+            MatrixRef<T> l, std::span<const T> alpha, MatrixMut<T> z_scratch, MatrixMut<T> w_out
+        )
         {
-            const std::size_t n = mat.rows();
-            for (std::size_t col = 0; col < n; ++col)
+            if (l.is_empty() || l.data() == nullptr || z_scratch.is_empty() || z_scratch.data() == nullptr
+                || w_out.is_empty() || w_out.data() == nullptr || alpha.empty())
             {
-                for (std::size_t row = 0; row < n; ++row)
+                return std::unexpected(GprError::empty_input());
+            }
+            const std::size_t n = l.rows();
+            if (!l.is_square() || z_scratch.rows() != n || z_scratch.cols() != n || w_out.rows() != n
+                || w_out.cols() != n || alpha.size() != n)
+            {
+                return std::unexpected(GprError::length_mismatch("matrix dimension mismatch when computing W"));
+            }
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const T diag = l(i, i);
+                if (!std::isfinite(diag))
                 {
-                    mat(row, col) = (row == col) ? T{1} : T{0};
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                if (diag <= T{0})
+                {
+                    return std::unexpected(GprError::non_positive_definite_matrix());
                 }
             }
+
+            // Stage 1: Invert lower-triangular L into Z = L^-1 (n^3 / 3 FLOPs, column-independent).
+            auto invert_range = [n, l, z_scratch](std::size_t col_begin, std::size_t col_end) mutable noexcept
+            {
+                for (std::size_t j = col_begin; j < col_end; ++j)
+                {
+                    T* const z_col = z_scratch.col(j).data();
+                    const T* const l_col_j = l.col(j).data();
+                    const T z_jj = T{1} / l_col_j[j];
+                    z_col[j] = z_jj;
+                    for (std::size_t r = j + 1U; r < n; ++r)
+                    {
+                        z_col[r] = -(l_col_j[r] * z_jj);
+                    }
+                    for (std::size_t k = j + 1U; k < n; ++k)
+                    {
+                        const T* const l_col_k = l.col(k).data();
+                        const T z_kj = z_col[k] / l_col_k[k];
+                        z_col[k] = z_kj;
+                        for (std::size_t r = k + 1U; r < n; ++r)
+                        {
+                            z_col[r] -= l_col_k[r] * z_kj;
+                        }
+                    }
+                }
+            };
+            if (n >= 96U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, invert_range);
+            }
+            else
+            {
+                invert_range(0U, n);
+            }
+
+            // Stage 2: Contract lower-triangular W_ij = alpha_i * alpha_j - <Z_{i:, i}, Z_{i:, j}>.
+            // Reading only z_scratch and alpha keeps CholeskyBuffer::Reuse safe when w_out aliases l.
+            auto contract_range =
+                [n, alpha, z_scratch, w_out](std::size_t col_begin, std::size_t col_end) mutable noexcept
+            {
+                for (std::size_t j = col_begin; j < col_end; ++j)
+                {
+                    const T* const z_col_j = z_scratch.col(j).data();
+                    T* const w_col_j = w_out.col(j).data();
+                    const T alpha_j = alpha[j];
+
+                    std::size_t row = j;
+                    for (; row + 4U <= n; row += 4U)
+                    {
+                        const std::size_t i0 = row;
+                        const std::size_t i1 = row + 1U;
+                        const std::size_t i2 = row + 2U;
+                        const std::size_t i3 = row + 3U;
+                        const T* const z0 = z_scratch.col(i0).data();
+                        const T* const z1 = z_scratch.col(i1).data();
+                        const T* const z2 = z_scratch.col(i2).data();
+                        const T* const z3 = z_scratch.col(i3).data();
+
+                        // Accumulate lead-in terms so each row maintains exact ascending k = i..n-1 order.
+                        T acc0 = (z0[i0] * z_col_j[i0]) + (z0[i1] * z_col_j[i1]) + (z0[i2] * z_col_j[i2]);
+                        T acc1 = (z1[i1] * z_col_j[i1]) + (z1[i2] * z_col_j[i2]);
+                        T acc2 = z2[i2] * z_col_j[i2];
+                        T acc3{0};
+
+                        for (std::size_t k = i3; k < n; ++k)
+                        {
+                            const T zjk = z_col_j[k];
+                            acc0 += z0[k] * zjk;
+                            acc1 += z1[k] * zjk;
+                            acc2 += z2[k] * zjk;
+                            acc3 += z3[k] * zjk;
+                        }
+
+                        w_col_j[i0] = (alpha[i0] * alpha_j) - acc0;
+                        w_col_j[i1] = (alpha[i1] * alpha_j) - acc1;
+                        w_col_j[i2] = (alpha[i2] * alpha_j) - acc2;
+                        w_col_j[i3] = (alpha[i3] * alpha_j) - acc3;
+                    }
+                    for (; row < n; ++row)
+                    {
+                        const T* const zi = z_scratch.col(row).data();
+                        T acc{0};
+                        for (std::size_t k = row; k < n; ++k)
+                        {
+                            acc += zi[k] * z_col_j[k];
+                        }
+                        w_col_j[row] = (alpha[row] * alpha_j) - acc;
+                    }
+                }
+            };
+            if (n >= 96U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, contract_range);
+            }
+            else
+            {
+                contract_range(0U, n);
+            }
+
+            return {};
         }
 
         /// @brief Populates the lower triangle of a square matrix view with diag_val * I_n.
@@ -54,32 +185,6 @@ namespace cxxgpr
                 for (std::size_t row = col; row < n; ++row)
                 {
                     mat(row, col) = (row == col) ? diag_val : T{0};
-                }
-            }
-        }
-
-        /// @brief Forms the lower triangle of W = alpha * alpha^T - A^-1 into w_out.
-        /// @details Reads alpha and the lower triangle of a_inv (which may alias w_out under
-        /// CholeskyBuffer::Reuse) and writes column-major lower entries in parallel.
-        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[in] alpha Pre-solved weight vector A^-1 * y (length n).
-        /// @param[in] a_inv Immutable view of A^-1 (only lower triangle read).
-        /// @param[out] w_out Mutable destination matrix view receiving lower triangle of W.
-        template <KernelScalarConcept T>
-        void build_w_lower_from_inv(std::span<const T> alpha, MatrixRef<T> a_inv, MatrixMut<T> w_out) noexcept
-        {
-            const std::size_t n = alpha.size();
-            const auto n_cols = static_cast<std::ptrdiff_t>(n);
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 384U)
-#endif
-            for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
-            {
-                const auto col = static_cast<std::size_t>(col_s);
-                const T a_col = alpha[col];
-                for (std::size_t row = col; row < n; ++row)
-                {
-                    w_out(row, col) = (alpha[row] * a_col) - a_inv(row, col);
                 }
             }
         }
@@ -292,14 +397,15 @@ namespace cxxgpr
                 buffers.core.nested.resize(kernel.nested_depth(), n, n);
             }
 
-            // Compute W = alpha * alpha^T - A^-1; under Reuse this temporarily overwrites k_matrix.
-            MatrixMut<Storage> inv_buf = buffers.overwrites_cholesky() ? buffers.core.exp_mut() : buffers.w_mut();
-            fill_identity(inv_buf);
-            if (auto inv_ok = linalg::solve_llt_in_place(buffers.core.k_ref(), inv_buf); !inv_ok.has_value())
+            // Compute W = alpha * alpha^T - A^-1; under Reuse this safely overwrites k_matrix after Z = L^-1.
+            if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
+                    buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
+                    buffers.w_mut()
+                );
+                !w_ok.has_value())
             {
-                return inv_ok;
+                return w_ok;
             }
-            build_w_lower_from_inv<Storage>(buffers.core.rhs, inv_buf.as_ref(), buffers.w_mut());
 
             const DistanceCache<Storage>* dist_ptr =
                 (buffers.dist.has_value() && (buffers.dist->has_dist() || buffers.dist->has_ard())) ? &(*buffers.dist)
@@ -644,15 +750,16 @@ namespace cxxgpr
             return mll_res;
         }
 
-        // Solve A^-1 and form W = alpha * alpha^T - A^-1 (aliasing k_matrix when CholeskyBuffer::Reuse).
+        // Form W = alpha * alpha^T - A^-1 in parallel directly from L (aliasing k_matrix safely under Reuse).
         const std::size_t n = buffers.core.order();
-        MatrixMut<Storage> inv_buf = buffers.overwrites_cholesky() ? buffers.core.exp_mut() : buffers.w_mut();
-        fill_identity(inv_buf);
-        if (auto inv_ok = linalg::solve_llt_in_place(buffers.core.k_ref(), inv_buf); !inv_ok.has_value())
+        if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
+                buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
+                buffers.w_mut()
+            );
+            !w_ok.has_value())
         {
-            return std::unexpected(std::move(inv_ok).error());
+            return std::unexpected(std::move(w_ok).error());
         }
-        build_w_lower_from_inv<Storage>(buffers.core.rhs, inv_buf.as_ref(), buffers.w_mut());
 
         const DistanceCache<Storage>* dist_ptr =
             (buffers.dist.has_value() && (buffers.dist->has_dist() || buffers.dist->has_ard())) ? &(*buffers.dist)

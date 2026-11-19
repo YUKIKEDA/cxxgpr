@@ -13,7 +13,9 @@
 #include "cxxgpr/workspace/mll.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -61,7 +63,8 @@ namespace cxxgpr::detail
                 y_train_(y_train),
                 jitter_(jitter),
                 buffers_(buffers),
-                enable_leaf_cache_(enable_leaf_cache && buffers.buffer_policy == CholeskyBuffer::Retain)
+                enable_leaf_cache_(enable_leaf_cache && buffers.buffer_policy == CholeskyBuffer::Retain),
+                last_factored_params_(kernel.num_params() + likelihood.num_params(), 0.0)
             {
                 // Preallocate per-leaf kernel caches only when incremental updates can retain matrices across steps.
                 if (enable_leaf_cache_)
@@ -77,6 +80,33 @@ namespace cxxgpr::detail
                 return kernel_.num_params() + likelihood_.num_params();
             }
 
+            /// @brief Returns true when buffers_, kernel_, and likelihood_ already hold the state for params.
+            /// @details Compares candidate parameters bitwise via std::bit_cast<std::uint64_t> against the last
+            /// successful objective evaluation so train_or_factor_payload() can skip a duplicate factorization.
+            /// @param[in] params Hyperparameter vector of length dim().
+            /// @return True if buffers_ hold valid L, alpha, factor_jitter, and MLL matching params bitwise.
+            [[nodiscard]] bool matches_last_factor(std::span<const double> params) const noexcept
+            {
+                if (!has_valid_factor_ || params.size() != last_factored_params_.size())
+                {
+                    return false;
+                }
+                for (std::size_t i = 0; i < params.size(); ++i)
+                {
+                    if (std::bit_cast<std::uint64_t>(params[i])
+                        != std::bit_cast<std::uint64_t>(last_factored_params_[i]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            /// @brief Returns the negative MLL cached alongside the last valid factorization.
+            /// @pre matches_last_factor() returned true for the active hyperparameter vector.
+            /// @return Cached negative marginal log-likelihood scalar.
+            [[nodiscard]] double last_factored_mll() const noexcept { return last_factored_mll_; }
+
             /// @brief Evaluates the negative marginal log-likelihood at params, invalidating any cached leaves.
             /// @details Updates kernel and likelihood parameters, clears LeafCache if enabled, and runs full
             /// Cholesky factorization and MLL evaluation.
@@ -86,6 +116,7 @@ namespace cxxgpr::detail
             /// @retval GprErrorCode::CholeskyFailed When matrix factorization fails after jitter retries.
             [[nodiscard]] std::expected<double, GprError> value(std::span<const double> params) override
             {
+                has_valid_factor_ = false;
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
@@ -95,7 +126,12 @@ namespace cxxgpr::detail
                 {
                     leaf_cache_.invalidate();
                 }
-                return factor_and_mll(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, 0U);
+                auto res = factor_and_mll(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, 0U);
+                if (res.has_value())
+                {
+                    record_valid_factor(params, *res);
+                }
+                return res;
             }
 
             /// @brief Evaluates negative MLL incrementally when only changed_indices moved since the last step.
@@ -116,6 +152,7 @@ namespace cxxgpr::detail
                 {
                     return value(params);
                 }
+                has_valid_factor_ = false;
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
@@ -155,23 +192,24 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(solve).error());
                 }
-                auto half_ld = linalg::half_log_det_from_l(buffers_.core.k_ref());
-                if (!half_ld.has_value())
+                auto logdet = linalg::log_det_from_l(buffers_.core.k_ref());
+                if (!logdet.has_value())
                 {
-                    return std::unexpected(std::move(half_ld).error());
+                    return std::unexpected(std::move(logdet).error());
                 }
                 auto y_alpha = linalg::dot(y_train_, std::span<const Storage>(buffers_.core.rhs));
                 if (!y_alpha.has_value())
                 {
                     return std::unexpected(std::move(y_alpha).error());
                 }
-                // Assemble negative MLL = 0.5 * y^T alpha + sum(log L_ii) + 0.5 * n * log(2 * pi).
-                const double log_2pi = std::log(2.0 * std::numbers::pi);
-                const double mll = (0.5 * (*y_alpha)) + (*half_ld) + (0.5 * static_cast<double>(n) * log_2pi);
+                // Assemble negative MLL using the identical formula and parenthesization as factor_and_mll().
+                const double mll =
+                    0.5 * (*y_alpha + *logdet + (static_cast<double>(n) * std::log(2.0 * std::numbers::pi)));
                 if (!std::isfinite(mll))
                 {
                     return std::unexpected(GprError::non_finite_kernel_value());
                 }
+                record_valid_factor(params, mll);
                 return mll;
             }
 
@@ -223,6 +261,7 @@ namespace cxxgpr::detail
                 std::span<const double> params, std::span<double> out_grad
             ) override
             {
+                has_valid_factor_ = false;
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
@@ -231,7 +270,12 @@ namespace cxxgpr::detail
                 {
                     leaf_cache_.invalidate();
                 }
-                return mll_and_gradient_into(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, out_grad);
+                auto res = mll_and_gradient_into(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, out_grad);
+                if (res.has_value())
+                {
+                    record_valid_factor(params, *res);
+                }
+                return res;
             }
 
             /// @brief Evaluates the exact Hessian of the negative MLL into out_hess at params.
@@ -244,6 +288,7 @@ namespace cxxgpr::detail
                 std::span<const double> params, std::span<double> out_hess
             ) override
             {
+                has_valid_factor_ = false;
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return set;
@@ -266,6 +311,7 @@ namespace cxxgpr::detail
                 std::span<const double> params, std::span<double> out_grad, std::span<double> out_hess
             ) override
             {
+                has_valid_factor_ = false;
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
@@ -274,12 +320,27 @@ namespace cxxgpr::detail
                 {
                     leaf_cache_.invalidate();
                 }
-                return cxxgpr::value_gradient_hessian_into(
+                auto res = cxxgpr::value_gradient_hessian_into(
                     kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, out_grad, out_hess
                 );
+                if (res.has_value())
+                {
+                    record_valid_factor(params, *res);
+                }
+                return res;
             }
 
         private:
+            /// @brief Records parameters and negative MLL paired with the valid live factor in buffers_.
+            /// @param[in] params Evaluated hyperparameter vector of length dim().
+            /// @param[in] mll Evaluated negative marginal log-likelihood matching params.
+            void record_valid_factor(std::span<const double> params, double mll) noexcept
+            {
+                std::ranges::copy(params, last_factored_params_.begin());
+                last_factored_mll_ = mll;
+                has_valid_factor_ = true;
+            }
+
             /// @brief Applies kernel and likelihood parameters after validating vector length.
             /// @param[in] params Combined parameter vector [kernel_params..., log_noise_var].
             /// @return Empty expected on success, or LengthMismatch / validation GprError.
@@ -316,6 +377,12 @@ namespace cxxgpr::detail
             bool enable_leaf_cache_{false};
             /// @brief Per-leaf cached kernel blocks supporting incremental parameter evaluation.
             LeafCache<Storage> leaf_cache_;
+            /// @brief Pre-allocated parameter snapshot matching the last successful objective factorization.
+            std::vector<double> last_factored_params_;
+            /// @brief Cached negative marginal log-likelihood corresponding to last_factored_params_.
+            double last_factored_mll_{0.0};
+            /// @brief True when buffers_.core.k_ref() and rhs hold a valid factor matching last_factored_params_.
+            bool has_valid_factor_{false};
         };
 
         /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
@@ -830,19 +897,30 @@ namespace cxxgpr::detail
             };
         }
 
-        // Ensure kernel, likelihood, L, alpha, and MLL match opt_res.params exactly.
-        if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
+        // Reuse the live factor L, alpha, and MLL when the last objective call already evaluated opt_res.params.
+        double final_mll = 0.0;
+        if (obj.matches_last_factor(opt_res.params))
         {
-            return std::unexpected(std::move(sp).error());
+            final_mll = obj.last_factored_mll();
         }
-        if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U)); !lp.has_value())
+        else
         {
-            return std::unexpected(std::move(lp).error());
-        }
-        auto final_mll = factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
-        if (!final_mll.has_value())
-        {
-            return std::unexpected(std::move(final_mll).error());
+            // Ensure kernel, likelihood, L, alpha, and MLL match opt_res.params exactly.
+            if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
+            {
+                return std::unexpected(std::move(sp).error());
+            }
+            if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
+                !lp.has_value())
+            {
+                return std::unexpected(std::move(lp).error());
+            }
+            auto mll_res = factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
+            if (!mll_res.has_value())
+            {
+                return std::unexpected(std::move(mll_res).error());
+            }
+            final_mll = *mll_res;
         }
 
         KernelSpec updated_spec = cfg.kernel_spec;
@@ -853,11 +931,16 @@ namespace cxxgpr::detail
 
         // Snapshot dense column-major Cholesky factor L from workspace k_ref().
         std::vector<Storage> l_copy(n * n);
-        for (std::size_t col = 0; col < n; ++col)
+        const auto l_ref = buffers->core.k_ref();
+        if (l_ref.col_stride() == n)
         {
-            for (std::size_t row = 0; row < n; ++row)
+            std::copy_n(l_ref.data(), n * n, l_copy.data());
+        }
+        else
+        {
+            for (std::size_t col = 0; col < n; ++col)
             {
-                l_copy[(col * n) + row] = buffers->core.k_ref()(row, col);
+                std::copy_n(l_ref.col(col).data(), n, l_copy.data() + (col * n));
             }
         }
 
@@ -880,9 +963,16 @@ namespace cxxgpr::detail
         }
         else
         {
-            for (std::size_t i = 0; i < n; ++i)
+            if constexpr (std::same_as<Refine, Storage>)
             {
-                alpha_out[i] = static_cast<Refine>(buffers->core.rhs[i]);
+                std::copy_n(buffers->core.rhs.data(), n, alpha_out.data());
+            }
+            else
+            {
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    alpha_out[i] = static_cast<Refine>(buffers->core.rhs[i]);
+                }
             }
         }
 
@@ -901,7 +991,7 @@ namespace cxxgpr::detail
             .n_train = n,
             .n_features = d,
             .factor_jitter = buffers->core.factor_jitter,
-            .log_marginal_likelihood = *final_mll,
+            .log_marginal_likelihood = final_mll,
             .refinement_summary = ref_summary,
             .optimizer_result = std::move(opt_res),
         };

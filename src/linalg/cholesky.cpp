@@ -8,12 +8,20 @@
 
 #include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/linalg/dense.hpp"
+#include "cxxgpr/linalg/parallel.hpp"
 
 #include <Eigen/Cholesky>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <vector>
+
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
 
 #include "linalg/eigen_map.hpp"
 
@@ -93,23 +101,361 @@ namespace cxxgpr::linalg
             return {};
         }
 
-        /// @brief Executes Eigen::LLT strictly in place on the lower triangle of a validated matrix view.
-        /// @details Uses Eigen::Ref over the strided map so Eigen decomposes directly in caller storage without
-        /// copying, then verifies Eigen::Success and positive finite diagonal pivots.
+        /// @brief Factors a small diagonal panel block a[k:k+bs, k:k+bs] in place via unblocked lower Cholesky.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose diagonal block [k, k + bs) is factored in place.
+        /// @param[in] k Starting row and column index of the diagonal panel.
+        /// @param[in] bs Panel dimension (number of rows and columns).
+        /// @return True on success, false if a diagonal pivot is non-finite or non-positive.
+        template <KernelScalarConcept T>
+        [[nodiscard]] bool factor_unblocked_panel_diag(MatrixMut<T> a, std::size_t k, std::size_t bs) noexcept
+        {
+            for (std::size_t j = 0; j < bs; ++j)
+            {
+                const std::size_t gj = k + j;
+                T diag = a(gj, gj);
+                for (std::size_t p = 0; p < j; ++p)
+                {
+                    const T l_jp = a(gj, k + p);
+                    diag -= l_jp * l_jp;
+                }
+                if (!std::isfinite(diag) || diag <= T{0})
+                {
+                    return false;
+                }
+                const T l_jj = std::sqrt(diag);
+                if (!std::isfinite(l_jj) || l_jj <= T{0})
+                {
+                    return false;
+                }
+                a(gj, gj) = l_jj;
+                const T inv_diag = T{1} / l_jj;
+                T* const col_j = a.col(gj).data();
+                for (std::size_t i = j + 1U; i < bs; ++i)
+                {
+                    const std::size_t gi = k + i;
+                    T sum{0};
+                    for (std::size_t p = 0; p < j; ++p)
+                    {
+                        sum += a(gi, k + p) * a(gj, k + p);
+                    }
+                    col_j[gi] = (col_j[gi] - sum) * inv_diag;
+                }
+            }
+            return true;
+        }
+
+        /// @brief Solves lower-panel rows [r_begin, r_end) x cols [k, k + bs) against the factored diagonal block.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view owning factored diagonal block and trailing panel rows.
+        /// @param[in] k Starting column of the active panel.
+        /// @param[in] bs Width of the active panel.
+        /// @param[in] r_begin Inclusive starting row owned by the calling thread.
+        /// @param[in] r_end Exclusive ending row owned by the calling thread.
+        template <KernelScalarConcept T>
+        void solve_panel_rows(
+            MatrixMut<T> a, std::size_t k, std::size_t bs, std::size_t r_begin, std::size_t r_end
+        ) noexcept
+        {
+            for (std::size_t col = 0; col < bs; ++col)
+            {
+                const std::size_t gc = k + col;
+                T* const col_c = a.col(gc).data();
+                for (std::size_t p = 0; p < col; ++p)
+                {
+                    const T factor = a(gc, k + p);
+                    const T* const col_p = a.col(k + p).data();
+                    for (std::size_t r = r_begin; r < r_end; ++r)
+                    {
+                        col_c[r] -= col_p[r] * factor;
+                    }
+                }
+                const T inv_diag = T{1} / col_c[gc];
+                for (std::size_t r = r_begin; r < r_end; ++r)
+                {
+                    col_c[r] *= inv_diag;
+                }
+            }
+        }
+
+        /// @brief Applies the trailing symmetric rank-bs update to lower-triangular columns [j_begin, j_end).
+        /// @details Tiles rows in cache-resident blocks of 256 and unrolls 4 columns at a time while preserving exact
+        /// ascending p = 0..bs-1 accumulation order per matrix entry for OpenMP thread-count bitwise invariance.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose trailing lower columns [j_begin, j_end) are updated.
+        /// @param[in] k Starting column of the finished panel.
+        /// @param[in] bs Panel width.
+        /// @param[in] j_begin Inclusive first trailing column assigned to this thread.
+        /// @param[in] j_end Exclusive last trailing column assigned to this thread.
+        /// @param[in] n Matrix order.
+        template <KernelScalarConcept T>
+        void rank_k_lower_update(
+            MatrixMut<T> a, std::size_t k, std::size_t bs, std::size_t j_begin, std::size_t j_end, std::size_t n
+        ) noexcept
+        {
+            constexpr std::size_t row_tile = 256U;
+            std::size_t j = j_begin;
+            for (; j + 4U <= j_end; j += 4U)
+            {
+                const std::size_t j0 = j;
+                const std::size_t j1 = j + 1U;
+                const std::size_t j2 = j + 2U;
+                const std::size_t j3 = j + 3U;
+                T* const col0 = a.col(j0).data();
+                T* const col1 = a.col(j1).data();
+                T* const col2 = a.col(j2).data();
+                T* const col3 = a.col(j3).data();
+
+                // Update the 6 lower-triangle entries inside rows [j0, j3) in ascending p order.
+                for (std::size_t p = 0; p < bs; ++p)
+                {
+                    const T* const lp = a.col(k + p).data();
+                    const T v0 = lp[j0];
+                    const T v1 = lp[j1];
+                    const T v2 = lp[j2];
+                    col0[j0] -= v0 * v0;
+                    col0[j1] -= v1 * v0;
+                    col0[j2] -= v2 * v0;
+                    col1[j1] -= v1 * v1;
+                    col1[j2] -= v2 * v1;
+                    col2[j2] -= v2 * v2;
+                }
+
+                // Update rows [j3, n) across all 4 columns in cache-friendly row tiles.
+                for (std::size_t r_start = j3; r_start < n; r_start += row_tile)
+                {
+                    const std::size_t r_stop = std::min(r_start + row_tile, n);
+                    for (std::size_t p = 0; p < bs; ++p)
+                    {
+                        const T* const lp = a.col(k + p).data();
+                        const T v0 = lp[j0];
+                        const T v1 = lp[j1];
+                        const T v2 = lp[j2];
+                        const T v3 = lp[j3];
+                        for (std::size_t row = r_start; row < r_stop; ++row)
+                        {
+                            const T l_rp = lp[row];
+                            col0[row] -= l_rp * v0;
+                            col1[row] -= l_rp * v1;
+                            col2[row] -= l_rp * v2;
+                            col3[row] -= l_rp * v3;
+                        }
+                    }
+                }
+            }
+            for (; j < j_end; ++j)
+            {
+                T* const col_j = a.col(j).data();
+                for (std::size_t r_start = j; r_start < n; r_start += row_tile)
+                {
+                    const std::size_t r_stop = std::min(r_start + row_tile, n);
+                    for (std::size_t p = 0; p < bs; ++p)
+                    {
+                        const T* const lp = a.col(k + p).data();
+                        const T vj = lp[j];
+                        for (std::size_t row = r_start; row < r_stop; ++row)
+                        {
+                            col_j[row] -= lp[row] * vj;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// @brief Selects triangular system solve direction or full symmetric L * L^T solve.
+        enum class TriSolveMode : std::uint8_t
+        {
+            /// @brief Solves L * X = B in place.
+            Forward,
+            /// @brief Solves L^T * X = B in place.
+            Backward,
+            /// @brief Solves (L * L^T) * X = B in place.
+            Llt,
+        };
+
+        /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
+        /// @details Parallelizes independent right-hand side column slices across OpenMP threads when work is
+        /// large enough to amortize team synchronization.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
+        /// @param[in] mode Triangular substitution direction or combined LLT solve.
+        template <KernelScalarConcept T> void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode)
+        {
+            const auto l_map = detail::to_eigen_map(l);
+            auto solve_slice = [&l_map, mode](auto&& rhs_slice)
+            {
+                if (mode == TriSolveMode::Forward)
+                {
+                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
+                }
+                else if (mode == TriSolveMode::Backward)
+                {
+                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                }
+                else
+                {
+                    l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_slice);
+                    l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_slice);
+                }
+            };
+
+            const std::size_t n_rows = l.rows();
+            const std::size_t n_cols = rhs.cols();
+#ifdef _OPENMP
+            if (n_cols >= 4U && (n_rows * n_cols) >= 32768U && openmp_max_threads() > 1U)
+            {
+                auto rhs_map = detail::to_eigen_map(rhs);
+#    pragma omp parallel shared(rhs_map, n_cols, solve_slice)
+                {
+                    const auto tid = static_cast<std::size_t>(omp_get_thread_num());
+                    const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
+                    const std::size_t col_begin = (n_cols * tid) / nthreads;
+                    const std::size_t col_end = (n_cols * (tid + 1U)) / nthreads;
+                    if (col_begin < col_end)
+                    {
+                        auto slice = rhs_map.middleCols(
+                            static_cast<Eigen::Index>(col_begin), static_cast<Eigen::Index>(col_end - col_begin)
+                        );
+                        solve_slice(slice);
+                    }
+                }
+                return;
+            }
+#else
+            (void)n_rows;
+            (void)n_cols;
+#endif
+
+            auto rhs_map = detail::to_eigen_map(rhs);
+            solve_slice(rhs_map);
+        }
+
+        /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.
+        /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+        /// @param[in,out] a Target n x n matrix view whose submatrix [k, k + bs) is factored in place.
+        /// @param[in] k Starting row and column index of the submatrix.
+        /// @param[in] bs Submatrix dimension (number of rows and columns).
+        /// @return True on success, false if Eigen::LLT fails or produces a non-positive/non-finite pivot.
+        template <KernelScalarConcept T>
+        [[nodiscard]] bool factor_subblock_eigen(MatrixMut<T> a, std::size_t k, std::size_t bs)
+        {
+            const auto bs_idx = static_cast<Eigen::Index>(bs);
+            detail::MutEigenMap<T> sub_map(
+                &a(k, k), bs_idx, bs_idx, Eigen::OuterStride<>(static_cast<Eigen::Index>(a.col_stride()))
+            );
+            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
+            Eigen::LLT<RefType, Eigen::Lower> llt(sub_map);
+            if (llt.info() != Eigen::Success)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < bs; ++i)
+            {
+                const T diag = a(k + i, k + i);
+                if (!std::isfinite(diag) || diag <= T{0})
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// @brief Executes Eigen::LLT or parallel blocked Cholesky in place on the lower triangle of a.
+        /// @details Uses a single persistent OpenMP region with blocked panel/rank-32 updates and Eigen::LLT
+        /// subblock tail finishing when row byte size n * sizeof(T) >= 2048 (n >= 256 for double, n >= 512 for float)
+        /// and multiple threads are active; otherwise runs Eigen::LLT strictly in place (using a tightly packed map
+        /// whenever a is contiguous) and verifies positive finite pivots.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
         /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
         /// @return Empty expected on success, or GprErrorCode::CholeskyFailed on breakdown.
-        /// @retval GprErrorCode::CholeskyFailed When Eigen::LLT fails or produces a non-positive or non-finite pivot.
+        /// @retval GprErrorCode::CholeskyFailed When factorization fails or yields a non-positive/non-finite pivot.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> run_eigen_llt_in_place(MatrixMut<T> a, CholeskyStage stage)
         {
-            // Wrap caller storage via Eigen::Ref so Eigen::LLT overwrites the lower triangle in place.
-            auto map = detail::to_eigen_map(a);
-            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
-            Eigen::LLT<RefType, Eigen::Lower> llt(map);
             const std::size_t n = a.rows();
-            if (llt.info() != Eigen::Success)
+#ifdef _OPENMP
+            if ((n * sizeof(T)) >= 2048U && openmp_max_threads() > 1U)
+            {
+                bool failed = false;
+                constexpr std::size_t panel_block = 32U;
+                constexpr std::size_t tail_cutoff = 64U;
+                constexpr std::size_t row_granule = 16U;
+#    pragma omp parallel shared(a, failed, n)
+                {
+                    const auto tid = static_cast<std::size_t>(omp_get_thread_num());
+                    const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
+                    for (std::size_t k = 0; k < n; k += panel_block)
+                    {
+                        const std::size_t rem = n - k;
+                        if (rem <= tail_cutoff)
+                        {
+#    pragma omp single
+                            {
+                                if (!factor_subblock_eigen(a, k, rem))
+                                {
+                                    failed = true;
+                                }
+                            }
+                            break;
+                        }
+                        const std::size_t bs = std::min(panel_block, rem);
+#    pragma omp single
+                        {
+                            if (!factor_unblocked_panel_diag(a, k, bs))
+                            {
+                                failed = true;
+                            }
+                        }
+                        if (failed)
+                        {
+                            break;
+                        }
+                        const std::size_t row_start = k + bs;
+                        const std::size_t tail = n - row_start;
+                        const std::size_t n_gran = (tail + row_granule - 1U) / row_granule;
+                        const std::size_t chunk_begin =
+                            row_start + std::min(tail, ((n_gran * tid) / nthreads) * row_granule);
+                        const std::size_t chunk_end =
+                            row_start + std::min(tail, ((n_gran * (tid + 1U)) / nthreads) * row_granule);
+                        if (chunk_begin < chunk_end)
+                        {
+                            solve_panel_rows(a, k, bs, chunk_begin, chunk_end);
+                        }
+#    pragma omp barrier
+                        const std::size_t rel_begin = lower_block_start(tail, tid, nthreads);
+                        const std::size_t rel_end = lower_block_start(tail, tid + 1U, nthreads);
+                        rank_k_lower_update(a, k, bs, row_start + rel_begin, row_start + rel_end, n);
+#    pragma omp barrier
+                    }
+                }
+                if (failed)
+                {
+                    return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
+                }
+                return {};
+            }
+#endif
+
+            // Wrap caller storage via Eigen::Ref (tightly packed when contiguous) so Eigen overwrites in place.
+            bool ok = false;
+            if (a.is_contiguous())
+            {
+                Eigen::Map<detail::ColMajorDynamic<T>> dense_map(
+                    a.data(), static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(n)
+                );
+                Eigen::LLT<Eigen::Ref<detail::ColMajorDynamic<T>>, Eigen::Lower> llt(dense_map);
+                ok = (llt.info() == Eigen::Success);
+            }
+            else
+            {
+                auto map = detail::to_eigen_map(a);
+                using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
+                Eigen::LLT<RefType, Eigen::Lower> llt(map);
+                ok = (llt.info() == Eigen::Success);
+            }
+            if (!ok)
             {
                 return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
             }
@@ -189,11 +535,16 @@ namespace cxxgpr::linalg
             return std::unexpected(fin.error());
         }
 
-        // Snapshot the pristine lower triangle before in-place LLT mutates `a`.
+        // Skip backing up the lower triangle when no jitter retry steps are configured (e.g., Fixed(0.0)).
         const std::size_t n = a.rows();
-        if (const auto cp = copy_lower_triangle(detail::as_ref(a), backup); !cp.has_value())
+        JitterSchedule schedule = policy.retry_schedule();
+        const std::optional<double> first_retry = schedule.next();
+        if (first_retry.has_value())
         {
-            return std::unexpected(cp.error());
+            if (const auto cp = copy_lower_triangle(detail::as_ref(a), backup); !cp.has_value())
+            {
+                return std::unexpected(cp.error());
+            }
         }
 
         // Attempt unjittered factorization (j = 0) first; propagate non-Cholesky failures immediately.
@@ -209,8 +560,7 @@ namespace cxxgpr::linalg
 
         // Retry with escalating jitter, restoring the uncorrupted lower triangle before each attempt.
         double last_j = 0.0;
-        JitterSchedule schedule = policy.retry_schedule();
-        while (const auto next_j = schedule.next())
+        for (std::optional<double> next_j = first_retry; next_j.has_value(); next_j = schedule.next())
         {
             const double j = *next_j;
             last_j = j;
@@ -287,9 +637,7 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_map);
+        apply_tri_solve(l, rhs, TriSolveMode::Forward);
         return {};
     }
 
@@ -332,9 +680,7 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_map);
+        apply_tri_solve(l, rhs, TriSolveMode::Backward);
         return {};
     }
 
@@ -377,10 +723,7 @@ namespace cxxgpr::linalg
             return check;
         }
         // Perform two-stage triangular solve: L * Y = B, then L^T * X = Y.
-        const auto l_map = detail::to_eigen_map(l);
-        auto rhs_map = detail::to_eigen_map(rhs);
-        l_map.template triangularView<Eigen::Lower>().solveInPlace(rhs_map);
-        l_map.transpose().template triangularView<Eigen::Upper>().solveInPlace(rhs_map);
+        apply_tri_solve(l, rhs, TriSolveMode::Llt);
         return {};
     }
 

@@ -11,7 +11,7 @@ function(cxxgpr_configure_target target)
             /permissive-
             /utf-8
             /EHsc
-            /fp:strict
+            /fp:precise
         )
     else()
         target_compile_options(${target} PRIVATE
@@ -21,7 +21,6 @@ function(cxxgpr_configure_target target)
             -Werror
             -Wconversion
             -Wsign-conversion
-            -ffp-contract=off
             -fno-fast-math
         )
     endif()

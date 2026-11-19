@@ -14,7 +14,7 @@
 2. **MSVC 環境スクリプト（`tools/dev/msvc.ps1`）**：Windows では VsDevCmd により最新の C++ ツールチェーンを読み込んで `cl` を使用する。VsDevCmd は環境変数 `VCPKG_ROOT` を VS 同梱版へ上書きすることがあるため、`msvc.ps1` が呼び出し元の `VCPKG_ROOT` を保存・復元する。
 3. **コンパイラと浮動小数点ポリシー**：
    - `CMAKE_CXX_STANDARD 23`、MSVC は 19.44 以上を要求し `/std:c++23preview` による `std::expected`（`__cpp_lib_expected >= 202211L`）を構成時コンパイル試験で検証する。
-   - MSVC は `/W4 /WX /fp:strict`、GCC 14 / Clang は `-Wall -Wextra -Wpedantic -Werror -ffp-contract=off -fno-fast-math` を課す。
+   - MSVC は `/W4 /WX /fp:precise`、GCC 14 / Clang は `-Wall -Wextra -Wpedantic -Werror -fno-fast-math` を課す。
 
 ## Consequences
 

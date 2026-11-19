@@ -153,7 +153,7 @@ namespace cxxgpr
 
             const auto m_signed = static_cast<std::ptrdiff_t>(m_local);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (m_local >= 16U)
+#    pragma omp parallel for schedule(static) if ((n_local * m_local) >= 65536U)
 #endif
             for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
             {
@@ -243,7 +243,7 @@ namespace cxxgpr
         // Form diagonal predictive variance max(0, k(x*_j, x*_j) - ||V_:,j||_2^2) + noise_var.
         const auto m_signed = static_cast<std::ptrdiff_t>(m);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (m >= 16U)
+#    pragma omp parallel for schedule(static) if ((n * m) >= 65536U)
 #endif
         for (std::ptrdiff_t col_idx = 0; col_idx < m_signed; ++col_idx)
         {
