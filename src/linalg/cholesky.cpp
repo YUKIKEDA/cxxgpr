@@ -26,6 +26,7 @@
 #endif
 
 #include "linalg/eigen_map.hpp"
+#include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
 namespace cxxgpr::linalg
@@ -106,45 +107,31 @@ namespace cxxgpr::linalg
             return {};
         }
 
-        /// @brief Factors a small diagonal panel block a[k:k+bs, k:k+bs] in place via unblocked lower Cholesky.
+        /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[in,out] a Target n x n matrix view whose diagonal block [k, k + bs) is factored in place.
-        /// @param[in] k Starting row and column index of the diagonal panel.
-        /// @param[in] bs Panel dimension (number of rows and columns).
-        /// @return True on success, false if a diagonal pivot is non-finite or non-positive.
+        /// @param[in,out] a Target n x n matrix view whose submatrix [k, k + bs) is factored in place.
+        /// @param[in] k Starting row and column index of the submatrix.
+        /// @param[in] bs Submatrix dimension (number of rows and columns).
+        /// @return True on success, false if Eigen::LLT fails or produces a non-positive/non-finite pivot.
         template <KernelScalarConcept T>
-        [[nodiscard]] bool factor_unblocked_panel_diag(MatrixMut<T> a, std::size_t k, std::size_t bs) noexcept
+        [[nodiscard]] bool factor_subblock_eigen(MatrixMut<T> a, std::size_t k, std::size_t bs)
         {
-            for (std::size_t j = 0; j < bs; ++j)
+            const auto bs_idx = static_cast<Eigen::Index>(bs);
+            detail::MutEigenMap<T> sub_map(
+                &a(k, k), bs_idx, bs_idx, Eigen::OuterStride<>(static_cast<Eigen::Index>(a.col_stride()))
+            );
+            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
+            Eigen::LLT<RefType, Eigen::Lower> llt(sub_map);
+            if (llt.info() != Eigen::Success)
             {
-                const std::size_t gj = k + j;
-                T diag = a(gj, gj);
-                for (std::size_t p = 0; p < j; ++p)
-                {
-                    const T l_jp = a(gj, k + p);
-                    diag -= l_jp * l_jp;
-                }
+                return false;
+            }
+            for (std::size_t i = 0; i < bs; ++i)
+            {
+                const T diag = a(k + i, k + i);
                 if (!std::isfinite(diag) || diag <= T{0})
                 {
                     return false;
-                }
-                const T l_jj = std::sqrt(diag);
-                if (!std::isfinite(l_jj) || l_jj <= T{0})
-                {
-                    return false;
-                }
-                a(gj, gj) = l_jj;
-                const T inv_diag = T{1} / l_jj;
-                T* const col_j = a.col(gj).data();
-                for (std::size_t i = j + 1U; i < bs; ++i)
-                {
-                    const std::size_t gi = k + i;
-                    T sum{0};
-                    for (std::size_t p = 0; p < j; ++p)
-                    {
-                        sum += a(gi, k + p) * a(gj, k + p);
-                    }
-                    col_j[gi] = (col_j[gi] - sum) * inv_diag;
                 }
             }
             return true;
@@ -299,6 +286,11 @@ namespace cxxgpr::linalg
         void solve_lower_cols(MatrixRef<T> l, MatrixMut<T> rhs, std::size_t col_begin, std::size_t col_end) noexcept
         {
             const std::size_t n = l.rows();
+            if (n >= 64U && (col_end - col_begin) >= 6U)
+            {
+                cxxgpr::detail::solve_lower_block_packed(l, rhs, 0U, col_begin, col_end);
+                return;
+            }
             constexpr std::size_t k_block = 32U;
             constexpr std::size_t row_tile = 256U;
             std::array<const T*, k_block> l_ptrs{};
@@ -538,8 +530,8 @@ namespace cxxgpr::linalg
         }
 
         /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
-        /// @details Uses deterministic SIMD column-blocked triangular solvers and parallelizes fixed 4-column blocks
-        /// across OpenMP threads when n_rows^2 * n_cols >= 2^24.
+        /// @details Uses cache-packed BLAS-3 solvers in fixed column blocks for large multi-RHS forward solves and
+        /// deterministic fixed 4-column SIMD blocks for backward solves across OpenMP threads.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in] l Square read-only lower Cholesky factor matrix view.
         /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
@@ -547,93 +539,242 @@ namespace cxxgpr::linalg
         template <KernelScalarConcept T>
         void apply_tri_solve(MatrixRef<T> l, MatrixMut<T> rhs, TriSolveMode mode) noexcept
         {
-            auto solve_range = [l, rhs, mode](std::size_t col_begin, std::size_t col_end) mutable noexcept
+            if (mode == TriSolveMode::Llt)
             {
-                if (mode == TriSolveMode::Forward)
-                {
-                    solve_lower_cols(l, rhs, col_begin, col_end);
-                }
-                else if (mode == TriSolveMode::Backward)
-                {
-                    solve_lower_transpose_cols(l, rhs, col_begin, col_end);
-                }
-                else
-                {
-                    solve_lower_cols(l, rhs, col_begin, col_end);
-                    solve_lower_transpose_cols(l, rhs, col_begin, col_end);
-                }
-            };
+                apply_tri_solve(l, rhs, TriSolveMode::Forward);
+                apply_tri_solve(l, rhs, TriSolveMode::Backward);
+                return;
+            }
 
             const std::size_t n_rows = l.rows();
             const std::size_t n_cols = rhs.cols();
+            if (mode == TriSolveMode::Forward)
+            {
+#ifdef _OPENMP
+                const double approx_flops =
+                    static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
+                if (n_cols >= 12U && approx_flops >= 4194304.0)
+                {
+                    // Fixed column blocks keep block boundaries independent of thread count while saturating OpenMP
+                    // cores.
+                    const std::size_t col_block = (n_cols >= 512U) ? 24U : 12U;
+                    const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
+                    const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
+#    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
+                    for (std::ptrdiff_t b = 0; b < n_blocks_s; ++b)
+                    {
+                        const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
+                        const std::size_t col_end = std::min(col_begin + col_block, n_cols);
+                        solve_lower_cols(l, rhs, col_begin, col_end);
+                    }
+                    return;
+                }
+#else
+                (void)n_rows;
+#endif
+                solve_lower_cols(l, rhs, 0U, n_cols);
+                return;
+            }
+
 #ifdef _OPENMP
             const double approx_flops =
                 static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
             if (n_cols >= 4U && approx_flops >= 16777216.0)
             {
-                // Use fixed 4-column blocks so forward/backward SIMD grouping stays invariant to thread count.
+                // Use fixed 4-column blocks so backward SIMD grouping stays invariant to thread count.
                 constexpr std::size_t col_block = 4U;
                 const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                 const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
-#    pragma omp parallel for schedule(static) if (openmp_max_threads() > 1U)
+#    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
                 for (std::ptrdiff_t b = 0; b < n_blocks_s; ++b)
                 {
                     const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
                     const std::size_t col_end = std::min(col_begin + col_block, n_cols);
-                    solve_range(col_begin, col_end);
+                    solve_lower_transpose_cols(l, rhs, col_begin, col_end);
                 }
                 return;
             }
 #else
             (void)n_rows;
 #endif
-            solve_range(0U, n_cols);
+            solve_lower_transpose_cols(l, rhs, 0U, n_cols);
         }
 
-        /// @brief Factors diagonal submatrix a[k:k+bs, k:k+bs] in place via Eigen::LLT and validates diagonal pivots.
+        /// @brief Applies one trailing symmetric rank-bs lower tile update inside blocked Cholesky factorization.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
-        /// @param[in,out] a Target n x n matrix view whose submatrix [k, k + bs) is factored in place.
-        /// @param[in] k Starting row and column index of the submatrix.
-        /// @param[in] bs Submatrix dimension (number of rows and columns).
-        /// @return True on success, false if Eigen::LLT fails or produces a non-positive/non-finite pivot.
+        /// @param[in,out] a Target n x n symmetric matrix view updated in place.
+        /// @param[in] k Starting column of the factored panel.
+        /// @param[in] bs Factored panel width.
+        /// @param[in] row_start Starting row and column index of the trailing submatrix (`k + bs`).
+        /// @param[in] tail Dimension of the trailing submatrix (`n - row_start`).
+        /// @param[in] tile Block tile extent (`24` or `k_blas3_mc`).
+        /// @param[in] n_blocks Number of lower-triangular blocks along the trailing dimension.
+        /// @param[in] tile_idx Linear column-major lower tile index in `[0, n_blocks * (n_blocks + 1) / 2)`.
+        /// @param[in,out] last_bj Cached block column index corresponding to current contents of `packed_b`.
+        /// @param[out] packed_a Per-thread scratch buffer of length `k_blas3_pack_a_cap<T>`.
+        /// @param[in,out] packed_b Per-thread scratch buffer of length `k_blas3_pack_b_cap` reused across equal `bj`.
         template <KernelScalarConcept T>
-        [[nodiscard]] bool factor_subblock_eigen(MatrixMut<T> a, std::size_t k, std::size_t bs)
+        inline void apply_cholesky_trailing_tile(
+            MatrixMut<T> a,
+            std::size_t k,
+            std::size_t bs,
+            std::size_t row_start,
+            std::size_t tail,
+            std::size_t tile,
+            std::size_t n_blocks,
+            std::size_t tile_idx,
+            std::size_t& last_bj,
+            T* packed_a,
+            T* packed_b
+        ) noexcept
         {
-            const auto bs_idx = static_cast<Eigen::Index>(bs);
-            detail::MutEigenMap<T> sub_map(
-                &a(k, k), bs_idx, bs_idx, Eigen::OuterStride<>(static_cast<Eigen::Index>(a.col_stride()))
-            );
-            using RefType = Eigen::Ref<detail::ColMajorDynamic<T>, 0, Eigen::OuterStride<>>;
-            Eigen::LLT<RefType, Eigen::Lower> llt(sub_map);
-            if (llt.info() != Eigen::Success)
+            const auto coords = cxxgpr::detail::lower_tile_coords(tile_idx, n_blocks);
+            const std::size_t bi = coords.row_block;
+            const std::size_t bj = coords.col_block;
+            const std::size_t ib = bi * tile;
+            const std::size_t jb = bj * tile;
+            const std::size_t rm = std::min(tile, tail - ib);
+            const std::size_t cn = std::min(tile, tail - jb);
+            if (bj != last_bj)
             {
-                return false;
+                cxxgpr::detail::pack_panel_b_colmajor_t(&a(row_start + jb, k), a.col_stride(), bs, cn, packed_b);
+                last_bj = bj;
             }
-            for (std::size_t i = 0; i < bs; ++i)
+            cxxgpr::detail::pack_panel_a_colmajor(&a(row_start + ib, k), a.col_stride(), rm, bs, packed_a);
+            T* const c_dst = &a(row_start + ib, row_start + jb);
+            if (bi == bj)
             {
-                const T diag = a(k + i, k + i);
-                if (!std::isfinite(diag) || diag <= T{0})
-                {
-                    return false;
-                }
+                cxxgpr::detail::syrk_packed_lower_diag_sub(rm, bs, packed_a, packed_b, c_dst, a.col_stride());
             }
-            return true;
+            else
+            {
+                cxxgpr::detail::gemm_packed_sub(rm, cn, bs, packed_a, packed_b, c_dst, a.col_stride());
+            }
         }
 
-        /// @brief Executes Eigen::LLT or deterministic blocked Cholesky in place on the lower triangle of a.
-        /// @details Uses blocked panel/rank-32 SIMD updates with Eigen::LLT subblock tail finishing whenever matrix
-        /// order `n >= 256` (covering both `float` and `double`), running inside a single persistent OpenMP region when
-        /// multiple threads are active so 1-thread and multi-thread runs stay bit-identical. For smaller matrices runs
-        /// Eigen::LLT strictly in place and verifies positive finite pivots.
+        /// @brief Executes Eigen::LLT, direct L2 SIMD blocked Cholesky, or cache-packed BLAS-3 Cholesky in place.
+        /// @details Uses a three-tier cache-aware schedule:
+        /// - `n >= 384`: cache-packed BLAS-3 (`KC = 64`, `MC/NC = 48`) with dynamic tile scheduling inside OpenMP.
+        /// - `256 <= n < 384`: direct multi-threaded column-SIMD blocked Cholesky (`k_direct_panel_block`) without packing.
+        /// - `n < 256`: single-threaded in-place `Eigen::LLT`.
+        /// All tiers keep single-thread and multi-thread runs bitwise identical.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in,out] a Square mutable matrix view containing A's lower triangle on entry.
-        /// @param[in] stage Factorization stage recorded in CholeskyFailed errors.
+        /// @param[in] stage Factorization stage recorded in CholeskyFailed diagnostics.
         /// @return Empty expected on success, or GprErrorCode::CholeskyFailed on breakdown.
         /// @retval GprErrorCode::CholeskyFailed When factorization fails or yields a non-positive/non-finite pivot.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> run_eigen_llt_in_place(MatrixMut<T> a, CholeskyStage stage)
         {
             const std::size_t n = a.rows();
+            if (n >= 384U)
+            {
+                bool failed = false;
+                constexpr std::size_t panel_block = cxxgpr::detail::k_blas3_kc;
+                constexpr std::size_t tail_cutoff = 64U;
+#ifdef _OPENMP
+#    pragma omp parallel if (openmp_max_threads() > 1U) shared(a, failed, n)
+                {
+                    alignas(64) std::array<T, cxxgpr::detail::k_blas3_pack_a_cap<T>> packed_a{};
+                    alignas(64) std::array<T, cxxgpr::detail::k_blas3_pack_b_cap> packed_b{};
+                    for (std::size_t k = 0U; k < n; k += panel_block)
+                    {
+                        const std::size_t rem = n - k;
+                        if (rem <= tail_cutoff)
+                        {
+#    pragma omp single
+                            {
+                                if (!factor_subblock_eigen(a, k, rem))
+                                {
+                                    failed = true;
+                                }
+                            }
+                            break;
+                        }
+                        const std::size_t bs = std::min(panel_block, rem);
+#    pragma omp single
+                        {
+                            if (!factor_subblock_eigen(a, k, bs))
+                            {
+                                failed = true;
+                            }
+                        }
+                        if (failed)
+                        {
+                            break;
+                        }
+                        const std::size_t row_start = k + bs;
+                        const std::size_t tail = n - row_start;
+                        const std::size_t n_strips =
+                            (tail + cxxgpr::detail::k_blas3_mc - 1U) / cxxgpr::detail::k_blas3_mc;
+                        const auto n_strips_s = static_cast<std::ptrdiff_t>(n_strips);
+#    pragma omp for schedule(dynamic, 1)
+                        for (std::ptrdiff_t s = 0; s < n_strips_s; ++s)
+                        {
+                            const std::size_t r_begin =
+                                row_start + (static_cast<std::size_t>(s) * cxxgpr::detail::k_blas3_mc);
+                            const std::size_t r_end = std::min(r_begin + cxxgpr::detail::k_blas3_mc, n);
+                            cxxgpr::detail::solve_panel_rows_packed(a, k, bs, r_begin, r_end);
+                        }
+
+                        const std::size_t tile = (tail >= 384U) ? cxxgpr::detail::k_blas3_mc : 24U;
+                        const std::size_t n_blocks = (tail + tile - 1U) / tile;
+                        const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
+                        const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
+                        std::size_t last_bj = n_blocks;
+#    pragma omp for schedule(dynamic, 1)
+                        for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
+                        {
+                            apply_cholesky_trailing_tile(
+                                a, k, bs, row_start, tail, tile, n_blocks, static_cast<std::size_t>(t_s), last_bj,
+                                packed_a.data(), packed_b.data()
+                            );
+                        }
+                    }
+                }
+#else
+                alignas(64) std::array<T, cxxgpr::detail::k_blas3_pack_a_cap<T>> packed_a{};
+                alignas(64) std::array<T, cxxgpr::detail::k_blas3_pack_b_cap> packed_b{};
+                for (std::size_t k = 0U; k < n; k += panel_block)
+                {
+                    const std::size_t rem = n - k;
+                    if (rem <= tail_cutoff)
+                    {
+                        if (!factor_subblock_eigen(a, k, rem))
+                        {
+                            failed = true;
+                        }
+                        break;
+                    }
+                    const std::size_t bs = std::min(panel_block, rem);
+                    if (!factor_subblock_eigen(a, k, bs))
+                    {
+                        failed = true;
+                        break;
+                    }
+                    const std::size_t row_start = k + bs;
+                    const std::size_t tail = n - row_start;
+                    cxxgpr::detail::solve_panel_rows_packed(a, k, bs, row_start, n);
+
+                    const std::size_t tile = (tail >= 384U) ? cxxgpr::detail::k_blas3_mc : 24U;
+                    const std::size_t n_blocks = (tail + tile - 1U) / tile;
+                    const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
+                    std::size_t last_bj = n_blocks;
+                    for (std::size_t t = 0U; t < total_tiles; ++t)
+                    {
+                        apply_cholesky_trailing_tile(
+                            a, k, bs, row_start, tail, tile, n_blocks, t, last_bj, packed_a.data(), packed_b.data()
+                        );
+                    }
+                }
+#endif
+                if (failed)
+                {
+                    return std::unexpected(GprError::cholesky_failed(0.0, n, stage));
+                }
+                return {};
+            }
+
             if (n >= 256U)
             {
                 bool failed = false;
@@ -644,7 +785,7 @@ namespace cxxgpr::linalg
                 {
                     const auto tid = static_cast<std::size_t>(omp_get_thread_num());
                     const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
-                    for (std::size_t k = 0; k < n; k += k_direct_panel_block)
+                    for (std::size_t k = 0U; k < n; k += k_direct_panel_block)
                     {
                         const std::size_t rem = n - k;
                         if (rem <= tail_cutoff)
@@ -661,7 +802,7 @@ namespace cxxgpr::linalg
                         const std::size_t bs = std::min(k_direct_panel_block, rem);
 #    pragma omp single
                         {
-                            if (!factor_unblocked_panel_diag(a, k, bs))
+                            if (!factor_subblock_eigen(a, k, bs))
                             {
                                 failed = true;
                             }
@@ -689,7 +830,7 @@ namespace cxxgpr::linalg
                     }
                 }
 #else
-                for (std::size_t k = 0; k < n; k += k_direct_panel_block)
+                for (std::size_t k = 0U; k < n; k += k_direct_panel_block)
                 {
                     const std::size_t rem = n - k;
                     if (rem <= tail_cutoff)
@@ -701,7 +842,7 @@ namespace cxxgpr::linalg
                         break;
                     }
                     const std::size_t bs = std::min(k_direct_panel_block, rem);
-                    if (!factor_unblocked_panel_diag(a, k, bs))
+                    if (!factor_subblock_eigen(a, k, bs))
                     {
                         failed = true;
                         break;
@@ -1070,8 +1211,36 @@ namespace cxxgpr::linalg
             return std::unexpected(GprError::length_mismatch("scratch matrix dimension must match factor dimension"));
         }
 
-        // Seed scratch with I_n, then solve L * X = I_n in place so scratch holds L^-1 (lower triangular).
+        // Use packed lower-triangular inversion for larger matrices, otherwise seed I_n and solve forward.
         const std::size_t n = l.rows();
+        if (n >= 192U)
+        {
+            const std::size_t col_block = (n >= 768U) ? 24U : 12U;
+            const std::size_t n_blocks = (n + col_block - 1U) / col_block;
+            const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
+#endif
+            for (std::ptrdiff_t b = 0; b < n_blocks_s; ++b)
+            {
+                const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
+                const std::size_t col_end = std::min(col_begin + col_block, n);
+                cxxgpr::detail::invert_lower_col_strip_packed(l, scratch_n_by_n, col_begin, col_end);
+            }
+            const auto n_cols_s = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U && n >= 256U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < n_cols_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                const auto sum_sq =
+                    cxxgpr::detail::sq_norm_mixed_simd<T, double>(scratch_n_by_n.col(col).data() + col, n - col);
+                out_diag[col] = static_cast<T>(sum_sq);
+            }
+            return {};
+        }
+
         for (std::size_t col = 0; col < n; ++col)
         {
             for (std::size_t row = 0; row < n; ++row)
@@ -1085,12 +1254,8 @@ namespace cxxgpr::linalg
         // Since (L L^T)^-1 = (L^-1)^T L^-1, the col-th diagonal equals ||L^-1 e_col||_2^2.
         for (std::size_t col = 0; col < n; ++col)
         {
-            double sum_sq = 0.0;
-            for (std::size_t row = col; row < n; ++row)
-            {
-                const auto val = static_cast<double>(scratch_n_by_n(row, col));
-                sum_sq += val * val;
-            }
+            const auto sum_sq =
+                cxxgpr::detail::sq_norm_mixed_simd<T, double>(scratch_n_by_n.col(col).data() + col, n - col);
             out_diag[col] = static_cast<T>(sum_sq);
         }
         return {};

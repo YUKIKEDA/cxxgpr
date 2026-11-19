@@ -21,6 +21,7 @@
 #    include <omp.h>
 #endif
 
+#include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
 namespace cxxgpr
@@ -514,7 +515,75 @@ namespace cxxgpr
         };
 
         const double cov_flops = static_cast<double>(n) * static_cast<double>(m) * static_cast<double>(m);
-        if (m >= 32U && cov_flops >= 262144.0)
+        if (m >= 64U && n >= 64U)
+        {
+            const std::size_t tile = (m >= 512U) ? detail::k_blas3_mc : 24U;
+            const std::size_t n_blocks = (m + tile - 1U) / tile;
+            const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
+            const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
+#ifdef _OPENMP
+#    pragma omp parallel if (linalg::openmp_max_threads() > 1U && cov_flops >= 262144.0)
+#endif
+            {
+                alignas(64) std::array<Refine, detail::k_blas3_mc * detail::k_blas3_nc> c_tile{};
+                alignas(64) std::array<Refine, detail::k_blas3_pack_a_cap<Refine>> packed_a{};
+                alignas(64) std::array<Refine, detail::k_blas3_pack_b_cap> packed_b{};
+#ifdef _OPENMP
+#    pragma omp for schedule(dynamic, 1)
+#endif
+                for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
+                {
+                    const auto coords = detail::lower_tile_coords(static_cast<std::size_t>(t_s), n_blocks);
+                    const std::size_t bi = coords.row_block;
+                    const std::size_t bj = coords.col_block;
+                    const std::size_t ib = bi * tile;
+                    const std::size_t jb = bj * tile;
+                    const std::size_t rm = std::min(tile, m - ib);
+                    const std::size_t cn = std::min(tile, m - jb);
+                    std::fill_n(c_tile.data(), rm * cn, Refine{0});
+
+                    for (std::size_t kb = 0U; kb < n; kb += detail::k_blas3_kc)
+                    {
+                        const std::size_t bs = std::min(detail::k_blas3_kc, n - kb);
+                        if constexpr (std::same_as<Storage, Refine>)
+                        {
+                            detail::pack_panel_a_transpose(v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data(), 0U);
+                            detail::pack_panel_b_colmajor(v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data(), 0U);
+                        }
+                        else
+                        {
+                            detail::pack_panel_a_transpose_promote_f32_to_f64(
+                                v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data()
+                            );
+                            detail::pack_panel_b_colmajor_promote_f32_to_f64(
+                                v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data()
+                            );
+                        }
+                        detail::gemm_packed_add(rm, cn, bs, packed_a.data(), packed_b.data(), c_tile.data(), rm);
+                    }
+
+                    // Form Sigma_* = K_** - V^T V over the lower tile and add observation noise on the diagonal.
+                    for (std::size_t c = 0U; c < cn; ++c)
+                    {
+                        const std::size_t col = jb + c;
+                        const std::size_t r_start = (bi == bj) ? c : 0U;
+                        const Refine* const tile_col = c_tile.data() + (c * rm);
+                        const std::size_t col_off = col * m;
+                        for (std::size_t r = r_start; r < rm; ++r)
+                        {
+                            const std::size_t row = ib + r;
+                            Refine entry = static_cast<Refine>(kss[col_off + row]) - tile_col[r];
+                            if (row == col)
+                            {
+                                entry += noise_var;
+                            }
+                            cov_ptr[col_off + row] = entry;
+                        }
+                    }
+                }
+            }
+        }
+        else if (m >= 32U && cov_flops >= 262144.0)
         {
             linalg::parallel_for_lower_blocks(m, 0U, col_range);
         }

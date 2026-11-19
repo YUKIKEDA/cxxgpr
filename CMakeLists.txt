@@ -60,6 +60,7 @@ add_library(cxxgpr STATIC
     src/linalg/cholesky.cpp
     src/linalg/dense.cpp
     src/linalg/jitter.cpp
+    src/linalg/packed_blas3.cpp
     src/linalg/parallel.cpp
     src/optimizer/bounds.cpp
     src/optimizer/fixed.cpp

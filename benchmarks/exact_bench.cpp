@@ -192,6 +192,24 @@ namespace
         }
     }
 
+    /// @brief Benchmarks fixed-hyperparameter Cholesky factorization on n = 2048 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_forrester_2048_factor_double(benchmark::State& state)
+    {
+        const ForresterDataset data(2048U, 64U);
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x_train.data(), data.n, 1U, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+
+        // Measure very large-scale O(n^3) Cholesky factorization for n = 2048.
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(x_ref, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
     /// @brief Benchmarks L-BFGS hyperparameter fitting on n = 512 Forrester data for precision P.
     /// @tparam P Precision policy type (DoublePrecision or MixedPrecision).
     /// @param[in,out] state Google Benchmark iteration state.
@@ -522,6 +540,7 @@ namespace
     BENCHMARK(bm_forrester_256_predict_into_double);
     BENCHMARK(bm_forrester_512_factor_double);
     BENCHMARK(bm_forrester_1024_factor_double);
+    BENCHMARK(bm_forrester_2048_factor_double);
     BENCHMARK_TEMPLATE(bm_forrester_512_fit_lbfgs, cxxgpr::DoublePrecision);
     BENCHMARK_TEMPLATE(bm_forrester_512_fit_lbfgs, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>);
     BENCHMARK(bm_forrester_512_predict_cov_double);

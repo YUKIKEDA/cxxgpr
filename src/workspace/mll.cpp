@@ -20,6 +20,7 @@
 #    include <omp.h>
 #endif
 
+#include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
 namespace cxxgpr
@@ -216,6 +217,80 @@ namespace cxxgpr
                     }
                 }
             };
+            if (n >= 384U)
+            {
+                const std::size_t col_block = (n >= 768U) ? 24U : 12U;
+                const std::size_t n_col_blocks = (n + col_block - 1U) / col_block;
+                const auto n_col_blocks_s = static_cast<std::ptrdiff_t>(n_col_blocks);
+                const std::size_t tile = (n >= 768U) ? detail::k_blas3_mc : 24U;
+                const std::size_t n_tile_blocks = (n + tile - 1U) / tile;
+                const std::size_t total_tiles = (n_tile_blocks * (n_tile_blocks + 1U)) / 2U;
+                const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
+#ifdef _OPENMP
+#    pragma omp parallel if (linalg::openmp_max_threads() > 1U)
+#endif
+                {
+                    // Stage 1: Strip-wise packed inversion of Z = L^-1 (implicit barrier ensures Z is complete).
+#ifdef _OPENMP
+#    pragma omp for schedule(dynamic, 1)
+#endif
+                    for (std::ptrdiff_t b = 0; b < n_col_blocks_s; ++b)
+                    {
+                        const std::size_t col_begin = static_cast<std::size_t>(b) * col_block;
+                        const std::size_t col_end = std::min(col_begin + col_block, n);
+                        detail::invert_lower_col_strip_packed(l, z_scratch, col_begin, col_end);
+                    }
+
+                    // Stage 2: Lower-triangular GEMM contraction W = alpha * alpha^T - Z^T * Z.
+                    alignas(64) std::array<T, detail::k_blas3_mc * detail::k_blas3_nc> c_tile{};
+                    alignas(64) std::array<T, detail::k_blas3_pack_a_cap<T>> packed_a{};
+                    alignas(64) std::array<T, detail::k_blas3_pack_b_cap> packed_b{};
+#ifdef _OPENMP
+#    pragma omp for schedule(dynamic, 1)
+#endif
+                    for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
+                    {
+                        const auto coords = detail::lower_tile_coords(static_cast<std::size_t>(t_s), n_tile_blocks);
+                        const std::size_t bi = coords.row_block;
+                        const std::size_t bj = coords.col_block;
+                        const std::size_t ib = bi * tile;
+                        const std::size_t jb = bj * tile;
+                        const std::size_t rm = std::min(tile, n - ib);
+                        const std::size_t cn = std::min(tile, n - jb);
+                        std::fill_n(c_tile.data(), rm * cn, T{0});
+
+                        for (std::size_t kb = ib; kb < n; kb += detail::k_blas3_kc)
+                        {
+                            const std::size_t bs = std::min(detail::k_blas3_kc, n - kb);
+                            detail::pack_panel_a_transpose(
+                                &z_scratch(kb, ib), z_scratch.col_stride(), rm, bs, packed_a.data(),
+                                (kb == ib) ? rm : 0U
+                            );
+                            detail::pack_panel_b_colmajor(
+                                &z_scratch(kb, jb), z_scratch.col_stride(), bs, cn, packed_b.data(),
+                                (kb == jb) ? cn : 0U
+                            );
+                            detail::gemm_packed_add(rm, cn, bs, packed_a.data(), packed_b.data(), c_tile.data(), rm);
+                        }
+
+                        // Subtract accumulated Z^T * Z from alpha * alpha^T in explicit FMA order over the lower tile.
+                        for (std::size_t c = 0U; c < cn; ++c)
+                        {
+                            const std::size_t col = jb + c;
+                            const T alpha_j = alpha[col];
+                            const std::size_t r_start = (bi == bj) ? c : 0U;
+                            const T* const tile_col = c_tile.data() + (c * rm);
+                            T* const w_col = w_out.col(col).data();
+                            for (std::size_t r = r_start; r < rm; ++r)
+                            {
+                                const std::size_t row = ib + r;
+                                w_col[row] = detail::scalar_fmadd(alpha[row], alpha_j, -tile_col[r]);
+                            }
+                        }
+                    }
+                }
+                return {};
+            }
             if (n >= 96U)
             {
                 linalg::parallel_for_lower_blocks(n, 0U, invert_range);

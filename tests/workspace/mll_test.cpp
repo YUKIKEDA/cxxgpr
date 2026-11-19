@@ -620,7 +620,7 @@ namespace
     }
 
     /// @brief Verifies parallel W construction and MLL+grad match bitwise across 1/2/4 threads for odd n >= 96.
-    /// @details Evaluates DoublePrecision and SinglePrecision mll_and_gradient_into at n = 99 and n = 131 with
+    /// @details Evaluates DoublePrecision and SinglePrecision mll_and_gradient_into at n = 99, 131, and 389 with
     /// zero heap allocations under NoAllocationScope(AuditMode::CppAndEigen), checks exact bitwise invariance of MLL,
     /// gradients, and lower-triangular W across 1/2/4 OpenMP threads, and verifies parity with CholeskyBuffer::Reuse.
     TEST(WorkspaceMllTest, MllAndGradBitwiseDeterministicAcrossThreadsAndOddSizes)
@@ -749,8 +749,10 @@ namespace
 
         check_policy.template operator()<cxxgpr::DoublePrecision>(99U);
         check_policy.template operator()<cxxgpr::DoublePrecision>(131U);
+        check_policy.template operator()<cxxgpr::DoublePrecision>(389U);
         check_policy.template operator()<cxxgpr::SinglePrecision>(99U);
         check_policy.template operator()<cxxgpr::SinglePrecision>(131U);
+        check_policy.template operator()<cxxgpr::SinglePrecision>(389U);
     }
 
 }  // namespace

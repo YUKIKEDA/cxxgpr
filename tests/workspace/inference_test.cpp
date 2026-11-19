@@ -600,17 +600,17 @@ namespace
     }
 
     /// @brief Verifies parallel predict_covariance_into() stays bit-identical across 1/2/4 threads for odd m.
-    /// @details Evaluates DoublePrecision and MixedPrecision<PromoteStorage> full covariance at n = 128, m = 67
-    /// (n * m^2 >= 262,144) under 1, 2, and 4 OpenMP threads, verifies exact bitwise equality across all mean and
-    /// matrix elements, and checks accuracy against an independent naive K_** - V^T V reference.
+    /// @details Evaluates DoublePrecision, SinglePrecision, and MixedPrecision<PromoteStorage> full covariance at
+    /// n = 128, m = 67 and m = 200 under 1, 2, and 4 OpenMP threads, verifies exact bitwise equality across all mean
+    /// and matrix elements, and checks accuracy against an independent naive K_** - V^T V reference.
     TEST(WorkspaceInferenceTest, PredictCovarianceBitwiseDeterministicAcrossThreads)
     {
         // Spec: DES-16, DES-20
-        auto check_cov_policy = []<typename Policy>()
+        auto check_cov_policy = []<typename Policy>(std::size_t m)
         {
             using Storage = Policy::Storage;
+            using Refine = Policy::Refine;
             constexpr std::size_t n = 128U;
-            constexpr std::size_t m = 67U;
             constexpr std::size_t d = 2U;
             std::vector<double> x_vals(n * d);
             std::vector<double> y_vals(n);
@@ -643,7 +643,7 @@ namespace
                 (void)threads;
 #endif
                 cxxgpr::QueryWorkspace<Policy> qws;
-                cxxgpr::PredictiveCovariance<double> out;
+                cxxgpr::PredictiveCovariance<Refine> out;
                 EXPECT_TRUE(
                     cxxgpr::predict_covariance_into<Policy>(
                         kernel, fix.likelihood, fix.x_ref(), fix.l_ref(), fix.alpha, q_ref,
@@ -668,17 +668,41 @@ namespace
             ASSERT_EQ(c1.covariance.size(), m * m);
             for (std::size_t i = 0U; i < m; ++i)
             {
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c2.mean[i]));
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c4.mean[i]));
+                if constexpr (std::same_as<Refine, double>)
+                {
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c2.mean[i]));
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(c1.mean[i]), std::bit_cast<std::uint64_t>(c4.mean[i]));
+                }
+                else
+                {
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(c1.mean[i]), std::bit_cast<std::uint32_t>(c2.mean[i]));
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(c1.mean[i]), std::bit_cast<std::uint32_t>(c4.mean[i]));
+                }
             }
             for (std::size_t idx = 0U; idx < m * m; ++idx)
             {
-                EXPECT_EQ(
-                    std::bit_cast<std::uint64_t>(c1.covariance[idx]), std::bit_cast<std::uint64_t>(c2.covariance[idx])
-                );
-                EXPECT_EQ(
-                    std::bit_cast<std::uint64_t>(c1.covariance[idx]), std::bit_cast<std::uint64_t>(c4.covariance[idx])
-                );
+                if constexpr (std::same_as<Refine, double>)
+                {
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint64_t>(c1.covariance[idx]),
+                        std::bit_cast<std::uint64_t>(c2.covariance[idx])
+                    );
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint64_t>(c1.covariance[idx]),
+                        std::bit_cast<std::uint64_t>(c4.covariance[idx])
+                    );
+                }
+                else
+                {
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint32_t>(c1.covariance[idx]),
+                        std::bit_cast<std::uint32_t>(c2.covariance[idx])
+                    );
+                    EXPECT_EQ(
+                        std::bit_cast<std::uint32_t>(c1.covariance[idx]),
+                        std::bit_cast<std::uint32_t>(c4.covariance[idx])
+                    );
+                }
             }
 
             // Compare against an explicit naive K_** - V^T V (+ sigma_n^2 I) oracle.
@@ -707,7 +731,15 @@ namespace
                     .has_value());
 
             const double noise_var = fix.likelihood.noise_variance();
-            const double oracle_tol = std::same_as<Storage, double> ? 1e-12 : 1e-11;
+            double oracle_tol = 1e-11;
+            if constexpr (std::same_as<Refine, float>)
+            {
+                oracle_tol = 1e-4;
+            }
+            else if constexpr (std::same_as<Storage, double>)
+            {
+                oracle_tol = 1e-12;
+            }
             for (std::size_t col = 0U; col < m; ++col)
             {
                 for (std::size_t row = col; row < m; ++row)
@@ -728,8 +760,11 @@ namespace
             }
         };
 
-        check_cov_policy.template operator()<cxxgpr::DoublePrecision>();
-        check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>();
+        check_cov_policy.template operator()<cxxgpr::DoublePrecision>(67U);
+        check_cov_policy.template operator()<cxxgpr::SinglePrecision>(67U);
+        check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(67U);
+        check_cov_policy.template operator()<cxxgpr::DoublePrecision>(200U);
+        check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(200U);
     }
 
 }  // namespace
