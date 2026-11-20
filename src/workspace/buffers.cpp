@@ -359,6 +359,7 @@ namespace cxxgpr
     }
 
     /// @brief Grows the buffers used by point-based prediction, leaving query_dist untouched.
+    /// @tparam P Training precision policy.
     /// @param[in] n Training point count.
     /// @param[in] m Query point count.
     /// @param[in] d Feature count.
