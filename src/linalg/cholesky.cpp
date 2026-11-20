@@ -34,6 +34,7 @@ namespace cxxgpr::linalg
     namespace
     {
 
+        /// @brief Column count shared by direct Cholesky panels and their scratch arrays.
         constexpr std::size_t k_direct_panel_block = 32U;
 
         /// @brief Validates a square lower-triangular Cholesky factor L prior to solves or determinant queries.
