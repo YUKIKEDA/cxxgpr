@@ -557,7 +557,8 @@ namespace cxxgpr::linalg
                 if (n_cols >= 8U && approx_flops >= 4194304.0)
                 {
                     // Narrow batches use independent four-column solves.
-                    const std::size_t col_block = (n_cols <= 24U) ? 4U : ((n_cols >= 512U) ? 24U : 12U);
+                    const std::size_t wide_block = (n_cols >= 512U) ? 24U : 12U;
+                    const std::size_t col_block = (n_cols <= 24U) ? 4U : wide_block;
                     const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                     const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
