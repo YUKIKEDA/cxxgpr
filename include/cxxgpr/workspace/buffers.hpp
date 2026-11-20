@@ -297,6 +297,11 @@ namespace cxxgpr
         );
 
         /// @brief Grows the buffers used by point-based prediction, leaving query_dist untouched.
+        /// @param[in] n Training point count.
+        /// @param[in] m Query point count.
+        /// @param[in] d Feature count.
+        /// @param[in] nested_depth Kernel nesting depth.
+        /// @return Success or a dimension error.
         [[nodiscard]] std::expected<void, GprError> ensure_prediction(
             std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
         );
