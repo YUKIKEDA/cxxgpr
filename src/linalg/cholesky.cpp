@@ -34,6 +34,8 @@ namespace cxxgpr::linalg
     namespace
     {
 
+        constexpr std::size_t k_direct_panel_block = 32U;
+
         /// @brief Validates a square lower-triangular Cholesky factor L prior to solves or determinant queries.
         /// @details Enforces square view geometry, lower-triangle finiteness, and strictly positive diagonal entries.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
@@ -163,8 +165,8 @@ namespace cxxgpr::linalg
         ) noexcept
         {
             constexpr std::size_t row_tile = 64U;
-            std::array<const T*, 32> l_ptrs{};
-            std::array<T, 32> coeffs{};
+            std::array<const T*, k_direct_panel_block> l_ptrs{};
+            std::array<T, k_direct_panel_block> coeffs{};
             for (std::size_t r_tile = r_begin; r_tile < r_end; r_tile += row_tile)
             {
                 const std::size_t r_stop = std::min(r_tile + row_tile, r_end);
@@ -207,11 +209,11 @@ namespace cxxgpr::linalg
         ) noexcept
         {
             constexpr std::size_t row_tile = 256U;
-            std::array<const T*, 32> l_ptrs{};
-            std::array<T, 32> v0_arr{};
-            std::array<T, 32> v1_arr{};
-            std::array<T, 32> v2_arr{};
-            std::array<T, 32> v3_arr{};
+            std::array<const T*, k_direct_panel_block> l_ptrs{};
+            std::array<T, k_direct_panel_block> v0_arr{};
+            std::array<T, k_direct_panel_block> v1_arr{};
+            std::array<T, k_direct_panel_block> v2_arr{};
+            std::array<T, k_direct_panel_block> v3_arr{};
 
             std::size_t j = j_begin;
             for (; j + 4U <= j_end; j += 4U)
@@ -635,7 +637,6 @@ namespace cxxgpr::linalg
             if (n >= 256U)
             {
                 bool failed = false;
-                constexpr std::size_t panel_block = 32U;
                 constexpr std::size_t tail_cutoff = 64U;
                 constexpr std::size_t row_granule = 16U;
 #ifdef _OPENMP
@@ -643,7 +644,7 @@ namespace cxxgpr::linalg
                 {
                     const auto tid = static_cast<std::size_t>(omp_get_thread_num());
                     const auto nthreads = static_cast<std::size_t>(omp_get_num_threads());
-                    for (std::size_t k = 0; k < n; k += panel_block)
+                    for (std::size_t k = 0; k < n; k += k_direct_panel_block)
                     {
                         const std::size_t rem = n - k;
                         if (rem <= tail_cutoff)
@@ -657,7 +658,7 @@ namespace cxxgpr::linalg
                             }
                             break;
                         }
-                        const std::size_t bs = std::min(panel_block, rem);
+                        const std::size_t bs = std::min(k_direct_panel_block, rem);
 #    pragma omp single
                         {
                             if (!factor_unblocked_panel_diag(a, k, bs))
@@ -688,7 +689,7 @@ namespace cxxgpr::linalg
                     }
                 }
 #else
-                for (std::size_t k = 0; k < n; k += panel_block)
+                for (std::size_t k = 0; k < n; k += k_direct_panel_block)
                 {
                     const std::size_t rem = n - k;
                     if (rem <= tail_cutoff)
@@ -699,7 +700,7 @@ namespace cxxgpr::linalg
                         }
                         break;
                     }
-                    const std::size_t bs = std::min(panel_block, rem);
+                    const std::size_t bs = std::min(k_direct_panel_block, rem);
                     if (!factor_unblocked_panel_diag(a, k, bs))
                     {
                         failed = true;
