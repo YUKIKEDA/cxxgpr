@@ -133,6 +133,8 @@ namespace cxxgpr
             bool optimize;
             /// @brief True if the optimizer utilizes incremental LeafCache updates via changed_indices.
             bool use_change_indices;
+            /// @brief True for built-in optimizers that only request objective values.
+            bool value_only;
         };
 
         /// @brief Type-erased callback invoking a concrete optimizer on TwiceDifferentiable MLL objective.
@@ -765,6 +767,8 @@ namespace cxxgpr
                 .fit_policy = fit_policy_,
                 .optimize = optimize && !std::same_as<O, optimizer::Fixed>,
                 .use_change_indices = optimizer_uses_change_indices_v<O>,
+                .value_only =
+                    std::same_as<O, optimizer::NelderMead> || std::same_as<O, optimizer::FastSimulatedAnnealing>,
             };
             // Bridge the statically typed optimizer to the out-of-line training engine.
             auto cb = [](void* ctx, optimizer::TwiceDifferentiable& obj,
