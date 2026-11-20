@@ -493,7 +493,9 @@ namespace cxxgpr::detail
                 l_f32_(l_f32),
                 a_f32_(a_f32_symm),
                 diag_offset_(diag_offset),
-                r_f32_buf_(x_f64.rows(), 0.0F)
+                r_f32_buf_(x_f64.rows(), 0.0F),
+                row_abs_buf_(x_f64.rows(), 0.0),
+                sum_buf_(x_f64.rows(), 0.0)
             {
                 kernel_f64_.set_kernel_exp(kernel_exp);
             }
@@ -503,8 +505,8 @@ namespace cxxgpr::detail
             [[nodiscard]] std::span<const double> rhs() const noexcept override { return y_f64_; }
 
             /// @brief Computes residual r = y_f64 - A * w according to P::Residual and returns matrix norm.
-            /// @details Promotes stored float entries for PromoteStorage, or recomputes double kernel blocks
-            /// of width 32 via block_reeval_residual() for ReevaluateKernel.
+            /// @details Promotes stored float entries for PromoteStorage using preallocated scratch, or recomputes
+            /// double kernel blocks of width 32 via block_reeval_residual() for ReevaluateKernel.
             /// @param[in] w Current double-precision iterate of length n.
             /// @param[out] r Output double-precision residual buffer of length n.
             /// @return Infinity norm of the system matrix used for relative residual scaling, or GprError.
@@ -515,7 +517,7 @@ namespace cxxgpr::detail
             {
                 if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
                 {
-                    return promoted_residual(a_f32_, w, y_f64_, r);
+                    return promoted_residual_into(a_f32_, w, y_f64_, r, row_abs_buf_, sum_buf_);
                 }
                 else
                 {
@@ -623,6 +625,10 @@ namespace cxxgpr::detail
             double diag_offset_{0.0};
             /// @brief Reusable single-precision residual buffer for triangular L_f32 solves.
             std::vector<float> r_f32_buf_;
+            /// @brief Reusable row l1-norm scratch buffer for promoted_residual_into().
+            std::vector<double> row_abs_buf_;
+            /// @brief Reusable double-precision matrix-vector accumulator buffer for promoted_residual_into().
+            std::vector<double> sum_buf_;
         };
 
         /// @brief Executes mixed-precision iterative refinement starting from the float Cholesky solution.

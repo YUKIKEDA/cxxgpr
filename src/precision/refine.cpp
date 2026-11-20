@@ -10,10 +10,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <limits>
 #include <optional>
 #include <utility>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#    include <immintrin.h>
+#endif
 
 namespace cxxgpr
 {
@@ -63,6 +68,228 @@ namespace cxxgpr
             }
             const double rel = r_inf / denom;
             return {.relative_residual = rel, .converged = rel < tol};
+        }
+
+        /// @brief Computes `a * b + c` in double precision matching active SIMD FMA contraction.
+        /// @param[in] a First multiplicand.
+        /// @param[in] b Second multiplicand.
+        /// @param[in] c Addend.
+        /// @return `a * b + c`.
+        [[nodiscard]] inline double refine_scalar_fmadd(double a, double b, double c) noexcept
+        {
+#if ((defined(__AVX512F__) && defined(__AVX512DQ__)) || defined(__AVX2__)) && (defined(__FMA__) || defined(_MSC_VER))
+            return std::fma(a, b, c);
+#else
+            return c + (a * b);
+#endif
+        }
+
+        /// @brief Accumulates 4 consecutive float columns into promoted double `row_abs` and `sum` buffers.
+        /// @details Converts float entries to binary64 via AVX-512, AVX2+FMA, or SSE2 while preserving strict
+        /// ascending column order `j0 -> j1 -> j2 -> j3` per row and cutting scratch loads/stores by 4x.
+        /// @param[in] col0 Pointer to float column `j` base.
+        /// @param[in] col1 Pointer to float column `j + 1` base.
+        /// @param[in] col2 Pointer to float column `j + 2` base.
+        /// @param[in] col3 Pointer to float column `j + 3` base.
+        /// @param[in] alpha0 Binary64 weight for column `j`.
+        /// @param[in] alpha1 Binary64 weight for column `j + 1`.
+        /// @param[in] alpha2 Binary64 weight for column `j + 2`.
+        /// @param[in] alpha3 Binary64 weight for column `j + 3`.
+        /// @param[in,out] row_abs Scratch buffer accumulating row l1 sums in binary64.
+        /// @param[in,out] sum Scratch buffer accumulating matrix-vector sums in binary64.
+        /// @param[in] n Number of rows in each column.
+        inline void accumulate_promoted_4cols_simd(
+            const float* col0,
+            const float* col1,
+            const float* col2,
+            const float* col3,
+            double alpha0,
+            double alpha1,
+            double alpha2,
+            double alpha3,
+            double* row_abs,
+            double* sum,
+            std::size_t n
+        ) noexcept
+        {
+            std::size_t i = 0U;
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+            const __m512i abs_mask = _mm512_set1_epi64(0x7FFFFFFFFFFFFFFFLL);
+            const __m512d va0 = _mm512_set1_pd(alpha0);
+            const __m512d va1 = _mm512_set1_pd(alpha1);
+            const __m512d va2 = _mm512_set1_pd(alpha2);
+            const __m512d va3 = _mm512_set1_pd(alpha3);
+            for (; i + 8U <= n; i += 8U)
+            {
+                __m512d rabs = _mm512_loadu_pd(row_abs + i);
+                __m512d rsum = _mm512_loadu_pd(sum + i);
+                const __m512d x0 = _mm512_cvtps_pd(_mm256_loadu_ps(col0 + i));
+                const __m512d x1 = _mm512_cvtps_pd(_mm256_loadu_ps(col1 + i));
+                const __m512d x2 = _mm512_cvtps_pd(_mm256_loadu_ps(col2 + i));
+                const __m512d x3 = _mm512_cvtps_pd(_mm256_loadu_ps(col3 + i));
+
+                rabs = _mm512_add_pd(rabs, _mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(x0), abs_mask)));
+                rabs = _mm512_add_pd(rabs, _mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(x1), abs_mask)));
+                rabs = _mm512_add_pd(rabs, _mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(x2), abs_mask)));
+                rabs = _mm512_add_pd(rabs, _mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(x3), abs_mask)));
+
+#    if defined(__FMA__) || defined(_MSC_VER)
+                rsum = _mm512_fmadd_pd(x0, va0, rsum);
+                rsum = _mm512_fmadd_pd(x1, va1, rsum);
+                rsum = _mm512_fmadd_pd(x2, va2, rsum);
+                rsum = _mm512_fmadd_pd(x3, va3, rsum);
+#    else
+                rsum = _mm512_add_pd(rsum, _mm512_mul_pd(x0, va0));
+                rsum = _mm512_add_pd(rsum, _mm512_mul_pd(x1, va1));
+                rsum = _mm512_add_pd(rsum, _mm512_mul_pd(x2, va2));
+                rsum = _mm512_add_pd(rsum, _mm512_mul_pd(x3, va3));
+#    endif
+                _mm512_storeu_pd(row_abs + i, rabs);
+                _mm512_storeu_pd(sum + i, rsum);
+            }
+#elifdef __AVX2__
+            const __m256d abs_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+            const __m256d va0 = _mm256_set1_pd(alpha0);
+            const __m256d va1 = _mm256_set1_pd(alpha1);
+            const __m256d va2 = _mm256_set1_pd(alpha2);
+            const __m256d va3 = _mm256_set1_pd(alpha3);
+            for (; i + 4U <= n; i += 4U)
+            {
+                __m256d rabs = _mm256_loadu_pd(row_abs + i);
+                __m256d rsum = _mm256_loadu_pd(sum + i);
+                const __m256d x0 = _mm256_cvtps_pd(_mm_loadu_ps(col0 + i));
+                const __m256d x1 = _mm256_cvtps_pd(_mm_loadu_ps(col1 + i));
+                const __m256d x2 = _mm256_cvtps_pd(_mm_loadu_ps(col2 + i));
+                const __m256d x3 = _mm256_cvtps_pd(_mm_loadu_ps(col3 + i));
+
+                rabs = _mm256_add_pd(rabs, _mm256_and_pd(x0, abs_mask));
+                rabs = _mm256_add_pd(rabs, _mm256_and_pd(x1, abs_mask));
+                rabs = _mm256_add_pd(rabs, _mm256_and_pd(x2, abs_mask));
+                rabs = _mm256_add_pd(rabs, _mm256_and_pd(x3, abs_mask));
+
+#    if defined(__FMA__) || defined(_MSC_VER)
+                rsum = _mm256_fmadd_pd(x0, va0, rsum);
+                rsum = _mm256_fmadd_pd(x1, va1, rsum);
+                rsum = _mm256_fmadd_pd(x2, va2, rsum);
+                rsum = _mm256_fmadd_pd(x3, va3, rsum);
+#    else
+                rsum = _mm256_add_pd(rsum, _mm256_mul_pd(x0, va0));
+                rsum = _mm256_add_pd(rsum, _mm256_mul_pd(x1, va1));
+                rsum = _mm256_add_pd(rsum, _mm256_mul_pd(x2, va2));
+                rsum = _mm256_add_pd(rsum, _mm256_mul_pd(x3, va3));
+#    endif
+                _mm256_storeu_pd(row_abs + i, rabs);
+                _mm256_storeu_pd(sum + i, rsum);
+            }
+#elif defined(_M_X64) || defined(__x86_64__)
+            const __m128d abs_mask = _mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+            const __m128d va0 = _mm_set1_pd(alpha0);
+            const __m128d va1 = _mm_set1_pd(alpha1);
+            const __m128d va2 = _mm_set1_pd(alpha2);
+            const __m128d va3 = _mm_set1_pd(alpha3);
+            for (; i + 2U <= n; i += 2U)
+            {
+                __m128d rabs = _mm_loadu_pd(row_abs + i);
+                __m128d rsum = _mm_loadu_pd(sum + i);
+                const __m128d x0 = _mm_cvtps_pd(_mm_set_ps(0.0F, 0.0F, col0[i + 1U], col0[i]));
+                const __m128d x1 = _mm_cvtps_pd(_mm_set_ps(0.0F, 0.0F, col1[i + 1U], col1[i]));
+                const __m128d x2 = _mm_cvtps_pd(_mm_set_ps(0.0F, 0.0F, col2[i + 1U], col2[i]));
+                const __m128d x3 = _mm_cvtps_pd(_mm_set_ps(0.0F, 0.0F, col3[i + 1U], col3[i]));
+
+                rabs = _mm_add_pd(rabs, _mm_and_pd(x0, abs_mask));
+                rabs = _mm_add_pd(rabs, _mm_and_pd(x1, abs_mask));
+                rabs = _mm_add_pd(rabs, _mm_and_pd(x2, abs_mask));
+                rabs = _mm_add_pd(rabs, _mm_and_pd(x3, abs_mask));
+
+                rsum = _mm_add_pd(rsum, _mm_mul_pd(x0, va0));
+                rsum = _mm_add_pd(rsum, _mm_mul_pd(x1, va1));
+                rsum = _mm_add_pd(rsum, _mm_mul_pd(x2, va2));
+                rsum = _mm_add_pd(rsum, _mm_mul_pd(x3, va3));
+
+                _mm_storeu_pd(row_abs + i, rabs);
+                _mm_storeu_pd(sum + i, rsum);
+            }
+#endif
+            for (; i < n; ++i)
+            {
+                const auto x0 = static_cast<double>(col0[i]);
+                const auto x1 = static_cast<double>(col1[i]);
+                const auto x2 = static_cast<double>(col2[i]);
+                const auto x3 = static_cast<double>(col3[i]);
+                double rabs = row_abs[i];
+                double rsum = sum[i];
+                rabs = ((rabs + std::abs(x0)) + std::abs(x1)) + (std::abs(x2) + std::abs(x3));
+                rsum = refine_scalar_fmadd(x0, alpha0, rsum);
+                rsum = refine_scalar_fmadd(x1, alpha1, rsum);
+                rsum = refine_scalar_fmadd(x2, alpha2, rsum);
+                rsum = refine_scalar_fmadd(x3, alpha3, rsum);
+                row_abs[i] = rabs;
+                sum[i] = rsum;
+            }
+        }
+
+        /// @brief Accumulates one float column into promoted double `row_abs` and `sum` buffers using SIMD.
+        /// @param[in] col Pointer to contiguous float column base.
+        /// @param[in] alpha_j Binary64 weight for column `j`.
+        /// @param[in,out] row_abs Scratch buffer accumulating row l1 sums in binary64.
+        /// @param[in,out] sum Scratch buffer accumulating matrix-vector sums in binary64.
+        /// @param[in] n Number of rows in `col`.
+        inline void accumulate_promoted_1col_simd(
+            const float* col, double alpha_j, double* row_abs, double* sum, std::size_t n
+        ) noexcept
+        {
+            std::size_t i = 0U;
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+            const __m512i abs_mask = _mm512_set1_epi64(0x7FFFFFFFFFFFFFFFLL);
+            const __m512d va = _mm512_set1_pd(alpha_j);
+            for (; i + 8U <= n; i += 8U)
+            {
+                const __m512d x = _mm512_cvtps_pd(_mm256_loadu_ps(col + i));
+                const __m512d rabs = _mm512_add_pd(
+                    _mm512_loadu_pd(row_abs + i),
+                    _mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(x), abs_mask))
+                );
+#    if defined(__FMA__) || defined(_MSC_VER)
+                const __m512d rsum = _mm512_fmadd_pd(x, va, _mm512_loadu_pd(sum + i));
+#    else
+                const __m512d rsum = _mm512_add_pd(_mm512_loadu_pd(sum + i), _mm512_mul_pd(x, va));
+#    endif
+                _mm512_storeu_pd(row_abs + i, rabs);
+                _mm512_storeu_pd(sum + i, rsum);
+            }
+#elifdef __AVX2__
+            const __m256d abs_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+            const __m256d va = _mm256_set1_pd(alpha_j);
+            for (; i + 4U <= n; i += 4U)
+            {
+                const __m256d x = _mm256_cvtps_pd(_mm_loadu_ps(col + i));
+                const __m256d rabs = _mm256_add_pd(_mm256_loadu_pd(row_abs + i), _mm256_and_pd(x, abs_mask));
+#    if defined(__FMA__) || defined(_MSC_VER)
+                const __m256d rsum = _mm256_fmadd_pd(x, va, _mm256_loadu_pd(sum + i));
+#    else
+                const __m256d rsum = _mm256_add_pd(_mm256_loadu_pd(sum + i), _mm256_mul_pd(x, va));
+#    endif
+                _mm256_storeu_pd(row_abs + i, rabs);
+                _mm256_storeu_pd(sum + i, rsum);
+            }
+#elif defined(_M_X64) || defined(__x86_64__)
+            const __m128d abs_mask = _mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+            const __m128d va = _mm_set1_pd(alpha_j);
+            for (; i + 2U <= n; i += 2U)
+            {
+                const __m128d x = _mm_cvtps_pd(_mm_set_ps(0.0F, 0.0F, col[i + 1U], col[i]));
+                const __m128d rabs = _mm_add_pd(_mm_loadu_pd(row_abs + i), _mm_and_pd(x, abs_mask));
+                const __m128d rsum = _mm_add_pd(_mm_loadu_pd(sum + i), _mm_mul_pd(x, va));
+                _mm_storeu_pd(row_abs + i, rabs);
+                _mm_storeu_pd(sum + i, rsum);
+            }
+#endif
+            for (; i < n; ++i)
+            {
+                const auto x = static_cast<double>(col[i]);
+                row_abs[i] += std::abs(x);
+                sum[i] = refine_scalar_fmadd(x, alpha_j, sum[i]);
+            }
         }
 
     }  // namespace
@@ -155,18 +382,18 @@ namespace cxxgpr
         std::fill_n(row_abs_scratch.data(), n, 0.0);
         std::fill_n(sum_scratch.data(), n, 0.0);
 
-        // Column-major traversal accumulates each row sum and row absolute sum in ascending column
-        // order.
-        for (std::size_t j = 0; j < n; ++j)
+        // Column-major traversal accumulates 4 columns per scratch pass in ascending column order via SIMD.
+        std::size_t j = 0U;
+        for (; j + 4U <= n; j += 4U)
         {
-            const auto col = a_f32.col(j);
-            const double alpha_j = alpha[j];
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const auto a_ij = static_cast<double>(col[i]);
-                row_abs_scratch[i] += std::abs(a_ij);
-                sum_scratch[i] += a_ij * alpha_j;
-            }
+            accumulate_promoted_4cols_simd(
+                a_f32.col(j).data(), a_f32.col(j + 1U).data(), a_f32.col(j + 2U).data(), a_f32.col(j + 3U).data(),
+                alpha[j], alpha[j + 1U], alpha[j + 2U], alpha[j + 3U], row_abs_scratch.data(), sum_scratch.data(), n
+            );
+        }
+        for (; j < n; ++j)
+        {
+            accumulate_promoted_1col_simd(a_f32.col(j).data(), alpha[j], row_abs_scratch.data(), sum_scratch.data(), n);
         }
 
         // Subtract the promoted matrix-vector product from y in double precision to form r.
