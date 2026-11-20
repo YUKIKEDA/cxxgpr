@@ -561,11 +561,11 @@ namespace cxxgpr::linalg
 #ifdef _OPENMP
                 const double approx_flops =
                     static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
-                if (n_cols >= 12U && approx_flops >= 4194304.0)
+                if (n_cols >= 8U && approx_flops >= 4194304.0)
                 {
-                    // Fixed column blocks keep block boundaries independent of thread count while saturating OpenMP
-                    // cores.
-                    const std::size_t col_block = (n_cols >= 512U) ? 24U : 12U;
+                    // Narrow batches use independent four-column solves.
+                    const std::size_t wide_block = (n_cols >= 512U) ? 24U : 12U;
+                    const std::size_t col_block = (n_cols <= 24U) ? 4U : wide_block;
                     const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                     const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
