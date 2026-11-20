@@ -760,25 +760,47 @@ namespace cxxgpr
 
         // Generate each posterior sample y^(s) = mu_* + L_* * z^(s) from deterministic Box-Muller normals.
         std::vector<Refine> samples(*total_len);
-        std::vector<Refine> z(m);
+        constexpr std::size_t batch_size = 8U;
+        const auto capacity = std::min(n_draws, batch_size);
+        std::vector<Refine> z(capacity * m);
         Xoshiro256PlusPlus rng(seed);
-        for (std::size_t draw = 0; draw < n_draws; ++draw)
+        for (std::size_t draw = 0; draw < n_draws;)
         {
-            for (std::size_t i = 0; i < m; ++i)
+            const auto count = std::min(capacity, n_draws - draw);
+            for (std::size_t k = 0; k < count * m; ++k)
             {
-                z[i] = static_cast<Refine>(rng.unit_normal());
+                z[k] = static_cast<Refine>(rng.unit_normal());
             }
-            Refine* out_draw = samples.data() + draw * m;
-            std::copy_n(cov_res->mean.data(), m, out_draw);
-            for (std::size_t col = 0; col < m; ++col)
+            for (std::size_t j = 0; j < count; ++j)
             {
-                const auto factor_col = cov_mut.col(col);
-                const Refine weight = z[col];
-                for (std::size_t row = col; row < m; ++row)
+                std::copy_n(cov_res->mean.data(), m, samples.data() + ((draw + j) * m));
+            }
+            // Each row tile owns disjoint output rows across all draws in this batch.
+            const std::size_t tile = (count >= 4U && m >= 256U) ? 64U : m;
+            const auto tiles = static_cast<std::ptrdiff_t>(1U + ((m - 1U) / tile));
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (tiles > 1)
+#endif
+            for (std::ptrdiff_t t = 0; t < tiles; ++t)
+            {
+                const auto begin = static_cast<std::size_t>(t) * tile;
+                const auto end = std::min(begin + tile, m);
+                for (std::size_t col = 0; col < end; ++col)
                 {
-                    out_draw[row] += factor_col[row] * weight;
+                    const auto factor_col = cov_mut.col(col);
+                    const auto first = std::max(begin, col);
+                    for (std::size_t j = 0; j < count; ++j)
+                    {
+                        Refine* out_draw = samples.data() + ((draw + j) * m);
+                        const Refine weight = z[(j * m) + col];
+                        for (std::size_t row = first; row < end; ++row)
+                        {
+                            out_draw[row] += factor_col[row] * weight;
+                        }
+                    }
                 }
             }
+            draw += count;
         }
 
         return samples;
