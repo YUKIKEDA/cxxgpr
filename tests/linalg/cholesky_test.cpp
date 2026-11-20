@@ -405,6 +405,54 @@ namespace
         check_blocked.template operator()<float>(520U, 5e-2F);
     }
 
+    /// @brief Checks packed factor reuse across two RHS strips and a partial group with padded columns.
+    TEST(CholeskyLinalgTest, ForwardSolveReusesFactorAcrossStridedRhsStrips)
+    {
+        // Spec: REQ-06, DES-03
+        // L has a unit diagonal and a single subdiagonal 64 rows below it.
+        auto check = []<typename T>()
+        {
+            constexpr std::size_t n = 129U;
+            constexpr std::size_t m = 103U;
+            constexpr std::size_t stride = n + 3U;
+            constexpr std::size_t offset = 64U;
+            std::vector<T> factor(stride * n, T{0});
+            std::vector<T> expected(stride * m, T{-1});
+            for (std::size_t j = 0U; j < n; ++j)
+            {
+                factor[(j * stride) + j] = T{1};
+                if (j + offset < n)
+                {
+                    factor[(j * stride) + j + offset] = T{0.5};
+                }
+            }
+            for (std::size_t c = 0U; c < m; ++c)
+            {
+                for (std::size_t r = 0U; r < n; ++r)
+                {
+                    expected[(c * stride) + r] = static_cast<T>((c * n) + r);
+                }
+            }
+            auto rhs = expected;
+            for (std::size_t c = 0U; c < m; ++c)
+            {
+                for (std::size_t r = offset; r < n; ++r)
+                {
+                    rhs[(c * stride) + r] += T{0.5} * expected[(c * stride) + r - offset];
+                }
+            }
+            ASSERT_TRUE(
+                cxxgpr::linalg::solve_lower_in_place(
+                    MatrixRef<T>(factor.data(), n, n, stride), MatrixMut<T>(rhs.data(), n, m, stride)
+                )
+                    .has_value()
+            );
+            EXPECT_EQ(rhs, expected);
+        };
+        check.template operator()<float>();
+        check.template operator()<double>();
+    }
+
     /// @brief Verifies parallel fixed-block triangular solves (n^2 * m >= 2^24) stay bit-identical across 1/2/4
     /// threads.
     /// @details Factors a 256 x 256 double SPD matrix and solves 256 right-hand side columns across Forward, Backward,

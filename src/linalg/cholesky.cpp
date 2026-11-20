@@ -39,6 +39,9 @@ namespace cxxgpr::linalg
         /// @brief Column count shared by direct Cholesky panels and their scratch arrays.
         constexpr std::size_t k_direct_panel_block = 32U;
 
+        /// @brief Smallest RHS batch handled by the packed forward solver.
+        constexpr std::size_t k_min_packed_rhs = 6U;
+
         /// @brief Validates a square lower-triangular Cholesky factor L prior to solves or determinant queries.
         /// @details Enforces square view geometry, lower-triangle finiteness, and strictly positive diagonal entries.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
@@ -294,7 +297,7 @@ namespace cxxgpr::linalg
         void solve_lower_cols(MatrixRef<T> l, MatrixMut<T> rhs, std::size_t col_begin, std::size_t col_end) noexcept
         {
             const std::size_t n = l.rows();
-            if (n >= 64U && (col_end - col_begin) >= 6U)
+            if (n >= 64U && (col_end - col_begin) >= k_min_packed_rhs)
             {
                 cxxgpr::detail::solve_lower_block_packed(l, rhs, 0U, col_begin, col_end);
                 return;
@@ -536,9 +539,18 @@ namespace cxxgpr::linalg
                     std::size_t col_block = 4U;
                     if (n_cols > 24U && openmp_max_threads() == 1U)
                     {
-                        col_block = cxxgpr::detail::k_blas3_nc;
+                        constexpr std::size_t strip = cxxgpr::detail::k_blas3_nc;
+                        const std::size_t tail = n_cols % strip;
+                        // A short final strip uses the direct solver and its original accumulation order.
+                        const std::size_t packed_end = (tail < k_min_packed_rhs) ? n_cols - tail : n_cols;
+                        solve_lower_cols(l, rhs, 0U, packed_end);
+                        if (packed_end < n_cols)
+                        {
+                            solve_lower_cols(l, rhs, packed_end, n_cols);
+                        }
+                        return;
                     }
-                    else if (n_cols >= 192U)
+                    if (n_cols >= 192U)
                     {
                         col_block = (n_cols >= 512U) ? 24U : 12U;
                     }
