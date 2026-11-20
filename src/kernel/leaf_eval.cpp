@@ -236,7 +236,7 @@ namespace cxxgpr::detail
             const bool has_weights = !weights.empty();
             // Split tall, feature-heavy columns into SIMD-aligned slices even for a single query.
             const std::size_t block = (d >= 8U && n2 <= 8U) ? 256U : n1;
-            const std::size_t blocks = 1U + (n1 - 1U) / block;
+            const std::size_t blocks = 1U + ((n1 - 1U) / block);
             const auto jobs = static_cast<std::ptrdiff_t>(n2 * blocks);
 #ifdef _OPENMP
 #    pragma omp parallel for schedule(static) if (jobs > 1 \
