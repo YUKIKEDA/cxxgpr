@@ -103,6 +103,50 @@ namespace cxxgpr::detail
             }
         }
 
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+        /// @brief Solves eight packed double RHS columns together, with one RHS per SIMD lane.
+        /// @param[in] l Lower triangular factor.
+        /// @param[in] kb First row and column of the diagonal block.
+        /// @param[in] bs Block order, at most k_blas3_kc.
+        /// @param[in,out] x Eight contiguous column-major right-hand sides with leading dimension bs.
+        inline void solve_diag_eight_rhs(MatrixRef<double> l, std::size_t kb, std::size_t bs, double* x) noexcept
+        {
+            constexpr std::size_t width = 8U;
+            alignas(32) std::array<std::array<double, width>, k_blas3_kc> rows;
+            for (std::size_t r = 0U; r < bs; ++r)
+            {
+                for (std::size_t c = 0U; c < width; ++c)
+                {
+                    rows[r][c] = x[c * bs + r];
+                }
+            }
+            for (std::size_t p = 0U; p < bs; ++p)
+            {
+                const double* const col = l.col(kb + p).data() + kb;
+                const __m256d diag = _mm256_set1_pd(col[p]);
+                const __m256d lo = _mm256_div_pd(_mm256_load_pd(rows[p].data()), diag);
+                const __m256d hi = _mm256_div_pd(_mm256_load_pd(rows[p].data() + 4), diag);
+                _mm256_store_pd(rows[p].data(), lo);
+                _mm256_store_pd(rows[p].data() + 4, hi);
+                for (std::size_t r = p + 1U; r < bs; ++r)
+                {
+                    const __m256d coeff = _mm256_set1_pd(col[r]);
+                    _mm256_store_pd(rows[r].data(), _mm256_fnmadd_pd(coeff, lo, _mm256_load_pd(rows[r].data())));
+                    _mm256_store_pd(
+                        rows[r].data() + 4, _mm256_fnmadd_pd(coeff, hi, _mm256_load_pd(rows[r].data() + 4))
+                    );
+                }
+            }
+            for (std::size_t r = 0U; r < bs; ++r)
+            {
+                for (std::size_t c = 0U; c < width; ++c)
+                {
+                    x[c * bs + r] = rows[r][c];
+                }
+            }
+        }
+#endif
+
         /// @brief Solves a contiguous diagonal block `L[kb:kb+bs, kb:kb+bs] * X = X` inside `x_diag` in ascending-`p`
         /// order.
         /// @tparam T Floating-point scalar type (`double` or `float`).
@@ -115,6 +159,15 @@ namespace cxxgpr::detail
         void solve_diag_lower_block(MatrixRef<T> l, std::size_t kb, std::size_t bs, std::size_t cn, T* x_diag) noexcept
         {
             std::size_t c = 0U;
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+            if constexpr (std::same_as<T, double>)
+            {
+                for (; c + 8U <= cn; c += 8U)
+                {
+                    solve_diag_eight_rhs(l, kb, bs, x_diag + c * bs);
+                }
+            }
+#endif
             // Process 4 columns at a time so L column reads are reused while matching single-RHS FMA rounding bitwise.
             for (; c + 4U <= cn; c += 4U)
             {
