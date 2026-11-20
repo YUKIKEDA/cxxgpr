@@ -345,6 +345,15 @@ namespace
         EXPECT_EQ(*s1, *s2);
         EXPECT_NE(*s1, *s_other);
 
+        // Crossing a draw-batch boundary must preserve the seeded prefix, including the partial final batch.
+        auto more = cxxgpr::sample(
+            kernel, fix.likelihood, fix.x_ref(), fix.l_ref(), fix.alpha, xq_ref, 9U, 12345ULL,
+            cxxgpr::PredictOptions{cxxgpr::VarianceKind::Latent}, qws
+        );
+        ASSERT_TRUE(more.has_value());
+        ASSERT_EQ(more->size(), 9U * m);
+        EXPECT_TRUE(std::equal(s1->begin(), s1->end(), more->begin()));
+
         // Monte Carlo sanity: empirical mean and covariance of 4000 draws approach analytical
         // posterior.
         const std::size_t n_draws = 4000;
