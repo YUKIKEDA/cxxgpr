@@ -132,6 +132,7 @@ namespace cxxgpr::detail
     /// @param[out] out Column-major n1 x n2 destination cross-covariance matrix.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
     /// @param[in] cached_ls Pre-cached ARD lengthscales in double, or empty to read from leaf.
+    /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
     /// @return Empty expected on success or GprError on invalid inputs, shape/dim mismatch, or CustomKernel.
     /// @retval GprErrorCode::EmptyInput When x1 or x2 is empty.
     /// @retval GprErrorCode::LengthMismatch When out shape is not n1 x n2.

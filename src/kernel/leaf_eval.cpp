@@ -405,6 +405,7 @@ namespace cxxgpr::detail
         /// @param[in] x1 First point matrix of shape `(n1, d)`.
         /// @param[in] x2 Second point matrix of shape `(n2, d)`.
         /// @param[in] out Target cross-covariance matrix view of shape `(n1, n2)`.
+        /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
         /// @return Empty expected on success, or an input/dimension/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `x1` or `x2` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `(x1.rows(), x2.rows())`.
@@ -1446,6 +1447,7 @@ namespace cxxgpr::detail
         /// @param[out] out Target cross-covariance matrix of shape `(n1, n2)`.
         /// @param[in] exp_mode Exponential evaluation backend.
         /// @param[in] cached_ls Pre-cached ARD lengthscales, or empty to read from `leaf`.
+        /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
         /// @return Empty expected on success, or validation/dimension/evaluation error.
         /// @retval GprErrorCode::EmptyInput If either point matrix is empty.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `(x1.rows(), x2.rows())`.
@@ -1941,6 +1943,7 @@ namespace cxxgpr::detail
     /// @param[out] out Output cross-covariance matrix of shape `(n1, n2)`.
     /// @param[in] exp_mode Exponential evaluation backend.
     /// @param[in] cached_ls Pre-cached ARD lengthscales, or empty to query `leaf`.
+    /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
     /// @return Empty expected on success, or validation/dimension/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_cross_points(
