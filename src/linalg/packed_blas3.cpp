@@ -117,7 +117,7 @@ namespace cxxgpr::detail
             {
                 for (std::size_t c = 0U; c < width; ++c)
                 {
-                    rows[r][c] = x[c * bs + r];
+                    rows[r][c] = x[(c * bs) + r];
                 }
             }
             for (std::size_t p = 0U; p < bs; ++p)
@@ -141,7 +141,7 @@ namespace cxxgpr::detail
             {
                 for (std::size_t c = 0U; c < width; ++c)
                 {
-                    x[c * bs + r] = rows[r][c];
+                    x[(c * bs) + r] = rows[r][c];
                 }
             }
         }
@@ -164,7 +164,7 @@ namespace cxxgpr::detail
             {
                 for (; c + 8U <= cn; c += 8U)
                 {
-                    solve_diag_eight_rhs(l, kb, bs, x_diag + c * bs);
+                    solve_diag_eight_rhs(l, kb, bs, x_diag + (c * bs));
                 }
             }
 #endif
