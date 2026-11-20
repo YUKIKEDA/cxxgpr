@@ -65,7 +65,7 @@ namespace cxxgpr::detail
                 y_train_(y_train),
                 jitter_(jitter),
                 buffers_(buffers),
-                enable_leaf_cache_(enable_leaf_cache && buffers.buffer_policy == CholeskyBuffer::Retain),
+                enable_leaf_cache_(enable_leaf_cache),
                 last_factored_params_(kernel.num_params() + likelihood.num_params(), 0.0)
             {
                 // Preallocate per-leaf kernel caches only when incremental updates can retain matrices across steps.
@@ -845,7 +845,11 @@ namespace cxxgpr::detail
         compiled->set_kernel_exp(cfg.kernel_exp);
 
         const FitPolicy effective_fit_policy = cfg.optimize ? cfg.fit_policy : FitPolicy::prefer_memory();
-        auto buffers = FitBuffers<P>::create(n, effective_fit_policy);
+        // Value-only optimizers never construct W. Keep the requested distance and incremental leaf caches.
+        const bool use_leaf_cache =
+            cfg.use_change_indices && effective_fit_policy.cholesky_buffer == CholeskyBuffer::Retain;
+        const auto buffer_policy = cfg.value_only ? CholeskyBuffer::Reuse : effective_fit_policy.cholesky_buffer;
+        auto buffers = FitBuffers<P>::create(n, effective_fit_policy.distance_cache, buffer_policy);
         if (!buffers.has_value())
         {
             return std::unexpected(std::move(buffers).error());
@@ -864,9 +868,7 @@ namespace cxxgpr::detail
 
         const MatrixRef<Storage> x_train_ref(x_storage.data(), n, d, n);
         GaussianLikelihood likelihood = cfg.likelihood;
-        GprObjective<P> obj(
-            *compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
-        );
+        GprObjective<P> obj(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, use_leaf_cache);
 
         const std::size_t total_params = obj.dim();
         std::vector<double> init_params(total_params);
