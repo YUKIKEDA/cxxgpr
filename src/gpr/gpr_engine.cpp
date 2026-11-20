@@ -938,21 +938,6 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(sp).error());
         }
 
-        // Snapshot dense column-major Cholesky factor L from workspace k_ref().
-        std::vector<Storage> l_copy(n * n);
-        const auto l_ref = buffers->core.k_ref();
-        if (l_ref.col_stride() == n)
-        {
-            std::copy_n(l_ref.data(), n * n, l_copy.data());
-        }
-        else
-        {
-            for (std::size_t col = 0; col < n; ++col)
-            {
-                std::copy_n(l_ref.col(col).data(), n, l_copy.data() + (col * n));
-            }
-        }
-
         std::vector<Refine> alpha_out(n);
         std::optional<RefinementSummary> ref_summary;
 
@@ -995,7 +980,7 @@ namespace cxxgpr::detail
             .y_raw = std::move(y_raw),
             .x_train = std::move(x_storage),
             .y_transformed = std::move(y_refine),
-            .l_factor = std::move(l_copy),
+            .l_factor = std::move(buffers->core.k_matrix),
             .alpha = std::move(alpha_out),
             .n_train = n,
             .n_features = d,
@@ -1038,7 +1023,7 @@ namespace cxxgpr::detail
                 return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
             }
             // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
-            if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
+            if (auto ens = workspace.ensure_prediction(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
                 !ens.has_value())
             {
                 return std::unexpected(std::move(ens).error());

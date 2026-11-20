@@ -347,6 +347,29 @@ namespace cxxgpr
         std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
     )
     {
+        if (auto result = ensure_prediction(n, m, d, nested_depth); !result)
+        {
+            return result;
+        }
+        if (query_dist.size() < n * m)
+        {
+            query_dist.resize(n * m);
+        }
+        return {};
+    }
+
+    /// @brief Grows the buffers used by point-based prediction, leaving query_dist untouched.
+    /// @tparam P Training precision policy.
+    /// @param[in] n Training point count.
+    /// @param[in] m Query point count.
+    /// @param[in] d Feature count.
+    /// @param[in] nested_depth Kernel nesting depth.
+    /// @return Success or a dimension error.
+    template <PrecisionPolicyConcept P>
+    std::expected<void, GprError> QueryWorkspace<P>::ensure_prediction(
+        std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
+    )
+    {
         if (n == 0U || m == 0U || d == 0U)
         {
             return std::unexpected(GprError::empty_input());
@@ -384,10 +407,6 @@ namespace cxxgpr
         if (query_scratch.size() < *nm)
         {
             query_scratch.resize(*nm);
-        }
-        if (query_dist.size() < *nm)
-        {
-            query_dist.resize(*nm);
         }
         if (query_kss.size() < m)
         {

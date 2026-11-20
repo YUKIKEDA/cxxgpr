@@ -57,7 +57,10 @@ namespace
         EXPECT_TRUE(reuse->w_matrix.empty());
 
         cxxgpr::QueryWorkspace<cxxgpr::DoublePrecision> qws;
+        ASSERT_TRUE(qws.ensure_prediction(4U, 3U, 2U, 1U).has_value());
+        EXPECT_TRUE(qws.query_dist.empty());
         ASSERT_TRUE(qws.ensure(4U, 3U, 2U, 1U).has_value());
+        EXPECT_EQ(qws.query_dist.size(), 12U);
         {
             const cxxgpr::test_support::NoAllocationScope audit;
             ASSERT_TRUE(qws.ensure(4U, 3U, 2U, 1U).has_value());
