@@ -544,6 +544,9 @@ namespace
                 std::vector<Scalar> fwd_strided = rhs_strided_init;
                 std::vector<Scalar> bwd_strided = rhs_strided_init;
                 std::vector<Scalar> llt_strided = rhs_strided_init;
+                auto fu = rhs_strided_init;
+                auto bu = rhs_strided_init;
+                auto lu = rhs_strided_init;
                 std::vector<Scalar> diag_inv(n, Scalar{0});
                 std::vector<Scalar> scratch(n * n, qnan);
 
@@ -578,6 +581,15 @@ namespace
                         )
                             .has_value()
                     );
+                    cxxgpr::linalg::solve_lower_in_place_unchecked(
+                        l_strided_ref, MatrixMut<Scalar>(fu.data(), n, m, rhs_stride)
+                    );
+                    cxxgpr::linalg::solve_lower_transpose_in_place_unchecked(
+                        l_strided_ref, MatrixMut<Scalar>(bu.data(), n, m, rhs_stride)
+                    );
+                    cxxgpr::linalg::solve_llt_in_place_unchecked(
+                        l_strided_ref, MatrixMut<Scalar>(lu.data(), n, m, rhs_stride)
+                    );
                     ASSERT_TRUE(
                         cxxgpr::linalg::inv_diag_from_chol_l(
                             l_ref, std::span<Scalar>(diag_inv), MatrixMut<Scalar>(scratch.data(), n, n)
@@ -585,6 +597,16 @@ namespace
                             .has_value()
                     );
                     EXPECT_EQ(audit.delta_allocations(), 0U);
+                }
+                for (std::size_t col = 0; col < m; ++col)
+                {
+                    for (std::size_t row = 0; row < n; ++row)
+                    {
+                        const auto idx = (col * rhs_stride) + row;
+                        EXPECT_EQ(fu[idx], fwd_strided[idx]);
+                        EXPECT_EQ(bu[idx], bwd_strided[idx]);
+                        EXPECT_EQ(lu[idx], llt_strided[idx]);
+                    }
                 }
 
                 // Verify forward, backward, and LLT residuals plus bitwise parity against single-RHS solves.

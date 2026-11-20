@@ -448,24 +448,24 @@ namespace cxxgpr::linalg
         ) noexcept
         {
             const std::size_t n = l.rows();
-            std::size_t c = col_begin;
-            for (; c + 2U <= col_end; c += 2U)
+            std::size_t rem = n;
+            while (rem >= 4U)
             {
-                T* const x0 = rhs.col(c).data();
-                T* const x1 = rhs.col(c + 1U).data();
-                std::size_t rem = n;
-                while (rem >= 4U)
+                const std::size_t i0 = rem - 4U;
+                const std::size_t i1 = rem - 3U;
+                const std::size_t i2 = rem - 2U;
+                const std::size_t i3 = rem - 1U;
+                const std::size_t tail_start = rem;
+                const std::size_t tail_len = n - tail_start;
+                const T* const l0 = l.col(i0).data();
+                const T* const l1 = l.col(i1).data();
+                const T* const l2 = l.col(i2).data();
+                const T* const l3 = l.col(i3).data();
+                std::size_t c = col_begin;
+                for (; c + 2U <= col_end; c += 2U)
                 {
-                    const std::size_t i0 = rem - 4U;
-                    const std::size_t i1 = rem - 3U;
-                    const std::size_t i2 = rem - 2U;
-                    const std::size_t i3 = rem - 1U;
-                    const std::size_t tail_start = rem;
-                    const std::size_t tail_len = n - tail_start;
-                    const T* const l0 = l.col(i0).data();
-                    const T* const l1 = l.col(i1).data();
-                    const T* const l2 = l.col(i2).data();
-                    const T* const l3 = l.col(i3).data();
+                    T* const x0 = rhs.col(c).data();
+                    T* const x1 = rhs.col(c + 1U).data();
                     std::array<std::array<T, 2>, 4> dots{};
                     if (tail_len > 0U)
                     {
@@ -476,42 +476,10 @@ namespace cxxgpr::linalg
                     }
                     finish_backward_4rows(x0, l0, l1, l2, l3, i0, dots[0][0], dots[1][0], dots[2][0], dots[3][0]);
                     finish_backward_4rows(x1, l0, l1, l2, l3, i0, dots[0][1], dots[1][1], dots[2][1], dots[3][1]);
-                    rem -= 4U;
                 }
-                while (rem > 0U)
+                if (c < col_end)
                 {
-                    --rem;
-                    const std::size_t i = rem;
-                    const T* const li = l.col(i).data();
-                    const std::size_t tail_start = i + 1U;
-                    const std::size_t tail_len = n - tail_start;
-                    const T acc0 = (tail_len > 0U)
-                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, x0 + tail_start, tail_len)
-                        : T{0};
-                    const T acc1 = (tail_len > 0U)
-                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, x1 + tail_start, tail_len)
-                        : T{0};
-                    x0[i] = (x0[i] - acc0) / li[i];
-                    x1[i] = (x1[i] - acc1) / li[i];
-                }
-            }
-
-            for (; c < col_end; ++c)
-            {
-                T* const xc = rhs.col(c).data();
-                std::size_t rem = n;
-                while (rem >= 4U)
-                {
-                    const std::size_t i0 = rem - 4U;
-                    const std::size_t i1 = rem - 3U;
-                    const std::size_t i2 = rem - 2U;
-                    const std::size_t i3 = rem - 1U;
-                    const std::size_t tail_start = rem;
-                    const std::size_t tail_len = n - tail_start;
-                    const T* const l0 = l.col(i0).data();
-                    const T* const l1 = l.col(i1).data();
-                    const T* const l2 = l.col(i2).data();
-                    const T* const l3 = l.col(i3).data();
+                    T* const xc = rhs.col(c).data();
                     std::array<T, 4> dots{};
                     if (tail_len > 0U)
                     {
@@ -521,26 +489,26 @@ namespace cxxgpr::linalg
                         );
                     }
                     finish_backward_4rows(xc, l0, l1, l2, l3, i0, dots[0], dots[1], dots[2], dots[3]);
-                    rem -= 4U;
                 }
-                while (rem > 0U)
+                rem -= 4U;
+            }
+            while (rem > 0U)
+            {
+                --rem;
+                const T* const li = l.col(rem).data();
+                const auto start = rem + 1U;
+                for (std::size_t c = col_begin; c < col_end; ++c)
                 {
-                    --rem;
-                    const std::size_t i = rem;
-                    const T* const li = l.col(i).data();
-                    const std::size_t tail_start = i + 1U;
-                    const std::size_t tail_len = n - tail_start;
-                    const T acc = (tail_len > 0U)
-                        ? cxxgpr::detail::dot_1x1_simd(li + tail_start, xc + tail_start, tail_len)
-                        : T{0};
-                    xc[i] = (xc[i] - acc) / li[i];
+                    T* const xc = rhs.col(c).data();
+                    const T acc = cxxgpr::detail::dot_1x1_simd(li + start, xc + start, n - start);
+                    xc[rem] = (xc[rem] - acc) / li[rem];
                 }
             }
         }
 
         /// @brief Executes forward, backward, or two-stage L * L^T triangular substitution over rhs columns.
         /// @details Uses cache-packed BLAS-3 solvers in fixed column blocks for large multi-RHS forward solves and
-        /// deterministic fixed 4-column SIMD blocks for backward solves across OpenMP threads.
+        /// four-row backward panels reused across RHS pairs with deterministic SIMD dot products.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in] l Square read-only lower Cholesky factor matrix view.
         /// @param[in,out] rhs Mutable right-hand side matrix view overwritten with the solution.
@@ -595,10 +563,11 @@ namespace cxxgpr::linalg
 #ifdef _OPENMP
             const double approx_flops =
                 static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
-            if (n_cols >= 4U && approx_flops >= 4194304.0)
+            if (n_cols >= 4U && openmp_max_threads() > 1U && approx_flops >= 4194304.0)
             {
                 // Each task solves at least one pair of RHS columns.
-                const std::size_t col_block = (n_cols <= 12U) ? 2U : 4U;
+                const std::size_t small_block = (n_cols <= 12U) ? 2U : 4U;
+                const std::size_t col_block = (n_cols >= 64U) ? 16U : small_block;
                 const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                 const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
@@ -1077,7 +1046,7 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        apply_tri_solve(l, rhs, TriSolveMode::Forward);
+        solve_lower_in_place_unchecked(l, rhs);
         return {};
     }
 
@@ -1145,7 +1114,7 @@ namespace cxxgpr::linalg
         {
             return check;
         }
-        apply_tri_solve(l, rhs, TriSolveMode::Backward);
+        solve_lower_transpose_in_place_unchecked(l, rhs);
         return {};
     }
 
@@ -1188,7 +1157,7 @@ namespace cxxgpr::linalg
             return check;
         }
         // Perform two-stage triangular solve: L * Y = B, then L^T * X = Y.
-        apply_tri_solve(l, rhs, TriSolveMode::Llt);
+        solve_llt_in_place_unchecked(l, rhs);
         return {};
     }
 
@@ -1291,7 +1260,7 @@ namespace cxxgpr::linalg
             }
         }
 
-        apply_tri_solve(l, scratch_n_by_n, TriSolveMode::Forward);
+        solve_lower_in_place_unchecked(l, scratch_n_by_n);
 
         // Since (L L^T)^-1 = (L^-1)^T L^-1, the col-th diagonal equals ||L^-1 e_col||_2^2.
         for (std::size_t col = 0; col < n; ++col)
@@ -1377,6 +1346,49 @@ namespace cxxgpr::linalg
     template std::expected<double, GprError> cholesky_lower_with_jitter<double>(
         MatrixMut<double>, const JitterPolicy&, CholeskyStage
     );
+
+    /// @brief Performs the forward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_lower_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept
+    {
+        apply_tri_solve(l, rhs, TriSolveMode::Forward);
+    }
+
+    template void solve_lower_in_place_unchecked(MatrixRef<float>, MatrixMut<float>) noexcept;
+    template void solve_lower_in_place_unchecked(MatrixRef<double>, MatrixMut<double>) noexcept;
+
+    /// @brief Performs the backward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T>
+    void solve_lower_transpose_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept
+    {
+        apply_tri_solve(l, rhs, TriSolveMode::Backward);
+    }
+
+    template void solve_lower_transpose_in_place_unchecked(MatrixRef<float>, MatrixMut<float>) noexcept;
+    template void solve_lower_transpose_in_place_unchecked(MatrixRef<double>, MatrixMut<double>) noexcept;
+
+    /// @brief Performs the llt solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_llt_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept
+    {
+        apply_tri_solve(l, rhs, TriSolveMode::Llt);
+    }
+
+    template void solve_llt_in_place_unchecked(MatrixRef<float>, MatrixMut<float>) noexcept;
+    template void solve_llt_in_place_unchecked(MatrixRef<double>, MatrixMut<double>) noexcept;
 
     template std::expected<void, GprError> solve_lower_in_place<float>(MatrixRef<float>, MatrixMut<float>);
     template std::expected<void, GprError> solve_lower_in_place<double>(MatrixRef<double>, MatrixMut<double>);

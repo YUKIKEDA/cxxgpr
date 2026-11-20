@@ -20,6 +20,7 @@
 #    include <omp.h>
 #endif
 
+#include "linalg/factor_validation.hpp"
 #include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
@@ -760,7 +761,9 @@ namespace cxxgpr
             }
 
             // Compute S_i = L^-1 * A_i * L^-T and v_i = L^-1 * A_i * alpha for each parameter i.
+            // factor_and_mll has validated this factor, including after restoration in Reuse mode.
             const auto l_ref = buffers.core.k_ref();
+            constexpr auto validated = linalg::detail::FactorValidation::AlreadyValidated;
             const std::span<const Storage> alpha(buffers.core.rhs);
             for (std::size_t i = 0; i < n_params; ++i)
             {
@@ -796,7 +799,8 @@ namespace cxxgpr
                 gemv_sym_lower<Storage>(d_a, alpha, std::span<Storage>(buffers.core.hessian.u));
                 auto v_i = buffers.core.hessian.v_col_mut(i);
                 std::ranges::copy(buffers.core.hessian.u, v_i.begin());
-                if (auto sol_v = linalg::solve_lower_in_place(l_ref, v_i); !sol_v.has_value())
+                if (auto sol_v = linalg::detail::solve_lower(l_ref, MatrixMut<Storage>(v_i.data(), n, 1U), validated);
+                    !sol_v.has_value())
                 {
                     return sol_v;
                 }
@@ -815,12 +819,12 @@ namespace cxxgpr
                         s_i(r2, r1) = val;
                     }
                 }
-                if (auto s1 = linalg::solve_lower_in_place(l_ref, s_i); !s1.has_value())
+                if (auto s1 = linalg::detail::solve_lower(l_ref, s_i, validated); !s1.has_value())
                 {
                     return s1;
                 }
                 transpose_square_in_place(s_i);
-                if (auto s2 = linalg::solve_lower_in_place(l_ref, s_i); !s2.has_value())
+                if (auto s2 = linalg::detail::solve_lower(l_ref, s_i, validated); !s2.has_value())
                 {
                     return s2;
                 }

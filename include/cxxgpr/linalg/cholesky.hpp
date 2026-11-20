@@ -204,4 +204,63 @@ namespace cxxgpr::linalg
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is non-positive.
     template <KernelScalarConcept T> [[nodiscard]] std::expected<double, GprError> half_log_det_from_l(MatrixRef<T> l);
 
+    /// @brief Performs the forward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_lower_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept;
+
+    /// @brief Performs the forward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_lower_in_place_unchecked(MatrixRef<T> l, std::span<T> rhs) noexcept
+    {
+        solve_lower_in_place_unchecked(l, MatrixMut<T>(rhs.data(), rhs.size(), 1U));
+    }
+
+    /// @brief Performs the backward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T>
+    void solve_lower_transpose_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept;
+
+    /// @brief Performs the backward solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T>
+    void solve_lower_transpose_in_place_unchecked(MatrixRef<T> l, std::span<T> rhs) noexcept
+    {
+        solve_lower_transpose_in_place_unchecked(l, MatrixMut<T>(rhs.data(), rhs.size(), 1U));
+    }
+
+    /// @brief Performs the llt solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_llt_in_place_unchecked(MatrixRef<T> l, MatrixMut<T> rhs) noexcept;
+
+    /// @brief Performs the llt solve in place for validated inputs.
+    /// @pre The views must be nonempty, correctly strided, nonoverlapping and backed by valid storage.
+    /// L must be square with finite lower entries and positive diagonal; RHS must be finite with matching rows.
+    /// @tparam T Storage scalar type.
+    /// @param[in] l Lower Cholesky factor.
+    /// @param[in,out] rhs Right-hand sides overwritten with the solution.
+    template <KernelScalarConcept T> void solve_llt_in_place_unchecked(MatrixRef<T> l, std::span<T> rhs) noexcept
+    {
+        solve_llt_in_place_unchecked(l, MatrixMut<T>(rhs.data(), rhs.size(), 1U));
+    }
+
 }  // namespace cxxgpr::linalg
