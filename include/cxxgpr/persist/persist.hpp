@@ -431,6 +431,7 @@ namespace cxxgpr::persist
             kernel_exp(), FitPolicy{distance_cache_policy(), CholeskyBuffer::Retain}
         );
     }
+
     /// @endcond
 
     /// @brief Internal persistence helpers bridging typed FittedGpr accessors to disk writers.
