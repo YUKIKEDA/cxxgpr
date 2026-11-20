@@ -150,22 +150,42 @@ namespace cxxgpr::detail
                     rows[(r * width) + c] = x[(c * bs) + r];
                 }
             }
-            for (std::size_t p = 0U; p < bs; ++p)
+            // Solve consecutive pivots before streaming the remaining rows, preserving the FMA order.
+            std::size_t p = 0U;
+            for (; p + 1U < bs; p += 2U)
             {
-                const double* const col = l.col(kb + p).data() + kb;
-                const __m256d diag = _mm256_set1_pd(col[p]);
-                double* const pivot = rows.data() + (p * width);
-                const __m256d lo = _mm256_div_pd(_mm256_load_pd(pivot), diag);
-                const __m256d hi = _mm256_div_pd(_mm256_load_pd(pivot + 4), diag);
-                _mm256_store_pd(pivot, lo);
-                _mm256_store_pd(pivot + 4, hi);
-                for (std::size_t r = p + 1U; r < bs; ++r)
+                const double* const col0 = l.col(kb + p).data() + kb + p;
+                const double* const col1 = l.col(kb + p + 1U).data() + kb + p;
+                double* const pivot0 = rows.data() + (p * width);
+                double* const pivot1 = pivot0 + width;
+                const __m256d diag0 = _mm256_set1_pd(col0[0]);
+                const __m256d diag1 = _mm256_set1_pd(col1[1]);
+                const __m256d sub = _mm256_set1_pd(col0[1]);
+                const __m256d lo0 = _mm256_div_pd(_mm256_load_pd(pivot0), diag0);
+                const __m256d hi0 = _mm256_div_pd(_mm256_load_pd(pivot0 + 4U), diag0);
+                const __m256d lo1 = _mm256_div_pd(_mm256_fnmadd_pd(sub, lo0, _mm256_load_pd(pivot1)), diag1);
+                const __m256d hi1 = _mm256_div_pd(_mm256_fnmadd_pd(sub, hi0, _mm256_load_pd(pivot1 + 4U)), diag1);
+                _mm256_store_pd(pivot0, lo0);
+                _mm256_store_pd(pivot0 + 4U, hi0);
+                _mm256_store_pd(pivot1, lo1);
+                _mm256_store_pd(pivot1 + 4U, hi1);
+                for (std::size_t r = 2U; r < bs - p; ++r)
                 {
-                    const __m256d coeff = _mm256_set1_pd(col[r]);
-                    double* const row = rows.data() + (r * width);
-                    _mm256_store_pd(row, _mm256_fnmadd_pd(coeff, lo, _mm256_load_pd(row)));
-                    _mm256_store_pd(row + 4, _mm256_fnmadd_pd(coeff, hi, _mm256_load_pd(row + 4)));
+                    double* const row = pivot0 + (r * width);
+                    const __m256d coeff0 = _mm256_set1_pd(col0[r]);
+                    const __m256d coeff1 = _mm256_set1_pd(col1[r]);
+                    const __m256d lo = _mm256_fnmadd_pd(coeff0, lo0, _mm256_load_pd(row));
+                    const __m256d hi = _mm256_fnmadd_pd(coeff0, hi0, _mm256_load_pd(row + 4U));
+                    _mm256_store_pd(row, _mm256_fnmadd_pd(coeff1, lo1, lo));
+                    _mm256_store_pd(row + 4U, _mm256_fnmadd_pd(coeff1, hi1, hi));
                 }
+            }
+            if (p < bs)
+            {
+                double* const last = rows.data() + (p * width);
+                const __m256d diag = _mm256_set1_pd(l(kb + p, kb + p));
+                _mm256_store_pd(last, _mm256_div_pd(_mm256_load_pd(last), diag));
+                _mm256_store_pd(last + 4U, _mm256_div_pd(_mm256_load_pd(last + 4U), diag));
             }
             for (std::size_t r = 0U; r < full_rows; r += 4U)
             {
@@ -1339,6 +1359,15 @@ namespace cxxgpr::detail
     {
         while (col_begin < col_end)
         {
+            // All six strips must be nonempty; the final strip may be partial.
+            constexpr std::size_t wide_strips = 6U;
+            if (col_end - col_begin > (wide_strips - 1U) * k_blas3_nc)
+            {
+                const std::size_t group = std::min(wide_strips * k_blas3_nc, col_end - col_begin);
+                solve_lower_strip_group<wide_strips>(l, rhs, row_start, col_begin, col_begin + group);
+                col_begin += group;
+                continue;
+            }
             const std::size_t width = std::min(2U * k_blas3_nc, col_end - col_begin);
             if (width > k_blas3_nc)
             {
