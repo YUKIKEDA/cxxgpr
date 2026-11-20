@@ -283,7 +283,7 @@ namespace cxxgpr::linalg
         /// @brief Solves `L * X = B` in place across column range `[col_begin, col_end)` via blocked SIMD panel/rank-k
         /// updates.
         /// @details Processes 4 RHS columns simultaneously (`rank_k_update_4cols_simd`) followed by 1-column
-        /// remainders (`rank_k_update_1col_simd`) in fixed `k_block = 32` panels and `row_tile = 256` L1 strips without
+        /// remainders (`rank_k_update_1col_simd`) in panels of 8 or 32 and `row_tile = 256` L1 strips without
         /// runtime CPU cache queries or reading the strictly upper triangle of `l`.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in] l Square read-only lower Cholesky factor matrix view.
@@ -360,12 +360,13 @@ namespace cxxgpr::linalg
                 }
             }
 
+            const std::size_t single_panel = (n <= 1024U) ? 8U : k_block;
             for (; c < col_end; ++c)
             {
                 T* const xc = rhs.col(c).data();
-                for (std::size_t kb = 0U; kb < n; kb += k_block)
+                for (std::size_t kb = 0U; kb < n; kb += single_panel)
                 {
-                    const std::size_t ke = std::min(kb + k_block, n);
+                    const std::size_t ke = std::min(kb + single_panel, n);
                     const std::size_t bs = ke - kb;
                     for (std::size_t p = 0U; p < bs; ++p)
                     {
