@@ -133,7 +133,7 @@ namespace cxxgpr
             const std::size_t d = x_train.cols();
 
             // Grow query workspace once if dimensions exceed current capacity.
-            if (auto ens = workspace.ensure(n, m, d, kernel.nested_depth()); !ens.has_value())
+            if (auto ens = workspace.ensure_prediction(n, m, d, kernel.nested_depth()); !ens.has_value())
             {
                 return ens;
             }
