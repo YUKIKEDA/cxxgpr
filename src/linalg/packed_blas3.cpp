@@ -15,6 +15,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #if defined(_M_X64) || defined(__x86_64__)
 #    include <immintrin.h>
@@ -104,6 +105,27 @@ namespace cxxgpr::detail
         }
 
 #if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+        /// @brief Transposes four rows and four columns between strided double buffers.
+        /// @param[in] src First of four input vectors, each holding four adjacent doubles.
+        /// @param[in] lds Distance between input vectors, in elements.
+        /// @param[out] dst First of four output vectors.
+        /// @param[in] ldd Distance between output vectors, in elements.
+        inline void transpose_four(const double* src, std::size_t lds, double* dst, std::size_t ldd) noexcept
+        {
+            const __m256d r0 = _mm256_loadu_pd(src);
+            const __m256d r1 = _mm256_loadu_pd(src + lds);
+            const __m256d r2 = _mm256_loadu_pd(src + (2U * lds));
+            const __m256d r3 = _mm256_loadu_pd(src + (3U * lds));
+            const __m256d lo01 = _mm256_unpacklo_pd(r0, r1);
+            const __m256d hi01 = _mm256_unpackhi_pd(r0, r1);
+            const __m256d lo23 = _mm256_unpacklo_pd(r2, r3);
+            const __m256d hi23 = _mm256_unpackhi_pd(r2, r3);
+            _mm256_storeu_pd(dst, _mm256_permute2f128_pd(lo01, lo23, 0x20));
+            _mm256_storeu_pd(dst + ldd, _mm256_permute2f128_pd(hi01, hi23, 0x20));
+            _mm256_storeu_pd(dst + (2U * ldd), _mm256_permute2f128_pd(lo01, lo23, 0x31));
+            _mm256_storeu_pd(dst + (3U * ldd), _mm256_permute2f128_pd(hi01, hi23, 0x31));
+        }
+
         /// @brief Solves eight packed double RHS columns together, with one RHS per SIMD lane.
         /// @param[in] l Lower triangular factor.
         /// @param[in] kb First row and column of the diagonal block.
@@ -112,36 +134,51 @@ namespace cxxgpr::detail
         inline void solve_diag_eight_rhs(MatrixRef<double> l, std::size_t kb, std::size_t bs, double* x) noexcept
         {
             constexpr std::size_t width = 8U;
-            alignas(32) std::array<std::array<double, width>, k_blas3_kc> rows;
-            for (std::size_t r = 0U; r < bs; ++r)
+            alignas(32) std::array<double, width * k_blas3_kc> rows;
+            const std::size_t full_rows = bs - (bs % 4U);
+            for (std::size_t r = 0U; r < full_rows; r += 4U)
+            {
+                for (std::size_t c = 0U; c < width; c += 4U)
+                {
+                    transpose_four(x + (c * bs) + r, bs, rows.data() + (r * width) + c, width);
+                }
+            }
+            for (std::size_t r = full_rows; r < bs; ++r)
             {
                 for (std::size_t c = 0U; c < width; ++c)
                 {
-                    rows[r][c] = x[(c * bs) + r];
+                    rows[(r * width) + c] = x[(c * bs) + r];
                 }
             }
             for (std::size_t p = 0U; p < bs; ++p)
             {
                 const double* const col = l.col(kb + p).data() + kb;
                 const __m256d diag = _mm256_set1_pd(col[p]);
-                const __m256d lo = _mm256_div_pd(_mm256_load_pd(rows[p].data()), diag);
-                const __m256d hi = _mm256_div_pd(_mm256_load_pd(rows[p].data() + 4), diag);
-                _mm256_store_pd(rows[p].data(), lo);
-                _mm256_store_pd(rows[p].data() + 4, hi);
+                double* const pivot = rows.data() + (p * width);
+                const __m256d lo = _mm256_div_pd(_mm256_load_pd(pivot), diag);
+                const __m256d hi = _mm256_div_pd(_mm256_load_pd(pivot + 4), diag);
+                _mm256_store_pd(pivot, lo);
+                _mm256_store_pd(pivot + 4, hi);
                 for (std::size_t r = p + 1U; r < bs; ++r)
                 {
                     const __m256d coeff = _mm256_set1_pd(col[r]);
-                    _mm256_store_pd(rows[r].data(), _mm256_fnmadd_pd(coeff, lo, _mm256_load_pd(rows[r].data())));
-                    _mm256_store_pd(
-                        rows[r].data() + 4, _mm256_fnmadd_pd(coeff, hi, _mm256_load_pd(rows[r].data() + 4))
-                    );
+                    double* const row = rows.data() + (r * width);
+                    _mm256_store_pd(row, _mm256_fnmadd_pd(coeff, lo, _mm256_load_pd(row)));
+                    _mm256_store_pd(row + 4, _mm256_fnmadd_pd(coeff, hi, _mm256_load_pd(row + 4)));
                 }
             }
-            for (std::size_t r = 0U; r < bs; ++r)
+            for (std::size_t r = 0U; r < full_rows; r += 4U)
+            {
+                for (std::size_t c = 0U; c < width; c += 4U)
+                {
+                    transpose_four(rows.data() + (r * width) + c, width, x + (c * bs) + r, bs);
+                }
+            }
+            for (std::size_t r = full_rows; r < bs; ++r)
             {
                 for (std::size_t c = 0U; c < width; ++c)
                 {
-                    x[(c * bs) + r] = rows[r][c];
+                    x[(c * bs) + r] = rows[(r * width) + c];
                 }
             }
         }
@@ -958,17 +995,14 @@ namespace cxxgpr::detail
             {
                 const std::size_t rm = std::min(PanelWidth, count - ib);
                 T* const dst_panel = dst + ((ib / PanelWidth) * panel_stride);
-                // Copy full panels with fixed compile-time width so compilers vectorize without calling memcpy.
+                // Full panels copy a compile-time number of bytes from the column into disjoint packed storage.
                 if (rm == PanelWidth)
                 {
                     for (std::size_t p = 0U; p < k; ++p)
                     {
                         const T* const src_col = src + (p * ld) + ib;
                         T* const dst_col = dst_panel + (p * PanelWidth);
-                        for (std::size_t rr = 0U; rr < PanelWidth; ++rr)
-                        {
-                            dst_col[rr] = src_col[rr];
-                        }
+                        std::memcpy(dst_col, src_col, PanelWidth * sizeof(T));
                     }
                     continue;
                 }
