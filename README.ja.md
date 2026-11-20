@@ -77,46 +77,70 @@ target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```cpp
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
 
 #include <array>
+#include <cmath>
 #include <iostream>
 
-int main() {
-    const std::array<double, 4> x_train{0.0, 1.0, 2.0, 3.0};
-    const std::array<double, 4> y_train{0.0, 1.0, 0.5, 1.2};
-    const std::array<double, 2> x_query{0.5, 1.5};
+int main()
+{
+    // Eight training inputs: one column, so the column-major buffer is just the values.
+    const std::array<double, 8> x_train{0.0, 0.9, 1.8, 2.7, 3.6, 4.5, 5.4, 6.3};
+    // y = sin(x) plus small hand-picked noise (standard deviation about 0.1).
+    const std::array<double, 8> y_train{0.08, 0.83, 1.01, 0.33, -0.52, -1.07, -0.67, 0.12};
+    // Three query inputs, one of them (3.15) between two training points.
+    const std::array<double, 3> x_query{1.35, 3.15, 5.85};
 
-    const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
-    auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec).with_noise_variance(1e-4);
-    if (!trainer) {
+    // k(x, x') = c * exp(-(x - x')^2 / (2 l^2)): signal variance c times an RBF kernel.
+    auto signal = cxxgpr::ConstantKernel::create(1.0);
+    auto shape = cxxgpr::RbfKernel::create(1.0);
+    if (!signal || !shape)
+    {
+        std::cerr << "kernel construction failed\n";
+        return 1;
+    }
+    const cxxgpr::KernelSpec spec = cxxgpr::KernelSpec(*signal) * cxxgpr::KernelSpec(*shape);
+
+    // Initial observation noise variance 0.01 (it is optimised too); targets are standardised before fitting.
+    auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec).with_noise_variance(0.01);
+    if (!trainer)
+    {
         std::cerr << trainer.error().message() << '\n';
         return 1;
     }
+    const auto configured = trainer->with_target_transform(cxxgpr::transform::StandardizeTarget{});
 
-    auto fitted = trainer->fit(x_train, 4U, 1U, y_train);
-    if (!fitted) {
+    auto fitted = configured.fit(x_train, 8U, 1U, y_train);
+    if (!fitted)
+    {
         std::cerr << fitted.error().message() << '\n';
         return 1;
     }
 
-    auto pred = fitted->predict(x_query, 2U, 1U);
-    if (!pred) {
+    auto pred = fitted->predict(x_query, 3U, 1U);
+    if (!pred)
+    {
         std::cerr << pred.error().message() << '\n';
         return 1;
     }
-    std::cout << pred->mean[0] << ", " << pred->mean[1] << '\n';
+
+    std::cout << "mean = " << pred->mean[0] << ", std = " << std::sqrt(pred->variance[0]) << '\n';
     return 0;
 }
 ```
 
+一行ずつの解説は[最初の回帰チュートリアル](docs/ja/tutorials/first-regression.md)を参照してください。
+
 ## 文書
 
-| 文書 | 内容 |
+利用者向け文書は [Diataxis](https://diataxis.fr/) の構成で、日本語と英語の両方を用意しています。`just docs` でビルドできます。ソースは `docs/ja/` と `docs/en/` にあります。
+
+| 区分 | 内容 |
 |---|---|
-| [`docs/roadmap.md`](docs/roadmap.md) | マイルストーン・依存グラフ・現在地 |
-| [`docs/design.md`](docs/design.md) | 要求・C++23 API・数理式・バッファ設計 |
-| [`docs/persist-format.md`](docs/persist-format.md) | `config.json` と `model.safetensors` 仕様 |
-| [`docs/architecture.md`](docs/architecture.md) | レイヤ構成と依存方向 |
-| [`docs/conventions.md`](docs/conventions.md) | ディレクトリ構成と命名規約 |
-| [`docs/quality/quality-plan.md`](docs/quality/quality-plan.md) | 追跡・基準結果・結果変更管理・来歴 |
+| [チュートリアル](docs/ja/tutorials/index.md) | 作りながら学ぶ。最初の回帰、多次元モデル、保存と読込 |
+| [ハウツーガイド](docs/ja/how-to/index.md) | 目的別の手順。全体で公開 API をすべて網羅 |
+| [リファレンス](docs/ja/reference/index.md) | ヘッダから生成した API リファレンス、エラーコード、ビルドオプション、ファイル形式 |
+| [解説](docs/ja/explanation/index.md) | ガウス過程の背景、カーネル、数値安定性、設計原則 |
+| [`docs/internal/`](docs/internal/roadmap.md) | 開発者向け文書（英語）：仕様、ADR、品質計画、ロードマップ |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 開発手順とゲート |

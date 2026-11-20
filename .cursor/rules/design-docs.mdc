@@ -6,13 +6,13 @@ alwaysApply: true
 # 設計文書と仕様変更
 
 正本：
-- 設計仕様：[docs/design.md](../../docs/design.md)（`REQ-*`、`DES-*`）
-- 永続化仕様：[docs/persist-format.md](../../docs/persist-format.md)（`FMT-*`）
-- アーキテクチャ：[docs/architecture.md](../../docs/architecture.md)（依存方向と公開ヘッダ境界）
-- 技術選定理由：`docs/adr/`（1 決定 1 ファイル）
+- 設計仕様：[docs/internal/design.md](../../docs/internal/design.md)（`REQ-*`、`DES-*`）
+- 永続化仕様：[docs/internal/persist-format.md](../../docs/internal/persist-format.md)（`FMT-*`）
+- アーキテクチャ：[docs/internal/architecture.md](../../docs/internal/architecture.md)（依存方向と公開ヘッダ境界）
+- 技術選定理由：`docs/internal/adr/`（1 決定 1 ファイル）
 
 規則：
 - 数式・状態遷移・型契約・エラー種・永続化スキーマを変えるときは、先に `design` Issue と仕様変更 PR を出し、実装より先に仕様を確定させる。
 - 先に実装してから後で仕様を合わせない。仕様に抜けや矛盾を見つけた場合は `design` Issue を開いて整理する。
 - 他ライブラリ（`gprx` や `scikit-learn`）について言及する際は、該当ファイル・バージョン・実際に確認した範囲を明記する。
-- 実装が端の入力検査や境界条件を補った場合、PR マージ前に `docs/design.md` へ反映し整合を取る。
+- 実装が端の入力検査や境界条件を補った場合、PR マージ前に `docs/internal/design.md` へ反映し整合を取る。

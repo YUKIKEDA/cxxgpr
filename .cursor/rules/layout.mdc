@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 配置
 
-ディレクトリ構成の正本は [docs/conventions.md](../../docs/conventions.md)。新しいモジュールやディレクトリを追加する PR が同じ PR で表を更新する。
+ディレクトリ構成の正本は [docs/internal/conventions.md](../../docs/internal/conventions.md)。新しいモジュールやディレクトリを追加する PR が同じ PR で表を更新する。
 
 ```text
 include/cxxgpr/<module>/  公開 C++23 ヘッダ（第三者ヘッダ非露出）

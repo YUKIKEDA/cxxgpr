@@ -1,0 +1,8 @@
+# Pinned documentation toolchain (Python 3.11-3.13). Doxygen 1.12 or newer is installed separately.
+sphinx==9.2.0
+furo==2025.12.19
+myst-parser==5.2.0
+breathe==5.1.0
+sphinx-design==0.8.0
+sphinx-copybutton==0.5.2
+sphinxcontrib-mermaid==2.1.1

@@ -22,7 +22,7 @@ trim_trailing_whitespace = false
 indent_size = 4
 
 # Byte-exact areas (see .gitattributes). Editors must not rewrite them.
-[{docs/verification/**,qa/baselines/**}]
+[{docs/internal/verification/**,qa/baselines/**}]
 charset = unset
 end_of_line = unset
 insert_final_newline = unset

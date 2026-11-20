@@ -78,46 +78,70 @@ target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```cpp
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
 
 #include <array>
+#include <cmath>
 #include <iostream>
 
-int main() {
-    const std::array<double, 4> x_train{0.0, 1.0, 2.0, 3.0};
-    const std::array<double, 4> y_train{0.0, 1.0, 0.5, 1.2};
-    const std::array<double, 2> x_query{0.5, 1.5};
+int main()
+{
+    // Eight training inputs: one column, so the column-major buffer is just the values.
+    const std::array<double, 8> x_train{0.0, 0.9, 1.8, 2.7, 3.6, 4.5, 5.4, 6.3};
+    // y = sin(x) plus small hand-picked noise (standard deviation about 0.1).
+    const std::array<double, 8> y_train{0.08, 0.83, 1.01, 0.33, -0.52, -1.07, -0.67, 0.12};
+    // Three query inputs, one of them (3.15) between two training points.
+    const std::array<double, 3> x_query{1.35, 3.15, 5.85};
 
-    const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
-    auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec).with_noise_variance(1e-4);
-    if (!trainer) {
+    // k(x, x') = c * exp(-(x - x')^2 / (2 l^2)): signal variance c times an RBF kernel.
+    auto signal = cxxgpr::ConstantKernel::create(1.0);
+    auto shape = cxxgpr::RbfKernel::create(1.0);
+    if (!signal || !shape)
+    {
+        std::cerr << "kernel construction failed\n";
+        return 1;
+    }
+    const cxxgpr::KernelSpec spec = cxxgpr::KernelSpec(*signal) * cxxgpr::KernelSpec(*shape);
+
+    // Initial observation noise variance 0.01 (it is optimised too); targets are standardised before fitting.
+    auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec).with_noise_variance(0.01);
+    if (!trainer)
+    {
         std::cerr << trainer.error().message() << '\n';
         return 1;
     }
+    const auto configured = trainer->with_target_transform(cxxgpr::transform::StandardizeTarget{});
 
-    auto fitted = trainer->fit(x_train, 4U, 1U, y_train);
-    if (!fitted) {
+    auto fitted = configured.fit(x_train, 8U, 1U, y_train);
+    if (!fitted)
+    {
         std::cerr << fitted.error().message() << '\n';
         return 1;
     }
 
-    auto pred = fitted->predict(x_query, 2U, 1U);
-    if (!pred) {
+    auto pred = fitted->predict(x_query, 3U, 1U);
+    if (!pred)
+    {
         std::cerr << pred.error().message() << '\n';
         return 1;
     }
-    std::cout << pred->mean[0] << ", " << pred->mean[1] << '\n';
+
+    std::cout << "mean = " << pred->mean[0] << ", std = " << std::sqrt(pred->variance[0]) << '\n';
     return 0;
 }
 ```
 
+See the [first-regression tutorial](docs/en/tutorials/first-regression.md) for a line-by-line walkthrough.
+
 ## Documentation
 
-| Document | Contents |
+The user documentation follows the [Diataxis](https://diataxis.fr/) structure and is available in English and Japanese. Build it with `just docs`; the source is under `docs/en/` and `docs/ja/`.
+
+| Section | Contents |
 |---|---|
-| [`docs/roadmap.md`](docs/roadmap.md) | Milestones, dependencies, and status |
-| [`docs/design.md`](docs/design.md) | Requirements, C++23 API contracts, math, and workspace design |
-| [`docs/persist-format.md`](docs/persist-format.md) | On-disk `config.json` and `model.safetensors` format specification |
-| [`docs/architecture.md`](docs/architecture.md) | Module layers and dependency direction |
-| [`docs/conventions.md`](docs/conventions.md) | Directory structure and naming conventions |
-| [`docs/quality/quality-plan.md`](docs/quality/quality-plan.md) | Traceability, baselines, provenance, and platform qualification |
+| [Tutorials](docs/en/tutorials/index.md) | Learn by building: first regression, multi-dimensional models, save and reload |
+| [How-to guides](docs/en/how-to/index.md) | Task recipes that together cover every public API |
+| [Reference](docs/en/reference/index.md) | API reference generated from the headers, error codes, build options, file format |
+| [Explanation](docs/en/explanation/index.md) | Gaussian-process background, kernels, numerical stability, design principles |
+| [`docs/internal/`](docs/internal/roadmap.md) | Developer documentation (English): specifications, ADRs, quality plan, roadmap |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and gates |

@@ -6,16 +6,17 @@ Rust ライブラリ [gprx](https://github.com/YUKIKEDA/gprx) の **Exact GPR** 
 
 | 知りたいこと | 場所 |
 |---|---|
-| 作業の順序と現在地 | [docs/roadmap.md](docs/roadmap.md) |
-| 設計仕様（要求・API・アルゴリズム・バッファ） | [docs/design.md](docs/design.md) |
-| 永続化仕様（`config.json`・`model.safetensors`） | [docs/persist-format.md](docs/persist-format.md) |
-| レイヤ構成とモジュール依存の向き | [docs/architecture.md](docs/architecture.md) |
-| ディレクトリ構成と命名規約 | [docs/conventions.md](docs/conventions.md) |
-| 決定の理由（ADR） | [docs/adr/](docs/adr/0001-exact-gpr-cpp23-scope.md) |
-| 品質保証（追跡・基準結果・変更管理・来歴） | [docs/quality/quality-plan.md](docs/quality/quality-plan.md) |
+| 利用者向け文書（Diataxis、日英） | `docs/en/`、`docs/ja/`（例は `docs/examples/`）。`just docs` / `just docs-coverage` |
+| 作業の順序と現在地 | [docs/internal/roadmap.md](docs/internal/roadmap.md) |
+| 設計仕様（要求・API・アルゴリズム・バッファ） | [docs/internal/design.md](docs/internal/design.md) |
+| 永続化仕様（`config.json`・`model.safetensors`） | [docs/internal/persist-format.md](docs/internal/persist-format.md) |
+| レイヤ構成とモジュール依存の向き | [docs/internal/architecture.md](docs/internal/architecture.md) |
+| ディレクトリ構成と命名規約 | [docs/internal/conventions.md](docs/internal/conventions.md) |
+| 決定の理由（ADR） | [docs/internal/adr/](docs/internal/adr/0001-exact-gpr-cpp23-scope.md) |
+| 品質保証（追跡・基準結果・変更管理・来歴） | [docs/internal/quality/quality-plan.md](docs/internal/quality/quality-plan.md) |
 | ビルド・試験・ゲートのレシピ | `justfile`（M0-2 で追加） |
 
-現在の行のIDは [docs/roadmap.md](docs/roadmap.md) だけが持つ。`.dev/` は手元の一時領域であり、決定を置かない。
+現在の行のIDは [docs/internal/roadmap.md](docs/internal/roadmap.md) だけが持つ。`.dev/` は手元の一時領域であり、決定を置かない。
 
 ## 移植スコープの基本原則
 

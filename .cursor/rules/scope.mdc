@@ -8,7 +8,7 @@ alwaysApply: true
 対象は `gprx` の Exact GPR モデル（`Gpr` / `FittedGpr`）の忠実な C++23 移植であり、`Sgpr`・`Svgp`・`OnlineGpr`・誘導点座標微分は対象外である。
 
 - 実装の手間を理由に機能を削らない。たとえば「`DoublePrecision` のみ対応し `MixedPrecision` / `SinglePrecision` を落とす」「10 カーネルのうち一部だけ置く」「供給二乗距離や `Custom` 葉を省く」といった部分実装を正当化しない。
-- 分割する場合は必ず [docs/roadmap.md](../../docs/roadmap.md) の該当マイルストーン行と Issue で残作業の担い手を明示する。
+- 分割する場合は必ず [docs/internal/roadmap.md](../../docs/internal/roadmap.md) の該当マイルストーン行と Issue で残作業の担い手を明示する。
 - 完了状態は「仕様実装適合」「数値照合合格」「ベンチ測定完了」を区別して報告する。
 
 ```text

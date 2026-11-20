@@ -370,7 +370,8 @@ namespace cxxgpr::persist
         /// @tparam O Optimizer type associated with the returned FittedGpr for refit/into_trainer.
         /// @tparam P Precision policy type that must match precision_kind().
         /// @param[in] optimizer Optimizer instance stored on the extracted FittedGpr.
-        /// @return Typed FittedGpr on precision match, or PersistFailed(WrongModel) on mismatch.
+        /// @return Typed FittedGpr configured with CholeskyBuffer::Retain on precision match, or
+        /// PersistFailed(WrongModel) on mismatch.
         /// @retval GprErrorCode::PersistFailed When P::persist_kind() != precision_kind().
         template <typename O = optimizer::Lbfgs, PrecisionPolicyConcept P = DoublePrecision>
         [[nodiscard]] std::expected<FittedGpr<O, P, KernelSpec>, GprError> into_fitted(O optimizer = O{}) const;
@@ -398,13 +399,12 @@ namespace cxxgpr::persist
         std::shared_ptr<const Impl> impl_;
     };
 
-    /// @brief Extracts a typed FittedGpr<O, P, KernelSpec> if P matches the loaded precision policy.
-    /// @details Verifies that P::persist_kind() equals precision_kind() before copying factor and raw
-    /// tensors out of the loaded checkpoint.
+    /// @cond CXXGPR_OUT_OF_CLASS_DEFINITION
+    /// @brief Out-of-class definition of LoadedGpr::into_fitted(); the declaration carries the public docs.
     /// @tparam O Optimizer type attached to the returned FittedGpr.
     /// @tparam P Precision policy matching precision_kind().
     /// @param[in] optimizer Optimizer configuration forwarded to the returned FittedGpr.
-    /// @return Typed FittedGpr configured with CholeskyBuffer::Retain, or GprError on precision mismatch.
+    /// @return Typed FittedGpr, or GprError on precision mismatch.
     /// @retval GprErrorCode::PersistFailed When P::persist_kind() does not match precision_kind().
     template <typename O, PrecisionPolicyConcept P>
     std::expected<FittedGpr<O, P, KernelSpec>, GprError> LoadedGpr::into_fitted(O optimizer) const
@@ -431,6 +431,7 @@ namespace cxxgpr::persist
             kernel_exp(), FitPolicy{distance_cache_policy(), CholeskyBuffer::Retain}
         );
     }
+    /// @endcond
 
     /// @brief Internal persistence helpers bridging typed FittedGpr accessors to disk writers.
     namespace detail

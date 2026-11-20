@@ -38,5 +38,5 @@ N/A
 - [ ] 数値試験は確かめる決定IDを記し、`just trace-check` / `just arch-check` / `just doc-check` が通る
 - [ ] 基準結果は変わらない。変わるなら、結果変更記録を足し、所有者の承認を得た（QA-04）
 - [ ] 採用仕様からの逸脱、見つけた仕様欠陥を書いた（なければ「なし」）
-- [ ] 先送りしたものは `docs/roadmap.md` の行になっている
-- [ ] `docs/conventions.md`、`docs/roadmap.md` を必要に応じて更新した
+- [ ] 先送りしたものは `docs/internal/roadmap.md` の行になっている
+- [ ] `docs/internal/conventions.md`、`docs/internal/roadmap.md` を必要に応じて更新した

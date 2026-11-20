@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import cast
 
 BASELINES_ROOT = Path("qa/baselines")
-RESULT_CHANGES_DIR = Path("docs/quality/result-changes")
+RESULT_CHANGES_DIR = Path("docs/internal/quality/result-changes")
 RECORD_NUMBER_RE = re.compile(r"^\d{4}$")
 SCHEMA = "cxxgpr.baseline/1"
 
@@ -172,7 +172,7 @@ def cmd_check(case_name: str, binary: Path, *, if_certified: bool) -> int:
         if if_certified:
             print(f"NOTICE: {msg}; skipping bitwise comparison (--if-certified).")
             return 0
-        print(f"ERROR: {msg}. See docs/quality/result-changes/README.md.")
+        print(f"ERROR: {msg}. See docs/internal/quality/result-changes/README.md.")
         return 1
 
     raw_doc: object = json.loads(target.read_text(encoding="utf-8"))
@@ -367,7 +367,9 @@ def main() -> int:
     accept_p.add_argument(
         "--record",
         default=None,
-        help="4-digit NNNN of docs/quality/result-changes/NNNN-*.md (required for updates).",
+        help=(
+            "4-digit NNNN of docs/internal/quality/result-changes/NNNN-*.md (required for updates)."
+        ),
     )
     accept_p.add_argument(
         "--allow-dirty",
