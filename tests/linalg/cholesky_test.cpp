@@ -408,7 +408,8 @@ namespace
     /// @brief Checks packed factor reuse across two RHS strips and a partial group with padded columns.
     TEST(CholeskyLinalgTest, ForwardSolveReusesFactorAcrossStridedRhsStrips)
     {
-        // Spec: REQ-06, DES-03. L has a unit diagonal and a single subdiagonal 64 rows below it.
+        // Spec: REQ-06, DES-03
+        // L has a unit diagonal and a single subdiagonal 64 rows below it.
         auto check = []<typename T>()
         {
             constexpr std::size_t n = 129U;
@@ -419,17 +420,17 @@ namespace
             std::vector<T> expected(stride * m, T{-1});
             for (std::size_t j = 0U; j < n; ++j)
             {
-                factor[j * stride + j] = T{1};
+                factor[(j * stride) + j] = T{1};
                 if (j + offset < n)
                 {
-                    factor[j * stride + j + offset] = T{0.5};
+                    factor[(j * stride) + j + offset] = T{0.5};
                 }
             }
             for (std::size_t c = 0U; c < m; ++c)
             {
                 for (std::size_t r = 0U; r < n; ++r)
                 {
-                    expected[c * stride + r] = static_cast<T>(c * n + r);
+                    expected[(c * stride) + r] = static_cast<T>((c * n) + r);
                 }
             }
             auto rhs = expected;
@@ -437,7 +438,7 @@ namespace
             {
                 for (std::size_t r = offset; r < n; ++r)
                 {
-                    rhs[c * stride + r] += T{0.5} * expected[c * stride + r - offset];
+                    rhs[(c * stride) + r] += T{0.5} * expected[(c * stride) + r - offset];
                 }
             }
             ASSERT_TRUE(

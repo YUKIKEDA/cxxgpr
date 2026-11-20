@@ -1012,7 +1012,7 @@ namespace cxxgpr::detail
                 const std::size_t bs = ke - kb;
                 for (std::size_t strip = 0U; strip < Strips; ++strip)
                 {
-                    const std::size_t cb = col_begin + strip * k_blas3_nc;
+                    const std::size_t cb = col_begin + (strip * k_blas3_nc);
                     const std::size_t cn = std::min(k_blas3_nc, col_end - cb);
                     copy_block_strided(&rhs(kb, cb), rhs.col_stride(), x_diag.data(), bs, bs, cn);
                     solve_diag_lower_block(l, kb, bs, cn, x_diag.data());
@@ -1028,7 +1028,7 @@ namespace cxxgpr::detail
                     pack_panel_a_colmajor(&l(ib, kb), l.col_stride(), rm, bs, packed_a.data());
                     for (std::size_t strip = 0U; strip < Strips; ++strip)
                     {
-                        const std::size_t cb = col_begin + strip * k_blas3_nc;
+                        const std::size_t cb = col_begin + (strip * k_blas3_nc);
                         const std::size_t cn = std::min(k_blas3_nc, col_end - cb);
                         gemm_packed_sub(
                             rm, cn, bs, packed_a.data(), packed_b[strip].data(), &rhs(ib, cb), rhs.col_stride()
