@@ -405,15 +405,14 @@ namespace
         check_blocked.template operator()<float>(520U, 5e-2F);
     }
 
-    /// @brief Checks packed factor reuse across two RHS strips and a partial group with padded columns.
+    /// @brief Checks packed factor reuse across narrow and wide groups with padded columns.
     TEST(CholeskyLinalgTest, ForwardSolveReusesFactorAcrossStridedRhsStrips)
     {
         // Spec: REQ-06, DES-03
         // L has a unit diagonal and a single subdiagonal 64 rows below it.
-        auto check = []<typename T>()
+        auto check = []<typename T>(std::size_t m)
         {
             constexpr std::size_t n = 129U;
-            constexpr std::size_t m = 103U;
             constexpr std::size_t stride = n + 3U;
             constexpr std::size_t offset = 64U;
             std::vector<T> factor(stride * n, T{0});
@@ -449,8 +448,11 @@ namespace
             );
             EXPECT_EQ(rhs, expected);
         };
-        check.template operator()<float>();
-        check.template operator()<double>();
+        for (const std::size_t m : {103U, 247U})
+        {
+            check.template operator()<float>(m);
+            check.template operator()<double>(m);
+        }
     }
 
     /// @brief Verifies parallel fixed-block triangular solves (n^2 * m >= 2^24) stay bit-identical across 1/2/4
