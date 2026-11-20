@@ -988,6 +988,56 @@ namespace cxxgpr::detail
             }
         }
 
+        /// @brief Solves `L[row_start:n, row_start:n] * X[row_start:n, col_begin:col_end] = B` in place via
+        /// cache-packed BLAS-3.
+        /// @tparam Strips Number of consecutive nonempty RHS strips sharing each packed factor panel.
+        /// @tparam T Floating-point scalar type (`double` or `float`).
+        /// @param[in] l Square read-only lower Cholesky factor matrix view.
+        /// @param[in,out] rhs Mutable right-hand side matrix view updated in place.
+        /// @param[in] row_start Inclusive leading row and column index where the triangular solve begins.
+        /// @param[in] col_begin Inclusive starting right-hand side column index.
+        /// @param[in] col_end Exclusive ending right-hand side column index.
+        template <std::size_t Strips, SimdBlasScalar T>
+        void solve_lower_strip_group(
+            MatrixRef<T> l, MatrixMut<T> rhs, std::size_t row_start, std::size_t col_begin, std::size_t col_end
+        ) noexcept
+        {
+            const std::size_t n = l.rows();
+            alignas(64) std::array<T, k_blas3_kc * k_blas3_nc> x_diag;
+            alignas(64) std::array<T, k_blas3_pack_a_cap<T>> packed_a;
+            alignas(64) std::array<std::array<T, k_blas3_pack_b_cap>, Strips> packed_b;
+            for (std::size_t kb = row_start; kb < n; kb += k_blas3_kc)
+            {
+                const std::size_t ke = std::min(kb + k_blas3_kc, n);
+                const std::size_t bs = ke - kb;
+                for (std::size_t strip = 0U; strip < Strips; ++strip)
+                {
+                    const std::size_t cb = col_begin + strip * k_blas3_nc;
+                    const std::size_t cn = std::min(k_blas3_nc, col_end - cb);
+                    copy_block_strided(&rhs(kb, cb), rhs.col_stride(), x_diag.data(), bs, bs, cn);
+                    solve_diag_lower_block(l, kb, bs, cn, x_diag.data());
+                    copy_block_strided(x_diag.data(), bs, &rhs(kb, cb), rhs.col_stride(), bs, cn);
+                    if (ke < n)
+                    {
+                        pack_panel_b_colmajor(x_diag.data(), bs, bs, cn, packed_b[strip].data(), 0U);
+                    }
+                }
+                for (std::size_t ib = ke; ib < n; ib += k_blas3_mc)
+                {
+                    const std::size_t rm = std::min(k_blas3_mc, n - ib);
+                    pack_panel_a_colmajor(&l(ib, kb), l.col_stride(), rm, bs, packed_a.data());
+                    for (std::size_t strip = 0U; strip < Strips; ++strip)
+                    {
+                        const std::size_t cb = col_begin + strip * k_blas3_nc;
+                        const std::size_t cn = std::min(k_blas3_nc, col_end - cb);
+                        gemm_packed_sub(
+                            rm, cn, bs, packed_a.data(), packed_b[strip].data(), &rhs(ib, cb), rhs.col_stride()
+                        );
+                    }
+                }
+            }
+        }
+
     }  // namespace
 
     /// @brief Packs an `m x k` column-major matrix A into ISA-aligned MR-tall micro-panels.
@@ -1253,37 +1303,18 @@ namespace cxxgpr::detail
         MatrixRef<T> l, MatrixMut<T> rhs, std::size_t row_start, std::size_t col_begin, std::size_t col_end
     ) noexcept
     {
-        const std::size_t n = l.rows();
-        if (row_start >= n || col_begin >= col_end)
+        while (col_begin < col_end)
         {
-            return;
-        }
-        alignas(64) std::array<T, k_blas3_kc * k_blas3_nc> x_diag{};
-        alignas(64) std::array<T, k_blas3_pack_a_cap<T>> packed_a{};
-        alignas(64) std::array<T, k_blas3_pack_b_cap> packed_b{};
-
-        for (std::size_t cb = col_begin; cb < col_end; cb += k_blas3_nc)
-        {
-            const std::size_t cn = std::min(k_blas3_nc, col_end - cb);
-            for (std::size_t kb = row_start; kb < n; kb += k_blas3_kc)
+            const std::size_t width = std::min(2U * k_blas3_nc, col_end - col_begin);
+            if (width > k_blas3_nc)
             {
-                const std::size_t ke = std::min(kb + k_blas3_kc, n);
-                const std::size_t bs = ke - kb;
-                copy_block_strided(&rhs(kb, cb), rhs.col_stride(), x_diag.data(), bs, bs, cn);
-                solve_diag_lower_block(l, kb, bs, cn, x_diag.data());
-                copy_block_strided(x_diag.data(), bs, &rhs(kb, cb), rhs.col_stride(), bs, cn);
-
-                if (ke < n)
-                {
-                    pack_panel_b_colmajor(x_diag.data(), bs, bs, cn, packed_b.data(), 0U);
-                    for (std::size_t ib = ke; ib < n; ib += k_blas3_mc)
-                    {
-                        const std::size_t rm = std::min(k_blas3_mc, n - ib);
-                        pack_panel_a_colmajor(&l(ib, kb), l.col_stride(), rm, bs, packed_a.data());
-                        gemm_packed_sub(rm, cn, bs, packed_a.data(), packed_b.data(), &rhs(ib, cb), rhs.col_stride());
-                    }
-                }
+                solve_lower_strip_group<2U>(l, rhs, row_start, col_begin, col_begin + width);
             }
+            else
+            {
+                solve_lower_strip_group<1U>(l, rhs, row_start, col_begin, col_begin + width);
+            }
+            col_begin += width;
         }
     }
 
