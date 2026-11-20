@@ -23,6 +23,7 @@
 
 #include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
+#include "workspace/predict_diagonal.hpp"
 
 namespace cxxgpr
 {
@@ -101,6 +102,7 @@ namespace cxxgpr
         /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision.
         /// @param[in] x_query Column-major m x d query coordinate matrix.
         /// @param[in,out] workspace Reusable query-time workspace storing K_* and then V = L^-1 * K_*.
+        /// @param[in] validation Whether the model owns a verified factor.
         /// @param[out] out_mean Output vector resized to m receiving posterior mean mu_*.
         /// @return Empty expected on success, or GprError on invalid inputs, kernel error, or solve failure.
         /// @retval GprErrorCode::EmptyInput When inputs are empty.
@@ -117,7 +119,8 @@ namespace cxxgpr
             std::span<const typename P::Refine> alpha,
             MatrixRef<typename P::Storage> x_query,
             QueryWorkspace<P>& workspace,
-            std::vector<typename P::Refine>& out_mean
+            std::vector<typename P::Refine>& out_mean,
+            linalg::detail::FactorValidation validation = linalg::detail::FactorValidation::Check
         )
         {
             using Storage = P::Storage;
@@ -168,7 +171,7 @@ namespace cxxgpr
             }
 
             // Overwrite K_* in place with V = L^-1 * K_* for subsequent variance/covariance projection.
-            if (auto solve = linalg::solve_lower_in_place(l_factor, k_star_mut); !solve.has_value())
+            if (auto solve = linalg::detail::solve_lower(l_factor, k_star_mut, validation); !solve.has_value())
             {
                 return solve;
             }
@@ -190,6 +193,7 @@ namespace cxxgpr
     /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
     /// @param[in] options Prediction configuration selecting latent or observation variance.
     /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[in] validation Whether the model owns a verified factor.
     /// @param[out] out Destination Prediction structure populated with length-m mean and variance vectors.
     /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or triangular solve failure.
     /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
@@ -199,7 +203,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
     template <PrecisionPolicyConcept P>
-    std::expected<void, GprError> predict_into(
+    std::expected<void, GprError> detail::predict_diagonal_into(
         const CompiledKernel<typename P::Storage>& kernel,
         const GaussianLikelihood& likelihood,
         MatrixRef<typename P::Storage> x_train,
@@ -208,13 +212,15 @@ namespace cxxgpr
         MatrixRef<typename P::Storage> x_query,
         const PredictOptions& options,
         QueryWorkspace<P>& workspace,
-        Prediction<typename P::Refine>& out
+        Prediction<typename P::Refine>& out,
+        linalg::detail::FactorValidation validation
     )
     {
         using Storage = P::Storage;
         using Refine = P::Refine;
 
-        if (auto mv = compute_mean_and_v_into<P>(kernel, x_train, l_factor, alpha, x_query, workspace, out.mean);
+        if (auto mv =
+                compute_mean_and_v_into<P>(kernel, x_train, l_factor, alpha, x_query, workspace, out.mean, validation);
             !mv.has_value())
         {
             return mv;
@@ -256,6 +262,45 @@ namespace cxxgpr
         }
 
         return {};
+    }
+
+    /// @brief Computes posterior mean and diagonal predictive variance into out using pre-allocated buffers.
+    /// @details Calls compute_mean_and_v_into() to obtain mu_* and V = L^-1 * K_*, evaluates k(x*_j, x*_j)
+    /// into workspace.query_kss without heap allocation, and forms max(0, k_** - ||v_j||_2^2) (+ sigma_n^2).
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x_train Column-major n x d training feature matrix in storage precision.
+    /// @param[in] l_factor Square n x n lower Cholesky factor L of A = K + sigma_n^2 I.
+    /// @param[in] alpha Pre-solved weight vector A^-1 * y in refine precision (length n).
+    /// @param[in] x_query Column-major m x d query feature matrix in storage precision.
+    /// @param[in] options Prediction configuration selecting latent or observation variance.
+    /// @param[in,out] workspace Reusable query-time prediction workspace grown on demand.
+    /// @param[out] out Destination Prediction structure populated with length-m mean and variance vectors.
+    /// @return Empty expected on success, or GprError on invalid inputs, dimensions, or triangular solve failure.
+    /// @retval GprErrorCode::EmptyInput When x_train, x_query, l_factor, or alpha is empty.
+    /// @retval GprErrorCode::LengthMismatch When l_factor is not n x n or alpha.size() != n.
+    /// @retval GprErrorCode::DimensionMismatch When x_query.cols() != x_train.cols() or disagrees with ARD dims.
+    /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
+    /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    template <PrecisionPolicyConcept P>
+    std::expected<void, GprError> predict_into(
+        const CompiledKernel<typename P::Storage>& kernel,
+        const GaussianLikelihood& likelihood,
+        MatrixRef<typename P::Storage> x_train,
+        MatrixRef<typename P::Storage> l_factor,
+        std::span<const typename P::Refine> alpha,
+        MatrixRef<typename P::Storage> x_query,
+        const PredictOptions& options,
+        QueryWorkspace<P>& workspace,
+        Prediction<typename P::Refine>& out
+    )
+    {
+        return detail::predict_diagonal_into<P>(
+            kernel, likelihood, x_train, l_factor, alpha, x_query, options, workspace, out,
+            linalg::detail::FactorValidation::Check
+        );
     }
 
     /// @brief Computes posterior mean and diagonal predictive variance for query points x_query.
@@ -872,6 +917,55 @@ namespace cxxgpr
         }
         return result;
     }
+
+    template std::expected<void, GprError> detail::predict_diagonal_into<DoublePrecision>(
+        const CompiledKernel<double>&,
+        const GaussianLikelihood&,
+        MatrixRef<double>,
+        MatrixRef<double>,
+        std::span<const double>,
+        MatrixRef<double>,
+        const PredictOptions&,
+        QueryWorkspace<DoublePrecision>&,
+        Prediction<double>&,
+        linalg::detail::FactorValidation
+    );
+    template std::expected<void, GprError> detail::predict_diagonal_into<SinglePrecision>(
+        const CompiledKernel<float>&,
+        const GaussianLikelihood&,
+        MatrixRef<float>,
+        MatrixRef<float>,
+        std::span<const float>,
+        MatrixRef<float>,
+        const PredictOptions&,
+        QueryWorkspace<SinglePrecision>&,
+        Prediction<float>&,
+        linalg::detail::FactorValidation
+    );
+    template std::expected<void, GprError> detail::predict_diagonal_into<MixedPrecision<PromoteStorage>>(
+        const CompiledKernel<float>&,
+        const GaussianLikelihood&,
+        MatrixRef<float>,
+        MatrixRef<float>,
+        std::span<const double>,
+        MatrixRef<float>,
+        const PredictOptions&,
+        QueryWorkspace<MixedPrecision<PromoteStorage>>&,
+        Prediction<double>&,
+        linalg::detail::FactorValidation
+    );
+    template std::expected<void, GprError> detail::predict_diagonal_into<MixedPrecision<ReevaluateKernel>>(
+        const CompiledKernel<float>&,
+        const GaussianLikelihood&,
+        MatrixRef<float>,
+        MatrixRef<float>,
+        std::span<const double>,
+        MatrixRef<float>,
+        const PredictOptions&,
+        QueryWorkspace<MixedPrecision<ReevaluateKernel>>&,
+        Prediction<double>&,
+        linalg::detail::FactorValidation
+    );
 
     template std::expected<void, GprError> predict_into<DoublePrecision>(
         const CompiledKernel<double>&,

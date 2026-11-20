@@ -538,6 +538,23 @@ namespace
         auto fix = make_fitted_fixture<cxxgpr::DoublePrecision>(kernel, x_vals, y_vals, 2U, 2U, 0.1);
         cxxgpr::QueryWorkspace<cxxgpr::DoublePrecision> qws;
 
+        // A borrowed factor can change between calls using the same workspace.
+        auto borrowed_factor = fix.l_factor;
+        const cxxgpr::MatrixRef<double> borrowed_view(borrowed_factor.data(), 2U, 2U);
+        cxxgpr::Prediction<double> prediction;
+        const auto predict_borrowed = [&]()
+        {
+            return cxxgpr::predict_into(
+                kernel, fix.likelihood, fix.x_ref(), borrowed_view, fix.alpha, fix.x_ref(), cxxgpr::PredictOptions{},
+                qws, prediction
+            );
+        };
+        ASSERT_TRUE(predict_borrowed().has_value());
+        borrowed_factor[1] = std::numeric_limits<double>::quiet_NaN();
+        const auto bad_lower = predict_borrowed();
+        ASSERT_FALSE(bad_lower.has_value());
+        EXPECT_EQ(bad_lower.error().code(), cxxgpr::GprErrorCode::NonFiniteInput);
+
         // Reject query column-count mismatch with DimensionMismatch.
         const std::vector<double> bad_dim_q = {0.1, 0.2};
         auto err_dim = cxxgpr::predict(
