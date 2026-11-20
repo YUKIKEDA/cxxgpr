@@ -564,8 +564,15 @@ namespace cxxgpr::linalg
                 if (n_cols >= 8U && approx_flops >= 4194304.0)
                 {
                     // Narrow batches use independent four-column solves.
-                    const std::size_t wide_block = (n_cols >= 512U) ? 24U : 12U;
-                    const std::size_t col_block = (n_cols <= 24U) ? 4U : wide_block;
+                    std::size_t col_block = 4U;
+                    if (n_cols > 24U && openmp_max_threads() == 1U)
+                    {
+                        col_block = cxxgpr::detail::k_blas3_nc;
+                    }
+                    else if (n_cols >= 192U)
+                    {
+                        col_block = (n_cols >= 512U) ? 24U : 12U;
+                    }
                     const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                     const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
@@ -587,10 +594,10 @@ namespace cxxgpr::linalg
 #ifdef _OPENMP
             const double approx_flops =
                 static_cast<double>(n_rows) * static_cast<double>(n_rows) * static_cast<double>(n_cols);
-            if (n_cols >= 4U && approx_flops >= 16777216.0)
+            if (n_cols >= 4U && approx_flops >= 4194304.0)
             {
-                // Use fixed 4-column blocks so backward SIMD grouping stays invariant to thread count.
-                constexpr std::size_t col_block = 4U;
+                // Each task solves at least one pair of RHS columns.
+                const std::size_t col_block = (n_cols <= 12U) ? 2U : 4U;
                 const std::size_t n_blocks = (n_cols + col_block - 1U) / col_block;
                 const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
 #    pragma omp parallel for schedule(dynamic, 1) if (openmp_max_threads() > 1U)
