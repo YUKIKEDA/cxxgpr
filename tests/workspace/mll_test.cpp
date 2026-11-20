@@ -341,6 +341,7 @@ namespace
             {
                 const cxxgpr::test_support::NoAllocationScope audit;
                 ASSERT_TRUE(cxxgpr::hessian_into(compiled, lik, x, y, jitter, *bufs, hess2).has_value());
+                EXPECT_EQ(hess2, hess);
                 auto mll2 = cxxgpr::value_gradient_hessian_into(compiled, lik, x, y, jitter, *bufs, grad, hess2);
                 ASSERT_TRUE(mll2.has_value());
                 EXPECT_DOUBLE_EQ(*mll2, *mll_res);
