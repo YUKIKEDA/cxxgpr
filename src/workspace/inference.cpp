@@ -769,14 +769,15 @@ namespace cxxgpr
                 z[i] = static_cast<Refine>(rng.unit_normal());
             }
             Refine* out_draw = samples.data() + draw * m;
-            for (std::size_t row = 0; row < m; ++row)
+            std::copy_n(cov_res->mean.data(), m, out_draw);
+            for (std::size_t col = 0; col < m; ++col)
             {
-                Refine acc = cov_res->mean[row];
-                for (std::size_t col = 0; col <= row; ++col)
+                const auto factor_col = cov_mut.col(col);
+                const Refine weight = z[col];
+                for (std::size_t row = col; row < m; ++row)
                 {
-                    acc += cov_mut(row, col) * z[col];
+                    out_draw[row] += factor_col[row] * weight;
                 }
-                out_draw[row] = acc;
             }
         }
 
