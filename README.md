@@ -2,7 +2,7 @@ English | [日本語](README.ja.md)
 
 # cxxgpr
 
-Exact Gaussian Process Regression (GPR) library in C++23, ported from the Exact GPR model of [`gprx`](https://github.com/YUKIKEDA/gprx).
+Exact Gaussian Process Regression (GPR) library in C++23.
 
 > **Status (`0.1.0`)**: Exact GPR implementation, persistence, CMake install/package support, and verification suites are complete. Public APIs follow pre-1.0 (`0.x`) stability expectations.
 

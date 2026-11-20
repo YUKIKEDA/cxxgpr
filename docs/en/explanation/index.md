@@ -11,5 +11,4 @@ numerical-stability
 optimizers
 determinism-and-performance
 design-principles
-relationship-to-gprx
 ```

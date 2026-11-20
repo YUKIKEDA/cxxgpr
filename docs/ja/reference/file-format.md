@@ -24,7 +24,7 @@
 | 未知の最上位キー | 読み込み時に無視する |
 | 書き込み側の動作 | 完成した一時ファイルを最終的な名前へリネームして書き込む |
 
-この形式は、Rust ライブラリ `gprx` の厳密 GPR の永続化（`config.json` と `model.safetensors`）と、構造の上で互換である。他のモデル族は、`PersistErrorKind::WrongModel` で拒否する。対象は、疎なモデルとオンラインモデル（`model` キー）、`"llt"` 以外の分解（`factor_kind`）、供給された二乗距離で学習したモデル（`distance` キー）である。
+他のモデル族は、`PersistErrorKind::WrongModel` で拒否する。対象は、疎なモデルとオンラインモデル（`model` キー）、`"llt"` 以外の分解（`factor_kind`）、供給された二乗距離で学習したモデル（`distance` キー）である。
 
 ## `config.json`
 

@@ -59,13 +59,13 @@ cxxgpr is a C++ static library with a C++ interface. It makes no ABI promise acr
 
 ## Numerical compatibility
 
-Results are reproducible under the rules in {doc}`../explanation/determinism-and-performance`: bit for bit across thread counts within one build; equal to rounding error across compilers, operating systems and `CXXGPR_X86_ISA` tiers. The random stream of `Xoshiro256PlusPlus` is the same integer sequence everywhere and is specified to match `gprx` for equal seeds.
+Results are reproducible under the rules in {doc}`../explanation/determinism-and-performance`: bit for bit across thread counts within one build; equal to rounding error across compilers, operating systems and `CXXGPR_X86_ISA` tiers. The random stream of `Xoshiro256PlusPlus` is the same integer sequence everywhere.
 
 A saved model is intended to be portable across platforms: the on-disk format is the safetensors layout with little-endian headers and column-major matrices ({doc}`file-format`), and a model loaded on another platform is expected to predict to within rounding error of the original.
 
-## Relation to gprx
+## Scope
 
-cxxgpr implements the Exact GPR part of the Rust library `gprx`, including a persistence format that is essentially compatible with it. Sparse and online models are not part of cxxgpr and are rejected when loading. See {doc}`../explanation/relationship-to-gprx` for the scope.
+cxxgpr implements exact Gaussian process regression only. Sparse approximations and online (incremental) models are not part of the library, and the loader rejects files that describe them.
 
 ## License and third-party code
 

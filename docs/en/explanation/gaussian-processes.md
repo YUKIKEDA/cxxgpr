@@ -72,7 +72,7 @@ V = L^{-1} K_*, \qquad
 \Sigma_* = K_{**} - V^\top V,
 $$
 
-where each $L^{-1}(\cdot)$ is a triangular solve. Fitting costs $O(n^3)$ time for the factorisation and $O(n^2)$ memory for $K$ and $L$; every later prediction at $m$ points costs $O(n m)$ for the means and $O(n^2 m)$ for the variances, which need the triangular solves. The factor $L$ and the weights $\boldsymbol{\alpha}$ are exactly what a `FittedGpr` stores and what `persist::save_with_factor` writes to disk. For large $n$, this cubic cost is the main limitation of exact GP regression, and the reason why approximate sparse models exist (see {doc}`relationship-to-gprx` for why cxxgpr does not include them).
+where each $L^{-1}(\cdot)$ is a triangular solve. Fitting costs $O(n^3)$ time for the factorisation and $O(n^2)$ memory for $K$ and $L$; every later prediction at $m$ points costs $O(n m)$ for the means and $O(n^2 m)$ for the variances, which need the triangular solves. The factor $L$ and the weights $\boldsymbol{\alpha}$ are exactly what a `FittedGpr` stores and what `persist::save_with_factor` writes to disk. For large $n$, this cubic cost is the main limitation of exact GP regression, and the reason why approximate sparse models exist (cxxgpr implements the exact model only).
 
 ```{mermaid}
 flowchart LR

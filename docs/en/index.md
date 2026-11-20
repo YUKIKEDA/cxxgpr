@@ -46,7 +46,6 @@ Understand why: the maths, the numerical choices, and the design decisions behin
 
 - New to Gaussian processes? Read {doc}`explanation/gaussian-processes`, then follow {doc}`tutorials/first-regression`.
 - Already know the theory? Jump to {doc}`how-to/install-and-link` and {doc}`how-to/index`.
-- Coming from the Rust crate `gprx`? See {doc}`explanation/relationship-to-gprx`.
 
 ```{toctree}
 :hidden:

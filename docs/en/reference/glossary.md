@@ -53,7 +53,7 @@ Distance cache
 : Squared distances between training points, computed once and reused in every optimizer iteration (`DistanceCachePolicy::Cached`). See {doc}`../how-to/optimize-performance`.
 
 Exact GPR
-: Gaussian process regression that factorizes the full $n \times n$ covariance matrix without approximation. This is the only model cxxgpr implements. See {doc}`../explanation/relationship-to-gprx`.
+: Gaussian process regression that factorizes the full $n \times n$ covariance matrix without approximation. This is the only model cxxgpr implements.
 
 Factor
 : Used as a noun for the Cholesky factor $L$. As a verb in the API (`Gpr::factor`): fit the model at the current hyperparameters without optimizing them.

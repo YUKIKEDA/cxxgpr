@@ -45,7 +45,6 @@
 
 - ガウス過程が初めてなら、{doc}`explanation/gaussian-processes` を読み、{doc}`tutorials/first-regression` に進んでください。
 - 理論を知っているなら、{doc}`how-to/install-and-link` と {doc}`how-to/index` へ進んでください。
-- Rust の `gprx` から移る場合は {doc}`explanation/relationship-to-gprx` を参照してください。
 
 ```{toctree}
 :hidden:

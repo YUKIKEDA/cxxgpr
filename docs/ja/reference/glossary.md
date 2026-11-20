@@ -53,7 +53,7 @@ ARD（automatic relevance determination、自動関連度決定）
 : 学習点間の二乗距離を 1 回だけ計算し、最適化器の毎回の反復で再利用するもの（`DistanceCachePolicy::Cached`）。{doc}`../how-to/optimize-performance` を参照。
 
 Exact GPR（厳密なガウス過程回帰）
-: $n \times n$ の共分散行列全体を、近似なしで因子分解するガウス過程回帰。cxxgpr が実装するのは、このモデルだけである。{doc}`../explanation/relationship-to-gprx` を参照。
+: $n \times n$ の共分散行列全体を、近似なしで因子分解するガウス過程回帰。cxxgpr が実装するのは、このモデルだけである。
 
 因子（factor）
 : 名詞では、コレスキー因子 $L$ のこと。API の動詞（`Gpr::factor`）では、ハイパーパラメータを最適化せず、現在の値のままモデルを学習することを指す。

@@ -2,13 +2,13 @@
 
 # cxxgpr
 
-Rust 製ガウス過程回帰ライブラリ [`gprx`](https://github.com/YUKIKEDA/gprx) の **Exact GPR** モデルを C++23 へ移植した静的ライブラリ。
+C++23 の厳密ガウス過程回帰（Exact GPR）静的ライブラリ。
 
 > **現在地（`0.1.0`）**：Exact GPR 本体、永続化、CMake install / パッケージ対応、および検証スイートを実装済み。公開 API は 1.0 未満（`0.x`）の事前安定性規約に従う。
 
 ## 対象範囲
 
-`cxxgpr` は **Exact GPR**（`Gpr` / `FittedGpr`）に特化して移植した。Sparse GPR（`Sgpr` / `Svgp`）およびオンライン学習（`OnlineGpr`）はスコープ外とする。
+`cxxgpr` は **Exact GPR**（`Gpr` / `FittedGpr`）に特化している。Sparse GPR（`Sgpr` / `Svgp`）およびオンライン学習（`OnlineGpr`）はスコープ外とする。
 
 - **推論・モデル操作**：`Gpr::fit`（`const` メンバ、失敗時も不変）、`Gpr::factor`、`predict`、`predict_with`（`VarianceKind::Observation` / `Latent`）、`predict_into`、`predict_with_into`（ウォームアップ後アロケーションゼロ）、`predict_covariance`、`sample`（決定的 `Xoshiro256++`）、`loo_predict`、`neg_log_marginal_likelihood`、`value_and_gradient_into`、`hessian_into`、`get_params` / `set_params`、`refit`、`into_trainer`。
 - **カーネル**：組込み 10 種の葉（`RbfKernel`、`RbfArdKernel`、`MaternKernel` $\nu \in \{1/2, 3/2, 5/2\}$、`MaternArdKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`RationalQuadraticArdKernel`、`ConstantKernel`、`LinearKernel`、`WhiteKernel`）、`+` / `*` 合成（`KernelSpec` -> `CompiledKernel<T>`）、`Custom` 葉（`KernelTerm<T>`）、`LeafCache` 増分更新、供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel`）。

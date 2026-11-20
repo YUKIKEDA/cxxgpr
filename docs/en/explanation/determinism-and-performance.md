@@ -61,7 +61,7 @@ Anything that you control and that varies between runs breaks reproducibility: u
 
 All randomness in cxxgpr is explicit and seeded: posterior samples (`FittedGpr::sample`, `sample` in the workspace API), optimizer restarts and `FastSimulatedAnnealing`. They draw from `Xoshiro256PlusPlus`, also available as `SeededRng`, a 256-bit generator with a very small state and good statistical quality. A 64-bit seed is expanded into the four state words with SplitMix64, so that even seeds such as 0 and 1 give well-separated streams.
 
-- `next_u64()` is pure integer arithmetic and returns the same sequence on every platform; it is specified to match the generator of `gprx`.
+- `next_u64()` is pure integer arithmetic and returns the same sequence on every platform; the generator is Xoshiro256++.
 - `unit()` takes the upper 53 bits and scales them into $[0, 1)$, which is exact and portable; `open_unit()` clamps that value at least $2^{-53}$ away from 0 and 1 so that logarithms stay finite.
 - `up_to(max)` draws an unbiased integer in $[0, \text{max}]$ by Lemire's rejection method.
 - `unit_normal()` produces standard normal values with the Box-Muller transform. It calls the C library's `log`, `sqrt` and trigonometric functions, so a different C library can differ in the last bit of a draw while the underlying integer stream is identical.

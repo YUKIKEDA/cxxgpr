@@ -24,7 +24,7 @@ During a save, the files `config.json.tmp` and `model.safetensors.tmp` may exist
 | Unknown top-level keys | ignored on load |
 | Writer behaviour | a file is written by renaming a complete temporary file onto the final name |
 
-The format is compatible in structure with the exact-GPR persistence of the Rust library `gprx` (`config.json` plus `model.safetensors`). Models of other families are rejected with `PersistErrorKind::WrongModel`: sparse and online models (a `model` key), factorizations other than `"llt"` (`factor_kind`), and models trained on supplied squared distances (a `distance` key).
+Models of other families are rejected with `PersistErrorKind::WrongModel`: sparse and online models (a `model` key), factorizations other than `"llt"` (`factor_kind`), and models trained on supplied squared distances (a `distance` key).
 
 ## `config.json`
 
