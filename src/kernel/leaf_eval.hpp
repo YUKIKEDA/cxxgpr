@@ -145,7 +145,8 @@ namespace cxxgpr::detail
         MatrixRef<T> x2,
         MatrixMut<T> out,
         KernelExp exp_mode = KernelExp::Accurate,
-        std::span<const double> cached_ls = {}
+        std::span<const double> cached_ls = {},
+        bool coordinates_validated = false
     );
 
     /// @brief Fills the training diagonal k(x_i, x_i) for a single kernel leaf over points x.
