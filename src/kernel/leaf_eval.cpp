@@ -234,22 +234,28 @@ namespace cxxgpr::detail
             const std::size_t n2 = x2.rows();
             const std::size_t d = x1.cols();
             const bool has_weights = !weights.empty();
-            const auto cols_s = static_cast<std::ptrdiff_t>(n2);
+            // Split tall, feature-heavy columns into SIMD-aligned slices even for a single query.
+            const std::size_t block = (d >= 8U && n2 <= 8U) ? 256U : n1;
+            const std::size_t blocks = 1U + ((n1 - 1U) / block);
+            const auto jobs = static_cast<std::ptrdiff_t>(n2 * blocks);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if ((n1 * n2) >= 65536U)
+#    pragma omp parallel for schedule(static) if (jobs > 1 \
+            && (n1 * n2 >= 65536U || (blocks > 1U && n1 * n2 >= 131072U / d)))
 #endif
-            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            for (std::ptrdiff_t job = 0; job < jobs; ++job)
             {
-                const auto col = static_cast<std::size_t>(col_s);
-                T* col_ptr = &out(0U, col);
+                const auto col = static_cast<std::size_t>(job) / blocks;
+                const auto begin = (static_cast<std::size_t>(job) % blocks) * block;
+                const auto len = std::min(block, n1 - begin);
+                T* col_ptr = &out(begin, col);
                 const T w0 = has_weights ? weights[0U] : T{1};
-                detail::set_scaled_sq_diff_slice(col_ptr, x1.col(0U).data(), x2(col, 0U), w0, n1);
+                detail::set_scaled_sq_diff_slice(col_ptr, x1.col(0U).data() + begin, x2(col, 0U), w0, len);
                 for (std::size_t dim = 1U; dim < d; ++dim)
                 {
                     const T wd = has_weights ? weights[dim] : T{1};
-                    detail::add_scaled_sq_diff_slice(col_ptr, x1.col(dim).data(), x2.col(dim)[col], wd, n1);
+                    detail::add_scaled_sq_diff_slice(col_ptr, x1.col(dim).data() + begin, x2.col(dim)[col], wd, len);
                 }
-                slice_fn(col_ptr, n1);
+                slice_fn(col_ptr, len);
             }
         }
 
@@ -399,6 +405,7 @@ namespace cxxgpr::detail
         /// @param[in] x1 First point matrix of shape `(n1, d)`.
         /// @param[in] x2 Second point matrix of shape `(n2, d)`.
         /// @param[in] out Target cross-covariance matrix view of shape `(n1, n2)`.
+        /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
         /// @return Empty expected on success, or an input/dimension/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `x1` or `x2` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `(x1.rows(), x2.rows())`.
@@ -406,7 +413,7 @@ namespace cxxgpr::detail
         /// @retval GprErrorCode::NonFiniteInput If any coordinate in `x1` or `x2` is non-finite.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> validate_cross_points(
-            MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out
+            MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out, bool coordinates_validated
         )
         {
             // Validate empty inputs, output shape, and feature count before scanning matrix entries.
@@ -421,6 +428,10 @@ namespace cxxgpr::detail
             if (x1.cols() != x2.cols())
             {
                 return std::unexpected(GprError::dimension_mismatch(x2.cols(), x1.cols()));
+            }
+            if (coordinates_validated)
+            {
+                return {};
             }
             if (auto v = validate_points(x1); !v.has_value())
             {
@@ -1436,6 +1447,7 @@ namespace cxxgpr::detail
         /// @param[out] out Target cross-covariance matrix of shape `(n1, n2)`.
         /// @param[in] exp_mode Exponential evaluation backend.
         /// @param[in] cached_ls Pre-cached ARD lengthscales, or empty to read from `leaf`.
+        /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
         /// @return Empty expected on success, or validation/dimension/evaluation error.
         /// @retval GprErrorCode::EmptyInput If either point matrix is empty.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `(x1.rows(), x2.rows())`.
@@ -1448,11 +1460,12 @@ namespace cxxgpr::detail
             MatrixRef<T> x2,
             MatrixMut<T> out,
             KernelExp exp_mode,
-            std::span<const double> cached_ls
+            std::span<const double> cached_ls,
+            bool coordinates_validated
         )
         {
             // Validate point shapes, matching feature count, and finite entries before dispatching.
-            if (auto v = validate_cross_points(x1, x2, out); !v.has_value())
+            if (auto v = validate_cross_points(x1, x2, out, coordinates_validated); !v.has_value())
             {
                 return v;
             }
@@ -1930,6 +1943,7 @@ namespace cxxgpr::detail
     /// @param[out] out Output cross-covariance matrix of shape `(n1, n2)`.
     /// @param[in] exp_mode Exponential evaluation backend.
     /// @param[in] cached_ls Pre-cached ARD lengthscales, or empty to query `leaf`.
+    /// @param[in] coordinates_validated True when the caller already checked all coordinates for finiteness.
     /// @return Empty expected on success, or validation/dimension/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_cross_points(
@@ -1938,10 +1952,11 @@ namespace cxxgpr::detail
         MatrixRef<T> x2,
         MatrixMut<T> out,
         KernelExp exp_mode,
-        std::span<const double> cached_ls
+        std::span<const double> cached_ls,
+        bool coordinates_validated
     )
     {
-        return eval_leaf_cross_points(leaf, x1, x2, out, exp_mode, cached_ls);
+        return eval_leaf_cross_points(leaf, x1, x2, out, exp_mode, cached_ls, coordinates_validated);
     }
 
     /// @brief Fills the diagonal $k(x_i, x_i)$ of a kernel leaf over point matrix `x`.
@@ -2732,10 +2747,22 @@ namespace cxxgpr::detail
         const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp
     );
     template std::expected<void, GprError> leaf_apply_cross_points<double>(
-        const KernelLeaf&, MatrixRef<double>, MatrixRef<double>, MatrixMut<double>, KernelExp, std::span<const double>
+        const KernelLeaf&,
+        MatrixRef<double>,
+        MatrixRef<double>,
+        MatrixMut<double>,
+        KernelExp,
+        std::span<const double>,
+        bool
     );
     template std::expected<void, GprError> leaf_apply_cross_points<float>(
-        const KernelLeaf&, MatrixRef<float>, MatrixRef<float>, MatrixMut<float>, KernelExp, std::span<const double>
+        const KernelLeaf&,
+        MatrixRef<float>,
+        MatrixRef<float>,
+        MatrixMut<float>,
+        KernelExp,
+        std::span<const double>,
+        bool
     );
     template std::expected<void, GprError> leaf_fill_diag<double>(
         const KernelLeaf&, MatrixRef<double>, std::span<double>, std::span<const double>

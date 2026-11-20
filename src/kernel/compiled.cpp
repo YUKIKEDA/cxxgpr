@@ -1433,7 +1433,7 @@ namespace cxxgpr
                     fill_cross_sq_dist(x1, x2, dist_buf);
                     return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
                 }
-                return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode, cached_ls[leaf->leaf_idx]);
+                return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode, cached_ls[leaf->leaf_idx], true);
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
