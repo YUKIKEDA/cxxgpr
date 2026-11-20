@@ -644,6 +644,7 @@ namespace cxxgpr
         /// @param[in] jitter Diagonal jitter policy used if L must be refactored under Reuse.
         /// @param[in,out] buffers Factored FitBuffers owning L, alpha, W buffer, and lazy HessianScratch.
         /// @param[out] out_hess Destination span of length p * p receiving the symmetric analytical Hessian.
+        /// @param[in] weights_ready True if the joint gradient evaluation already populated W.
         /// @return Empty expected on success, or GprError on solve, kernel derivative, or allocation failure.
         /// @retval GprErrorCode::EmptyInput When dimensions are empty.
         /// @retval GprErrorCode::SizeOverflow When HessianScratch sizing overflows std::size_t.
@@ -657,7 +658,8 @@ namespace cxxgpr
             std::span<const typename P::Storage> y,
             const JitterPolicy& jitter,
             FitBuffers<P>& buffers,
-            std::span<double> out_hess
+            std::span<double> out_hess,
+            bool weights_ready
         )
         {
             using Storage = P::Storage;
@@ -681,13 +683,16 @@ namespace cxxgpr
             }
 
             // Compute W = alpha * alpha^T - A^-1; under Reuse this safely overwrites k_matrix after Z = L^-1.
-            if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
-                    buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
-                    buffers.w_mut()
-                );
-                !w_ok.has_value())
+            if (!weights_ready)
             {
-                return w_ok;
+                if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
+                        buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
+                        buffers.w_mut()
+                    );
+                    !w_ok.has_value())
+                {
+                    return w_ok;
+                }
             }
 
             const DistanceCache<Storage>* dist_ptr =
@@ -979,6 +984,127 @@ namespace cxxgpr
         return 0.5 * (*dot_res + *logdet_res + (n_dbl * std::log(2.0 * std::numbers::pi)));
     }
 
+    namespace
+    {
+        /// @brief Computes negative MLL and analytical log-space gradients in a single pass via keep_plan.
+        /// @details Factors A with factor-Gram retention enabled, constructs W = alpha * alpha^T - A^-1 in
+        /// buffers.w_mut(), runs single-pass weighted_grads() scaled by -0.5, computes the log-noise gradient
+        /// -0.5 * sigma_n^2 * tr(W), and restores L if CholeskyBuffer::Reuse overwrote k_matrix.
+        /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+        /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+        /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+        /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+        /// @param[in] y Training target vector in storage precision (length n).
+        /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+        /// @param[in,out] buffers Pre-allocated FitBuffers receiving updated L, alpha, W, and scratch state.
+        /// @param[out] out_grad Destination span of length kernel.num_params() + 1 receiving log-space gradients.
+        /// @param[out] out_hess Optional Hessian destination; empty for a gradient-only evaluation.
+        /// @return Negative marginal log-likelihood, or GprError on invalid inputs, size mismatch, or solve failure.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty.
+        /// @retval GprErrorCode::LengthMismatch When out_grad.size() != kernel.num_params() + 1 or n mismatches.
+        /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or +/-Inf.
+        /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with an ARD kernel leaf.
+        /// @retval GprErrorCode::SizeOverflow When workspace or cache sizing overflows std::size_t.
+        /// @retval GprErrorCode::CholeskyFailed When factorization (or CholeskyBuffer::Reuse restoration) fails.
+        template <PrecisionPolicyConcept P>
+        std::expected<double, GprError> evaluate_derivatives(
+            const CompiledKernel<typename P::Storage>& kernel,
+            const GaussianLikelihood& likelihood,
+            MatrixRef<typename P::Storage> x,
+            std::span<const typename P::Storage> y,
+            const JitterPolicy& jitter,
+            FitBuffers<P>& buffers,
+            std::span<double> out_grad,
+            std::span<double> out_hess
+        )
+        {
+            using Storage = P::Storage;
+            const std::size_t n_kernel = kernel.num_params();
+            if (out_grad.size() != n_kernel + 1U)
+            {
+                return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
+            }
+
+            // Ensure keep_plan walk buffers and leaf gradient scratch are allocated before factoring.
+            const std::size_t products = kernel.kept_products();
+            if (auto ok = buffers.core.ensure_weighted(kernel.weighted_buffers(products)); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+            if (auto ok = buffers.core.ensure_kernel_scratch(); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+
+            auto mll_res = factor_and_mll(kernel, likelihood, x, y, jitter, buffers, products);
+            if (!mll_res.has_value())
+            {
+                return mll_res;
+            }
+
+            // Form W = alpha * alpha^T - A^-1 in parallel directly from L (aliasing k_matrix safely under Reuse).
+            const std::size_t n = buffers.core.order();
+            if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
+                    buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
+                    buffers.w_mut()
+                );
+                !w_ok.has_value())
+            {
+                return std::unexpected(std::move(w_ok).error());
+            }
+
+            const DistanceCache<Storage>* dist_ptr =
+                (buffers.dist.has_value() && (buffers.dist->has_dist() || buffers.dist->has_ard())) ? &(*buffers.dist)
+                                                                                                    : nullptr;
+
+            // Contract <W, dK/dtheta_p>_F across all kernel parameters in a single tree walk.
+            if (auto wg_ok = kernel.weighted_grads(
+                    x, dist_ptr, buffers.w_ref(), out_grad.subspan(0, n_kernel), buffers.core.kernel_scratch_mut(),
+                    buffers.core.nested, buffers.core.weighted, products, std::span<double>(buffers.core.col_partials)
+                );
+                !wg_ok.has_value())
+            {
+                return std::unexpected(std::move(wg_ok).error());
+            }
+            for (std::size_t p = 0; p < n_kernel; ++p)
+            {
+                out_grad[p] *= -0.5;
+            }
+
+            // Compute d(-MLL)/d(log sigma_n^2) = -0.5 * tr(W * sigma_n^2 * I) = -0.5 * sigma_n^2 * tr(W).
+            const auto w_ref = buffers.w_ref();
+            double trace_w = 0.0;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                trace_w += static_cast<double>(w_ref(i, i));
+            }
+            out_grad[n_kernel] = -0.5 * likelihood.noise_variance() * trace_w;
+
+            if (!out_hess.empty())
+            {
+                if (auto h_ok = fill_hessian_from_factor(kernel, likelihood, x, y, jitter, buffers, out_hess, true);
+                    !h_ok)
+                {
+                    return std::unexpected(std::move(h_ok).error());
+                }
+                return *mll_res;
+            }
+
+            // Restore L in k_matrix when Reuse mode overwrote it with W.
+            if (buffers.overwrites_cholesky())
+            {
+                auto restore_res = factor_and_mll(kernel, likelihood, x, y, jitter, buffers, 0U);
+                if (!restore_res.has_value())
+                {
+                    return std::unexpected(std::move(restore_res).error());
+                }
+            }
+
+            return *mll_res;
+        }
+
+    }  // namespace
+
     /// @brief Computes negative MLL and analytical log-space gradients in a single pass via keep_plan.
     /// @details Factors A with factor-Gram retention enabled, constructs W = alpha * alpha^T - A^-1 in
     /// buffers.w_mut(), runs single-pass weighted_grads() scaled by -0.5, computes the log-noise gradient
@@ -1009,79 +1135,7 @@ namespace cxxgpr
         std::span<double> out_grad
     )
     {
-        using Storage = P::Storage;
-        const std::size_t n_kernel = kernel.num_params();
-        if (out_grad.size() != n_kernel + 1U)
-        {
-            return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
-        }
-
-        // Ensure keep_plan walk buffers and leaf gradient scratch are allocated before factoring.
-        const std::size_t products = kernel.kept_products();
-        if (auto ok = buffers.core.ensure_weighted(kernel.weighted_buffers(products)); !ok.has_value())
-        {
-            return std::unexpected(std::move(ok).error());
-        }
-        if (auto ok = buffers.core.ensure_kernel_scratch(); !ok.has_value())
-        {
-            return std::unexpected(std::move(ok).error());
-        }
-
-        auto mll_res = factor_and_mll(kernel, likelihood, x, y, jitter, buffers, products);
-        if (!mll_res.has_value())
-        {
-            return mll_res;
-        }
-
-        // Form W = alpha * alpha^T - A^-1 in parallel directly from L (aliasing k_matrix safely under Reuse).
-        const std::size_t n = buffers.core.order();
-        if (auto w_ok = compute_w_lower_from_cholesky<Storage>(
-                buffers.core.k_ref(), std::span<const Storage>(buffers.core.rhs), buffers.core.exp_mut(),
-                buffers.w_mut()
-            );
-            !w_ok.has_value())
-        {
-            return std::unexpected(std::move(w_ok).error());
-        }
-
-        const DistanceCache<Storage>* dist_ptr =
-            (buffers.dist.has_value() && (buffers.dist->has_dist() || buffers.dist->has_ard())) ? &(*buffers.dist)
-                                                                                                : nullptr;
-
-        // Contract <W, dK/dtheta_p>_F across all kernel parameters in a single tree walk.
-        if (auto wg_ok = kernel.weighted_grads(
-                x, dist_ptr, buffers.w_ref(), out_grad.subspan(0, n_kernel), buffers.core.kernel_scratch_mut(),
-                buffers.core.nested, buffers.core.weighted, products, std::span<double>(buffers.core.col_partials)
-            );
-            !wg_ok.has_value())
-        {
-            return std::unexpected(std::move(wg_ok).error());
-        }
-        for (std::size_t p = 0; p < n_kernel; ++p)
-        {
-            out_grad[p] *= -0.5;
-        }
-
-        // Compute d(-MLL)/d(log sigma_n^2) = -0.5 * tr(W * sigma_n^2 * I) = -0.5 * sigma_n^2 * tr(W).
-        const auto w_ref = buffers.w_ref();
-        double trace_w = 0.0;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            trace_w += static_cast<double>(w_ref(i, i));
-        }
-        out_grad[n_kernel] = -0.5 * likelihood.noise_variance() * trace_w;
-
-        // Restore L in k_matrix when Reuse mode overwrote it with W.
-        if (buffers.overwrites_cholesky())
-        {
-            auto restore_res = factor_and_mll(kernel, likelihood, x, y, jitter, buffers, 0U);
-            if (!restore_res.has_value())
-            {
-                return std::unexpected(std::move(restore_res).error());
-            }
-        }
-
-        return *mll_res;
+        return evaluate_derivatives(kernel, likelihood, x, y, jitter, buffers, out_grad, {});
     }
 
     /// @brief Computes the analytical log-space Hessian matrix of the negative marginal log-likelihood.
@@ -1122,12 +1176,11 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(mll_res).error());
         }
-        return fill_hessian_from_factor(kernel, likelihood, x, y, jitter, buffers, out_hess);
+        return fill_hessian_from_factor(kernel, likelihood, x, y, jitter, buffers, out_hess, false);
     }
 
     /// @brief Computes negative MLL, analytical gradient, and analytical Hessian together in one pass.
-    /// @details Verifies out_hess length p * p, runs mll_and_gradient_into() (which leaves L intact even
-    /// under CholeskyBuffer::Reuse), and evaluates out_hess via fill_hessian_from_factor().
+    /// @details Verifies the Hessian length and contracts both derivatives against the same weight matrix.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
     /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
     /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
@@ -1161,17 +1214,7 @@ namespace cxxgpr
         {
             return std::unexpected(GprError::length_mismatch("hessian output length mismatch"));
         }
-        auto mll_res = mll_and_gradient_into(kernel, likelihood, x, y, jitter, buffers, out_grad);
-        if (!mll_res.has_value())
-        {
-            return mll_res;
-        }
-        if (auto h_ok = fill_hessian_from_factor(kernel, likelihood, x, y, jitter, buffers, out_hess);
-            !h_ok.has_value())
-        {
-            return std::unexpected(std::move(h_ok).error());
-        }
-        return *mll_res;
+        return evaluate_derivatives(kernel, likelihood, x, y, jitter, buffers, out_grad, out_hess);
     }
 
     template std::expected<double, GprError> factor_and_mll<DoublePrecision>(
