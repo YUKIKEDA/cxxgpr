@@ -29,8 +29,10 @@ if (-not $SkipInstall) {
 }
 
 $deps = Join-Path $buildDir 'vcpkg_installed\x64-windows'
+# Passed through the environment: a "-D...=C:" argument is parsed as a named parameter by pwsh -File.
+$env:CMAKE_PREFIX_PATH = "$prefix;$deps"
 Invoke-Msvc cmake -S (Join-Path $root 'docs\examples') -B $exBuild -G 'Ninja Multi-Config' `
-    "-DCMAKE_PREFIX_PATH=$prefix;$deps" -DCMAKE_CXX_COMPILER=cl
+    -DCMAKE_CXX_COMPILER=cl
 if ($Name) {
     Invoke-Msvc cmake --build $exBuild --config $Config --target "cxxgpr_example_$Name"
     & (Join-Path $exBuild "$Config\$Name.exe")

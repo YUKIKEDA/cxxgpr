@@ -92,7 +92,9 @@ jobs:
         run: |
           $stage = "$env:GITHUB_WORKSPACE/out/stage"
           $deps = "$env:GITHUB_WORKSPACE/out/build/windows-msvc/vcpkg_installed/x64-windows"
-          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake -S docs/examples -B out/examples-build -G "Ninja Multi-Config" "-DCMAKE_PREFIX_PATH=$stage;$deps" -DCMAKE_CXX_COMPILER=cl
+          # Passed through the environment: a "-D...=C:" argument is parsed as a named parameter by pwsh -File.
+          $env:CMAKE_PREFIX_PATH = "$stage;$deps"
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake -S docs/examples -B out/examples-build -G "Ninja Multi-Config" -DCMAKE_CXX_COMPILER=cl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --build out/examples-build --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
