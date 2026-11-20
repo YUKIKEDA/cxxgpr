@@ -23,6 +23,8 @@ The canonical source for repository layout and naming conventions. A PR that add
 | `qa/baselines/` | Per-platform hexfloat baseline results (written only by `tools/qa/results.py`) |
 | `tools/dev/` | Development helpers (MSVC environment launcher, Skill sync, CI scope detection, etc.; built in M0-2) |
 | `tools/qa/` | Quality gates (`trace.py`, `arch_check.py`, `doc_check.py`, `results.py`; built in M0-2) |
+| `tools/docs/` | Documentation generators (API reference pages, Doxygen input filter) |
+| `tools/release/` | Release helpers (version check, archive, checksums); see [release.md](release.md) |
 | `.agents/skills/`, `.claude/skills/` | The canonical Skills and their exact copies |
 | `.cursor/rules/` | Development, design, numerical, and C++23 rules |
 | `out/` | Build artifacts and the vcpkg installation area (not tracked by git) |
@@ -60,5 +62,5 @@ M0 builds the repository foundation and the build and QA infrastructure; M1 onwa
 - **Namespaces**: `cxxgpr` (`cxxgpr::kernel`, `cxxgpr::transform`, `cxxgpr::persist`). Internal details live in `cxxgpr::detail`.
 - **C++ identifiers**: types in `PascalCase`; functions, methods, local variables, and constants in `snake_case`; a trailing `_` on private members; the macro prefix `CXXGPR_`.
 - **Doxygen comment convention**: every C++ file uses English `///` Doxygen with `@file`, `@defgroup`/`@ingroup`, `@brief`, `@details`, `@tparam`, `@param[in]`/`@param[out]`/`@param[in,out]`, `@return`, `@retval`, `@pre`, `@post`, `@note`, `@warning`, `@attention`, `@code`/`@endcode`, and `@see` (the canonical source for details is the [dev-docs rule](../../.cursor/rules/dev-docs.mdc); every `@param` must carry `[in]`/`[out]`/`[in,out]`).
-- **Roadmap row IDs**: `M0-1` to `M5-4`, `REL-1` to `REL-3`.
+- **Roadmap row IDs**: `M0-1` to `M5-4`, `REL-1` to `REL-4`.
 - **Specification and quality IDs**: requirements `REQ-01` to `REQ-12`, design decisions `DES-01` to `DES-20`, persistence `FMT-01` to `FMT-08`, quality `QA-01` to `QA-10`.

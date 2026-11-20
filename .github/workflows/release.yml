@@ -1,0 +1,200 @@
+name: release
+
+# Pushing a tag vX.Y.Z builds the packages and documentation and creates a DRAFT GitHub Release.
+# The draft is published by the repository owner. A manual run (workflow_dispatch) builds
+# everything and uploads the artifacts but never creates a release. Pull requests that change the
+# release machinery run the same dry run.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "tools/release/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-version:
+    name: tag matches project version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check the tag against CMakeLists.txt
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: python tools/release/package.py check-version --tag "$TAG"
+
+  package:
+    needs: verify-version
+    name: package (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-2025
+            platform: windows-x64-msvc
+          - os: ubuntu-24.04
+            platform: linux-x64-gcc14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout vcpkg baseline
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: out/vcpkg
+          fetch-depth: 0
+      - name: vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: out/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ---- Windows (MSVC) ----
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./out/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          New-Item -ItemType Directory -Force out/vcpkg-cache | Out-Null
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE/out/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:GITHUB_WORKSPACE/out/vcpkg-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build, test, install (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --preset windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --build --preset windows-release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --preset windows-release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --install out/build/windows-msvc --config Release --prefix out/stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and run the examples against the installed package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "$env:GITHUB_WORKSPACE/out/stage"
+          $deps = "$env:GITHUB_WORKSPACE/out/build/windows-msvc/vcpkg_installed/x64-windows"
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake -S docs/examples -B out/examples-build -G "Ninja Multi-Config" "-DCMAKE_PREFIX_PATH=$stage;$deps" -DCMAKE_CXX_COMPILER=cl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/dev/msvc.ps1 cmake --build out/examples-build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/dev/msvc.ps1 ctest --test-dir out/examples-build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ---- Linux (GCC 14) ----
+      - name: Bootstrap vcpkg and toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p out/vcpkg-cache
+          ./out/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/out/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/out/vcpkg-cache" >> "$GITHUB_ENV"
+          missing=""
+          command -v ninja >/dev/null || missing="$missing ninja-build"
+          command -v g++-14 >/dev/null || missing="$missing g++-14"
+          if [ -n "$missing" ]; then sudo apt-get update && sudo apt-get install -y $missing; fi
+      - name: Build, test, install (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CXX: g++-14
+        run: |
+          cmake --preset linux-release
+          cmake --build --preset linux-release
+          ctest --preset linux-release
+          cmake --install out/build/linux-release --prefix out/stage
+      - name: Build and run the examples against the installed package (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CXX: g++-14
+        run: |
+          cmake -S docs/examples -B out/examples-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/out/stage;$GITHUB_WORKSPACE/out/build/linux-release/vcpkg_installed/x64-linux"
+          cmake --build out/examples-build
+          ctest --test-dir out/examples-build --output-on-failure
+
+      - name: Create the archive
+        run: python tools/release/package.py archive --stage out/stage --platform ${{ matrix.platform }} --out out/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}
+          path: out/dist/*
+          if-no-files-found: error
+
+  docs:
+    needs: verify-version
+    name: documentation sites
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen graphviz
+      - name: Install Sphinx toolchain
+        run: python -m pip install -r docs/requirements.txt
+      - name: Generate Doxygen XML and API reference pages
+        run: |
+          mkdir -p out/docs/doxygen
+          doxygen docs/Doxyfile
+          python tools/docs/gen_api_reference.py
+      - name: Check API coverage
+        run: python -X utf8 tools/qa/doc_api_coverage.py
+      - name: Build both sites
+        run: |
+          python -m sphinx -b html -W --keep-going -c docs docs/en out/docs/html/en
+          python -m sphinx -b html -W --keep-going -c docs -D language=ja docs/ja out/docs/html/ja
+      - name: Archive the sites
+        run: |
+          version=$(python tools/release/package.py version)
+          mkdir -p out/dist
+          (cd out/docs/html && zip -qr "../../dist/cxxgpr-${version}-docs.zip" en ja)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: out/dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [package, docs]
+    name: create draft release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          path: out/artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: python tools/release/package.py checksums --dir out/artifacts
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" out/artifacts/* \
+            --draft --verify-tag --generate-notes --title "cxxgpr ${TAG#v}"
