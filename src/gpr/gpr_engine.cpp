@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "workspace/predict_diagonal.hpp"
+
 namespace cxxgpr::detail
 {
     namespace
@@ -1175,9 +1177,9 @@ namespace cxxgpr::detail
             payload.x_train.data(), payload.n_train, payload.n_features, payload.n_train
         );
         const MatrixRef<Storage> l_ref(payload.l_factor.data(), payload.n_train, payload.n_train, payload.n_train);
-        if (auto res = predict_into<P>(
+        if (auto res = predict_diagonal_into<P>(
                 *payload.compiled_kernel, payload.likelihood, x_train_ref, l_ref, payload.alpha, *xq_ref, options,
-                workspace, out
+                workspace, out, linalg::detail::FactorValidation::AlreadyValidated
             );
             !res.has_value())
         {

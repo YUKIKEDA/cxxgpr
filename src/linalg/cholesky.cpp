@@ -26,6 +26,7 @@
 #endif
 
 #include "linalg/eigen_map.hpp"
+#include "linalg/factor_validation.hpp"
 #include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
@@ -76,6 +77,7 @@ namespace cxxgpr::linalg
         /// finiteness.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
         /// @param[in] l Square read-only lower Cholesky factor view.
+        /// @param[in] validation Whether the factor was already checked by the model producer.
         /// @param[in] rhs Mutable right-hand side matrix view.
         /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
         /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
@@ -84,12 +86,17 @@ namespace cxxgpr::linalg
         /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
         /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
         template <KernelScalarConcept T>
-        [[nodiscard]] std::expected<void, GprError> validate_solve_inputs(MatrixRef<T> l, MatrixMut<T> rhs)
+        [[nodiscard]] std::expected<void, GprError> validate_solve_inputs(
+            MatrixRef<T> l, MatrixMut<T> rhs, detail::FactorValidation validation = detail::FactorValidation::Check
+        )
         {
             // Validate factor first, then right-hand side geometry, row parity, and finiteness.
-            if (const auto l_check = validate_lower_factor(l); !l_check.has_value())
+            if (validation == detail::FactorValidation::Check)
             {
-                return l_check;
+                if (const auto l_check = validate_lower_factor(l); !l_check.has_value())
+                {
+                    return l_check;
+                }
             }
             if (const auto rhs_check = detail::validate_matrix_view(rhs, false); !rhs_check.has_value())
             {
@@ -1047,6 +1054,37 @@ namespace cxxgpr::linalg
     /// forward substitution.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
+    /// @param[in] validation Whether the caller owns an already validated factor.
+    /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
+    /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
+    /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
+    /// @retval GprErrorCode::SizeOverflow When stride * cols overflows std::size_t on l or rhs.
+    /// @retval GprErrorCode::LengthMismatch When l is non-square, strides are invalid, or rhs.rows() != l.rows().
+    /// @retval GprErrorCode::NonFiniteInput When any lower entry of l or any entry of rhs is non-finite.
+    /// @retval GprErrorCode::NonPositiveDefiniteMatrix When any diagonal entry of l is <= 0.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::solve_lower(MatrixRef<T> l, MatrixMut<T> rhs, FactorValidation validation)
+    {
+        if (const auto check = validate_solve_inputs(l, rhs, validation); !check.has_value())
+        {
+            return check;
+        }
+        apply_tri_solve(l, rhs, TriSolveMode::Forward);
+        return {};
+    }
+
+    template std::expected<void, GprError> detail::solve_lower(
+        MatrixRef<float>, MatrixMut<float>, detail::FactorValidation
+    );
+    template std::expected<void, GprError> detail::solve_lower(
+        MatrixRef<double>, MatrixMut<double>, detail::FactorValidation
+    );
+
+    /// @brief Solves L * X = B in place for a lower-triangular Cholesky factor L.
+    /// @details Validates factor and right-hand side views, then performs deterministic blocked lower-triangular
+    /// forward substitution.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] l Square read-only lower Cholesky factor matrix view with strictly positive finite diagonal.
     /// @param[in,out] rhs Mutable matrix view holding B on entry and X on success.
     /// @return Empty expected on success, or GprError on invalid factor or right-hand side.
     /// @retval GprErrorCode::EmptyInput When l or rhs is empty or null.
@@ -1057,12 +1095,7 @@ namespace cxxgpr::linalg
     template <KernelScalarConcept T>
     std::expected<void, GprError> solve_lower_in_place(MatrixRef<T> l, MatrixMut<T> rhs)
     {
-        if (const auto check = validate_solve_inputs(l, rhs); !check.has_value())
-        {
-            return check;
-        }
-        apply_tri_solve(l, rhs, TriSolveMode::Forward);
-        return {};
+        return detail::solve_lower(l, rhs, detail::FactorValidation::Check);
     }
 
     /// @brief Solves L * x = b in place for a lower-triangular Cholesky factor L and vector b.
