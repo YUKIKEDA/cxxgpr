@@ -84,7 +84,7 @@ skills-sync:
 trace-check:
     python -X utf8 tools/qa/trace.py check
 
-# Regenerate docs/quality/traceability.md.
+# Regenerate docs/internal/quality/traceability.md.
 trace-matrix:
     python -X utf8 tools/qa/trace.py matrix
 
@@ -104,3 +104,32 @@ results-check:
 [unix]
 results-check:
     python3 -X utf8 tools/qa/results.py check --case numeric-canary --run out/build/linux-release/cxxgpr_numeric_canary
+
+# Generate Doxygen XML for the public headers (input of the API reference and the coverage check).
+docs-xml:
+    python -X utf8 -c "import pathlib; pathlib.Path('out/docs/doxygen').mkdir(parents=True, exist_ok=True)"
+    doxygen docs/Doxyfile
+
+# Regenerate the Breathe-backed API reference pages.
+docs-api:
+    python -X utf8 tools/docs/gen_api_reference.py
+
+# Build the English and Japanese documentation sites with warnings as errors.
+[windows]
+docs: docs-xml docs-api
+    out/docs-venv/Scripts/python.exe -m sphinx -b html -W --keep-going -c docs docs/en out/docs/html/en
+    out/docs-venv/Scripts/python.exe -m sphinx -b html -W --keep-going -c docs -D language=ja docs/ja out/docs/html/ja
+
+[unix]
+docs: docs-xml docs-api
+    python3 -m sphinx -b html -W --keep-going -c docs docs/en out/docs/html/en
+    python3 -m sphinx -b html -W --keep-going -c docs -D language=ja docs/ja out/docs/html/ja
+
+# Verify every public API symbol is covered by the user documentation in both languages.
+docs-coverage: docs-xml
+    python -X utf8 tools/qa/doc_api_coverage.py
+
+# Build and run the documentation example programs against an installed package.
+[windows]
+docs-examples:
+    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools/dev/build_examples.ps1

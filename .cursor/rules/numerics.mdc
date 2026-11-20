@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 数値計算契約
 
-詳細は [docs/design.md](../../docs/design.md) を正本とする。
+詳細は [docs/internal/design.md](../../docs/internal/design.md) を正本とする。
 
 - **非有限入力と非正規化数**：境界入口で入力 `x`、`y`、初期 `θ`、供給二乗距離の `NaN` / `±∞` を検出して `NonFiniteInput` / `InvalidDistance` 等を返す。IEEE 754 の非正規化数（subnormal）は有限値としてそのまま扱い、プロセス制御レジスタ（MXCSR / FPCR）を読み書きしない。
 - **観測ノイズ $\sigma_n^2$ と Jitter の分離**：モデルパラメータである対数観測ノイズ $\theta_{\text{noise}} = \log(\sigma_n^2)$（$\partial K / \partial \theta_{\text{noise}} = \sigma_n^2 I$）と、数値安定化用の `JitterPolicy` を厳密に分離する。まず $j=0$ の `A = K + \sigma_n^2 I` で Cholesky 分解を試み、失敗時のみ `JitterPolicy` に従って再試行し、成功した `factor_jitter` を保持する。

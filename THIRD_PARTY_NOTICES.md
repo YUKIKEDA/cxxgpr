@@ -12,4 +12,4 @@ cxxgpr 自身のソースのライセンスは、ルートの `LICENSE` にあ�
 
 上の表はライセンス全文や著作権表示の代わりではない。CMake の構成時に、vcpkg が導入した各パッケージの `share/<package>/copyright` を構成先の `third-party-notices/<package>.txt` へバイトを変えずに複製し、CTest の整合検査（`toolchain.third_party_notices`）で原本と複製の SHA-256 一致を検証する。
 
-依存の取得・版の正本は `vcpkg.json` と [ADR 0001](docs/adr/0001-exact-gpr-cpp23-scope.md) / [ADR 0002](docs/adr/0002-msvc-ninja-vcpkg-toolchain.md) である。`EIGEN_MPL2_ONLY` により GPL/LGPL ライセンスのモジュール混入を禁止し、`include/cxxgpr/` に第三者ヘッダを露出させない。
+依存の取得・版の正本は `vcpkg.json` と [ADR 0001](docs/internal/adr/0001-exact-gpr-cpp23-scope.md) / [ADR 0002](docs/internal/adr/0002-msvc-ninja-vcpkg-toolchain.md) である。`EIGEN_MPL2_ONLY` により GPL/LGPL ライセンスのモジュール混入を禁止し、`include/cxxgpr/` に第三者ヘッダを露出させない。

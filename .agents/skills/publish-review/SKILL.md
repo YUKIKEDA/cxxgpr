@@ -26,7 +26,7 @@ Require all repository quality gates to pass before approving:
 - `.cursor/rules/publish.mdc`
 - `.cursor/rules/dev-docs.mdc`
 - `.cursor/rules/api-contract.mdc`
-- `docs/quality/quality-plan.md` (`QA-09`)
+- `docs/internal/quality/quality-plan.md` (`QA-09`)
 - `.agents/skills/natural-japanese/SKILL.md` (`score` mode, for inspecting Japanese prose in `README.ja.md`)
 
 Do not restate those rules here; audit every public surface directly against them.
@@ -37,7 +37,7 @@ Do not restate those rules here; audit every public surface directly against the
 2. `LICENSE` (Apache-2.0) and `THIRD_PARTY_NOTICES.md` against `vcpkg.json` and `CMakeLists.txt`
 3. Every public header under `include/cxxgpr/**/*.hpp` and its Doxygen comments
 
-Internal planning and specification documents (`docs/design.md`, `docs/persist-format.md`, `docs/roadmap.md`, `docs/adr/`, `docs/quality/`) and `detail` implementation symbols are excluded from the external-reader restrictions below.
+Internal planning and specification documents (`docs/internal/design.md`, `docs/internal/persist-format.md`, `docs/internal/roadmap.md`, `docs/internal/adr/`, `docs/internal/quality/`) and `detail` implementation symbols are excluded from the external-reader restrictions below.
 
 ## Fail criteria
 

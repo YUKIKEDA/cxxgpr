@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 数値試験の書き方
 
-- **独立参照との照合**：閉じた式（$n=2$ Exact GPR・LOO など）、中心差分（勾配・ヘッセ行列）、凍結済み `gprx`（および `scikit-learn`）golden JSON（`tests/fixtures/`）と比べる。製品関数自身を別の引数で呼び直しただけの自己一致で済ませない。
+- **独立参照との照合**：閉じた式（$n=2$ Exact GPR・LOO など）、中心差分（勾配・ヘッセ行列）、凍結済みの参照実装（および `scikit-learn`）の golden JSON（`tests/fixtures/`）と比べる。製品関数自身を別の引数で呼び直しただけの自己一致で済ませない。
 - **固定許容差**：試験コード内の許容差は固定の数値定数（出典や条件数見積りをコメント記）とし、製品の収束閾値定数から導かない。
 - **全要素・全境界網羅**：10 カーネル葉、3 精度ポリシー（`Double` / `Single` / `MixedPrecision<PromoteStorage>` / `MixedPrecision<ReevaluateKernel>`）、`KernelExp` 2 種、5 最適化器、全変換、全エラー種（`GprError`）を個別に試験する（一部で代表させない）。
 - **負対照と親不変**：空入力・寸法不一致・サイズ積オーバーフロー・非有限・不正区間・不正二乗距離・Cholesky 失敗の各負対照を置き、失敗後に親 `Gpr` / `FittedGpr` が不変であることを確かめる。

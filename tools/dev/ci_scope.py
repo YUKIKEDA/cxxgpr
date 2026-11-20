@@ -99,21 +99,21 @@ def select(paths: list[str], *, full: bool = False) -> dict[str, bool]:
             flags["skills"] = True
 
         if path in {
-            "docs/design.md",
-            "docs/persist-format.md",
-            "docs/quality/quality-plan.md",
-            "docs/quality/traceability.md",
+            "docs/internal/design.md",
+            "docs/internal/persist-format.md",
+            "docs/internal/quality/quality-plan.md",
+            "docs/internal/quality/traceability.md",
             "tools/qa/trace.py",
-        } or path.startswith(("docs/verification/", "tests/")):
+        } or path.startswith(("docs/internal/verification/", "tests/")):
             flags["trace"] = True
 
-        if path in {"docs/architecture.md", "tools/qa/arch_check.py"} or path.startswith(
+        if path in {"docs/internal/architecture.md", "tools/qa/arch_check.py"} or path.startswith(
             ("include/", "src/", "tests/", "benchmarks/")
         ):
             flags["arch"] = True
 
         if (
-            path in {"docs/conventions.md", "tools/qa/doc_check.py"}
+            path in {"docs/internal/conventions.md", "tools/qa/doc_check.py"}
             or path.startswith(("include/", ".cursor/rules/"))
             or _is_markdown(path)
         ):

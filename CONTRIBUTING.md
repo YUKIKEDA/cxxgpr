@@ -1,19 +1,19 @@
-# 開発の手順
+# Development workflow
 
-エージェント向けの入口は [AGENTS.md](AGENTS.md)、規則は `.cursor/rules/` にある。ここには開発手順をまとめる。
+The entry point for agents is [AGENTS.md](AGENTS.md), and the rules are in `.cursor/rules/`. This document summarizes the development workflow.
 
-## 順序
+## Order
 
-Grill（設計が分岐するとき）→ Issue → ブランチ → 作業 → PR → レビュー → squash merge → 振り返り。CI は PR 上で非同期に実行し、merge に必要な成功は merge 前に確認する。
+Grill (when the design forks) → Issue → branch → work → PR → review → squash merge → retrospective. CI runs asynchronously on the PR, and the successes required for merge are confirmed before merging.
 
-- Issue は `.github/ISSUE_TEMPLATE/` のテンプレートから作る。白紙の Issue は作らない。Issue には [docs/roadmap.md](docs/roadmap.md) の行 ID を書く。
-- ブランチ名は `type/<Issue番号>-<slug>`。`main` へ直接 commit しない。
-- 1 Issue は 1 PR。merge は所有者が行い、merge したブランチは消す。
-- 依頼されたタスクは、検査・commit・通常の push・PR 作成まで進める。設計や範囲の判断が分かれる場合は PR 前に確認する。
-- PR 作成後、エージェントは CI の完了を原則待たず、PR の URL と実行状態を報告して返す。
-- commit の件名は `type(scope): subject`（英語、命令形、末尾ピリオドなし）。
+- Create Issues from the templates in `.github/ISSUE_TEMPLATE/`. Do not create blank Issues. Write the row ID from [docs/internal/roadmap.md](docs/internal/roadmap.md) in the Issue.
+- Branch names are `type/<issue-number>-<slug>`. Never commit directly to `main`.
+- One Issue is one PR. The owner performs the merge and deletes the merged branch.
+- A requested task proceeds through checks, commit, a normal push, and PR creation. If the design or scope decision forks, confirm before the PR.
+- After creating a PR, an agent does not in principle wait for CI to finish; it reports the PR URL and the run status and returns.
+- Commit subjects are `type(scope): subject` (English, imperative mood, no trailing period).
 
-| テンプレート | ラベル | commit の type |
+| Template | Label | Commit type |
 |---|---|---|
 | feat | `type:feat` | `feat` |
 | bug | `type:bug` | `fix` |
@@ -23,31 +23,34 @@ Grill（設計が分岐するとき）→ Issue → ブランチ → 作業 → 
 | task | `type:chore` | `chore` `build` `ci` |
 | spike | `type:spike` | `chore` |
 
-## 振り返り
+## Retrospective
 
-merge 後、PR に 3 点を書く：得た教訓、それを書き込むファイル、追加のリファクタリングの要否。教訓があれば `chore` の Issue を立て、規則・Skill・仕様・ADR へ書く。
+After the merge, write three points on the PR: the lessons learned, the file to write them into, and whether additional refactoring is needed. If there is a lesson, open a `chore` Issue and write it into the rules, Skills, specifications, or ADRs.
 
-## ゲート
+## Gates
 
-差分と依存先に影響する検査を選ぶ。作業中は局所試験を使い、全体検証が必要な場合は編集を終えた最後に 1 回へまとめる。ゲート群は M0-2（Issue #2）で `justfile` と CI へ実装する。
+Choose the checks that affect the diff and its dependents. Use local tests during work, and consolidate any full verification into one run at the very end after editing is finished. The gate suite is implemented in `justfile` and CI in M0-2 (Issue #2).
 
-| コマンド | 内容 | ゲート |
+| Command | Contents | Gate |
 |---|---|---|
-| `just gate` | 構成、ビルド、試験（Windows Debug/Release、Linux Debug/Release/Sanitize） | はい |
-| `just format-check` | `clang-format` の差分がないこと | はい |
-| `just lint` | `clang-tidy`（WarningsAsErrors）の指摘がないこと | はい |
-| `just lint-python` | Python ツール：`ruff`（検査と整形）と `pyright` strict | はい |
-| `just trace-check` | 仕様 ID（`REQ-`/`DES-`/`FMT-`/`QA-`）の追跡表整合 | はい |
-| `just arch-check` | 依存方向および `include/cxxgpr/` の第三者ヘッダ非露出 | はい |
-| `just doc-check` | 公開 Doxygen コメント有無と内部 ID 非混入 | はい |
-| `just skills-check` | `.claude/skills` が `.agents/skills` の一致複製であること | はい |
-| `just results-check` | 基準結果（`qa/baselines/`）との一致 | はい |
-| `just format` / `just skills-sync` | 整形、Skill の複製 | いいえ |
+| `just gate` | Configure, build, and test (Windows Debug/Release, Linux Debug/Release/Sanitize) | yes |
+| `just format-check` | No `clang-format` differences | yes |
+| `just lint` | No `clang-tidy` findings (WarningsAsErrors) | yes |
+| `just lint-python` | Python tools: `ruff` (check and format) and `pyright` strict | yes |
+| `just trace-check` | Consistency of specification IDs (`REQ-`/`DES-`/`FMT-`/`QA-`) with the traceability matrix | yes |
+| `just arch-check` | Dependency direction and non-exposure of third-party headers in `include/cxxgpr/` | yes |
+| `just doc-check` | Presence of public Doxygen comments and absence of internal IDs | yes |
+| `just skills-check` | `.claude/skills` is an exact copy of `.agents/skills` | yes |
+| `just results-check` | Agreement with the baseline results (`qa/baselines/`) | yes |
+| `just format` / `just skills-sync` | Formatting; Skill copying | no |
 
-## 並列に進める
+## Working in parallel
 
-着手前にタスクの先行条件・成果物・編集ファイル・共有状態を整理する。依存する作業は順に行い、互いの結果を必要とせず共有ファイルを衝突させない作業は並列に進める。同一ファイルの編集とそのビルド・解析を同時に行わない。
+Before starting, sort out each task's prerequisites, deliverables, files to edit, and shared state. Do dependent work in order, and run in parallel the work that needs none of the others' results and does not collide on shared files. Do not edit a file while building or analyzing it at the same time.
 
-## 言語
+## Language
 
-文書（`docs/`、`AGENTS.md`、`CONTRIBUTING.md`、`.cursor/rules/`）、Issue・PR の本文は日本語（常体）。コード、Doxygen コメント、識別子、commit 件名、PR 題名は英語。`README.md`（英語）と `README.ja.md`（日本語）は両方維持する。
+- **User documentation** (`docs/en/`, `docs/ja/`, `README.md`, `README.ja.md`) is bilingual: English and Japanese. Keep both languages.
+- **Developer documentation** (`docs/internal/`, `CONTRIBUTING.md`) is English only.
+- **Agent configuration** (`.cursor/rules/`, `AGENTS.md`, `CLAUDE.md`, Skills) is written in Japanese.
+- Issue and PR bodies are written in Japanese (plain form, joyo style). Code, Doxygen comments, identifiers, commit subjects, and PR titles are English.

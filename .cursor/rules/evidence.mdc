@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 証拠の保全
 
-検証の根拠となる基準結果（`qa/baselines/`）、凍結された golden 参照データ（`tests/fixtures/`）、公開済み結果変更記録（`docs/quality/result-changes/`）を恣意的に書き換えない。
+検証の根拠となる基準結果（`qa/baselines/`）、凍結された golden 参照データ（`tests/fixtures/`）、公開済み結果変更記録（`docs/internal/quality/result-changes/`）を恣意的に書き換えない。
 
 - 訂正が必要な場合は新規の結果変更記録や生成手順の変更 PR として履歴と理由を残す。
 - `tests/fixtures/` と `qa/baselines/` は `.gitattributes` で `-text` 指定とし、Windows 環境でも LF/元のバイト列を破壊しない。

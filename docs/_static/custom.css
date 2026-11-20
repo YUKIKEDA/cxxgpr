@@ -1,0 +1,5 @@
+.sidebar-language-switch { padding: 0.25rem var(--sidebar-item-spacing-horizontal) 0.75rem; font-size: var(--font-size--small); }
+.sidebar-language-switch a { color: var(--color-sidebar-link-text); text-decoration: none; }
+.sidebar-language-switch a:hover { color: var(--color-brand-primary); }
+.sd-card { transition: box-shadow 0.15s ease; }
+.sd-card:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12); }

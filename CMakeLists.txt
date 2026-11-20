@@ -16,6 +16,7 @@ include(GNUInstallDirs)
 option(CXXGPR_BUILD_TESTS "Build cxxgpr unit and verification tests" ${PROJECT_IS_TOP_LEVEL})
 option(CXXGPR_BUILD_CANARY "Build numeric canary executable" ${PROJECT_IS_TOP_LEVEL})
 option(CXXGPR_BUILD_BENCHMARKS "Build Google Benchmark targets" OFF)
+option(CXXGPR_BUILD_EXAMPLES "Build the documentation example programs under docs/examples" OFF)
 option(CXXGPR_INSTALL "Generate CMake install targets for cxxgpr" ${PROJECT_IS_TOP_LEVEL})
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -116,6 +117,10 @@ endif()
 
 if(CXXGPR_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+if(CXXGPR_BUILD_EXAMPLES)
+    add_subdirectory(docs/examples)
 endif()
 
 if(CXXGPR_INSTALL)

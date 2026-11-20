@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 依存パッケージ管理
 
-依存は vcpkg manifest モード（`vcpkg.json`）と `builtin-baseline` + `overrides` で全ての版を固定する（[ADR 0001](../../docs/adr/0001-exact-gpr-cpp23-scope.md)）。新しい依存追加・版更新は設計判断（`design` Issue / ADR）が先。
+依存は vcpkg manifest モード（`vcpkg.json`）と `builtin-baseline` + `overrides` で全ての版を固定する（[ADR 0001](../../docs/internal/adr/0001-exact-gpr-cpp23-scope.md)）。新しい依存追加・版更新は設計判断（`design` Issue / ADR）が先。
 
 - **採用済み固定依存**：
   - 製品ランタイム：`eigen3`（5.0.1、`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`）、`nlohmann-json`（3.12.0）、ツールチェーン OpenMP。いずれも `cxxgpr` 静的ライブラリの `PRIVATE` 依存とし、`include/cxxgpr/` から参照・露出させない。

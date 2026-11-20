@@ -14,7 +14,7 @@ body:
     id: roadmap
     attributes:
       label: Roadmap ID
-      description: docs/roadmap.md の行ID。
+      description: docs/internal/roadmap.md の行ID。
       placeholder: M3-A
     validations:
       required: true
@@ -23,7 +23,7 @@ body:
     attributes:
       label: Specification
       description: 関連する仕様文書とID。
-      placeholder: "docs/design.md DES-12"
+      placeholder: "docs/internal/design.md DES-12"
   - type: textarea
     id: depends
     attributes:

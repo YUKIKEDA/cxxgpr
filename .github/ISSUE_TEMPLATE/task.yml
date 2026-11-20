@@ -14,7 +14,7 @@ body:
     id: roadmap
     attributes:
       label: Roadmap ID
-      description: docs/roadmap.md の行ID。例 - M0-2
+      description: docs/internal/roadmap.md の行ID。例 - M0-2
       placeholder: M0-2
     validations:
       required: true
@@ -23,7 +23,7 @@ body:
     attributes:
       label: Specification
       description: 関連する仕様・品質計画・ADR。
-      placeholder: "docs/quality/quality-plan.md QA-01"
+      placeholder: "docs/internal/quality/quality-plan.md QA-01"
   - type: textarea
     id: depends
     attributes:

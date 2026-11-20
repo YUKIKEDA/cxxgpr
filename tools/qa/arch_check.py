@@ -8,7 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 
-ARCH_DOC = Path("docs/architecture.md")
+ARCH_DOC = Path("docs/internal/architecture.md")
 PUBLIC_ROOT = Path("include/cxxgpr")
 SRC_ROOT = Path("src")
 TESTS_ROOT = Path("tests")
@@ -25,7 +25,7 @@ JSON_MODULES = frozenset({"persist"})
 
 
 def parse_allowed_deps(doc_path: Path) -> tuple[dict[str, set[str]], list[str]]:
-    """Parse permitted direct module dependency table from docs/architecture.md."""
+    """Parse permitted direct module dependency table from docs/internal/architecture.md."""
     if not doc_path.exists():
         return {}, [f"Missing architecture doc: {doc_path.as_posix()}"]
 
@@ -36,7 +36,7 @@ def parse_allowed_deps(doc_path: Path) -> tuple[dict[str, set[str]], list[str]]:
             continue
         module = match.group(1)
         deps_cell = match.group(2).strip()
-        if "なし" in deps_cell:
+        if "none" in deps_cell.lower():
             deps[module] = set()
         else:
             deps[module] = set(BACKTICK_MOD_RE.findall(deps_cell))
