@@ -72,7 +72,7 @@ namespace cxxgpr
     /// @return Unbiased uniform integer in [0, max].
     std::size_t Xoshiro256PlusPlus::up_to(std::size_t max) noexcept
     {
-        // Lemire (2019) unbiased rejection sampling over 0..=max, matching gprx/src/rng.rs.
+        // Lemire (2019) unbiased rejection sampling over 0..=max, matching the reference implementation.
         const std::uint64_t range = static_cast<std::uint64_t>(max) + 1ULL;
         if (range == 0ULL)
         {

@@ -62,7 +62,7 @@ Defect Issues state the scope of impact (kernel, precision policy, persistence c
 
 ## QA-09 Pre-release quality gate
 
-Before the REL-2 publication review, all of the following must be satisfied: all `just` gates pass, third-party headers are completely unexposed in `include/cxxgpr/`, the golden numerical comparison with `gprx` Exact GPR (fixed / fit / LOO / predict / persist) passes, the zero hot-path allocation tests pass, and `THIRD_PARTY_NOTICES.md` is consistent with `LICENSE`.
+Before the REL-2 publication review, all of the following must be satisfied: all `just` gates pass, third-party headers are completely unexposed in `include/cxxgpr/`, the golden numerical comparison with the frozen reference-implementation output (fixed / fit / LOO / predict / persist) passes, the zero hot-path allocation tests pass, and `THIRD_PARTY_NOTICES.md` is consistent with `LICENSE`.
 
 ## QA-10 Roles and approval
 

@@ -1,6 +1,6 @@
 # cxxgpr design specification (Exact GPR)
 
-This specification is the canonical source of the requirements (`REQ-01` to `REQ-12`) and design decisions (`DES-01` to `DES-20`) for porting the **Exact GPR** model of `gprx` to the C++23 static library `cxxgpr`. The details of the persistence format are defined in [docs/internal/persist-format.md](persist-format.md), and the dependency boundaries between modules in [docs/internal/architecture.md](architecture.md).
+This specification is the canonical source of the requirements (`REQ-01` to `REQ-12`) and design decisions (`DES-01` to `DES-20`) for the **Exact GPR** model implemented by the C++23 static library `cxxgpr`. The details of the persistence format are defined in [docs/internal/persist-format.md](persist-format.md), and the dependency boundaries between modules in [docs/internal/architecture.md](architecture.md).
 
 ---
 
@@ -19,7 +19,7 @@ This specification is the canonical source of the requirements (`REQ-01` to `REQ
 | REQ-09 | In-house optimizers | Without relying on external solvers, implement `Lbfgs` (Moré–Thuente), `NelderMead`, `TrustRegion` (Steihaug–Toint CG), `FastSimulatedAnnealing` (Cauchy/Metropolis/Ingber + incremental evaluation), `Fixed`, the logit interval transform, and deterministic restarts |
 | REQ-10 | Preprocessing pipeline | Provide `Identity`, `Standardize`, `MinMax`, `Pipeline`, `ColumnwiseInput`, `TargetPipeline`, and custom transforms, and map the predictive mean, variance, and covariance back to the original scale with a closed-form affine inverse transform |
 | REQ-11 | Zero allocation, deterministic parallelism, boundaries | The hot paths (MLL+grad, and `predict_into` after warm-up) perform zero new allocations. OpenMP parallelism keeps bitwise agreement independent of the thread count. Eigen, `nlohmann/json`, and OpenMP are not exposed in `include/cxxgpr/` |
-| REQ-12 | Persistence, random numbers, independent verification | Provide `config.json` + `model.safetensors` saving, `mmap` loading, and `PersistRegistry`; perform deterministic sampling with `Xoshiro256++`; and compare numerically against analytic solutions and frozen `gprx` output |
+| REQ-12 | Persistence, random numbers, independent verification | Provide `config.json` + `model.safetensors` saving, `mmap` loading, and `PersistRegistry`; perform deterministic sampling with `Xoshiro256++`; and compare numerically against analytic solutions and frozen reference-implementation output |
 
 ---
 
@@ -110,7 +110,7 @@ struct MixedPrecision  { using Storage = float;  using Refine = double; using Re
 - **`DoublePrecision`**: storage, arithmetic, and inference are all `double` (the default).
 - **`SinglePrecision`**: storage, arithmetic, and inference are all `float`. No iterative refinement.
 - **`MixedPrecision<R>`**: `K + σn²I + jI` is factorized and stored in `float` ($u_f \approx 1.19 \times 10^{-7}$), and only the prediction weights $\alpha$ are iteratively refined with `double` residuals. The MLL and analytic gradient during the training loop use the `float` factor as is.
-- **Notation**: $B = A + (\sigma_n^2 + j)I$ (the training-system matrix including the adopted jitter $j \ge 0$), $w_k = \alpha^{(k)} \in \mathbb{R}^n$ (the approximate weights at iteration $k$), $b = y \in \mathbb{R}^n$ (the transformed target vector), $r_k = b - B w_k$ (the residual vector evaluated in `double`). $\|\cdot\|_\infty$ is the maximum-absolute-value norm for vectors ($\|v\|_\infty = \max_i |v_i|$) and the maximum absolute row-sum norm for matrices ($\|B\|_\infty = \max_i \sum_j |B_{ij}|$). $\varepsilon_{64} = 2^{-52} \approx 2.220446049250313 \times 10^{-16}$ (`std::numeric_limits<double>::epsilon()`, identical to `f64::EPSILON` of `gprx`), and the stopping threshold is $\text{tol} = 10 \cdot n \cdot \varepsilon_{64}$.
+- **Notation**: $B = A + (\sigma_n^2 + j)I$ (the training-system matrix including the adopted jitter $j \ge 0$), $w_k = \alpha^{(k)} \in \mathbb{R}^n$ (the approximate weights at iteration $k$), $b = y \in \mathbb{R}^n$ (the transformed target vector), $r_k = b - B w_k$ (the residual vector evaluated in `double`). $\|\cdot\|_\infty$ is the maximum-absolute-value norm for vectors ($\|v\|_\infty = \max_i |v_i|$) and the maximum absolute row-sum norm for matrices ($\|B\|_\infty = \max_i \sum_j |B_{ij}|$). $\varepsilon_{64} = 2^{-52} \approx 2.220446049250313 \times 10^{-16}$ (`std::numeric_limits<double>::epsilon()`), and the stopping threshold is $\text{tol} = 10 \cdot n \cdot \varepsilon_{64}$.
 - **Iterative-refinement parameters and the stopping / fallback contract** (internal constants fixed):
   - Maximum number of correction iterations: `10`
   - Convergence condition: the denominator $\|B\|_\infty \|w_k\|_\infty + \|b\|_\infty > 0$ and $\|r_k\|_\infty / (\|B\|_\infty \|w_k\|_\infty + \|b\|_\infty) < 10 \cdot n \cdot \varepsilon_{64}$
@@ -310,7 +310,7 @@ The objective abstraction has three tiers: `Objective` (`value`, `value_at_chang
 
 ### DES-20 Deterministic random numbers (`Xoshiro256++`) and thread-invariant OpenMP parallelism
 
-- **`Xoshiro256++`**: every `seed` is expanded into the 256-bit state by SplitMix64, and `next_u64()`, a uniform $[0, 1)$ `double`, and Box–Muller standard normal random numbers are generated. The output sequence for the same seed matches exactly across OSes (Windows / Linux) and build configurations (fully compatible with `src/rng.rs` of `gprx`).
+- **`Xoshiro256++`**: every `seed` is expanded into the 256-bit state by SplitMix64, and `next_u64()`, a uniform $[0, 1)$ `double`, and Box–Muller standard normal random numbers are generated. The output sequence for the same seed matches exactly across OSes (Windows / Linux) and build configurations.
 - **OpenMP parallel design**:
   - The lower-triangular column blocks of the Gram matrix are parallelized with OpenMP using a partition (`lower_block_start`) that equalizes the area assigned to each worker.
   - Sums such as `weighted_grads` compute per-worker, per-column partial sums and then **add them sequentially in ascending column-index order**, which guarantees **bitwise-identical** floating-point results regardless of the number of OpenMP threads (1 vs. any).

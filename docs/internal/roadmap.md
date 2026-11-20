@@ -4,7 +4,7 @@ The canonical source for the order and state of work. A row carries only its ID,
 
 **Now**: REL-3 in progress (all rows through REL-2 are done)
 
-The goal is to port the **Exact GPR** model of the Rust library `gprx` to the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), and the publication preparation (REL-1, REL-2). It is now at the user documentation stage (REL-3).
+The goal is to provide the **Exact GPR** model as the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), and the publication preparation (REL-1, REL-2). It is now at the user documentation stage (REL-3).
 
 The quality-control mechanisms (traceability, baseline results, result-change records, provenance, platform qualification) are in the [quality assurance plan](quality/quality-plan.md); the mapping between IDs and tests is in the [traceability matrix](quality/traceability.md).
 
@@ -85,7 +85,7 @@ flowchart LR
 | ID | Kind | Title | Issue | State |
 |---|---|---|---|---|
 | M5-1 | Test | All-pairs integration tests (`path_matrix` over 10 kernels x 5 optimizers x 3 precisions x distance supply and preprocessing) | #36 | Done |
-| M5-2 | Test | Golden numerical comparison against `gprx` / `scikit-learn` / analytic solutions (fixed θ, L-BFGS optimization, LOO) | #38 | Done |
+| M5-2 | Test | Golden numerical comparison against reference-implementation output, `scikit-learn`, and analytic solutions (fixed θ, L-BFGS optimization, LOO) | #38 | Done |
 | M5-3 | Test | Zero hot-path allocation and ratchet tests (MLL+grad, `predict_into`, coordinate-ratio bound for distance supply) | #40 | Done |
 | M5-4 | Feat | Google Benchmark suite (Forrester $n=256$ / ARD Sphere, `KernelExp`, distance-supply comparison) | #42 | Done |
 
@@ -99,7 +99,7 @@ flowchart LR
 
 ## Out of scope
 
-The following are outside the port of this repository and must not leak into the API or the design documents.
+The following are outside the scope of this repository and must not leak into the API or the design documents.
 
 - Sparse GPR models (`Sgpr`, `Svgp`) and inducing-point coordinate derivatives (`grad_cross`, `hess_cross`, `grad_wrt_coord_dim`, `*_wrt_sq_dist`)
 - Online incremental-learning models (`OnlineGpr`, `into_online`, `LdltStore`, `PointId`) and the `ldlt` persistence format

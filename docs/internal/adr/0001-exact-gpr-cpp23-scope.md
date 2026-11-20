@@ -6,15 +6,15 @@
 
 ## Context
 
-The Rust library `gprx` contains Exact GPR (`Gpr` / `FittedGpr`), an online-updating Exact GPR (`OnlineGpr`), and approximate sparse models (`Sgpr` / `Svgp` / `OnlineSgpr`). The goal of this project, `cxxgpr`, is to rebuild the full functionality of **Exact GPR** faithfully and safely in C++23, so that it can be used directly from production, embedded, and C++ ecosystem code.
+Gaussian process regression comes in several families: exact regression (`Gpr` / `FittedGpr`), exact regression with online updates (`OnlineGpr`), and approximate sparse models (`Sgpr` / `Svgp` / `OnlineSgpr`). The goal of this project, `cxxgpr`, is to provide the full functionality of **Exact GPR** as a rigorous and safe C++23 library, so that it can be used directly from production, embedded, and C++ ecosystem code.
 
 At the same time, the dependency management approach (Eigen / JSON / optimizers / testing / benchmarking), the API error contract, and the public-header boundary must be fixed at the initial stage to prevent large rework after implementation starts.
 
 ## Decision
 
-1. **Explicit port scope**:
-   - Port Exact GPR of `gprx` completely (`Gpr` / `FittedGpr`, all 10 built-in kernel leaves, composition, `Custom`, supplied squared distances `DistanceKernel`, preprocessing transforms, `Double`/`Single`/`MixedPrecision`, `KernelExp`, the 5 optimizers, and `persist`).
-   - Exclude `Sgpr` / `Svgp` / `OnlineGpr` (`into_online` / `LdltStore` / `PointId` / `ldlt` persist) and sparse inducing-point coordinate derivatives from the port.
+1. **Explicit scope**:
+   - Implement Exact GPR completely (`Gpr` / `FittedGpr`, all 10 built-in kernel leaves, composition, `Custom`, supplied squared distances `DistanceKernel`, preprocessing transforms, `Double`/`Single`/`MixedPrecision`, `KernelExp`, the 5 optimizers, and `persist`).
+   - Exclude `Sgpr` / `Svgp` / `OnlineGpr` (`into_online` / `LdltStore` / `PointId` / `ldlt` persist) and sparse inducing-point coordinate derivatives from the project.
 2. **C++23 public API contract**:
    - The namespace is `cxxgpr` (`kernel`, `transform`, `persist`). Input matrices are column-major `std::span<const double>`.
    - Exceptions are not thrown across the API boundary; errors are returned as `[[nodiscard]] std::expected<T, GprError>`.
@@ -23,7 +23,7 @@ At the same time, the dependency management approach (Eigen / JSON / optimizers 
 3. **Dependency selection and non-leakage into public headers**:
    - Dependencies are pinned by the vcpkg manifest (`builtin-baseline` + `overrides` in `vcpkg.json`).
    - Internal linear algebra uses `eigen3` (5.0.1, `EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`), persistence JSON uses `nlohmann-json` (3.12.0), and parallelization uses OpenMP. All are confined to `PRIVATE` dependencies of the static library `cxxgpr` and are not exposed in `include/cxxgpr/`.
-   - The optimizers (`Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`) are in-house implementations faithful to the `gprx` / argmin algorithm specifications; no external solver library is introduced.
+   - The optimizers (`Lbfgs`, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, `Fixed`) are in-house implementations of the standard algorithms (Moré–Thuente line search, Steihaug–Toint trust region, and so on); no external solver library is introduced.
    - Tests use `gtest` (1.18.0, `tests` feature) and measurements use `benchmark` (1.9.5, `benchmarks` feature), installed as separate features.
 
 ## Consequences

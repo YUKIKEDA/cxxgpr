@@ -1,6 +1,6 @@
 # cxxgpr：エージェントの入口
 
-Rust ライブラリ [gprx](https://github.com/YUKIKEDA/gprx) の **Exact GPR** モデルを C++23 へ移植する静的ライブラリプロジェクト。品質・設計基準を学習用デモや簡易版で妥協しない。人間向けの手順は [CONTRIBUTING.md](CONTRIBUTING.md)、守るべき規則は `.cursor/rules/` にある。
+**Exact GPR** モデルを提供する C++23 の静的ライブラリプロジェクト。品質・設計基準を学習用デモや簡易版で妥協しない。人間向けの手順は [CONTRIBUTING.md](CONTRIBUTING.md)、守るべき規則は `.cursor/rules/` にある。
 
 ## 正本
 
@@ -18,9 +18,9 @@ Rust ライブラリ [gprx](https://github.com/YUKIKEDA/gprx) の **Exact GPR** 
 
 現在の行のIDは [docs/internal/roadmap.md](docs/internal/roadmap.md) だけが持つ。`.dev/` は手元の一時領域であり、決定を置かない。
 
-## 移植スコープの基本原則
+## スコープの基本原則
 
-- 対象は `gprx` の **Exact GPR**（`Gpr` / `FittedGpr`、全 10 種の組込みカーネル葉・合成・`Custom`、供給二乗距離 `DistanceKernel`、前処理変換、`Double`/`Single`/`MixedPrecision`、`KernelExp`、5 種最適化器、`persist`）に限る。
+- 対象は **Exact GPR**（`Gpr` / `FittedGpr`、全 10 種の組込みカーネル葉・合成・`Custom`、供給二乗距離 `DistanceKernel`、前処理変換、`Double`/`Single`/`MixedPrecision`、`KernelExp`、5 種最適化器、`persist`）に限る。
 - `Sgpr` / `Svgp` / `OnlineGpr`（`LdltStore` / `PointId` / `ldlt` persist）と誘導点座標微分は対象外とする。
 - 公開ヘッダ（`include/cxxgpr/`）へ Eigen・nlohmann/json・OpenMP の型やヘッダを露出させない。例外は API 境界へ送出せず、`std::expected<T, GprError>` を返す。入力行列は列優先（column-major）とする。
 
@@ -52,7 +52,7 @@ Rust ライブラリ [gprx](https://github.com/YUKIKEDA/gprx) の **Exact GPR** 
 | `quality` | 試験に決定 ID のタグ・コメント。基準結果の変化には結果変更記録。環境の認定 |
 | `publish` | Apache-2.0 準拠、公開ヘッダの非漏洩、第三者通知、英語 README |
 | `evidence` | 凍結した基準・参照・結果を書き換えない |
-| `reference-data` | 独立参照（`gprx` 出力／解析解／R&D スクリプト）との比較・不確かさ |
+| `reference-data` | 独立参照（参照実装の出力／解析解／R&D スクリプト）との比較・不確かさ |
 | `api-contract` | 所有結果、`Gpr::fit` / `factor` は `const`、`std::expected`、非例外、決定性 |
 | `types` | 不正状態を表現できなくする（強い型、区間型、学習前後分離） |
 | `cpp` | C++23、未定義動作禁止、検査付き寸法、`clang-tidy` / `clang-format`、命名規約 |

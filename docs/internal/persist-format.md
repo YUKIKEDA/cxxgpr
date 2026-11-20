@@ -1,6 +1,6 @@
 # Persistence format specification
 
-This specification defines the format (`FMT-01` to `FMT-08`) in which `cxxgpr` (Exact GPR) saves to and loads from a single directory on disk. The format version is `FORMAT_VERSION = 1`, and the format is essentially compatible with the Exact GPR persistence format of `gprx` (`config.json` + `model.safetensors`). However, `factor_kind: "ldlt"` and `point_ids` for online models, and Sparse models, are out of scope and are rejected on load.
+This specification defines the format (`FMT-01` to `FMT-08`) in which `cxxgpr` (Exact GPR) saves to and loads from a single directory on disk. The format version is `FORMAT_VERSION = 1`. The files are `config.json` + `model.safetensors`. Note that `factor_kind: "ldlt"` and `point_ids` for online models, and Sparse models, are out of scope and are rejected on load.
 
 ---
 
