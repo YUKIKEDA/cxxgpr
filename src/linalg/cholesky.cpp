@@ -655,7 +655,7 @@ namespace cxxgpr::linalg
         /// @brief Executes Eigen::LLT, direct L2 SIMD blocked Cholesky, or cache-packed BLAS-3 Cholesky in place.
         /// @details Uses a three-tier cache-aware schedule:
         /// - `n >= 384`: cache-packed BLAS-3 (`KC = 64`, `MC/NC = 48`) with dynamic tile scheduling inside OpenMP.
-        /// - `256 <= n < 384`: direct multi-threaded column-SIMD blocked Cholesky (`k_direct_panel_block`) without packing.
+        /// - `256 <= n < 384`: direct column-SIMD blocked Cholesky (`k_direct_panel_block`).
         /// - `n < 256`: single-threaded in-place `Eigen::LLT`.
         /// All tiers keep single-thread and multi-thread runs bitwise identical.
         /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.

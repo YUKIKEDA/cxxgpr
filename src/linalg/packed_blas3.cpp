@@ -1138,6 +1138,7 @@ namespace cxxgpr::detail
             return;
         }
         constexpr std::size_t sub_w = 16U;
+        static_assert(k_blas3_kc <= sub_w + k_blas3_nc);
         alignas(64) std::array<T, k_blas3_mc * k_blas3_kc> tile_buf{};
         alignas(64) std::array<T, k_blas3_pack_a_cap<T>> packed_a{};
         alignas(64) std::array<T, k_blas3_pack_b_cap> packed_b{};
