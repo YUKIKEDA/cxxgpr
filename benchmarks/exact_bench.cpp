@@ -426,6 +426,49 @@ namespace
         }
     }
 
+    /// @brief Times lower Gram assembly and complete fixed-parameter training on identical inputs.
+    /// @tparam Factor Selects complete training when true and Gram assembly otherwise.
+    /// @param[in,out] state Benchmark state with training size and feature count.
+    template <bool Factor> void bm_training_coordinates(benchmark::State& state)
+    {
+        const ArdSphereDataset data(static_cast<std::size_t>(state.range(0)), static_cast<std::size_t>(state.range(1)));
+        const cxxgpr::MatrixRef<double> x(data.x_train.data(), data.n, data.d, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+        if constexpr (Factor)
+        {
+            const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+            for (auto _ : state)
+            {
+                auto model = trainer.factor(x, data.y_train);
+                if (!model)
+                {
+                    state.SkipWithError("factor failed");
+                    break;
+                }
+                benchmark::DoNotOptimize(model);
+            }
+        }
+        else
+        {
+            const auto kernel = spec.compile<double>();
+            std::vector<double> gram(data.n * data.n);
+            std::vector<double> scratch(data.n * data.n);
+            const cxxgpr::MatrixMut<double> out(gram.data(), data.n, data.n, data.n);
+            const cxxgpr::MatrixMut<double> tmp(scratch.data(), data.n, data.n, data.n);
+            auto nested = kernel.make_nested_buffers(data.n, data.n);
+            for (auto _ : state)
+            {
+                if (!kernel.apply_points(x, out, cxxgpr::Triangle::Lower, tmp, nested))
+                {
+                    state.SkipWithError("Gram evaluation failed");
+                    break;
+                }
+                benchmark::ClobberMemory();
+            }
+        }
+    }
+
     /// @brief Benchmarks supplied-distance ARD + scalar DistanceKernel lower-triangle Gram evaluation.
     /// @param[in,out] state Google Benchmark iteration state.
     void bm_distance_supply_apply_double(benchmark::State& state)
@@ -552,6 +595,18 @@ namespace
     BENCHMARK_TEMPLATE(bm_kernel_exp_eval, float, cxxgpr::KernelExp::Accurate);
     BENCHMARK_TEMPLATE(bm_kernel_exp_eval, float, cxxgpr::KernelExp::FastApprox);
     BENCHMARK(bm_coord_apply_points_double);
+    BENCHMARK_TEMPLATE(bm_training_coordinates, false)
+        ->ArgsProduct({
+            {1024, 2048, 4096},
+            {8, 64}
+    })
+        ->UseRealTime();
+    BENCHMARK_TEMPLATE(bm_training_coordinates, true)
+        ->ArgsProduct({
+            {1024, 2048, 4096},
+            {8, 64}
+    })
+        ->UseRealTime();
     BENCHMARK(bm_distance_supply_apply_double);
     BENCHMARK(bm_distance_supply_scalar_only_double);
 
