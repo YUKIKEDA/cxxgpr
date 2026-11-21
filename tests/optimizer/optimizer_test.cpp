@@ -5,7 +5,7 @@
 /// @details Verifies LogBounds unconstrained-to-constrained transformations, chain-rule gradients
 /// and Hessians against finite differences, EvalCache deduplication, convergence of L-BFGS,
 /// TrustRegion, NelderMead, FastSimulatedAnnealing, and Fixed, deterministic multi-start restarts,
-/// and negative validation controls.
+/// non-converged success after an L-BFGS line-search breakdown, and negative validation controls.
 
 #include "cxxgpr/optimizer/optimizer.hpp"
 
@@ -20,6 +20,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace
@@ -335,6 +337,273 @@ namespace
         cxxgpr::Interval iv_;
     };
 
+    /// @brief One-dimensional linear objective f(theta) = slope * theta whose minimizer lies on a bound.
+    /// @details With a positive slope the infimum over the box is the lower log-space bound, approached with an
+    /// outward gradient; the Hessian is zero.
+    class LinearObjective final : public cxxgpr::optimizer::TwiceDifferentiable
+    {
+    public:
+        /// @brief Constructs the objective with its slope and parameter interval.
+        /// @param[in] slope Constant derivative df / dtheta.
+        /// @param[in] bounds User-space interval of the single parameter.
+        LinearObjective(double slope, cxxgpr::Interval bounds) : slope_(slope), bounds_(bounds) {}
+
+        /// @brief Returns the number of optimization variables.
+        /// @return Always 1.
+        [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
+
+        /// @brief Evaluates slope * theta.
+        /// @param[in] params Log-parameter vector of length 1.
+        /// @return Objective value.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> params) override
+        {
+            return slope_ * params[0];
+        }
+
+        /// @brief Copies the parameter interval into out.
+        /// @param[out] out Destination span of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
+            std::span<cxxgpr::Interval> out
+        ) const override
+        {
+            out[0] = bounds_;
+            return {};
+        }
+
+        /// @brief Writes the constant gradient.
+        /// @param[in] params Log-parameter vector (unused).
+        /// @param[out] out_grad Output gradient of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
+            [[maybe_unused]] std::span<const double> params, std::span<double> out_grad
+        ) override
+        {
+            out_grad[0] = slope_;
+            return {};
+        }
+
+        /// @brief Evaluates value and gradient.
+        /// @param[in] params Log-parameter vector of length 1.
+        /// @param[out] out_grad Output gradient of length 1.
+        /// @return Objective value.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
+            std::span<const double> params, std::span<double> out_grad
+        ) override
+        {
+            out_grad[0] = slope_;
+            return slope_ * params[0];
+        }
+
+        /// @brief Writes the zero Hessian.
+        /// @param[in] params Log-parameter vector (unused).
+        /// @param[out] out_hess Output 1 x 1 Hessian.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
+            [[maybe_unused]] std::span<const double> params, std::span<double> out_hess
+        ) override
+        {
+            out_hess[0] = 0.0;
+            return {};
+        }
+
+    private:
+        /// @brief Constant derivative of the objective.
+        double slope_ = 0.0;
+        /// @brief User-space interval of the parameter.
+        cxxgpr::Interval bounds_;
+    };
+
+    /// @brief One-dimensional objective whose value rises by a bump at every point other than the first one evaluated.
+    /// @details Evaluates base + 0.5 * curvature * (theta - centre)^2 + bump, where the bump is zero only at the bit
+    /// pattern of the first evaluated point. It models an objective at the limit of its value resolution: every other
+    /// point looks worse by the bump, whatever its true decrease. The reported gradient is offset + curvature * (theta
+    /// - centre), the derivative of the smooth part plus a constant chosen by the test, and the Hessian is curvature.
+    class SpikeObjective final : public cxxgpr::optimizer::TwiceDifferentiable
+    {
+    public:
+        /// @brief Constructs the objective.
+        /// @param[in] base Smooth-part value at the centre.
+        /// @param[in] bump Value added at every point other than the first evaluated one.
+        /// @param[in] offset Constant added to the reported gradient.
+        /// @param[in] curvature Second derivative of the smooth part.
+        /// @param[in] centre Minimizer of the smooth part.
+        /// @param[in] bounds User-space interval of the single parameter.
+        SpikeObjective(
+            double base, double bump, double offset, double curvature, double centre, cxxgpr::Interval bounds
+        ) :
+            base_(base),
+            bump_(bump),
+            offset_(offset),
+            curvature_(curvature),
+            centre_(centre),
+            bounds_(bounds)
+        {
+        }
+
+        /// @brief Returns the number of optimization variables.
+        /// @return Always 1.
+        [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
+
+        /// @brief Returns the smooth value, plus the bump away from the first evaluated point.
+        /// @param[in] params Log-parameter vector of length 1.
+        /// @return Objective value.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> params) override
+        {
+            if (!first_.has_value())
+            {
+                first_ = std::bit_cast<std::uint64_t>(params[0]);
+            }
+            const double diff = params[0] - centre_;
+            const double smooth = base_ + (0.5 * curvature_ * diff * diff);
+            return (std::bit_cast<std::uint64_t>(params[0]) == *first_) ? smooth : smooth + bump_;
+        }
+
+        /// @brief Copies the parameter interval into out.
+        /// @param[out] out Destination span of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
+            std::span<cxxgpr::Interval> out
+        ) const override
+        {
+            out[0] = bounds_;
+            return {};
+        }
+
+        /// @brief Writes the reported gradient offset + curvature * (theta - centre).
+        /// @param[in] params Log-parameter vector of length 1.
+        /// @param[out] out_grad Output gradient of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
+            std::span<const double> params, std::span<double> out_grad
+        ) override
+        {
+            out_grad[0] = offset_ + (curvature_ * (params[0] - centre_));
+            return {};
+        }
+
+        /// @brief Evaluates value and gradient.
+        /// @param[in] params Log-parameter vector of length 1.
+        /// @param[out] out_grad Output gradient of length 1.
+        /// @return Objective value.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
+            std::span<const double> params, std::span<double> out_grad
+        ) override
+        {
+            out_grad[0] = offset_ + (curvature_ * (params[0] - centre_));
+            return value(params);
+        }
+
+        /// @brief Writes the constant Hessian.
+        /// @param[in] params Log-parameter vector (unused).
+        /// @param[out] out_hess Output 1 x 1 Hessian.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> hessian_into(
+            [[maybe_unused]] std::span<const double> params, std::span<double> out_hess
+        ) override
+        {
+            out_hess[0] = curvature_;
+            return {};
+        }
+
+    private:
+        /// @brief Smooth-part value at the centre.
+        double base_ = 0.0;
+        /// @brief Value added away from the first evaluated point.
+        double bump_ = 0.0;
+        /// @brief Constant added to the reported gradient.
+        double offset_ = 0.0;
+        /// @brief Second derivative of the smooth part.
+        double curvature_ = 0.0;
+        /// @brief Minimizer of the smooth part.
+        double centre_ = 0.0;
+        /// @brief User-space interval of the parameter.
+        cxxgpr::Interval bounds_;
+        /// @brief Bit pattern of the first evaluated parameter, once known.
+        std::optional<std::uint64_t> first_;
+    };
+
+    /// @brief 1D quadratic objective that fails to evaluate anywhere except at its starting point.
+    /// @details Evaluates 0.5 * (x - 0.5)^2 only within 1e-12 of start and returns NonFiniteKernelValue
+    /// elsewhere, so every line-search trial step is rejected.
+    class StartOnlyObjective final : public cxxgpr::optimizer::Differentiable
+    {
+    public:
+        /// @brief Constructs the objective accepting only start within bound interval iv.
+        /// @param[in] start Only log-space point at which the objective evaluates successfully.
+        /// @param[in] iv Positive hyperparameter Interval bound.
+        StartOnlyObjective(double start, cxxgpr::Interval iv) : start_(start), iv_(iv) {}
+
+        /// @brief Returns problem dimensionality (always 1).
+        /// @return Problem dimension (1).
+        [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
+
+        /// @brief Evaluates 0.5 * (x - 0.5)^2 at the starting point, or fails elsewhere.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @return Scalar objective value at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
+        {
+            if (std::abs(p[0] - start_) > 1e-12)
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_kernel_value());
+            }
+            return 0.5 * (p[0] - 0.5) * (p[0] - 0.5);
+        }
+
+        /// @brief Copies bound interval iv_ into out[0].
+        /// @param[out] out Destination interval span of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
+            std::span<cxxgpr::Interval> out
+        ) const override
+        {
+            out[0] = iv_;
+            return {};
+        }
+
+        /// @brief Computes the derivative x - 0.5 at the starting point, or fails elsewhere.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Empty expected at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
+            std::span<const double> p, std::span<double> g
+        ) override
+        {
+            if (std::abs(p[0] - start_) > 1e-12)
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_kernel_value());
+            }
+            g[0] = p[0] - 0.5;
+            return {};
+        }
+
+        /// @brief Evaluates value and derivative together.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Scalar objective value at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
+            std::span<const double> p, std::span<double> g
+        ) override
+        {
+            auto v = value(p);
+            if (!v.has_value())
+            {
+                return v;
+            }
+            if (auto gr = gradient_into(p, g); !gr.has_value())
+            {
+                return std::unexpected(std::move(gr).error());
+            }
+            return v;
+        }
+
+    private:
+        /// @brief Only log-space point accepted by value() and gradient_into().
+        double start_;
+        /// @brief Coordinate Interval constraint.
+        cxxgpr::Interval iv_;
+    };
+
     /// @brief Verifies LogBounds mappings, chain-rule gradients/Hessians, and EvalCache deduplication.
     /// @details Confirms z = 0 midpoint Jacobian identity, constrained/unconstrained roundtrip,
     /// chain-rule gradient/Hessian match against central finite differences, and EvalCache hit reuse.
@@ -532,6 +801,29 @@ namespace
         EXPECT_EQ(std::bit_cast<std::uint64_t>(r_m1->value), std::bit_cast<std::uint64_t>(r_m2->value));
     }
 
+    /// @brief Verifies that a line search finding no acceptable step ends L-BFGS successfully without converging.
+    /// @details Every trial step of the Moré–Thuente line search fails to evaluate, so Lbfgs stops in its first
+    /// iteration and returns the starting point with converged == false instead of an error.
+    TEST(OptimizerTest, LbfgsLineSearchBreakdownReturnsNonConvergedSuccess)
+    {
+        // Spec: DES-02, DES-19
+        const auto iv = cxxgpr::Interval::positive(1e-2, 1e2).value();
+        constexpr double start = -2.0;
+        StartOnlyObjective obj(start, iv);
+        const std::array<double, 1> init{start};
+
+        const auto r = cxxgpr::optimizer::Lbfgs().optimize(obj, init);
+        if (!r.has_value())
+        {
+            FAIL() << "Lbfgs returned an error: " << r.error().message();
+        }
+        EXPECT_FALSE(r->converged);
+        EXPECT_EQ(r->iterations, 0U);
+        ASSERT_EQ(r->params.size(), 1U);
+        EXPECT_DOUBLE_EQ(r->params[0], start);
+        EXPECT_DOUBLE_EQ(r->value, 0.5 * (start - 0.5) * (start - 0.5));
+    }
+
     /// @brief Negative controls verifying optimizer input and configuration validation errors.
     /// @details Checks EmptyInput, LengthMismatch, NonFiniteInput, InvalidInterval on boundary points,
     /// and InvalidConfig for invalid history sizes, trust-region radii, and cooling temperatures.
@@ -579,6 +871,136 @@ namespace
                 .code(),
             cxxgpr::GprErrorCode::InvalidConfig
         );
+    }
+
+    /// @brief Returns the projected log-space gradient norm of a one-dimensional problem on [lo, hi].
+    /// @details Independent restatement of the first-order optimality measure of a box-constrained problem,
+    /// |theta - clamp(theta - g, lo, hi)|.
+    /// @param[in] theta Log-space parameter.
+    /// @param[in] g Analytic gradient at theta.
+    /// @param[in] lo Lower log-space bound.
+    /// @param[in] hi Upper log-space bound.
+    /// @return Projected-gradient magnitude.
+    [[nodiscard]] double projected_gradient_1d(double theta, double g, double lo, double hi)
+    {
+        return std::abs(theta - std::clamp(theta - g, lo, hi));
+    }
+
+    /// @brief Verifies that L-BFGS and TrustRegion stop on the projected log-space gradient, not on the logit one.
+    /// @details (1) A start on the saturated plateau next to the upper bound of the quadratic 0.5 * (theta - 2)^2 has
+    /// an unconstrained gradient near 1e-12 but a log-space gradient near 9.5; it must not be reported as converged
+    /// there, and the run must reach the minimizer. (2) The linear objective theta has its infimum on the lower bound
+    /// with an outward gradient; the run must approach the bound and report convergence. (3) A start at the exact
+    /// minimizer converges in zero iterations. In every case converged must agree with the analytic projected gradient
+    /// of the returned point.
+    TEST(OptimizerTest, StoppingTestIsTheProjectedLogSpaceGradient)
+    {
+        // Spec: DES-19
+        const auto iv = cxxgpr::Interval::default_positive();
+        const double lo = std::log(iv.lo());
+        const double hi = std::log(iv.hi());
+        // Default tolerance sqrt(eps); the stationarity threshold is tolerance * max(1, |theta|).
+        const double tol = std::sqrt(std::numeric_limits<double>::epsilon());
+
+        const auto check_result = [&](const cxxgpr::optimizer::OptimizerResult& r, double grad, const char* label)
+        {
+            const double theta = r.params[0];
+            const double chi = projected_gradient_1d(theta, grad, lo, hi);
+            EXPECT_EQ(r.converged, chi <= tol * std::max(1.0, std::abs(theta))) << label << " chi " << chi;
+        };
+
+        for (const bool use_tr : {false, true})
+        {
+            const char* name = use_tr ? "TrustRegion" : "Lbfgs";
+            const auto run = [&](cxxgpr::optimizer::TwiceDifferentiable& obj, std::span<const double> start)
+            {
+                return use_tr ? cxxgpr::optimizer::TrustRegion().optimize(obj, start)
+                              : cxxgpr::optimizer::Lbfgs().optimize(obj, start);
+            };
+
+            // (1) Saturated, non-stationary start 1e-12 below the upper bound.
+            QuadraticObjective quad({2.0}, {1.0}, {iv});
+            const std::array<double, 1> saturated{hi - 1e-12};
+            auto r_sat = run(quad, saturated);
+            ASSERT_TRUE(r_sat.has_value()) << name;
+            check_result(*r_sat, r_sat->params[0] - 2.0, name);
+            // The run leaves the plateau and converges at the minimizer 2: with unit curvature |theta - 2| equals the
+            // projected gradient, at most tol * 2 = 2.98e-8.
+            EXPECT_TRUE(r_sat->converged) << name;
+            EXPECT_NEAR(r_sat->params[0], 2.0, 2.98e-8) << name;
+
+            // (2) Bound-constrained minimizer with an outward gradient at the lower bound.
+            LinearObjective linear(1.0, iv);
+            const std::array<double, 1> interior{0.0};
+            auto r_lin = run(linear, interior);
+            ASSERT_TRUE(r_lin.has_value()) << name;
+            EXPECT_TRUE(r_lin->converged) << name;
+            check_result(*r_lin, 1.0, name);
+            // The projected gradient there is the distance to the bound, so it is within the threshold
+            // tol * |lo| = 1.72e-7 of the bound.
+            EXPECT_LE(r_lin->params[0] - lo, 1.72e-7) << name;
+
+            // (3) Exact interior minimizer.
+            QuadraticObjective at_min({0.5}, {3.0}, {iv});
+            const std::array<double, 1> optimum{0.5};
+            auto r_min = run(at_min, optimum);
+            ASSERT_TRUE(r_min.has_value()) << name;
+            EXPECT_TRUE(r_min->converged) << name;
+            EXPECT_EQ(r_min->iterations, 0U) << name;
+            EXPECT_EQ(r_min->params[0], 0.5) << name;
+        }
+    }
+
+    /// @brief Verifies that a failed step search counts as converged only at the function-precision floor.
+    /// @details SpikeObjective makes every step fail. With base value 100 the floor is
+    /// sqrt(eps) * (1 + 100) = 1.505e-6 and the ordinary threshold at theta = 0.5 is sqrt(eps) = 1.49e-8. A reported
+    /// gradient of 1e-7 lies between the two, so only the floor can make the run converge; a gradient of 1e-5 lies
+    /// above the floor (and below the cube-root level cbrt(eps) * 101 = 6.1e-4), so the run must not converge. Both
+    /// optimizers must return the start point.
+    TEST(OptimizerTest, FailedStepSearchIsConvergedOnlyAtThePrecisionFloor)
+    {
+        // Spec: DES-19
+        const auto iv = cxxgpr::Interval::default_positive();
+        const std::array<double, 1> start{0.5};
+        for (const bool use_tr : {false, true})
+        {
+            const char* name = use_tr ? "TrustRegion" : "Lbfgs";
+            for (const double grad : {1e-7, -1e-7, 1e-5, -1e-5})
+            {
+                SpikeObjective spike(100.0, 1.0, grad, 0.0, 0.5, iv);
+                auto r = use_tr ? cxxgpr::optimizer::TrustRegion().optimize(spike, start)
+                                : cxxgpr::optimizer::Lbfgs().optimize(spike, start);
+                ASSERT_TRUE(r.has_value()) << name;
+                EXPECT_EQ(r->converged, std::abs(grad) < 1e-6) << name << " gradient " << grad;
+                EXPECT_EQ(r->value, 100.0) << name;
+                EXPECT_EQ(r->params[0], 0.5) << name;
+            }
+        }
+    }
+
+    /// @brief Verifies that steps whose decrease is below the value resolution proceed on derivative evidence.
+    /// @details The smooth part 100 + 0.5 * (theta - 0.5)^2 starts 1e-5 away from its minimizer, so the projected
+    /// gradient 1e-5 exceeds both the threshold sqrt(eps) * 0.5 and the floor sqrt(eps) * 101 = 1.5e-6, while the
+    /// possible decrease 5e-11 is below the value resolution sqrt(eps) * 101. Every other point carries a bump of 1e-9,
+    /// still inside the resolution, so the computed values say every step makes things worse. Taking the step on
+    /// derivative evidence reaches the minimizer and converges; judging by the values alone would end in a failed
+    /// step with a gradient above the floor and converged = false.
+    TEST(OptimizerTest, StepsBelowTheValueResolutionProceedOnDerivatives)
+    {
+        // Spec: DES-19
+        const auto iv = cxxgpr::Interval::default_positive();
+        const std::array<double, 1> start{0.5 + 1e-5};
+        for (const bool use_tr : {false, true})
+        {
+            const char* name = use_tr ? "TrustRegion" : "Lbfgs";
+            SpikeObjective noisy(100.0, 1e-9, 0.0, 1.0, 0.5, iv);
+            auto r = use_tr ? cxxgpr::optimizer::TrustRegion().optimize(noisy, start)
+                            : cxxgpr::optimizer::Lbfgs().optimize(noisy, start);
+            ASSERT_TRUE(r.has_value()) << name;
+            EXPECT_TRUE(r->converged) << name;
+            // Converged means |theta - 0.5| <= sqrt(eps) * max(1, |theta|) = 1.49e-8.
+            EXPECT_NEAR(r->params[0], 0.5, 1.49e-8) << name;
+        }
     }
 
 }  // namespace

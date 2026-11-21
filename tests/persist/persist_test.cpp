@@ -19,11 +19,13 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -37,6 +39,7 @@
 
 #include "allocation_audit.hpp"
 #include "small_stack.hpp"
+#include "span_shape_contract.hpp"
 
 namespace
 {
@@ -1555,6 +1558,174 @@ namespace
             EXPECT_EQ(error->code(), cxxgpr::GprErrorCode::PersistFailed);
             EXPECT_EQ(error->persist_error_kind(), cxxgpr::PersistErrorKind::Config);
         }
+    }
+
+    /// @brief Verifies the raw-span overload of LoadedGpr::predict against the span shape contract.
+    /// @details Runs the shared shape cases (short span, long span, overflowing dimensions, empty span with a null
+    /// or non-null pointer, zero dimension) on a loaded model, checks that a wrong length is reported before a
+    /// wrong feature count, and that the loaded model predicts bitwise identically afterwards.
+    TEST(PersistModelsTest, LoadedGprSpanPredictRejectsLengthsThatDisagreeWithDimensions)
+    {
+        // Spec: REQ-03, DES-02
+        using cxxgpr::test_support::error_code_of;
+        const std::vector<double> x_train{0.0, 1.0};
+        const std::vector<double> y_train{0.5, 1.5};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const TempDirGuard dir("span_shape_contract");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+        auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_TRUE(loaded.has_value());
+
+        const std::vector<double> query{0.5, 1.5};
+        const auto before = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(before.has_value());
+
+        cxxgpr::test_support::expect_span_shape_contract(
+            [&](std::span<const double> xs, std::size_t n_rows, std::size_t n_cols)
+        { return error_code_of(loaded->predict(xs, n_rows, n_cols)); }, query, 2U, 1U
+        );
+
+        // Three values declared as 2 x 2: the length is reported before the feature count.
+        const std::vector<double> q3{0.5, 1.5, 2.5};
+        EXPECT_EQ(error_code_of(loaded->predict(q3, 2U, 2U)), std::optional{cxxgpr::GprErrorCode::LengthMismatch});
+
+        const auto after = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(after.has_value());
+        EXPECT_EQ(*after, *before);
+    }
+
+    /// @brief Returns the byte offset of element (row, col) of the stored column-major `l` tensor in a model file.
+    /// @param[in] file Path of a `model.safetensors` file written by save_with_factor().
+    /// @param[in] n Training sample count (the factor is n x n).
+    /// @param[in] element_size Size in bytes of one stored factor element (8 for F64, 4 for F32).
+    /// @param[in] row Row index of the element.
+    /// @param[in] col Column index of the element.
+    /// @return Absolute byte offset of the element, or 0 when the header cannot be parsed.
+    std::size_t stored_factor_offset(
+        const std::filesystem::path& file, std::size_t n, std::size_t element_size, std::size_t row, std::size_t col
+    )
+    {
+        std::ifstream in(file, std::ios::binary);
+        std::uint64_t header_len = 0;
+        in.read(reinterpret_cast<char*>(&header_len), sizeof(header_len));
+        std::string header(static_cast<std::size_t>(header_len), '\0');
+        in.read(header.data(), static_cast<std::streamsize>(header.size()));
+        const auto key = header.find("\"l\":");
+        const auto offsets = (key == std::string::npos) ? key : header.find("\"data_offsets\":[", key);
+        if (!in || offsets == std::string::npos)
+        {
+            return 0U;
+        }
+        const auto begin = static_cast<std::size_t>(std::stoull(header.substr(offsets + 16U)));
+        return sizeof(header_len) + static_cast<std::size_t>(header_len) + begin + (((col * n) + row) * element_size);
+    }
+
+    /// @brief Overwrites element (row, col) of the stored `l` tensor in place with value in storage precision.
+    /// @tparam Storage Stored factor scalar type (double for F64, float for F32).
+    /// @param[in] file Path of a `model.safetensors` file written by save_with_factor().
+    /// @param[in] n Training sample count (the factor is n x n).
+    /// @param[in] row Row index of the element.
+    /// @param[in] col Column index of the element.
+    /// @param[in] value Replacement value.
+    /// @return True when the element was located and rewritten.
+    template <typename Storage>
+    bool overwrite_stored_factor(
+        const std::filesystem::path& file, std::size_t n, std::size_t row, std::size_t col, Storage value
+    )
+    {
+        const std::size_t position = stored_factor_offset(file, n, sizeof(Storage), row, col);
+        if (position == 0U || position + sizeof(Storage) > std::filesystem::file_size(file))
+        {
+            return false;
+        }
+        // Rewrite in place (no truncation) so an existing memory map of the file observes the change.
+        std::fstream io(file, std::ios::binary | std::ios::in | std::ios::out);
+        io.seekp(static_cast<std::streamoff>(position));
+        io.write(reinterpret_cast<const char*>(&value), sizeof(Storage));
+        io.flush();
+        return static_cast<bool>(io);
+    }
+
+    /// @brief Verifies a corrupt Cholesky factor is rejected at load, because predictions no longer rescan it.
+    /// @details LoadedGpr predictions skip the per-call factor validation and rely on load having checked every
+    /// element for finiteness and the diagonal for positivity. A NaN below the diagonal and a zero diagonal entry
+    /// in the stored `l` tensor must therefore fail `LoadedGpr::load` instead of reaching a prediction, for the
+    /// memory-mapped F64 factor of DoublePrecision and the copied F32 factors of SinglePrecision and both
+    /// MixedPrecision policies.
+    TEST(PersistModelsTest, LoadRejectsCorruptCholeskyFactorBecausePredictionsDoNotRescanIt)
+    {
+        // Spec: FMT-02, FMT-05, DES-16
+        const std::vector<double> x_train{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4, 0.7};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+
+        const auto check_policy = [&]<typename P>(const std::string& tag)
+        {
+            using Storage = P::Storage;
+            const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).factor(x_train, 4U, 1U, y_train);
+            ASSERT_TRUE(fit.has_value()) << tag;
+
+            const auto corrupt = [&](const std::string& name, std::size_t row, std::size_t col, Storage value)
+            {
+                const TempDirGuard dir(name + "_" + tag);
+                ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+                ASSERT_TRUE(overwrite_stored_factor<Storage>(dir.path / "model.safetensors", 4U, row, col, value));
+                const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+                EXPECT_FALSE(loaded.has_value()) << name << " " << tag;
+            };
+            corrupt("corrupt_l_nan_below_diagonal", 2U, 1U, std::numeric_limits<Storage>::quiet_NaN());
+            corrupt("corrupt_l_zero_diagonal", 1U, 1U, Storage{0});
+
+            // The unmodified model still loads and predicts.
+            const TempDirGuard clean("clean_factor_for_rescan_test_" + tag);
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, clean.path).has_value());
+            const auto loaded = cxxgpr::persist::LoadedGpr::load(clean.path);
+            ASSERT_TRUE(loaded.has_value()) << tag;
+            EXPECT_EQ(loaded->has_mmap_factor(), (std::same_as<Storage, double>)) << tag;
+            const std::vector<double> query{0.5, 1.5};
+            EXPECT_TRUE(loaded->predict(query, 2U, 1U).has_value()) << tag;
+        };
+        check_policy.template operator()<cxxgpr::DoublePrecision>("double");
+        check_policy.template operator()<cxxgpr::SinglePrecision>("single");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>("mixed_promote");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>("mixed_reevaluate");
+    }
+
+    /// @brief Verifies a factor rewritten in place after load makes predictions fail instead of collapsing variance.
+    /// @details Rewriting the memory-mapped `model.safetensors` while a LoadedGpr maps it violates the mmap contract,
+    /// and predictions do not re-check the factor. A NaN or zero written onto the diagonal after load must not be
+    /// turned into a clamped zero latent variance (which would report only the noise variance); the non-finite
+    /// latent variance is reported as NonFiniteKernelValue. Runs only where the map observes in-place writes (Linux).
+    TEST(PersistModelsTest, FactorRewrittenAfterLoadFailsPredictionInsteadOfCollapsingVariance)
+    {
+        // Spec: FMT-05, DES-16
+#ifndef __linux__
+        GTEST_SKIP() << "an in-place write is observed through a private file mapping only on Linux";
+#else
+        const std::vector<double> x_train{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4, 0.7};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 4U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const std::vector<double> query{0.5, 1.5};
+
+        for (const double value : {std::numeric_limits<double>::quiet_NaN(), 0.0})
+        {
+            const TempDirGuard dir(std::isnan(value) ? "rewrite_after_load_nan" : "rewrite_after_load_zero");
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+            const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_TRUE(loaded.has_value());
+            ASSERT_TRUE(loaded->has_mmap_factor());
+            ASSERT_TRUE(loaded->predict(query, 2U, 1U).has_value());
+
+            ASSERT_TRUE(overwrite_stored_factor<double>(dir.path / "model.safetensors", 4U, 1U, 1U, value));
+            const auto pred = loaded->predict(query, 2U, 1U);
+            ASSERT_FALSE(pred.has_value()) << value;
+            EXPECT_EQ(pred.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue) << value;
+        }
+#endif
     }
 
     /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.

@@ -105,7 +105,7 @@ Both exist in two overloads: one taking a `MatrixRef<double>` plus `std::span<co
 
 ```{code-block} text
 factor: neg-MLL 4.7716, noise 0.0500, iterations 0
-fit:    neg-MLL 0.7080, noise 0.0227, iterations 17, converged 1
+fit:    neg-MLL 0.7080, noise 0.0227, iterations 15, converged 1
 ```
 
 `neg_log_marginal_likelihood()` returns the **negative** log marginal likelihood (lower is better). The optimized fit lowers it from 4.77 to 0.71 and finds a noise variance of 0.023 on standardized targets. That matches the data: 0.01 of noise was added to a signal whose variance is about 0.45, and 0.01 / 0.45 is about 0.022.

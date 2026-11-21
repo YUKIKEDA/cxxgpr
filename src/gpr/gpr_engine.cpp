@@ -1156,6 +1156,7 @@ namespace cxxgpr::detail
     /// @retval GprErrorCode::EmptyInput When xs is empty or null.
     /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
     /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> fitted_predict_into(
         const FittedPayload<P>& payload,
