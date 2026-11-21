@@ -850,4 +850,82 @@ namespace
         check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(200U);
     }
 
+    /// @brief Verifies loo_predict and loo_predict_into reject subnormal Q_ii when 1 / Q_ii overflows to +Inf.
+    /// @details Uses a 1x1 Cholesky factor whose inverse square Q_00 is positive and finite (IEEE 754 subnormal)
+    /// so inv_diag_from_chol_l succeeds, yet 1 / Q_00 overflows to +Inf. Checks all four precision policies and
+    /// both VarianceKind values return NonFiniteKernelValue, then confirms the buffers recover on a normal factor.
+    TEST(WorkspaceInferenceTest, SubnormalQiiOverflowsLooVarianceToNonFiniteKernelValue)
+    {
+        // Spec: DES-02, DES-16
+        const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
+
+        auto check_policy = [&]<typename P>(const char* name)
+        {
+            using Storage = typename P::Storage;
+            using Refine = typename P::Refine;
+            SCOPED_TRACE(name);
+
+            // L_00 = 1e160 (double) or 1e20f (float) makes q_00 = 1/L_00^2 a finite positive subnormal in Storage.
+            // For DoublePrecision and SinglePrecision, 1/q_00 overflows Refine; for MixedPrecision (Storage=float,
+            // Refine=double), 1/q_00 ~ 1e40 is finite in double, so a large finite alpha overflows alpha/q_00 instead.
+            Storage huge_l{};
+            Refine large_alpha{0};
+            if constexpr (std::same_as<Storage, float>)
+            {
+                huge_l = 1e20F;
+                if constexpr (std::same_as<Refine, double>)
+                {
+                    large_alpha = 1e280;
+                }
+            }
+            else
+            {
+                huge_l = 1e160;
+            }
+            const std::array<Storage, 1> l_subnormal{huge_l};
+            const std::array<Refine, 1> alpha{large_alpha};
+            const std::array<Refine, 1> y_train{Refine{1.5}};
+            const cxxgpr::MatrixRef<Storage> l_sub_ref(l_subnormal.data(), 1U, 1U, 1U);
+
+            std::array<Storage, 1> sc_mat{};
+            std::array<Storage, 1> sc_diag{};
+            cxxgpr::Prediction<Refine> out;
+
+            for (const auto kind : {cxxgpr::VarianceKind::Observation, cxxgpr::VarianceKind::Latent})
+            {
+                const cxxgpr::PredictOptions opts{kind};
+                const auto res_alloc = cxxgpr::loo_predict<P>(lik, l_sub_ref, alpha, y_train, opts);
+                ASSERT_FALSE(res_alloc.has_value());
+                EXPECT_EQ(res_alloc.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
+
+                const auto res_into = cxxgpr::loo_predict_into<P>(
+                    lik, l_sub_ref, alpha, y_train, opts, cxxgpr::MatrixMut<Storage>(sc_mat.data(), 1U, 1U, 1U), sc_diag,
+                    out
+                );
+                ASSERT_FALSE(res_into.has_value());
+                EXPECT_EQ(res_into.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
+            }
+
+            // Reusing the same buffers on a well-scaled factor L_00 = 2 (q_00 = 0.25, 1/q_00 = 4) succeeds.
+            const std::array<Storage, 1> l_ok{Storage{2}};
+            const std::array<Refine, 1> alpha_ok{Refine{0.5}};
+            const cxxgpr::MatrixRef<Storage> l_ok_ref(l_ok.data(), 1U, 1U, 1U);
+            const auto ok_res = cxxgpr::loo_predict_into<P>(
+                lik, l_ok_ref, alpha_ok, y_train, cxxgpr::PredictOptions{cxxgpr::VarianceKind::Observation},
+                cxxgpr::MatrixMut<Storage>(sc_mat.data(), 1U, 1U, 1U), sc_diag, out
+            );
+            ASSERT_TRUE(ok_res.has_value());
+            ASSERT_EQ(out.mean.size(), 1U);
+            ASSERT_EQ(out.variance.size(), 1U);
+            // Closed-form: mu_LOO = 1.5 - 0.5 / 0.25 = -0.5, var_LOO = 1 / 0.25 = 4.0.
+            EXPECT_NEAR(out.mean[0], -0.5, 1e-5);
+            EXPECT_NEAR(out.variance[0], 4.0, 1e-5);
+        };
+
+        check_policy.template operator()<cxxgpr::DoublePrecision>("DoublePrecision");
+        check_policy.template operator()<cxxgpr::SinglePrecision>("SinglePrecision");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>("MixedPromote");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>("MixedReevaluate");
+    }
+
 }  // namespace
