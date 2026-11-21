@@ -15,7 +15,7 @@ if (!fitted) {
 auto prediction = fitted->predict(xs, m, n_cols);
 ```
 
-The reasons are practical. Numerical code fails for data-dependent reasons (a matrix that is not positive definite, an optimizer that did not converge), so failure is expected control flow and not an exceptional event. A value-returning error can be handled in real-time and embedded code that disables exceptions, it is visible in the signature, and `[[nodiscard]]` makes ignoring it a compiler warning. It also composes: with C++23, `and_then`, `transform` and `or_else` chain calls without nested `if`.
+The reasons are practical. Numerical code fails for data-dependent reasons (a matrix that is not positive definite, a kernel value that overflows to infinity), so failure is expected control flow and not an exceptional event. A value-returning error can be handled in real-time and embedded code that disables exceptions, it is visible in the signature, and `[[nodiscard]]` makes ignoring it a compiler warning. It also composes: with C++23, `and_then`, `transform` and `or_else` chain calls without nested `if`.
 
 The cost is verbosity. Every call site needs a check, and constructing a kernel or a likelihood is a two-step affair (`create(...)` then `.value()` or a test). {doc}`../how-to/handle-errors` shows patterns that keep this readable.
 

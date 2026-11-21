@@ -65,7 +65,9 @@ namespace cxxgpr
         CholeskyFailed,
         /// @brief Matrix failed a strict positive-definiteness check without jitter recovery.
         NonPositiveDefiniteMatrix,
-        /// @brief Hyperparameter optimizer reached its iteration limit without converging.
+        /// @brief A user-defined hyperparameter optimizer gave up without converging.
+        /// @details The built-in optimizers never return it; they report non-convergence through
+        /// OptimizerResult::converged and fit() still succeeds.
         OptimizationNotConverged,
         /// @brief Caller-provided workspace or scratch buffer is smaller than required.
         WorkspaceTooSmall,
@@ -253,7 +255,8 @@ namespace cxxgpr
         [[nodiscard]] static GprError non_positive_definite_matrix();
 
         /// @brief Constructs an OptimizationNotConverged error recording completed iterations.
-        /// @details Populates iterations() alongside a formatted diagnostic message.
+        /// @details Populates iterations() alongside a formatted diagnostic message. Intended for user-defined
+        /// optimizers that give up; Gpr::fit() returns the error unchanged.
         /// @param[in] iterations Number of optimization iterations completed before stopping.
         /// @return GprError with code GprErrorCode::OptimizationNotConverged.
         [[nodiscard]] static GprError optimization_not_converged(std::size_t iterations);
