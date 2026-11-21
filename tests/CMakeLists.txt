@@ -76,7 +76,7 @@ cxxgpr_add_test(core.checked
 
 cxxgpr_add_test(core.views
     SOURCES core/views_test.cpp
-    LABELS unit property
+    LABELS unit property negative
 )
 
 cxxgpr_add_test(core.rng

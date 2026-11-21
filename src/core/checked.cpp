@@ -6,6 +6,8 @@
 
 #include "cxxgpr/core/checked.hpp"
 
+#include "cxxgpr/core/views.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <expected>
@@ -70,6 +72,30 @@ namespace cxxgpr
         }
 
     }  // namespace
+
+    namespace detail
+    {
+
+        /// @brief Checks that a contiguous buffer of span_size elements holds exactly a rows x cols matrix.
+        /// @details Delegates to the shared shape check so MatrixRef::from_span() and MatrixMut::from_span()
+        /// apply the same EmptyInput -> SizeOverflow -> LengthMismatch order as validate_matrix().
+        /// @param[in] span_size Number of elements in the supplied buffer.
+        /// @param[in] rows Declared number of matrix rows.
+        /// @param[in] cols Declared number of matrix columns.
+        /// @return Empty expected when the shape is valid, or the first violated GprError.
+        /// @retval GprErrorCode::EmptyInput When span_size == 0, rows == 0, or cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When span_size != rows * cols.
+        std::expected<void, GprError> check_matrix_span_shape(std::size_t span_size, std::size_t rows, std::size_t cols)
+        {
+            if (auto len = validate_shape_header(span_size, rows, cols, "matrix"); !len.has_value())
+            {
+                return std::unexpected(std::move(len).error());
+            }
+            return {};
+        }
+
+    }  // namespace detail
 
     /// @brief Adds two std::size_t counts, returning SizeOverflow on unsigned wraparound.
     /// @details Tests a > max - b prior to adding so unsigned wraparound never occurs.
