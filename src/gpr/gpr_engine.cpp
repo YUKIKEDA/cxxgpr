@@ -387,6 +387,9 @@ namespace cxxgpr::detail
             bool has_valid_factor_{false};
         };
 
+        /// @brief Multiple of the float epsilon accepted as storage-rounding backward error under PromoteStorage.
+        constexpr double promote_storage_accept_factor = 10.0;
+
         /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
         /// blocks of width 32 without materializing the full n x n double matrix.
         /// @details Evaluates cross-kernel slices B_f64(:, col_begin:col_end) in blocks of at most
@@ -575,7 +578,16 @@ namespace cxxgpr::detail
                     {
                         return std::unexpected(std::move(b_inf).error());
                     }
-                    return meets_relative_residual(*b_inf, w, y_f64_, r_true, tol);
+                    // The iterate solves the float-stored matrix to double accuracy, so against the exact kernel its
+                    // backward error is the storage error. When every stored entry is within a few float epsilons of
+                    // the true entry, that bounds the relative residual by a few epsilons independent of n, and the
+                    // iterate is accepted. Gating on the double-precision tolerance would reject it, and pay for the
+                    // fallback, unless every entry of the matrix is exactly representable in float. A float
+                    // evaluation that misses the exact kernel by more (for example coordinates far from the origin,
+                    // which lose digits when rounded to float) exceeds the threshold and still falls back.
+                    const double storage_tol =
+                        promote_storage_accept_factor * static_cast<double>(std::numeric_limits<float>::epsilon());
+                    return meets_relative_residual(*b_inf, w, y_f64_, r_true, std::max(tol, storage_tol));
                 }
             }
 

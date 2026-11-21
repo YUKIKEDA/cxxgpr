@@ -7,9 +7,13 @@
 
 #pragma once
 
+#include "cxxgpr/core/error.hpp"
+
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <span>
+#include <utility>
 #include <vector>
 
 /// @brief Top-level namespace for the cxxgpr Gaussian process regression library.
@@ -92,6 +96,28 @@ namespace cxxgpr
         [[nodiscard]] bool operator==(const PredictiveCovariance& other) const noexcept = default;
     };
 
+    /// @brief Internal implementation helpers for matrix views.
+    namespace detail
+    {
+
+        /// @brief Checks that a contiguous buffer of span_size elements holds exactly a rows x cols matrix.
+        /// @details Applies, in this order, the EmptyInput check (span_size, rows, or cols is zero), the
+        /// SizeOverflow check (rows * cols overflows std::size_t), and the LengthMismatch check
+        /// (span_size != rows * cols). An empty buffer is rejected even when its pointer is non-null, because
+        /// such a pointer may address no readable element.
+        /// @param[in] span_size Number of elements in the supplied buffer.
+        /// @param[in] rows Declared number of matrix rows.
+        /// @param[in] cols Declared number of matrix columns.
+        /// @return Empty expected when the shape is valid, or the first violated GprError.
+        /// @retval GprErrorCode::EmptyInput When span_size == 0, rows == 0, or cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When span_size != rows * cols.
+        [[nodiscard]] std::expected<void, GprError> check_matrix_span_shape(
+            std::size_t span_size, std::size_t rows, std::size_t cols
+        );
+
+    }  // namespace detail
+
     /// @brief Non-owning read-only view over a column-major matrix buffer.
     /// @details Addresses element (row, col) at offset col * col_stride_ + row without exposing
     /// third-party matrix types across the public API.
@@ -109,6 +135,8 @@ namespace cxxgpr
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
         /// @param[in] col_stride Distance in elements between consecutive columns.
+        /// @pre data addresses at least (cols - 1) * col_stride + rows readable elements when rows and cols are
+        /// non-zero. The constructor does not check this; use from_span() to build a checked view over a span.
         constexpr MatrixRef(const T* data, std::size_t rows, std::size_t cols, std::size_t col_stride) noexcept :
             data_(data),
             rows_(rows),
@@ -122,19 +150,36 @@ namespace cxxgpr
         /// @param[in] data Pointer to tightly packed column-major buffer.
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
+        /// @pre data addresses at least rows * cols readable elements. The constructor does not check this; use
+        /// from_span() to build a checked view over a span.
         constexpr MatrixRef(const T* data, std::size_t rows, std::size_t cols) noexcept :
             MatrixRef(data, rows, cols, rows)
         {
         }
 
-        /// @brief Constructs a tightly packed column-major view over a contiguous span.
-        /// @details Binds data.data() with col_stride == rows; caller ensures data.size() >= rows * cols.
+        /// @brief Builds a tightly packed column-major view over a span after checking its length.
+        /// @details Checks, in this order, that data, rows, and cols are non-empty, that rows * cols does not
+        /// overflow, and that data.size() equals rows * cols. The view binds data.data() with col_stride == rows
+        /// only after all three hold, so it never addresses elements past the end of data.
         /// @param[in] data Contiguous span backing the column-major matrix.
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
-        constexpr MatrixRef(std::span<const T> data, std::size_t rows, std::size_t cols) noexcept :
-            MatrixRef(data.data(), rows, cols, rows)
+        /// @return View over data, or GprError describing the first violated shape condition.
+        /// @retval GprErrorCode::EmptyInput When data is empty, rows == 0, or cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != rows * cols.
+        /// @note Does not allocate on success.
+        /// @see MatrixMut::from_span()
+        [[nodiscard]] static std::expected<MatrixRef, GprError> from_span(
+            std::span<const T> data, std::size_t rows, std::size_t cols
+        )
         {
+            // Validate the shape before binding the pointer so no view can extend past the span.
+            if (auto ok = detail::check_matrix_span_shape(data.size(), rows, cols); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+            return MatrixRef(data.data(), rows, cols, rows);
         }
 
         /// @brief Returns the base pointer to element (0, 0).
@@ -225,6 +270,8 @@ namespace cxxgpr
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
         /// @param[in] col_stride Distance in elements between consecutive columns.
+        /// @pre data addresses at least (cols - 1) * col_stride + rows writable elements when rows and cols are
+        /// non-zero. The constructor does not check this; use from_span() to build a checked view over a span.
         constexpr MatrixMut(T* data, std::size_t rows, std::size_t cols, std::size_t col_stride) noexcept :
             data_(data),
             rows_(rows),
@@ -238,16 +285,33 @@ namespace cxxgpr
         /// @param[in] data Mutable pointer to tightly packed column-major buffer.
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
+        /// @pre data addresses at least rows * cols writable elements. The constructor does not check this; use
+        /// from_span() to build a checked view over a span.
         constexpr MatrixMut(T* data, std::size_t rows, std::size_t cols) noexcept : MatrixMut(data, rows, cols, rows) {}
 
-        /// @brief Constructs a tightly packed mutable column-major view over a contiguous span.
-        /// @details Binds data.data() with col_stride == rows; caller ensures data.size() >= rows * cols.
+        /// @brief Builds a tightly packed mutable column-major view over a span after checking its length.
+        /// @details Checks, in this order, that data, rows, and cols are non-empty, that rows * cols does not
+        /// overflow, and that data.size() equals rows * cols. The view binds data.data() with col_stride == rows
+        /// only after all three hold, so it never addresses elements past the end of data.
         /// @param[in] data Contiguous mutable span backing the column-major matrix.
         /// @param[in] rows Number of matrix rows.
         /// @param[in] cols Number of matrix columns.
-        constexpr MatrixMut(std::span<T> data, std::size_t rows, std::size_t cols) noexcept :
-            MatrixMut(data.data(), rows, cols, rows)
+        /// @return Mutable view over data, or GprError describing the first violated shape condition.
+        /// @retval GprErrorCode::EmptyInput When data is empty, rows == 0, or cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != rows * cols.
+        /// @note Does not allocate on success.
+        /// @see MatrixRef::from_span()
+        [[nodiscard]] static std::expected<MatrixMut, GprError> from_span(
+            std::span<T> data, std::size_t rows, std::size_t cols
+        )
         {
+            // Validate the shape before binding the pointer so no view can extend past the span.
+            if (auto ok = detail::check_matrix_span_shape(data.size(), rows, cols); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+            return MatrixMut(data.data(), rows, cols, rows);
         }
 
         /// @brief Returns the base mutable pointer to element (0, 0).
