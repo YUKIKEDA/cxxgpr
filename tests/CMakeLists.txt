@@ -204,6 +204,11 @@ cxxgpr_add_test(persist.models
     LABELS unit property negative integration
 )
 
+cxxgpr_add_test(persist.distance
+    SOURCES persist/distance_persist_test.cpp
+    LABELS unit property negative integration
+)
+
 cxxgpr_add_test(integration.path_matrix
     SOURCES integration/path_matrix_test.cpp
     LABELS integration property

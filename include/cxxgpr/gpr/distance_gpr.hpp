@@ -45,6 +45,13 @@ namespace cxxgpr
     /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C> class FittedDistanceGpr;
 
+    /// @brief Library-internal part of the persistence layer.
+    namespace persist::detail
+    {
+        /// @brief Library-internal accessor used by the persistence layer.
+        struct DistanceModelAccess;
+    }  // namespace persist::detail
+
     /// @brief Internal training and prediction engine for supplied-distance models.
     namespace detail
     {
@@ -168,6 +175,43 @@ namespace cxxgpr
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
             void* optimize_ctx
+        );
+
+        /// @brief Assembles the fitted payload of a supplied-distance model from stored parts, without optimizing.
+        /// @details Used to restore a persisted model. Validates the distance tables once, applies the fitted
+        /// transforms, checks the stored factor and weights, and derives the marginal likelihood from them.
+        /// @tparam P Precision policy.
+        /// @tparam C Distance mode.
+        /// @param[in] kernel Kernel carrying the fitted hyperparameters.
+        /// @param[in] likelihood Likelihood carrying the fitted noise variance.
+        /// @param[in] kernel_exp Exponential mode of the kernel evaluation.
+        /// @param[in] train Square training distance tables bound to the kernel slots.
+        /// @param[in] x_raw Raw training coordinates, column-major n x n_features (WithPoints only).
+        /// @param[in] n_features Coordinate dimension (0 for DistanceOnly).
+        /// @param[in] y_raw Raw training targets.
+        /// @param[in] input_transform Fitted coordinate transform (WithPoints only).
+        /// @param[in] target_transform Fitted target transform.
+        /// @param[in] l_factor Lower Cholesky factor, column-major n x n.
+        /// @param[in] alpha Weights in the transformed target space.
+        /// @param[in] factor_jitter Accepted diagonal jitter.
+        /// @return Fitted payload, or GprError describing the first failing check.
+        /// @retval GprErrorCode::PersistFailed When the factor or the weights are not usable.
+        /// @retval GprErrorCode::InvalidDistance When the tables are invalid.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or mismatched.
+        template <PrecisionPolicyConcept P, DistanceModeConcept C>
+        [[nodiscard]] std::expected<DistanceFittedPayload<P, C>, GprError> assemble_distance_payload(
+            const DistanceKernel<C>& kernel,
+            const GaussianLikelihood& likelihood,
+            KernelExp kernel_exp,
+            const DistanceSource& train,
+            std::span<const double> x_raw,
+            std::size_t n_features,
+            std::span<const double> y_raw,
+            std::shared_ptr<const transform::FittedInputTransform> input_transform,
+            std::shared_ptr<const transform::FittedTargetTransform> target_transform,
+            std::span<const typename P::Storage> l_factor,
+            std::span<const typename P::Refine> alpha,
+            double factor_jitter
         );
 
         /// @brief Computes the posterior mean and diagonal variance at m query points.
@@ -532,6 +576,7 @@ namespace cxxgpr
 
     private:
         friend class DistanceGpr<O, P, C>;
+        friend struct persist::detail::DistanceModelAccess;
 
         /// @brief Constructs a fitted model from a training payload and the trainer configuration.
         /// @param[in] payload Immutable fitted state shared between copies.

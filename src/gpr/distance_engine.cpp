@@ -1587,6 +1587,179 @@ namespace cxxgpr
         return out;
     }
 
+    /// @brief Assembles the fitted payload of a supplied-distance model from stored parts, without optimizing.
+    /// @details Checks the stored factor and weights, validates the distance tables once, applies the fitted
+    /// transforms, and derives the marginal likelihood and the trivial optimizer trajectory from the stored parts.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] kernel Kernel carrying the fitted hyperparameters.
+    /// @param[in] likelihood Likelihood carrying the fitted noise variance.
+    /// @param[in] kernel_exp Exponential mode of the kernel evaluation.
+    /// @param[in] train Square training distance tables bound to the kernel slots.
+    /// @param[in] x_raw Raw training coordinates, column-major n x n_features (WithPoints only).
+    /// @param[in] n_features Coordinate dimension (0 for DistanceOnly).
+    /// @param[in] y_raw Raw training targets.
+    /// @param[in] input_transform Fitted coordinate transform (WithPoints only).
+    /// @param[in] target_transform Fitted target transform.
+    /// @param[in] l_factor Lower Cholesky factor, column-major n x n.
+    /// @param[in] alpha Weights in the transformed target space.
+    /// @param[in] factor_jitter Accepted diagonal jitter.
+    /// @return Fitted payload, or GprError describing the first failing check.
+    /// @retval GprErrorCode::PersistFailed When the factor or the weights are not usable.
+    /// @retval GprErrorCode::InvalidDistance When the tables are invalid.
+    template <PrecisionPolicyConcept P, DistanceModeConcept C>
+    std::expected<detail::DistanceFittedPayload<P, C>, GprError> detail::assemble_distance_payload(
+        const DistanceKernel<C>& kernel,
+        const GaussianLikelihood& likelihood,
+        KernelExp kernel_exp,
+        const DistanceSource& train,
+        std::span<const double> x_raw,
+        std::size_t n_features,
+        std::span<const double> y_raw,
+        std::shared_ptr<const transform::FittedInputTransform> input_transform,
+        std::shared_ptr<const transform::FittedTargetTransform> target_transform,
+        std::span<const typename P::Storage> l_factor,
+        std::span<const typename P::Refine> alpha,
+        double factor_jitter
+    )
+    {
+        using Storage = typename P::Storage;
+        using Refine = typename P::Refine;
+        constexpr bool with_points = std::same_as<C, WithPoints>;
+        const std::size_t n = y_raw.size();
+        if (n == 0U)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (l_factor.size() != n * n || alpha.size() != n)
+        {
+            return std::unexpected(
+                GprError::persist_failed(PersistErrorKind::Tensor, "factor tensor has the wrong size")
+            );
+        }
+        auto tensor_error = [](std::string_view message)
+        {
+            return GprError::persist_failed(PersistErrorKind::Tensor, std::string(message));
+        };
+        for (std::size_t j = 0; j < n; ++j)
+        {
+            const Storage diag = l_factor[(j * n) + j];
+            if (!std::isfinite(diag) || diag <= Storage{0})
+            {
+                return std::unexpected(tensor_error("factor diagonal must be finite and positive"));
+            }
+            for (std::size_t i = j + 1U; i < n; ++i)
+            {
+                if (!std::isfinite(l_factor[(j * n) + i]))
+                {
+                    return std::unexpected(tensor_error("factor contains a non-finite value"));
+                }
+            }
+        }
+        for (const auto a : alpha)
+        {
+            if (!std::isfinite(a))
+            {
+                return std::unexpected(tensor_error("weights contain a non-finite value"));
+            }
+        }
+
+        auto compiled = std::make_shared<CompiledDistanceKernel<Storage>>(kernel.template compile<Storage>());
+        compiled->set_kernel_exp(kernel_exp);
+        auto store = compiled->prepare_square(train);
+        if (!store.has_value())
+        {
+            return std::unexpected(std::move(store).error());
+        }
+        if (store->rows() != n)
+        {
+            return std::unexpected(GprError::length_mismatch("target length must match training table order"));
+        }
+
+        DistanceFittedPayload<P, C> payload{
+            .kernel = kernel,
+            .likelihood = likelihood,
+            .compiled = nullptr,
+            .store = nullptr,
+            .input_transform = nullptr,
+            .target_transform = std::move(target_transform),
+            .x_raw = {},
+            .y_raw = std::vector<double>(y_raw.begin(), y_raw.end()),
+            .x_train = {},
+            .y_transformed = {},
+            .l_factor = std::vector<Storage>(l_factor.begin(), l_factor.end()),
+            .alpha = std::vector<Refine>(alpha.begin(), alpha.end()),
+            .n_train = n,
+            .n_features = n_features,
+            .factor_jitter = factor_jitter,
+            .neg_log_marginal_likelihood = 0.0,
+            .optimizer_result = {},
+        };
+        if constexpr (with_points)
+        {
+            if (!input_transform || x_raw.size() != n * n_features)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            payload.x_raw.assign(x_raw.begin(), x_raw.end());
+            std::vector<double> x_t(x_raw.begin(), x_raw.end());
+            if (auto ap = input_transform->apply(x_t, n, n_features); !ap.has_value())
+            {
+                return std::unexpected(std::move(ap).error());
+            }
+            payload.x_train.resize(x_t.size());
+            for (std::size_t i = 0; i < x_t.size(); ++i)
+            {
+                if (!std::isfinite(x_t[i]))
+                {
+                    return std::unexpected(tensor_error("non-finite value after applying the input transform"));
+                }
+                payload.x_train[i] = static_cast<Storage>(x_t[i]);
+            }
+            payload.input_transform = std::move(input_transform);
+        }
+        std::vector<double> y_t(y_raw.begin(), y_raw.end());
+        if (auto tf = payload.target_transform->transform(y_t); !tf.has_value())
+        {
+            return std::unexpected(std::move(tf).error());
+        }
+        payload.y_transformed.resize(n);
+        double quad = 0.0;
+        double log_det_half = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            if (!std::isfinite(y_t[i]))
+            {
+                return std::unexpected(tensor_error("non-finite value after applying the target transform"));
+            }
+            payload.y_transformed[i] = static_cast<Refine>(y_t[i]);
+            quad += y_t[i] * static_cast<double>(alpha[i]);
+            log_det_half += std::log(static_cast<double>(l_factor[(i * n) + i]));
+        }
+        constexpr double log_two_pi = 1.8378770664093454835606594728112;
+        payload.neg_log_marginal_likelihood = (0.5 * quad) + log_det_half + (0.5 * static_cast<double>(n) * log_two_pi);
+
+        const std::size_t nk = kernel.num_params();
+        std::vector<double> params(nk + 1U);
+        if (auto gp = kernel.get_params(std::span<double>(params.data(), nk)); !gp.has_value())
+        {
+            return std::unexpected(std::move(gp).error());
+        }
+        if (auto lp = likelihood.get_params(std::span<double>(params.data() + nk, 1U)); !lp.has_value())
+        {
+            return std::unexpected(std::move(lp).error());
+        }
+        payload.optimizer_result = optimizer::OptimizerResult{
+            .params = std::move(params),
+            .value = payload.neg_log_marginal_likelihood,
+            .iterations = 0U,
+            .converged = true,
+        };
+        payload.compiled = std::move(compiled);
+        payload.store = std::make_shared<const CheckedDistanceStore<Storage>>(std::move(*store));
+        return payload;
+    }
+
     // Explicit instantiations of the supplied-distance engine for every precision policy and kernel mode.
 
     template std::expected<detail::DistanceFittedPayload<DoublePrecision, DistanceOnly>, GprError> detail::
@@ -1940,6 +2113,134 @@ namespace cxxgpr
     template std::expected<Prediction<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
         loo_distance<MixedPrecision<ReevaluateKernel>, WithPoints>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<DoublePrecision, DistanceOnly>, GprError> detail::
+        assemble_distance_payload<DoublePrecision, DistanceOnly>(
+            const DistanceKernel<DistanceOnly>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const DoublePrecision::Storage>,
+            std::span<const DoublePrecision::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<DoublePrecision, WithPoints>, GprError> detail::
+        assemble_distance_payload<DoublePrecision, WithPoints>(
+            const DistanceKernel<WithPoints>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const DoublePrecision::Storage>,
+            std::span<const DoublePrecision::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<SinglePrecision, DistanceOnly>, GprError> detail::
+        assemble_distance_payload<SinglePrecision, DistanceOnly>(
+            const DistanceKernel<DistanceOnly>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const SinglePrecision::Storage>,
+            std::span<const SinglePrecision::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<SinglePrecision, WithPoints>, GprError> detail::
+        assemble_distance_payload<SinglePrecision, WithPoints>(
+            const DistanceKernel<WithPoints>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const SinglePrecision::Storage>,
+            std::span<const SinglePrecision::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>, GprError>
+        detail::assemble_distance_payload<MixedPrecision<PromoteStorage>, DistanceOnly>(
+            const DistanceKernel<DistanceOnly>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const MixedPrecision<PromoteStorage>::Storage>,
+            std::span<const MixedPrecision<PromoteStorage>::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>, GprError> detail::
+        assemble_distance_payload<MixedPrecision<PromoteStorage>, WithPoints>(
+            const DistanceKernel<WithPoints>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const MixedPrecision<PromoteStorage>::Storage>,
+            std::span<const MixedPrecision<PromoteStorage>::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>, GprError>
+        detail::assemble_distance_payload<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceKernel<DistanceOnly>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
+            std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
+            double
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>, GprError>
+        detail::assemble_distance_payload<MixedPrecision<ReevaluateKernel>, WithPoints>(
+            const DistanceKernel<WithPoints>&,
+            const GaussianLikelihood&,
+            KernelExp,
+            const DistanceSource&,
+            std::span<const double>,
+            std::size_t,
+            std::span<const double>,
+            std::shared_ptr<const transform::FittedInputTransform>,
+            std::shared_ptr<const transform::FittedTargetTransform>,
+            std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
+            std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
+            double
         );
 
 }  // namespace cxxgpr

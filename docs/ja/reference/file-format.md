@@ -24,7 +24,7 @@
 | 未知の最上位キー | 読み込み時に無視する |
 | 書き込み側の動作 | 完成した一時ファイルを最終的な名前へリネームして書き込む |
 
-他のモデル族は、`PersistErrorKind::WrongModel` で拒否する。対象は、疎なモデルとオンラインモデル（`model` キー）、`"llt"` 以外の分解（`factor_kind`）、供給された二乗距離で学習したモデル（`distance` キー）である。
+他のモデル族は、`PersistErrorKind::WrongModel` で拒否する。対象は、疎なモデルとオンラインモデル（`model` キー）、`"llt"` 以外の分解（`factor_kind`）である。供給された二乗距離で学習したモデルは `distance` キーを持ち、`LoadedGpr` ではなく `LoadedDistanceGpr` が読む。
 
 ## `config.json`
 
@@ -36,7 +36,7 @@
 |---|---|---|---|---|
 | `format_version` | 整数 | はい | — | 形式のバージョン。`1` |
 | `n` | 整数、$> 0$ | はい | — | 学習点の数 |
-| `d` | 整数、$> 0$ | はい | — | 特徴量の数 |
+| `d` | 整数、$> 0$（距離のみのモデルは 0） | はい | — | 特徴量の数 |
 | `has_factor` | 真偽値 | はい | — | `model.safetensors` に `l` と `alpha` があれば `true` |
 | `factor_kind` | 文字列 | はい | — | `"llt"`（コレスキー $LL^\top$）でなければならない |
 | `factor_jitter` | 数値、$\ge 0$ | いいえ | `0.0` | モデルを分解したときに採用された対角ジッタ |
@@ -51,6 +51,7 @@
 | `x_transform` | 変換 | はい | — | 学習済みの入力変換 |
 | `y_unfitted` | 変換 | はい | — | 学習前の目的変数変換の設定 |
 | `y_transform` | 変換 | はい | — | 学習済みの目的変数変換 |
+| `distance` | オブジェクト | 供給距離のモデルのみ | — | モードと距離スロット。下記を参照 |
 
 書き込み側は、`precision` が `"mixed"` でない限り `residual` を出力しない。`precision` と `residual` の組が、モデルの `PersistPrecisionKind` を決める。
 
@@ -123,6 +124,27 @@
 `custom` ノードでは、未学習の変換と学習済みの変換は別々の登録になる。未学習側の `persist_id` は `register_unfitted_input` か `register_unfitted_target` で登録したファクトリへ、学習済み側の `persist_id` は `register_fitted_input` か `register_fitted_target` で登録したファクトリへ渡される。
 
 `custom` ノードの `state` は、構成要素の `persist_state_json` が返した文字列である。JSON として解析できれば構造化された JSON として、できなければ文字列として保存される。ファクトリには、それを文字列へ直したものが渡される。
+
+### 供給距離のモデル
+
+供給された二乗距離で学習したモデル（`FittedDistanceGpr`）は、上と同じセクションを持ち、次の点が異なる。
+
+```json
+"distance": {
+  "points": "distance_only",
+  "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+}
+```
+
+- `distance.points` は `"distance_only"`（このとき `d` は `0`）か `"with_points"`（このとき `d > 0` で、`x` も保存する）。もう一方のモードのローダーは、`PersistErrorKind::WrongModel` でファイルを拒否する。
+- `distance.slots` は、カーネルに最初に現れる深さ優先の順で距離スロットを並べる。スロットは `{"kind": "scalar"}` か `{"kind": "ard", "dims": <整数>}` である。
+- カーネルの木では、距離スロットを読む葉は `{"distance": {"slot": <slots の添字>, "leaf": <カーネルの葉>}}` と書く。スカラースロットが取るのは `rbf`、`matern`、`periodic`、`rq`、`custom`、ARD スロットが取るのは `dims` 個の長さスケールを持つ `rbf_ard`、`matern_ard`、`rq_ard` である。それ以外の葉は、上の表のとおりに書く座標の葉である。距離のみのモデルが持てる座標の葉は、`constant` と `white` だけである。
+- `distance_cache` は `"always"` と書き、使わない。
+- `"distance_only"` では、`x_transform` は `"identity"` である。
+
+**距離のテンソル。** スロット $k$ のテンソル `d2.<k>` は、修復済みの学習距離の下三角（対角を含む）を持つ。$i \ge j$ の要素 $(i, j)$ の詰めた位置は $p = j n - j(j-1)/2 + (i - j)$ で、詰めた長さは $n(n+1)/2$ である。ARD スロットは、次元ごとに詰めた配列を順に連結する。次元 `m` の平坦な添字は `m * packed_len + p` である。このため `x` や `l` と違って、`d2.<k>` は `reshape(shape, order="C")` で読む（1 次元であるスカラースロットでは、順序は結果に影響しない）。`"mixed"` の精度のモデルは、予測に使う精度と同じ `F32` の表を保存する。
+
+読み込み時には、保存した表が、自分で与える表と同じ検査を通る。有限であること、非負であること、対角が 0 であることである。違反は `InvalidDistance`。非有限の要素は、その前に壊れたテンソルとして拒否する。
 
 ### 例
 
@@ -216,10 +238,11 @@
 
 | 名前 | `shape` | `dtype` | 存在する条件 | 内容 |
 |---|---|---|---|---|
-| `x` | `[n, d]` | `F64` | 常に | 入力変換の前の学習入力 |
+| `x` | `[n, d]` | `F64` | 常に（距離のみのモデルは $d = 0$ なので省く） | 入力変換の前の学習入力 |
 | `y` | `[n]` | `F64` | 常に | 目的変数変換の前の学習目的変数 |
 | `l` | `[n, n]` | `double`: `F64`、`single` と `mixed`: `F32` | `has_factor` が `true` | $K + (\sigma_n^2 + j) I$ の下三角コレスキー因子 $L$。上三角は 0 で埋める |
 | `alpha` | `[n]` | `single`: `F32`、`double` と `mixed`: `F64` | `has_factor` が `true` | 変換後の目的変数空間での重み $\alpha = (K + (\sigma_n^2 + j) I)^{-1}\mathbf{y}'$。$j$ は `factor_jitter` |
+| `d2.<k>` | スカラースロット: `[n(n+1)/2]`、ARD スロット: `[dims, n(n+1)/2]` | `double`: `F64`、`single` と `mixed`: `F32` | 供給距離のモデル。スロット $k$ ごとに 1 つ | スロット $k$ の、検査済みの学習距離の下三角（下記） |
 
 すべてのテンソルのすべての要素は、有限でなければならない。
 
@@ -264,7 +287,7 @@ def read_safetensors(path):
 
 ## 読み込み時の動作
 
-`LoadedGpr::load` は、ディレクトリを信頼できない入力として扱い、次の検査を行う。
+`LoadedGpr::load` と `LoadedDistanceGpr::load` は、ディレクトリを信頼できない入力として扱い、次の検査を行う。`LoadedGpr::load` は `distance` キーのあるファイルを、`LoadedDistanceGpr::load` は `distance` キーのないファイルや、`distance.points` が別のファイルを拒否する。どちらも `PersistErrorKind::WrongModel` である。
 
 1. 2 つのファイルを開いて読む。失敗は `PersistErrorKind::Io`。
 2. JSON の深さが 128 以下で、テキストが解析でき、ルートがオブジェクトで、`model` キーがない。`model` キーや `distance` キーがあれば `PersistErrorKind::WrongModel`。そのほかの構文やスキーマの誤りは `PersistErrorKind::Config`。
@@ -285,8 +308,9 @@ def read_safetensors(path):
 | ファイルを開けない、読めない、書けない、マップできない | `PersistFailed`、`PersistErrorKind::Io` |
 | JSON が不正、キーが欠けている・型が違う、入れ子が 128 段を超える | `PersistFailed`、`PersistErrorKind::Config` |
 | テンソルがない、形状や `dtype` が違う、アラインメントが合わない、有限でない要素がある | `PersistFailed`、`PersistErrorKind::Tensor` |
-| `model` キーか `distance` キーがある、`factor_kind` が `"llt"` 以外、`into_fitted` で精度が合わない | `PersistFailed`、`PersistErrorKind::WrongModel` |
+| `model` キーがある、`LoadedGpr` で `distance` キーがある、`LoadedDistanceGpr` で `distance` キーがないか `distance.points` が別、`factor_kind` が `"llt"` 以外、`into_fitted` で精度が合わない | `PersistFailed`、`PersistErrorKind::WrongModel` |
 | ファイルの `persist_id` に登録されたファクトリがない | `PersistFailed`、`PersistErrorKind::UnregisteredId` |
 | `persist_id` が空、または `cxxgpr.` で始まる、または二重登録 | `PersistFailed`、`PersistErrorKind::InvalidPersistId` |
 | `persist_id` のない自作の構成要素を保存した | `PersistFailed`、`PersistErrorKind::NotPersistable` |
+| 保存した距離の表に負の要素や 0 でない対角がある | `InvalidDistance` |
 | `format_version` が `1` 以外 | `UnsupportedPersistVersion`（`found_version` と `supported_version` を持つ） |

@@ -14,9 +14,12 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
+#include "kernel/distance_desc.hpp"
 #include "kernel/exp_simd.hpp"
 #include "kernel/leaf_eval.hpp"
 
@@ -997,6 +1000,78 @@ namespace cxxgpr
             return DistanceKernel<Mode>(std::make_shared<const Node<Mode>>(Node<Mode>{
                 .data = typename Node<Mode>::Product{.lhs = std::move(lhs.root_), .rhs = std::move(rhs.root_)}
             }));
+        }
+
+        /// @brief Recursively describes one AST node for persistence.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] node AST node to describe.
+        /// @param[in] slots Slots of the whole kernel, used to turn slot identifiers into ordinals.
+        /// @return Description of the subtree.
+        template <DistanceModeConcept Mode>
+        static std::shared_ptr<const detail::DistanceNodeDesc> describe_node(
+            const Node<Mode>& node, const std::vector<SlotDescriptor>& slots
+        )
+        {
+            auto out = std::make_shared<detail::DistanceNodeDesc>();
+            auto ordinal = [&slots](SlotId id) -> std::size_t
+            {
+                for (std::size_t i = 0; i < slots.size(); ++i)
+                {
+                    if (slots[i].id == id)
+                    {
+                        return i;
+                    }
+                }
+                return 0;
+            };
+            if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
+            {
+                out->kind = detail::DistanceNodeDesc::Kind::Supplied;
+                out->slot = ordinal(s->slot);
+                out->leaf = s->leaf;
+            }
+            else if (const auto* a = std::get_if<SuppliedArdNode>(&node.data))
+            {
+                out->kind = detail::DistanceNodeDesc::Kind::Supplied;
+                out->slot = ordinal(a->slot);
+                out->leaf = a->leaf;
+            }
+            else if (const auto* c = std::get_if<CoordLeafNode>(&node.data))
+            {
+                out->kind = detail::DistanceNodeDesc::Kind::Coord;
+                out->leaf = c->leaf;
+            }
+            else if (const auto* sum = std::get_if<typename Node<Mode>::Sum>(&node.data))
+            {
+                out->kind = detail::DistanceNodeDesc::Kind::Sum;
+                out->lhs = describe_node<Mode>(*sum->lhs, slots);
+                out->rhs = describe_node<Mode>(*sum->rhs, slots);
+            }
+            else
+            {
+                const auto& prod = std::get<typename Node<Mode>::Product>(node.data);
+                out->kind = detail::DistanceNodeDesc::Kind::Product;
+                out->lhs = describe_node<Mode>(*prod.lhs, slots);
+                out->rhs = describe_node<Mode>(*prod.rhs, slots);
+            }
+            return out;
+        }
+
+        /// @brief Describes a whole kernel for persistence.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] kernel Kernel to describe.
+        /// @return Description of the tree and of its slots.
+        template <DistanceModeConcept Mode>
+        static detail::DistanceKernelDesc describe(const DistanceKernel<Mode>& kernel)
+        {
+            const auto slots = kernel.slots();
+            detail::DistanceKernelDesc desc;
+            desc.root = describe_node<Mode>(*kernel.root_, slots);
+            for (const auto& s : slots)
+            {
+                desc.slots.push_back(detail::DistanceSlotDesc{.ard_dims = s.ard_dims});
+            }
+            return desc;
         }
     };
 
@@ -4345,12 +4420,304 @@ namespace cxxgpr
         return hess(store, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested);
     }
 
+    /// @brief Friend helper that reads the validated tables of a CheckedDistanceStore for persistence.
+    struct DistanceStoreExport
+    {
+        /// @brief Packs the lower triangle of every slot table.
+        /// @tparam T Storage scalar of the store.
+        /// @param[in] store Square store.
+        /// @return Packed arrays in slot order.
+        template <KernelScalarConcept T> static std::vector<std::vector<T>> packed(const CheckedDistanceStore<T>& store)
+        {
+            const auto& impl = *store.impl_;
+            const std::size_t n = impl.n_rows;
+            const std::size_t packed_len = n * (n + 1U) / 2U;
+            std::vector<std::vector<T>> out;
+            out.reserve(impl.kernel_slots.size());
+            for (const auto& slot : impl.kernel_slots)
+            {
+                if (slot.ard_dims.has_value())
+                {
+                    out.push_back(impl.ard_data[slot.at]);
+                    continue;
+                }
+                const auto& dense = impl.scalar_tables[slot.at];
+                std::vector<T> packed_table(packed_len);
+                std::size_t pos = 0;
+                for (std::size_t j = 0; j < n; ++j)
+                {
+                    // Column j contributes rows j..n-1, so positions follow j*n - j*(j-1)/2 + (i-j).
+                    for (std::size_t i = j; i < n; ++i)
+                    {
+                        packed_table[pos++] = dense[(j * n) + i];
+                    }
+                }
+                out.push_back(std::move(packed_table));
+            }
+            return out;
+        }
+    };
+
+    /// @brief Describes the tree and the slots of a DistanceKernel.
+    /// @tparam C Distance mode.
+    /// @param[in] kernel Kernel to describe.
+    /// @return Structural description.
+    template <DistanceModeConcept C>
+    detail::DistanceKernelDesc detail::describe_distance_kernel(const DistanceKernel<C>& kernel)
+    {
+        return DistanceKernelAccess::describe<C>(kernel);
+    }
+
+    /// @brief Exports the validated training tables of a store as lower-triangular packed arrays, one per slot.
+    /// @tparam T Storage scalar of the store.
+    /// @param[in] store Square store built by CompiledDistanceKernel::prepare_square.
+    /// @return Packed arrays in slot order.
+    template <KernelScalarConcept T>
+    std::vector<std::vector<T>> detail::export_packed_distance_tables(const CheckedDistanceStore<T>& store)
+    {
+        return DistanceStoreExport::packed<T>(store);
+    }
+
+    namespace
+    {
+
+        /// @brief Builds a persistence configuration error.
+        /// @param[in] message Description of the problem.
+        /// @return GprError of kind PersistFailed(Config).
+        GprError distance_config_error(std::string_view message)
+        {
+            return GprError::persist_failed(PersistErrorKind::Config, std::string(message));
+        }
+
+        /// @brief Slot handles issued for one rebuilt kernel.
+        struct IssuedSlots
+        {
+            /// @brief Scalar handles by slot ordinal (engaged where the slot is scalar).
+            std::vector<std::optional<ScalarDistance>> scalar;
+            /// @brief ARD handles by slot ordinal (engaged where the slot is ARD).
+            std::vector<std::optional<ArdDistance>> ard;
+        };
+
+        /// @brief Maps an ARD binding failure to a configuration error.
+        /// @param[in] result Result of binding an ARD leaf.
+        /// @return The kernel, or a configuration error.
+        std::expected<DistanceKernel<DistanceOnly>, GprError> ard_bound(
+            std::expected<DistanceKernel<DistanceOnly>, GprError> result
+        )
+        {
+            if (!result.has_value())
+            {
+                return std::unexpected(distance_config_error("ARD leaf does not match the slot dimensions"));
+            }
+            return result;
+        }
+
+        /// @brief Binds a supplied leaf to its freshly issued slot.
+        /// @param[in] node Described supplied leaf.
+        /// @param[in] slots Issued slot handles.
+        /// @return Single-leaf DistanceOnly kernel, or GprError when the leaf does not fit the slot kind.
+        std::expected<DistanceKernel<DistanceOnly>, GprError> bind_supplied(
+            const detail::DistanceNodeDesc& node, const IssuedSlots& slots
+        )
+        {
+            if (!node.leaf.has_value() || node.slot >= slots.scalar.size())
+            {
+                return std::unexpected(distance_config_error("distance leaf refers to a missing slot"));
+            }
+            const KernelLeaf& leaf = *node.leaf;
+            if (const auto& sc = slots.scalar[node.slot]; sc.has_value())
+            {
+                if (const auto* k = std::get_if<RbfKernel>(&leaf))
+                {
+                    return sc->rbf(*k);
+                }
+                if (const auto* k = std::get_if<MaternKernel>(&leaf))
+                {
+                    return sc->matern(*k);
+                }
+                if (const auto* k = std::get_if<PeriodicKernel>(&leaf))
+                {
+                    return sc->periodic(*k);
+                }
+                if (const auto* k = std::get_if<RationalQuadraticKernel>(&leaf))
+                {
+                    return sc->rational_quadratic(*k);
+                }
+                if (const auto* k = std::get_if<CustomKernel>(&leaf))
+                {
+                    return sc->custom(*k);
+                }
+                return std::unexpected(distance_config_error("leaf kind does not fit a scalar distance slot"));
+            }
+            const auto& ar = slots.ard[node.slot];
+            if (!ar.has_value())
+            {
+                return std::unexpected(distance_config_error("distance leaf refers to a missing slot"));
+            }
+            if (const auto* k = std::get_if<RbfArdKernel>(&leaf))
+            {
+                return ard_bound(ar->rbf_ard(*k));
+            }
+            if (const auto* k = std::get_if<MaternArdKernel>(&leaf))
+            {
+                return ard_bound(ar->matern_ard(*k));
+            }
+            if (const auto* k = std::get_if<RationalQuadraticArdKernel>(&leaf))
+            {
+                return ard_bound(ar->rational_quadratic_ard(*k));
+            }
+            return std::unexpected(distance_config_error("leaf kind does not fit an ARD distance slot"));
+        }
+
+        /// @brief Rebuilds one described subtree.
+        /// @tparam C Distance mode.
+        /// @param[in] node Described subtree.
+        /// @param[in] slots Issued slot handles.
+        /// @return Rebuilt kernel, or GprError when a leaf does not fit the mode or its slot.
+        template <DistanceModeConcept C>
+        std::expected<DistanceKernel<C>, GprError> build_node(
+            const detail::DistanceNodeDesc& node, const IssuedSlots& slots
+        )
+        {
+            using Kind = detail::DistanceNodeDesc::Kind;
+            if (node.kind == Kind::Supplied)
+            {
+                auto leaf = bind_supplied(node, slots);
+                if (!leaf.has_value())
+                {
+                    return std::unexpected(std::move(leaf).error());
+                }
+                if constexpr (std::same_as<C, WithPoints>)
+                {
+                    return DistanceKernel<WithPoints>(*leaf);
+                }
+                else
+                {
+                    return std::move(*leaf);
+                }
+            }
+            if (node.kind == Kind::Coord)
+            {
+                if (!node.leaf.has_value())
+                {
+                    return std::unexpected(distance_config_error("coordinate leaf is missing"));
+                }
+                if constexpr (std::same_as<C, WithPoints>)
+                {
+                    return DistanceKernel<WithPoints>(KernelSpec(*node.leaf));
+                }
+                else
+                {
+                    if (const auto* c = std::get_if<ConstantKernel>(&*node.leaf))
+                    {
+                        return DistanceKernel<DistanceOnly>(*c);
+                    }
+                    if (const auto* w = std::get_if<WhiteKernel>(&*node.leaf))
+                    {
+                        return DistanceKernel<DistanceOnly>(*w);
+                    }
+                    return std::unexpected(
+                        distance_config_error("a distance-only model cannot contain a coordinate-dependent leaf")
+                    );
+                }
+            }
+            if (!node.lhs || !node.rhs)
+            {
+                return std::unexpected(distance_config_error("composite node is missing an operand"));
+            }
+            auto lhs = build_node<C>(*node.lhs, slots);
+            if (!lhs.has_value())
+            {
+                return lhs;
+            }
+            auto rhs = build_node<C>(*node.rhs, slots);
+            if (!rhs.has_value())
+            {
+                return rhs;
+            }
+            if (node.kind == Kind::Sum)
+            {
+                return std::move(*lhs) + std::move(*rhs);
+            }
+            return std::move(*lhs) * std::move(*rhs);
+        }
+
+    }  // namespace
+
+    /// @brief Rebuilds a DistanceKernel from its description, issuing a fresh slot for every described slot.
+    /// @tparam C Distance mode.
+    /// @param[in] desc Structural description.
+    /// @return The kernel, or GprError when the description is inconsistent with the mode or the slots.
+    /// @retval GprErrorCode::PersistFailed When a leaf does not fit its slot or the mode.
+    template <DistanceModeConcept C>
+    std::expected<DistanceKernel<C>, GprError> detail::build_distance_kernel(const DistanceKernelDesc& desc)
+    {
+        if (!desc.root)
+        {
+            return std::unexpected(distance_config_error("distance kernel has no root"));
+        }
+        IssuedSlots slots;
+        slots.scalar.resize(desc.slots.size());
+        slots.ard.resize(desc.slots.size());
+        for (std::size_t i = 0; i < desc.slots.size(); ++i)
+        {
+            if (desc.slots[i].ard_dims.has_value())
+            {
+                auto ard = ArdDistance::create(*desc.slots[i].ard_dims);
+                if (!ard.has_value())
+                {
+                    return std::unexpected(distance_config_error("ARD slot needs at least one dimension"));
+                }
+                slots.ard[i] = *ard;
+            }
+            else
+            {
+                slots.scalar[i] = ScalarDistance();
+            }
+        }
+        auto kernel = build_node<C>(*desc.root, slots);
+        if (!kernel.has_value())
+        {
+            return kernel;
+        }
+        // The rebuilt kernel must expose exactly the slots that were described, in the same order.
+        const auto rebuilt = kernel->slots();
+        if (rebuilt.size() != desc.slots.size())
+        {
+            return std::unexpected(distance_config_error("distance slots do not match the kernel tree"));
+        }
+        for (std::size_t i = 0; i < rebuilt.size(); ++i)
+        {
+            if (rebuilt[i].ard_dims != desc.slots[i].ard_dims)
+            {
+                return std::unexpected(distance_config_error("distance slots do not match the kernel tree"));
+            }
+        }
+        return kernel;
+    }
+
     template class DistanceKernel<DistanceOnly>;
     template class DistanceKernel<WithPoints>;
     template CompiledDistanceKernel<double> DistanceKernel<DistanceOnly>::compile<double>() const;
     template CompiledDistanceKernel<float> DistanceKernel<DistanceOnly>::compile<float>() const;
     template CompiledDistanceKernel<double> DistanceKernel<WithPoints>::compile<double>() const;
     template CompiledDistanceKernel<float> DistanceKernel<WithPoints>::compile<float>() const;
+    template detail::DistanceKernelDesc detail::describe_distance_kernel<DistanceOnly>(
+        const DistanceKernel<DistanceOnly>&
+    );
+    template detail::DistanceKernelDesc detail::describe_distance_kernel<WithPoints>(const DistanceKernel<WithPoints>&);
+    template std::expected<DistanceKernel<DistanceOnly>, GprError> detail::build_distance_kernel<DistanceOnly>(
+        const detail::DistanceKernelDesc&
+    );
+    template std::expected<DistanceKernel<WithPoints>, GprError> detail::build_distance_kernel<WithPoints>(
+        const detail::DistanceKernelDesc&
+    );
+    template std::vector<std::vector<double>> detail::export_packed_distance_tables<double>(
+        const CheckedDistanceStore<double>&
+    );
+    template std::vector<std::vector<float>> detail::export_packed_distance_tables<float>(
+        const CheckedDistanceStore<float>&
+    );
     template class CheckedDistanceStore<double>;
     template class CheckedDistanceStore<float>;
     template class CompiledDistanceKernel<double>;

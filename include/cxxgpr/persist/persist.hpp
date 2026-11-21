@@ -10,6 +10,7 @@
 #include "cxxgpr/core/error.hpp"
 #include "cxxgpr/core/likelihood.hpp"
 #include "cxxgpr/core/views.hpp"
+#include "cxxgpr/gpr/distance_gpr.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/custom.hpp"
 #include "cxxgpr/kernel/distance_cache.hpp"
@@ -27,11 +28,13 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 /// @defgroup cxxgpr_persist Model Persistence and Extension Registry
@@ -390,7 +393,7 @@ namespace cxxgpr::persist
         /// @param[out] out_unfitted_tgt Output pointer populated with cloned unfitted target transform.
         /// @return Owned FittedPayload<P> or GprError on extraction failure.
         template <PrecisionPolicyConcept P>
-        [[nodiscard]] std::expected<detail::FittedPayload<P>, GprError> extract_payload(
+        [[nodiscard]] std::expected<cxxgpr::detail::FittedPayload<P>, GprError> extract_payload(
             std::unique_ptr<transform::UnfittedInputTransform>& out_unfitted_in,
             std::unique_ptr<transform::UnfittedTargetTransform>& out_unfitted_tgt
         ) const;
@@ -605,6 +608,472 @@ namespace cxxgpr::persist
         };
         return detail::save_model_impl(input, dir, registry);
     }
+
+    /// @brief Library-internal helpers of the supplied-distance persistence.
+    namespace detail
+    {
+
+        /// @brief Library-internal bridge giving the persistence layer access to the state of a FittedDistanceGpr.
+        struct DistanceModelAccess
+        {
+            /// @brief Returns the immutable fitted state of a model.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] model Fitted model.
+            /// @return Shared fitted state.
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static const std::shared_ptr<const cxxgpr::detail::DistanceFittedPayload<P, C>>& payload(
+                const FittedDistanceGpr<O, P, C>& model
+            ) noexcept
+            {
+                return model.payload_;
+            }
+
+            /// @brief Returns the jitter policy of a model.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] model Fitted model.
+            /// @return Jitter policy.
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static const JitterPolicy& jitter(const FittedDistanceGpr<O, P, C>& model) noexcept
+            {
+                return model.jitter_;
+            }
+
+            /// @brief Returns the exponential mode of a model.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] model Fitted model.
+            /// @return Kernel exponential mode.
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static KernelExp kernel_exp(const FittedDistanceGpr<O, P, C>& model) noexcept
+            {
+                return model.kernel_exp_;
+            }
+
+            /// @brief Returns the unfitted coordinate transform of a model.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] model Fitted model.
+            /// @return Unfitted input transform (identity for a DistanceOnly model).
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static const transform::UnfittedInputTransform& unfitted_input(
+                const FittedDistanceGpr<O, P, C>& model
+            ) noexcept
+            {
+                return *model.input_transform_;
+            }
+
+            /// @brief Returns the unfitted target transform of a model.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] model Fitted model.
+            /// @return Unfitted target transform.
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static const transform::UnfittedTargetTransform& unfitted_target(
+                const FittedDistanceGpr<O, P, C>& model
+            ) noexcept
+            {
+                return *model.target_transform_;
+            }
+
+            /// @brief Builds a fitted model from restored parts.
+            /// @tparam O Optimizer type.
+            /// @tparam P Precision policy.
+            /// @tparam C Distance mode.
+            /// @param[in] payload Restored fitted state.
+            /// @param[in] optimizer Optimizer kept for refit and into_trainer.
+            /// @param[in] jitter Jitter policy.
+            /// @param[in] input_transform Unfitted coordinate transform.
+            /// @param[in] target_transform Unfitted target transform.
+            /// @param[in] kernel_exp Exponential mode.
+            /// @return The fitted model.
+            template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+            [[nodiscard]] static FittedDistanceGpr<O, P, C> make(
+                std::shared_ptr<const cxxgpr::detail::DistanceFittedPayload<P, C>> payload,
+                O optimizer,
+                JitterPolicy jitter,
+                std::unique_ptr<transform::UnfittedInputTransform> input_transform,
+                std::unique_ptr<transform::UnfittedTargetTransform> target_transform,
+                KernelExp kernel_exp
+            )
+            {
+                return FittedDistanceGpr<O, P, C>(
+                    std::move(payload), std::move(optimizer), jitter, std::move(input_transform),
+                    std::move(target_transform), kernel_exp
+                );
+            }
+        };
+
+        /// @brief Borrowed description of a supplied-distance model to persist.
+        struct DistanceSaveInput
+        {
+            /// @brief Number of training points.
+            std::size_t n_train{0};
+            /// @brief Coordinate dimension (0 for a DistanceOnly model).
+            std::size_t n_features{0};
+            /// @brief Whether the factor and weights are written.
+            bool has_factor{false};
+            /// @brief Precision policy kind.
+            PersistPrecisionKind precision_kind{PersistPrecisionKind::Double};
+            /// @brief Exponential mode.
+            KernelExp kernel_exp{KernelExp::Accurate};
+            /// @brief Accepted diagonal jitter.
+            double factor_jitter{0.0};
+            /// @brief Kernel of the model (its mode selects DistanceOnly or WithPoints).
+            std::variant<const DistanceKernel<DistanceOnly>*, const DistanceKernel<WithPoints>*> kernel;
+            /// @brief Validated training tables (the scalar selects the stored precision).
+            std::variant<const CheckedDistanceStore<double>*, const CheckedDistanceStore<float>*> store;
+            /// @brief Likelihood with the fitted noise variance.
+            const GaussianLikelihood& likelihood;
+            /// @brief Jitter policy.
+            const JitterPolicy& jitter;
+            /// @brief Unfitted coordinate transform.
+            const transform::UnfittedInputTransform& unfitted_input;
+            /// @brief Fitted coordinate transform, or null for a DistanceOnly model.
+            const transform::FittedInputTransform* fitted_input;
+            /// @brief Unfitted target transform.
+            const transform::UnfittedTargetTransform& unfitted_target;
+            /// @brief Fitted target transform.
+            const transform::FittedTargetTransform& fitted_target;
+            /// @brief Raw training coordinates (empty for DistanceOnly).
+            std::span<const double> x_raw;
+            /// @brief Raw training targets.
+            std::span<const double> y_raw;
+            /// @brief Cholesky factor in double (empty unless double storage with a factor).
+            std::span<const double> l_f64;
+            /// @brief Cholesky factor in float (empty unless float storage with a factor).
+            std::span<const float> l_f32;
+            /// @brief Weights in double (empty unless double refinement with a factor).
+            std::span<const double> alpha_f64;
+            /// @brief Weights in float (empty unless float refinement with a factor).
+            std::span<const float> alpha_f32;
+        };
+
+        /// @brief Validates and atomically writes the checkpoint of a supplied-distance model.
+        /// @param[in] input Borrowed model description.
+        /// @param[in] dir Destination directory.
+        /// @param[in] registry Registry of custom kernels and transforms.
+        /// @return Empty expected on success, or GprError on validation, serialization or I/O failure.
+        [[nodiscard]] std::expected<void, GprError> save_distance_model_impl(
+            const DistanceSaveInput& input, const std::filesystem::path& dir, const PersistRegistry& registry
+        );
+
+        /// @brief Builds the borrowed description of a fitted supplied-distance model and writes it.
+        /// @tparam O Optimizer type.
+        /// @tparam P Precision policy.
+        /// @tparam C Distance mode.
+        /// @param[in] model Fitted model.
+        /// @param[in] dir Destination directory.
+        /// @param[in] registry Registry of custom kernels and transforms.
+        /// @param[in] with_factor Whether the factor and weights are written.
+        /// @return Empty expected on success, or GprError.
+        template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+        [[nodiscard]] std::expected<void, GprError> save_distance_model(
+            const FittedDistanceGpr<O, P, C>& model,
+            const std::filesystem::path& dir,
+            const PersistRegistry& registry,
+            bool with_factor
+        )
+        {
+            const auto& payload = *DistanceModelAccess::payload(model);
+            std::span<const double> l_f64;
+            std::span<const float> l_f32;
+            std::span<const double> alpha_f64;
+            std::span<const float> alpha_f32;
+            if (with_factor)
+            {
+                if constexpr (std::same_as<typename P::Storage, double>)
+                {
+                    l_f64 = payload.l_factor;
+                }
+                else
+                {
+                    l_f32 = payload.l_factor;
+                }
+                if constexpr (std::same_as<typename P::Refine, double>)
+                {
+                    alpha_f64 = payload.alpha;
+                }
+                else
+                {
+                    alpha_f32 = payload.alpha;
+                }
+            }
+            const DistanceSaveInput input{
+                .n_train = payload.n_train,
+                .n_features = payload.n_features,
+                .has_factor = with_factor,
+                .precision_kind = P::persist_kind(),
+                .kernel_exp = DistanceModelAccess::kernel_exp(model),
+                .factor_jitter = payload.factor_jitter,
+                .kernel = &payload.kernel,
+                .store = payload.store.get(),
+                .likelihood = payload.likelihood,
+                .jitter = DistanceModelAccess::jitter(model),
+                .unfitted_input = DistanceModelAccess::unfitted_input(model),
+                .fitted_input = payload.input_transform.get(),
+                .unfitted_target = DistanceModelAccess::unfitted_target(model),
+                .fitted_target = *payload.target_transform,
+                .x_raw = payload.x_raw,
+                .y_raw = payload.y_raw,
+                .l_f64 = l_f64,
+                .l_f32 = l_f32,
+                .alpha_f64 = alpha_f64,
+                .alpha_f32 = alpha_f32,
+            };
+            return save_distance_model_impl(input, dir, registry);
+        }
+
+    }  // namespace detail
+
+    /// @brief Saves a supplied-distance model without its factor.
+    /// @details Writes config.json and model.safetensors atomically. The factor is recomputed on load.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] model Fitted supplied-distance model.
+    /// @param[in] dir Destination directory, created if needed.
+    /// @param[in] registry Registry that names custom kernels and transforms.
+    /// @return Empty expected on success, or GprError.
+    /// @retval GprErrorCode::PersistFailed When a custom component is not persistable or writing fails.
+    template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+    [[nodiscard]] std::expected<void, GprError> save(
+        const FittedDistanceGpr<O, P, C>& model, const std::filesystem::path& dir, const PersistRegistry& registry = {}
+    )
+    {
+        return detail::save_distance_model(model, dir, registry, false);
+    }
+
+    /// @brief Saves a supplied-distance model together with its factor and weights.
+    /// @details Loading such a checkpoint restores the exact fitted state, so predictions are bit-identical.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] model Fitted supplied-distance model.
+    /// @param[in] dir Destination directory, created if needed.
+    /// @param[in] registry Registry that names custom kernels and transforms.
+    /// @return Empty expected on success, or GprError.
+    /// @retval GprErrorCode::PersistFailed When a custom component is not persistable or writing fails.
+    template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
+    [[nodiscard]] std::expected<void, GprError> save_with_factor(
+        const FittedDistanceGpr<O, P, C>& model, const std::filesystem::path& dir, const PersistRegistry& registry = {}
+    )
+    {
+        return detail::save_distance_model(model, dir, registry, true);
+    }
+
+    /// @brief A supplied-distance model restored from disk.
+    /// @details Holds the fitted state of one of the four precision policies. The loaded kernel owns freshly issued
+    /// slots: take them from kernel().slots() to bind the query tables. Copies own independent query buffers.
+    /// @tparam C Distance mode the checkpoint was saved with.
+    template <DistanceModeConcept C> class LoadedDistanceGpr
+    {
+    public:
+        /// @brief Loads a supplied-distance checkpoint.
+        /// @param[in] dir Directory holding config.json and model.safetensors.
+        /// @param[in] registry Registry that recreates custom kernels and transforms.
+        /// @return The loaded model, or GprError.
+        /// @retval GprErrorCode::PersistFailed When the files are unreadable, malformed, or hold another kind of model.
+        /// @retval GprErrorCode::UnsupportedPersistVersion When the format version is not supported.
+        /// @retval GprErrorCode::InvalidDistance When a stored distance table is invalid.
+        [[nodiscard]] static std::expected<LoadedDistanceGpr, GprError> load(
+            const std::filesystem::path& dir, const PersistRegistry& registry = {}
+        );
+
+        /// @brief Copy-constructs a loaded model with independent query buffers.
+        /// @param[in] other Model to copy.
+        LoadedDistanceGpr(const LoadedDistanceGpr& other);
+
+        /// @brief Copy-assigns a loaded model with independent query buffers.
+        /// @param[in] other Model to copy.
+        /// @return This model.
+        LoadedDistanceGpr& operator=(const LoadedDistanceGpr& other);
+
+        /// @brief Move-constructs a loaded model.
+        /// @param[in] other Model to move from.
+        LoadedDistanceGpr(LoadedDistanceGpr&& other) noexcept;
+
+        /// @brief Move-assigns a loaded model.
+        /// @param[in] other Model to move from.
+        /// @return This model.
+        LoadedDistanceGpr& operator=(LoadedDistanceGpr&& other) noexcept;
+
+        /// @brief Destroys the loaded model.
+        ~LoadedDistanceGpr();
+
+        /// @brief Returns the number of training points.
+        /// @return Training point count.
+        [[nodiscard]] std::size_t n() const noexcept;
+
+        /// @brief Returns the coordinate dimension (0 for a DistanceOnly model).
+        /// @return Coordinate dimension.
+        [[nodiscard]] std::size_t d() const noexcept;
+
+        /// @brief Returns the stored precision policy.
+        /// @return Precision kind.
+        [[nodiscard]] PersistPrecisionKind precision_kind() const noexcept;
+
+        /// @brief Returns whether the checkpoint held the factor and weights.
+        /// @return True when the factor was stored and not recomputed.
+        [[nodiscard]] bool has_factor() const noexcept;
+
+        /// @brief Returns the accepted diagonal jitter of the factor.
+        /// @return Jitter offset.
+        [[nodiscard]] double factor_jitter() const noexcept;
+
+        /// @brief Returns the kernel with its freshly issued slots.
+        /// @return Kernel carrying the fitted hyperparameters.
+        [[nodiscard]] const DistanceKernel<C>& kernel() const noexcept;
+
+        /// @brief Returns the likelihood with the fitted noise variance.
+        /// @return Gaussian likelihood.
+        [[nodiscard]] const GaussianLikelihood& likelihood() const noexcept;
+
+        /// @brief Returns the jitter policy.
+        /// @return Jitter policy.
+        [[nodiscard]] const JitterPolicy& jitter() const noexcept;
+
+        /// @brief Returns the exponential mode.
+        /// @return Kernel exponential mode.
+        [[nodiscard]] KernelExp kernel_exp() const noexcept;
+
+        /// @brief Predicts the mean and variance at the queries of a DistanceOnly model.
+        /// @param[in] cross Training-to-query tables bound to the slots of kernel().
+        /// @param[in] options Variance selection.
+        /// @return Prediction in double, or GprError.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
+            const DistanceSource& cross, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, DistanceOnly>;
+
+        /// @brief Predicts the mean and variance at the queries of a WithPoints model.
+        /// @param[in] cross Training-to-query tables bound to the slots of kernel().
+        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] options Variance selection.
+        /// @return Prediction in double, or GprError.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
+            const DistanceSource& cross, MatrixRef<double> xq, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
+        /// @brief Computes the joint predictive covariance of a DistanceOnly model.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] options Variance selection.
+        /// @return Mean and covariance in double, or GprError.
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
+            const DistanceSource& cross, const DistanceSource& query, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, DistanceOnly>;
+
+        /// @brief Computes the joint predictive covariance of a WithPoints model.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] options Variance selection.
+        /// @return Mean and covariance in double, or GprError.
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
+            const DistanceSource& cross,
+            const DistanceSource& query,
+            MatrixRef<double> xq,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
+        /// @brief Draws joint posterior samples of a DistanceOnly model.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] n_draws Number of samples.
+        /// @param[in] seed Seed of the deterministic generator.
+        /// @param[in] options Variance selection.
+        /// @return Samples in double, m values per draw, or GprError.
+        [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
+            const DistanceSource& cross,
+            const DistanceSource& query,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, DistanceOnly>;
+
+        /// @brief Draws joint posterior samples of a WithPoints model.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] n_draws Number of samples.
+        /// @param[in] seed Seed of the deterministic generator.
+        /// @param[in] options Variance selection.
+        /// @return Samples in double, m values per draw, or GprError.
+        [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
+            const DistanceSource& cross,
+            const DistanceSource& query,
+            MatrixRef<double> xq,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
+        /// @brief Computes leave-one-out predictions at the training points.
+        /// @param[in] options Variance selection.
+        /// @return Leave-one-out prediction in double, or GprError.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> loo_predict(const PredictOptions& options = {}) const;
+
+        /// @brief Extracts a typed FittedDistanceGpr that shares the restored state.
+        /// @tparam O Optimizer type kept for refit and into_trainer.
+        /// @tparam P Precision policy; must match precision_kind().
+        /// @param[in] optimizer Optimizer to keep.
+        /// @return The fitted model, or GprError when P does not match the stored precision.
+        /// @retval GprErrorCode::PersistFailed When the requested precision policy differs from the stored one.
+        template <typename O = optimizer::Lbfgs, PrecisionPolicyConcept P = DoublePrecision>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> into_fitted(O optimizer = O{}) const
+        {
+            if (P::persist_kind() != precision_kind())
+            {
+                return std::unexpected(
+                    GprError::persist_failed(
+                        PersistErrorKind::WrongModel,
+                        "requested precision policy does not match persisted model precision"
+                    )
+                );
+            }
+            return detail::DistanceModelAccess::make<O, P, C>(
+                fitted_payload<P>(), std::move(optimizer), jitter(), unfitted_input_clone(), unfitted_target_clone(),
+                kernel_exp()
+            );
+        }
+
+    private:
+        /// @brief Pimpl state holding the fitted model of the stored precision.
+        struct Impl;
+
+        /// @brief Wraps a restored state.
+        /// @param[in] impl Restored state.
+        explicit LoadedDistanceGpr(std::unique_ptr<Impl> impl) noexcept;
+
+        /// @brief Returns the shared fitted state for precision policy P.
+        /// @tparam P Precision policy matching precision_kind().
+        /// @return Shared fitted state.
+        template <PrecisionPolicyConcept P>
+        [[nodiscard]] std::shared_ptr<const cxxgpr::detail::DistanceFittedPayload<P, C>> fitted_payload() const;
+
+        /// @brief Returns a copy of the unfitted coordinate transform.
+        /// @return Cloned transform.
+        [[nodiscard]] std::unique_ptr<transform::UnfittedInputTransform> unfitted_input_clone() const;
+
+        /// @brief Returns a copy of the unfitted target transform.
+        /// @return Cloned transform.
+        [[nodiscard]] std::unique_ptr<transform::UnfittedTargetTransform> unfitted_target_clone() const;
+
+        /// @brief Owning pointer to the restored state.
+        std::unique_ptr<Impl> impl_;
+    };
 
 }  // namespace cxxgpr::persist
 

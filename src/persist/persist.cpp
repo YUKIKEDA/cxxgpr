@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "checkpoint_io.hpp"
 #include "config_json.hpp"
 #include "safetensors.hpp"
 
@@ -1186,6 +1187,72 @@ namespace cxxgpr::persist
     namespace detail
     {
 
+        /// @brief Writes config.json and model.safetensors through staged temporary files and renames them into place.
+        /// @param[in] dir Destination directory that already exists.
+        /// @param[in] cfg_str Serialized config.json text.
+        /// @param[in] tensors Tensors of model.safetensors.
+        /// @return Empty expected on success, or GprError when writing or renaming fails (temporary files are removed).
+        /// @retval GprErrorCode::PersistFailed When a file cannot be written or renamed.
+        std::expected<void, GprError> write_checkpoint_files(
+            const std::filesystem::path& dir, const std::string& cfg_str, std::span<const TensorWriteView> tensors
+        )
+        {
+            std::error_code ec;
+            // Write staged temporary files inside dir, then atomically rename into final targets.
+            const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
+            const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
+
+            if (auto wr = write_safetensors_file(tmp_st, tensors); !wr.has_value())
+            {
+                std::filesystem::remove(tmp_st, ec);
+                return wr;
+            }
+
+            {
+                std::ofstream ofs(tmp_cfg, std::ios::binary | std::ios::trunc);
+                if (!ofs)
+                {
+                    std::filesystem::remove(tmp_st, ec);
+                    return std::unexpected(
+                        GprError::persist_failed(
+                            PersistErrorKind::Io, "failed to open temporary config.json for writing"
+                        )
+                    );
+                }
+                ofs.write(cfg_str.data(), static_cast<std::streamsize>(cfg_str.size()));
+                ofs.flush();
+                if (!ofs)
+                {
+                    std::filesystem::remove(tmp_st, ec);
+                    std::filesystem::remove(tmp_cfg, ec);
+                    return std::unexpected(
+                        GprError::persist_failed(PersistErrorKind::Io, "failed while writing temporary config.json")
+                    );
+                }
+            }
+
+            // Replace model.safetensors and config.json atomically and clean up leftover temporary files on error.
+            std::filesystem::rename(tmp_st, dir / "model.safetensors", ec);
+            if (ec)
+            {
+                std::filesystem::remove(tmp_st, ec);
+                std::filesystem::remove(tmp_cfg, ec);
+                return std::unexpected(
+                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace model.safetensors")
+                );
+            }
+            std::filesystem::rename(tmp_cfg, dir / "config.json", ec);
+            if (ec)
+            {
+                std::filesystem::remove(tmp_cfg, ec);
+                return std::unexpected(
+                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace config.json")
+                );
+            }
+
+            return {};
+        }
+
         /// @brief Validates inputs and atomically writes config.json and model.safetensors into dir.
         /// @details Checks dimensions and tensor finiteness, serializes config.json, builds aligned tensor
         /// descriptors, writes temporary staging files model.safetensors.tmp and config.json.tmp inside dir,
@@ -1329,59 +1396,7 @@ namespace cxxgpr::persist
                 }
             }
 
-            // Write staged temporary files inside dir, then atomically rename into final targets.
-            const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
-            const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
-
-            if (auto wr = write_safetensors_file(tmp_st, tensors); !wr.has_value())
-            {
-                std::filesystem::remove(tmp_st, ec);
-                return wr;
-            }
-
-            {
-                std::ofstream ofs(tmp_cfg, std::ios::binary | std::ios::trunc);
-                if (!ofs)
-                {
-                    std::filesystem::remove(tmp_st, ec);
-                    return std::unexpected(
-                        GprError::persist_failed(
-                            PersistErrorKind::Io, "failed to open temporary config.json for writing"
-                        )
-                    );
-                }
-                ofs.write(cfg_str->data(), static_cast<std::streamsize>(cfg_str->size()));
-                ofs.flush();
-                if (!ofs)
-                {
-                    std::filesystem::remove(tmp_st, ec);
-                    std::filesystem::remove(tmp_cfg, ec);
-                    return std::unexpected(
-                        GprError::persist_failed(PersistErrorKind::Io, "failed while writing temporary config.json")
-                    );
-                }
-            }
-
-            // Replace model.safetensors and config.json atomically and clean up leftover temporary files on error.
-            std::filesystem::rename(tmp_st, dir / "model.safetensors", ec);
-            if (ec)
-            {
-                std::filesystem::remove(tmp_st, ec);
-                std::filesystem::remove(tmp_cfg, ec);
-                return std::unexpected(
-                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace model.safetensors")
-                );
-            }
-            std::filesystem::rename(tmp_cfg, dir / "config.json", ec);
-            if (ec)
-            {
-                std::filesystem::remove(tmp_cfg, ec);
-                return std::unexpected(
-                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace config.json")
-                );
-            }
-
-            return {};
+            return write_checkpoint_files(dir, *cfg_str, tensors);
         }
 
     }  // namespace detail

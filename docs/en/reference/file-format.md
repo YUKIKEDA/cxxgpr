@@ -24,7 +24,7 @@ During a save, the files `config.json.tmp` and `model.safetensors.tmp` may exist
 | Unknown top-level keys | ignored on load |
 | Writer behaviour | a file is written by renaming a complete temporary file onto the final name |
 
-Models of other families are rejected with `PersistErrorKind::WrongModel`: sparse and online models (a `model` key), factorizations other than `"llt"` (`factor_kind`), and models trained on supplied squared distances (a `distance` key).
+Models of other families are rejected with `PersistErrorKind::WrongModel`: sparse and online models (a `model` key), and factorizations other than `"llt"` (`factor_kind`). A model trained on supplied squared distances carries a `distance` key and is read by `LoadedDistanceGpr`, not by `LoadedGpr`.
 
 ## `config.json`
 
@@ -36,7 +36,7 @@ The file is a single JSON object. The writer emits it with two-space indentation
 |---|---|---|---|---|
 | `format_version` | integer | yes | — | format version, `1` |
 | `n` | integer, $> 0$ | yes | — | number of training points |
-| `d` | integer, $> 0$ | yes | — | number of features |
+| `d` | integer, $> 0$ (0 for a distance-only model) | yes | — | number of features |
 | `has_factor` | boolean | yes | — | `true` if `model.safetensors` contains `l` and `alpha` |
 | `factor_kind` | string | yes | — | must be `"llt"` (Cholesky $LL^\top$) |
 | `factor_jitter` | number, $\ge 0$ | no | `0.0` | diagonal jitter accepted when the model was factored |
@@ -51,6 +51,7 @@ The file is a single JSON object. The writer emits it with two-space indentation
 | `x_transform` | transform | yes | — | fitted input transform |
 | `y_unfitted` | transform | yes | — | target transform configuration before fitting |
 | `y_transform` | transform | yes | — | fitted target transform |
+| `distance` | object | only for a supplied-distance model | — | the mode and the distance slots, see below |
 
 The writer omits `residual` unless `precision` is `"mixed"`. The `precision` and `residual` pair identifies the model's `PersistPrecisionKind`:
 
@@ -123,6 +124,27 @@ A transform is the string `"identity"` or an object with one key.
 The unfitted and fitted transforms form two separate registrations for custom nodes: the unfitted `persist_id` goes to a factory registered with `register_unfitted_input` or `register_unfitted_target`, and the fitted one to `register_fitted_input` or `register_fitted_target`.
 
 A custom node's `state` is the text returned by the component's `persist_state_json`, stored as structured JSON if it parses and as a string otherwise. The factory receives it serialized back to text.
+
+### Supplied-distance models
+
+A model trained on supplied squared distances (`FittedDistanceGpr`) has the same sections as above, with these differences.
+
+```json
+"distance": {
+  "points": "distance_only",
+  "slots": [ { "kind": "scalar" }, { "kind": "ard", "dims": 2 } ]
+}
+```
+
+- `distance.points` is `"distance_only"` (then `d` is `0`) or `"with_points"` (then `d > 0` and `x` is stored). The loader of the other mode refuses the file with `PersistErrorKind::WrongModel`.
+- `distance.slots` lists the distance slots in the depth-first order of first appearance in the kernel. A slot is `{"kind": "scalar"}` or `{"kind": "ard", "dims": <integer>}`.
+- In the kernel tree, a leaf that reads a distance slot is `{"distance": {"slot": <index into slots>, "leaf": <kernel leaf>}}`. A scalar slot takes `rbf`, `matern`, `periodic`, `rq` or `custom`; an ARD slot takes `rbf_ard`, `matern_ard` or `rq_ard` with `dims` length scales. Any other leaf is a coordinate leaf written as in the table above; a distance-only model may contain only `constant` and `white` coordinate leaves.
+- `distance_cache` is written as `"always"` and is not used.
+- For `"distance_only"`, `x_transform` is `"identity"`.
+
+**Distance tensors.** For slot $k$, the tensor `d2.<k>` holds the lower triangle, diagonal included, of the repaired training distances. The packed position of the entry $(i, j)$ with $i \ge j$ is $p = j n - j(j-1)/2 + (i - j)$, so the packed length is $n(n+1)/2$. An ARD slot concatenates one packed array per dimension, in order: flat index `m * packed_len + p` for dimension `m`. Unlike `x` and `l`, `d2.<k>` is therefore read with `reshape(shape, order="C")` (for a scalar slot, which is one-dimensional, the order makes no difference). A model in `"mixed"` precision stores `F32` tables, the precision it predicts with.
+
+On load, the stored tables go through the same validation as tables you supply: finite, non-negative and zero on the diagonal. A violation gives `InvalidDistance`; a non-finite element is rejected earlier as a corrupt tensor.
 
 ### Example
 
@@ -216,10 +238,11 @@ The writer pads the header so that $8 + H$ is a multiple of 8, and starts every 
 
 | Name | `shape` | `dtype` | Present when | Content |
 |---|---|---|---|---|
-| `x` | `[n, d]` | `F64` | always | training inputs before the input transform |
+| `x` | `[n, d]` | `F64` | always (omitted for a distance-only model, where $d = 0$) | training inputs before the input transform |
 | `y` | `[n]` | `F64` | always | training targets before the target transform |
 | `l` | `[n, n]` | `double`: `F64`; `single`, `mixed`: `F32` | `has_factor` is `true` | lower-triangular Cholesky factor $L$ of $K + (\sigma_n^2 + j) I$, with the upper triangle zero-filled |
 | `alpha` | `[n]` | `single`: `F32`; `double`, `mixed`: `F64` | `has_factor` is `true` | weights $\alpha = (K + (\sigma_n^2 + j) I)^{-1}\mathbf{y}'$ in transformed target space, where $j$ is `factor_jitter` |
+| `d2.<k>` | scalar slot: `[n(n+1)/2]`; ARD slot: `[dims, n(n+1)/2]` | `double`: `F64`; `single`, `mixed`: `F32` | supplied-distance models, one per slot $k$ | the lower triangle of the validated training distances of slot $k$ (see below) |
 
 Every element of every tensor must be finite.
 
@@ -264,7 +287,7 @@ def read_safetensors(path):
 
 ## Loading behaviour
 
-`LoadedGpr::load` treats the directory as untrusted input and performs the following checks.
+`LoadedGpr::load` and `LoadedDistanceGpr::load` treat the directory as untrusted input and perform the following checks. `LoadedGpr::load` refuses a file with a `distance` key, and `LoadedDistanceGpr::load` refuses a file without one or with the other `distance.points`, both with `PersistErrorKind::WrongModel`.
 
 1. Both files open and read. Failure: `PersistErrorKind::Io`.
 2. The JSON depth does not exceed 128, the text parses, the root is an object, and no `model` key is present. A `model` key or a `distance` key: `PersistErrorKind::WrongModel`. Other syntax or schema errors: `PersistErrorKind::Config`.
@@ -285,8 +308,9 @@ With `has_factor == true`, the loader uses `l` and `alpha` as stored and does no
 | file cannot be opened, read, written or mapped | `PersistFailed`, `PersistErrorKind::Io` |
 | invalid JSON, missing or mistyped key, nesting deeper than 128 | `PersistFailed`, `PersistErrorKind::Config` |
 | missing tensor, wrong shape or `dtype`, misaligned data, non-finite element | `PersistFailed`, `PersistErrorKind::Tensor` |
-| `model` or `distance` key, or `factor_kind` other than `"llt"`, or a precision mismatch in `into_fitted` | `PersistFailed`, `PersistErrorKind::WrongModel` |
+| `model` key, `distance` key in `LoadedGpr`, missing `distance` key or other `distance.points` in `LoadedDistanceGpr`, `factor_kind` other than `"llt"`, or a precision mismatch in `into_fitted` | `PersistFailed`, `PersistErrorKind::WrongModel` |
 | `persist_id` in the file has no registered factory | `PersistFailed`, `PersistErrorKind::UnregisteredId` |
 | `persist_id` empty or starting with `cxxgpr.`, or registered twice | `PersistFailed`, `PersistErrorKind::InvalidPersistId` |
 | saving a custom component without `persist_id` | `PersistFailed`, `PersistErrorKind::NotPersistable` |
+| a stored distance table with a negative entry or a nonzero diagonal | `InvalidDistance` |
 | `format_version` other than `1` | `UnsupportedPersistVersion` with `found_version` and `supported_version` |

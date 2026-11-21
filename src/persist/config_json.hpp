@@ -24,6 +24,8 @@
 #include <optional>
 #include <string>
 
+#include "kernel/distance_desc.hpp"
+
 /// @brief Internal persistence helpers for Exact GPR serialization and loading.
 namespace cxxgpr::persist::detail
 {
@@ -61,6 +63,10 @@ namespace cxxgpr::persist::detail
         std::unique_ptr<transform::UnfittedTargetTransform> y_unfitted;
         /// @brief Reconstructed fitted target transform used for inverse prediction scaling.
         std::unique_ptr<transform::FittedTargetTransform> y_transform;
+        /// @brief Structural description of the kernel of a supplied-distance checkpoint (otherwise empty).
+        std::optional<cxxgpr::detail::DistanceKernelDesc> distance_kernel;
+        /// @brief True when a supplied-distance checkpoint stores coordinates (with_points).
+        bool distance_with_points{false};
     };
 
     /// @brief Serializes model metadata, kernel tree, likelihood, jitter, and transforms into config.json text.
@@ -80,6 +86,26 @@ namespace cxxgpr::persist::detail
     /// @retval GprErrorCode::PersistFailed When file I/O, JSON schema, model kind, or registry lookup fails.
     /// @retval GprErrorCode::UnsupportedPersistVersion When format_version does not match FORMAT_VERSION.
     [[nodiscard]] std::expected<ParsedConfig, GprError> parse_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    );
+
+    /// @brief Serializes a supplied-distance model into pretty-printed config.json text.
+    /// @param[in] input Borrowed model configuration and transform references to serialize.
+    /// @param[in] kernel Structural description of the kernel of the model.
+    /// @return Formatted JSON text, or GprError when a custom component is not persistable.
+    /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
+    [[nodiscard]] std::expected<std::string, GprError> serialize_distance_config_json(
+        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
+    );
+
+    /// @brief Reads, validates and parses the config.json of a supplied-distance checkpoint.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying factories for custom kernels and transforms.
+    /// @return Populated ParsedConfig with the distance kernel description, or GprError.
+    /// @retval GprErrorCode::PersistFailed When the file, the JSON schema or the registry lookup fails, or the
+    /// checkpoint is a coordinate or non-Exact model (WrongModel).
+    /// @retval GprErrorCode::UnsupportedPersistVersion When format_version does not match FORMAT_VERSION.
+    [[nodiscard]] std::expected<ParsedConfig, GprError> parse_distance_config_json(
         const std::filesystem::path& path, const PersistRegistry& registry
     );
 
