@@ -147,7 +147,7 @@ checksum of the 64-point prediction: edb08ca7add4082b
 policy                    factor bytes   alpha error  mean error   var error  refinement
 DoublePrecision                 320000      0.00e+00    0.00e+00    0.00e+00  none
 SinglePrecision                 160000      5.17e-02    1.11e-03    1.01e-07  none
-Mixed<PromoteStorage>           160000      0.00e+00    4.93e-04    1.13e-07  RejectedByAccept, 4 corrections
+Mixed<PromoteStorage>           160000      1.32e-02    3.83e-04    1.13e-07  Converged, 4 corrections
 Mixed<ReevaluateKernel>         160000      1.72e-06    4.93e-04    1.13e-07  Converged, 4 corrections
 Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  none
 ```
@@ -157,20 +157,28 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 数値から読み取れることは次のとおり。
 
 - `SinglePrecision` は因子のメモリを半分にし、下の表では最も速いポリシーである。ただし、この悪条件の問題では重みが 5 % ずれる。
-- `MixedPrecision` は単精度で因子分解し、倍精度の残差で重みを反復改良する。この問題では、改良後の重みは約 $10^{-6}$（`ReevaluateKernel`）か、倍精度の解とまったく同じ（`PromoteStorage`、下記）になる。ただし**予測**の改善は 2 倍程度にとどまる。交差共分散 $K_*$ が単精度で評価されるためである。
-- `PromoteStorage` は、試したすべての問題で `RejectedByAccept` で終わった。この方式の反復は、保存された単精度行列に対して収束する。しかし、最後の厳密な倍精度カーネルとの照合が失敗する。行列を `float` に丸めただけで、約 $10^{-7}$ の摂動が入るからである。ライブラリはそこで系を倍精度で解き直す。結果は正しいが、単精度の因子分解、反復改良、倍精度の求解の 3 つを払うことになる。どの経路を通ったかは `FittedGpr::refinement_summary()` で確認できる。
-- `ReevaluateKernel` は、残差を倍精度の厳密なカーネルで列ブロックごとに検査し、ここでは収束した。
+- `MixedPrecision` は単精度で因子分解し、倍精度の残差で重みを反復改良する。この問題では、改良後の重みは約 $10^{-6}$（`ReevaluateKernel`）になる。`PromoteStorage` は、`float` で保存した系を解くので、単精度より約 4 倍近いだけである（下記）。ただし**予測**の改善は 2 倍程度にとどまる。交差共分散 $K_*$ が単精度で評価されるためである。
+- `PromoteStorage` は、保存された単精度行列に対して反復改良する。重みは、*その*系を倍精度の精度で解くが、行列を `float` に丸めた影響（1 要素あたり約 $10^{-7}$ を、条件数が増幅する）は残る。ライブラリは、厳密な倍精度カーネルに対する残差が `std::numeric_limits<float>::epsilon()` の 10 倍以内であれば受理する。許容値 $10\,n\,\varepsilon_{64}$ は要求しない。`float` に丸めたカーネル行列は、全要素が `float` で厳密に表せる場合を除いて、この許容値を満たさないからである。結果は `FittedGpr::refinement_summary()` で確認できる。
+- `ReevaluateKernel` は、残差を倍精度の厳密なカーネルで列ブロックごとに検査し、倍精度の解に収束する。
 
-`n = 2000`、特徴量 4 個で `Gpr<optimizer::Fixed, P>::factor` の時間を測った。
+`Gpr<optimizer::Fixed, P>::factor` の所要時間（3 回の中央値、特徴量 4 つ、Release ビルド、16 スレッドの x86-64 デスクトップ、実行ごとのばらつきは最大で約 10 %）を、16 スレッドでミリ秒で示す。
 
-| ポリシー | 16 スレッド | 1 スレッド |
-|---|---|---|
-| `DoublePrecision` | 約 32 ms | 約 200 ms |
-| `SinglePrecision` | 約 19〜23 ms | 約 120 ms |
-| `MixedPrecision<PromoteStorage>` | 約 86〜94 ms | 約 400 ms |
-| `MixedPrecision<ReevaluateKernel>` | 約 76〜78 ms | 約 200 ms |
+| `n` | `DoublePrecision` | `SinglePrecision` | `MixedPrecision<PromoteStorage>` | `MixedPrecision<ReevaluateKernel>` |
+|---|---|---|---|---|
+| 500 | 1.7 | 1.1 | 4.4 | 6.2 |
+| 1000 | 6.4 | 4.3 | 13 | 18 |
+| 2000 | 28 | 17 | 53 | 70 |
+| 4000 | 163 | 83 | 156 | 135 |
+| 6000 | 473 | 235 | 472 | 408 |
 
-この版では、混合精度のポリシーは `factor` を `DoublePrecision` より速くしない。利点は、単精度の因子で記憶域を節約できること、そして `ReevaluateKernel` では、重みが倍精度の厳密な系に対して検査されることである。メモリが制約でなければ `DoublePrecision`、誤差を許容できるなら `SinglePrecision`、単精度の記憶域と検査済みの重みが両方ほしいなら `MixedPrecision<ReevaluateKernel>` を選ぶ。反復改良のアルゴリズムは {doc}`../explanation/numerical-stability`、自分で動かす方法は {doc}`use-low-level-building-blocks` を参照。
+1 スレッドでは、`n = 2000` が 91 ms（倍精度）、53 ms（単精度）、87 ms（`PromoteStorage`）、99 ms（`ReevaluateKernel`）。`n = 4000` は 656、323、524、521 ms である。
+
+混合精度のポリシーがこう振る舞う理由は次のとおり。
+
+- 反復改良の各ステップは、倍精度で残差を評価する。収束までに、この残差が 2 回（出発点の残差と、収束を確かめる残差）要る。`ReevaluateKernel` では、各残差が厳密なカーネルを、列ブロックごとに、三角ではなく行列全体について評価し直すので、倍精度の経路のカーネル評価の数倍のコストになり、そこに単精度の分解が加わる。`PromoteStorage` では、残差は保存した `float` 行列を読むだけで、最後の受理の検査だけが厳密なカーネルを 1 回評価する。分解は $O(n^3)$ の計算を節約し、反復改良は $O(n^2)$ を要するので、`n` が大きくなるほど、どちらのポリシーも `DoublePrecision` を追い越す。この環境では、おおよそ `n = 3000` 未満では遅く、それ以上では `PromoteStorage` が同程度、`ReevaluateKernel` が約 1.2 倍速い。
+- どちらの混合精度も `SinglePrecision` より速くはない。単精度に対する利点は重みの精度、倍精度に対する利点は半分の大きさの因子である。
+
+メモリが制約でなければ `DoublePrecision`、誤差を許せるなら `SinglePrecision`、単精度の因子の保存と、厳密な系に対して検証した重みが要る場合や、`n` が大きく倍精度より速くしたい場合は `MixedPrecision<ReevaluateKernel>` を選ぶ。`MixedPrecision<PromoteStorage>` は単精度と `ReevaluateKernel` の中間にあたる。カーネルの繰り返しの評価は避けられるが、重みには保存時の丸めが残る。反復改良のアルゴリズムは {doc}`../explanation/numerical-stability`、自分で動かす方法は {doc}`use-low-level-building-blocks` を参照。
 
 ## 学習時にメモリと速度を取引する
 

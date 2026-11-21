@@ -100,6 +100,7 @@ flowchart LR
 | REL-5 | Design | Supplied-distance models: specification of `DistanceGpr` / `FittedDistanceGpr` (DES-21) | #104 | Done |
 | REL-6 | Feat | `DistanceGpr` / `FittedDistanceGpr`: fit, factor, predict, covariance, sampling, LOO for `DistanceOnly` and `WithPoints` | #105 | Todo |
 | REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Todo |
+| REL-8 | Design | Decide the `MixedPrecision<PromoteStorage>` acceptance rule (DES-05) | #108 | Done |
 
 ## Out of scope
 

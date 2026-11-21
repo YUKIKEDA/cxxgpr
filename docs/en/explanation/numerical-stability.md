@@ -98,7 +98,7 @@ It gives up and re-solves the system with a full double-precision Cholesky facto
 
 - the residual norm fails to drop below 0.9 times its previous value in two consecutive steps, or becomes non-finite (`Stagnated`),
 - ten corrections have not been enough (`MaxCorrectionsReached`), or
-- a converged iterate is rejected by the acceptance check (`RejectedByAccept`).
+- a converged iterate is rejected by the acceptance check (`RejectedByAccept`; for `PromoteStorage` this means the residual against the exact kernel exceeds the storage-rounding tolerance below).
 
 The fallback is an error-free path: no `GprError` is returned for it, and `FittedGpr::refinement_summary()` records which of the four outcomes (`Converged` or one of the three fallback reasons) occurred, together with the number of corrections and the final residual.
 
@@ -106,10 +106,10 @@ The fallback is an error-free path: no `GprError` is returned for it, and `Fitte
 
 The two residual formulas differ in which matrix defines "$B$":
 
-- `PromoteStorage` computes $r = b - \operatorname{double}(B_{32})\,w$ from the stored `float` matrix, promoted entry by entry. This is cheap, but it measures the residual of the *rounded* matrix $B_{32}$, which differs from the true matrix by relative errors of order $u_{32}$. The refinement can converge for $B_{32}$ and still be far from the solution for $B$. cxxgpr therefore adds an acceptance check: after convergence it recomputes the residual with the true double-precision kernel, evaluated column block by column block (blocks of 32 columns, so the full double matrix is never stored), and requires the same tolerance.
+- `PromoteStorage` computes $r = b - \operatorname{double}(B_{32})\,w$ from the stored `float` matrix, promoted entry by entry. This is cheap, but it measures the residual of the *rounded* matrix $B_{32}$, which differs from the true matrix by relative errors of order $u_{32}$. The iterate therefore solves $B_{32}$ to double accuracy and carries the effect of the storage rounding into the weights. cxxgpr adds an acceptance check: after convergence it recomputes the residual with the true double-precision kernel, evaluated column block by column block (blocks of 32 columns, so the full double matrix is never stored), and accepts the iterate when the relative residual is within ten times the float epsilon. Entrywise storage errors of a few float epsilons bound that residual independently of $n$, so a correctly stored matrix passes, while a stored matrix that is far from the true kernel still falls back.
 - `ReevaluateKernel` computes the residual from the kernel evaluated in double precision, block by block, in every step. No separate acceptance check is needed.
 
-The tolerance $10\,n\,\varepsilon_{64}$ is a few hundred rounding errors of double precision. A matrix that has only been stored in `float` cannot meet it, because the data themselves are perturbed by $u_{32} \gg \varepsilon_{64}$. In the measurements in {doc}`../how-to/optimize-performance`, `PromoteStorage` ended with `RejectedByAccept` for every problem we tried, and the result was therefore the double-precision fallback solution, while `ReevaluateKernel` converged. Treat `PromoteStorage` as "mixed precision with a built-in verification that usually falls back" and check `refinement_summary()`.
+The tolerance $10\,n\,\varepsilon_{64}$ is a few hundred rounding errors of double precision, which a matrix stored only in `float` does not meet unless all of its entries are exactly representable in `float`: otherwise the data themselves are perturbed by $u_{32} \gg \varepsilon_{64}$. `ReevaluateKernel` is held to it, because its residual uses the exact kernel. `PromoteStorage` is accepted at storage rounding instead, which is the accuracy it can deliver: its weights are the double-accuracy solution of the stored system, closer to the double-precision weights than a plain single-precision solve but not equal to them, with the difference growing with the conditioning (see the measurements in {doc}`../how-to/optimize-performance`). Check `refinement_summary()` for the outcome.
 
 ### Small residual is not small error
 
