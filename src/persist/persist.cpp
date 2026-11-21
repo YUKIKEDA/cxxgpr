@@ -27,6 +27,7 @@
 
 #include "config_json.hpp"
 #include "safetensors.hpp"
+#include "workspace/predict_diagonal.hpp"
 
 namespace cxxgpr::persist
 {
@@ -417,8 +418,9 @@ namespace cxxgpr::persist
         }
 
         /// @brief Evaluates double-promoted posterior mean and variance on a loaded precision state.
-        /// @details Validates xs, applies in_tf, casts to Storage, invokes predict_into<P>(), promotes float
-        /// outputs to double when Refine is float, and applies tgt_tf inverse mean and variance transforms.
+        /// @details Validates xs, applies in_tf, casts to Storage, invokes detail::predict_diagonal_into<P>() with
+        /// FactorValidation::AlreadyValidated (the factor was checked once by load), promotes float outputs to double
+        /// when Refine is float, and applies tgt_tf inverse mean and variance transforms.
         /// @tparam P Precision policy active in st.
         /// @param[in] st Loaded typed precision state owning compiled kernel, factor view, and query workspace.
         /// @param[in] lik Restored Gaussian observation noise likelihood.
@@ -429,7 +431,7 @@ namespace cxxgpr::persist
         /// @param[in] xs Column-major query feature matrix (m x d).
         /// @param[in] options Prediction variance controls.
         /// @param[out] out Destination double-precision Prediction struct populated on the original target scale.
-        /// @return Empty expected on success, or GprError on query validation or transform failure.
+        /// @return Empty expected on success, or GprError on query validation, prediction, or transform failure.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> loaded_predict_typed(
             const LoadedTypedState<P>& st,
@@ -459,8 +461,11 @@ namespace cxxgpr::persist
             // Predict directly into out for double Refine, or promote via tmp_pred for SinglePrecision.
             if constexpr (std::same_as<Refine, double>)
             {
-                if (auto pr = predict_into<P>(
-                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws, out
+                // The factor was validated when the model was loaded (finite, positive diagonal), so skip the
+                // per-call rescan of the whole lower triangle.
+                if (auto pr = cxxgpr::detail::predict_diagonal_into<P>(
+                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws, out,
+                        linalg::detail::FactorValidation::AlreadyValidated
                     );
                     !pr.has_value())
                 {
@@ -469,9 +474,9 @@ namespace cxxgpr::persist
             }
             else
             {
-                if (auto pr = predict_into<P>(
+                if (auto pr = cxxgpr::detail::predict_diagonal_into<P>(
                         *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws,
-                        st.tmp_pred
+                        st.tmp_pred, linalg::detail::FactorValidation::AlreadyValidated
                     );
                     !pr.has_value())
                 {

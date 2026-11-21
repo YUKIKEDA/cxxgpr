@@ -142,7 +142,7 @@ When a `DoublePrecision` model with `has_factor == true` is loaded, the factor $
 The mapping lives as long as any copy of the `LoadedGpr` does: copies share the underlying data, and the file stays mapped until the last one is destroyed.
 
 :::{warning}
-Never modify `model.safetensors` in place while a `LoadedGpr` that maps it exists; the loaded model would then read changed bytes. Replace the file instead, which is what `save` does (subject to the Windows restriction above).
+Never modify `model.safetensors` in place while a `LoadedGpr` that maps it exists; the loaded model would then read changed bytes. Predictions do not check the factor again after `load`, so the results are then unspecified and can be wrong without an error. Replace the file instead, which is what `save` does (subject to the Windows restriction above).
 :::
 
 (persist-models-custom)=

@@ -133,7 +133,7 @@ A `NaN` or infinity in a Gram matrix would silently poison every number after it
 |---|---|---|
 | Training and query inputs, targets | Every entry is finite | `NonFiniteInput` |
 | Hyperparameters, bounds, noise | Finite and inside the allowed interval | `InvalidHyperparameter`, `InvalidNoiseVariance`, `InvalidInterval` |
-| Objective, refinement and inverse scaling | The marginal likelihood value, the kernel entries re-evaluated during refinement, and the inverse-scaled predictive moments are finite | `NonFiniteKernelValue` |
+| Objective, prediction, refinement and inverse scaling | The marginal likelihood value, the latent predictive variance before it is clamped at zero, the kernel entries re-evaluated during refinement, and the inverse-scaled predictive moments are finite | `NonFiniteKernelValue` |
 | Supplied squared distances | Finite, non-negative, symmetric, zero diagonal | `InvalidDistance` |
 | Factorization input | Lower triangle finite; pivots finite and positive | `NonFiniteInput`, `CholeskyFailed` |
 | Triangular solves | Factor finite with positive diagonal, right-hand side finite | `NonFiniteInput`, `NonPositiveDefiniteMatrix` |

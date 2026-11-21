@@ -35,7 +35,7 @@ The means follow $\sin x$, and the true value lies within about 1.2 standard dev
 two-column query: input dimension mismatch: X.ncols()=2, expected 1 (x_dim 2, expected 1)
 ```
 
-The predictive variance is never negative. Internally the latent part is clamped at zero before the noise variance is added, so rounding cannot produce a negative value.
+The predictive variance is never negative. Internally the latent part is clamped at zero before the noise variance is added, so rounding cannot produce a negative value. A latent part that is `NaN` or infinite is not clamped: the prediction fails with `GprErrorCode::NonFiniteKernelValue`.
 
 ### Latent or observation variance
 

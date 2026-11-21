@@ -15,7 +15,7 @@ The enumeration has underlying type `std::uint8_t`. Values are assigned in the o
 | `IndexOutOfRange` | A parameter, distance slot, leaf or element index is out of range. | none | `index_out_of_range(reason)` |
 | `InsufficientData` | Fewer points than an operation or validation helper requires. | `n_points()`, `min_points()` | `insufficient_data(n_points, min_points)` |
 | `NonFiniteInput` | An input coordinate, target or scalar is NaN or infinite. | none | `non_finite_input()` |
-| `NonFiniteKernelValue` | A kernel matrix entry, the marginal likelihood or a back-transformed value is NaN or infinite. | none | `non_finite_kernel_value()` |
+| `NonFiniteKernelValue` | A kernel matrix entry, the marginal likelihood, a latent predictive variance or a back-transformed value is NaN or infinite. | none | `non_finite_kernel_value()` |
 | `InvalidHyperparameter` | A component parameter failed validation (for example a non-positive transform scale). | none | `invalid_hyperparameter(reason)` |
 | `InvalidNoiseVariance` | The noise variance or log noise variance is invalid (non-finite, not positive, overflow). | none | `invalid_noise_variance(reason)` |
 | `InvalidInterval` | Interval bounds are invalid, or a value lies outside its open interval. | `interval_error_kind()`, `interval_value()`, `interval_lo()`, `interval_hi()` | `invalid_interval_bounds(lo, hi)`, `invalid_interval_out_of_range(value, lo, hi)` |
