@@ -71,6 +71,23 @@ namespace cxxgpr
 
 namespace cxxgpr::persist::detail
 {
+    /// @brief Reports whether text is valid UTF-8, that is, whether it can be written as a JSON string.
+    /// @param[in] text Bytes to check.
+    /// @return True when the JSON serializer accepts text as a string value.
+    bool is_valid_utf8(std::string_view text)
+    {
+        // Ask the serializer itself, so that the answer is exactly "dump() will not throw on this string".
+        try
+        {
+            (void)nlohmann::json(std::string(text)).dump();
+            return true;
+        }
+        catch (const nlohmann::json::exception&)
+        {
+            return false;
+        }
+    }
+
     namespace
     {
 
@@ -83,6 +100,63 @@ namespace cxxgpr::persist::detail
         [[nodiscard]] GprError config_err(std::string reason)
         {
             return GprError::persist_failed(PersistErrorKind::Config, std::move(reason));
+        }
+
+        /// @brief Encodes the state text of a custom kernel or transform as the JSON value stored under "state".
+        /// @details Text that parses as a JSON value other than a string is stored as that value, and the loader
+        /// re-serializes it. Every other text is stored verbatim as a JSON string: text that does not parse, and
+        /// text that is itself a JSON string literal, whose quotes would otherwise be lost because the loader hands
+        /// any string value back as it is. Text stored as a string must be valid UTF-8, since config.json is.
+        /// @param[in] text State text returned by persist_state_json().
+        /// @return JSON value to store, or GprError when the text cannot be written into config.json.
+        /// @retval GprErrorCode::PersistFailed When a stored JSON value is nested deeper than the loader accepts
+        /// (Config) or text that has to be stored as a string is not valid UTF-8 (NotPersistable).
+        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_custom_state(const std::string& text)
+        {
+            // Non-throwing parse: text that is not JSON yields a discarded value. The parser is not recursive.
+            auto parsed = nlohmann::json::parse(text, nullptr, false);
+            if (!parsed.is_discarded() && !parsed.is_string())
+            {
+                // Bound the nesting of a value stored as JSON before dump() recurses into it once per level; the
+                // loader would reject the deeper document anyway.
+                if (auto depth_ok = check_json_max_depth(text, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Config);
+                    !depth_ok.has_value())
+                {
+                    return std::unexpected(std::move(depth_ok).error());
+                }
+                return parsed;
+            }
+            if (!is_valid_utf8(text))
+            {
+                return std::unexpected(
+                    GprError::persist_failed(
+                        PersistErrorKind::NotPersistable,
+                        "custom state is neither JSON nor valid UTF-8 text and cannot be stored in config.json"
+                    )
+                );
+            }
+            return nlohmann::json(text);
+        }
+
+        /// @brief Reads an optional top-level string field of config.json.
+        /// @param[in] root Parsed config.json root object.
+        /// @param[in] key Field name.
+        /// @param[in] fallback Value used when the field is absent.
+        /// @return The field's string, fallback when absent, or PersistFailed(Config) when it is not a string.
+        [[nodiscard]] std::expected<std::string, GprError> optional_string(
+            const nlohmann::json& root, std::string_view key, std::string_view fallback
+        )
+        {
+            const auto it = root.find(key);
+            if (it == root.end())
+            {
+                return std::string(fallback);
+            }
+            if (!it->is_string())
+            {
+                return std::unexpected(config_err("config.json field " + std::string(key) + " must be a string"));
+            }
+            return it->get<std::string>();
         }
 
         /// @brief Serializes a bounded parameter value and its open interval (lo, hi) as JSON.
@@ -308,18 +382,13 @@ namespace cxxgpr::persist::detail
                     {
                         return std::unexpected(std::move(st).error());
                     }
-                    // Store structured JSON directly if parseable, otherwise fall back to raw string payload.
-                    nlohmann::json parsed_state;
-                    try
+                    auto state = encode_custom_state(*st);
+                    if (!state.has_value())
                     {
-                        parsed_state = nlohmann::json::parse(*st);
-                    }
-                    catch (const nlohmann::json::exception&)
-                    {
-                        parsed_state = *st;
+                        return std::unexpected(std::move(state).error());
                     }
                     return nlohmann::json{
-                        {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(parsed_state)}}}
+                        {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(*state)}}}
                     };
                 }
             }, leaf
@@ -676,18 +745,13 @@ namespace cxxgpr::persist::detail
             {
                 return std::unexpected(std::move(st).error());
             }
-            // Embed structured JSON state when valid, falling back to string encoding otherwise.
-            nlohmann::json parsed;
-            try
+            auto state = encode_custom_state(*st);
+            if (!state.has_value())
             {
-                parsed = nlohmann::json::parse(*st);
-            }
-            catch (const nlohmann::json::exception&)
-            {
-                parsed = *st;
+                return std::unexpected(std::move(state).error());
             }
             return nlohmann::json{
-                {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(parsed)}}}
+                {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(*state)}}}
             };
         }
 
@@ -1576,7 +1640,14 @@ namespace cxxgpr::persist::detail
             root["residual"] = res_str;
         }
 
-        return root.dump(2);
+        // Refuse to write a document that the loader would reject for its nesting depth.
+        std::string text = root.dump(2);
+        if (auto depth_ok = check_json_max_depth(text, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Config);
+            !depth_ok.has_value())
+        {
+            return std::unexpected(std::move(depth_ok).error());
+        }
+        return text;
     }
 
     /// @brief Reads, depth-checks, parses, and validates config.json into a ParsedConfig struct.
@@ -1693,8 +1764,18 @@ namespace cxxgpr::persist::detail
         }
 
         // Decode precision and mixed-precision residual formula settings.
-        const std::string prec = root.value("precision", std::string("double"));
-        const std::string res = root.value("residual", std::string("promote_storage"));
+        const auto prec_opt = optional_string(root, "precision", "double");
+        if (!prec_opt.has_value())
+        {
+            return std::unexpected(prec_opt.error());
+        }
+        const std::string& prec = *prec_opt;
+        const auto res_opt = optional_string(root, "residual", "promote_storage");
+        if (!res_opt.has_value())
+        {
+            return std::unexpected(res_opt.error());
+        }
+        const std::string& res = *res_opt;
         if (prec == "double")
         {
             cfg.precision_kind = PersistPrecisionKind::Double;
@@ -1723,7 +1804,12 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown precision kind"));
         }
 
-        const std::string math_s = root.value("math", std::string("accurate"));
+        const auto math_s_opt = optional_string(root, "math", "accurate");
+        if (!math_s_opt.has_value())
+        {
+            return std::unexpected(math_s_opt.error());
+        }
+        const std::string& math_s = *math_s_opt;
         if (math_s == "accurate")
         {
             cfg.kernel_exp = KernelExp::Accurate;
@@ -1737,7 +1823,12 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown math mode"));
         }
 
-        const std::string dc_s = root.value("distance_cache", std::string("always"));
+        const auto dc_s_opt = optional_string(root, "distance_cache", "always");
+        if (!dc_s_opt.has_value())
+        {
+            return std::unexpected(dc_s_opt.error());
+        }
+        const std::string& dc_s = *dc_s_opt;
         if (dc_s == "always")
         {
             cfg.distance_cache = DistanceCachePolicy::Cached;

@@ -32,14 +32,15 @@
 namespace cxxgpr::persist
 {
 
-    /// @brief Validates a custom persist_id against empty and reserved prefix rules.
-    /// @details Rejects empty strings and identifiers beginning with RESERVED_PREFIX ("cxxgpr.").
+    /// @brief Validates a custom persist_id against the empty, reserved prefix, and encoding rules.
+    /// @details Rejects empty strings, identifiers beginning with RESERVED_PREFIX ("cxxgpr."), and identifiers
+    /// that are not valid UTF-8.
     /// @param[in] persist_id Candidate custom extension identifier.
     /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on violation.
-    /// @retval GprErrorCode::PersistFailed When persist_id is empty or starts with "cxxgpr.".
+    /// @retval GprErrorCode::PersistFailed When persist_id is empty, starts with "cxxgpr.", or is not valid UTF-8.
     std::expected<void, GprError> validate_persist_id(std::string_view persist_id)
     {
-        // Reject empty identifiers and reserved library prefixes before registration or serialization.
+        // Reject empty, reserved, and unencodable identifiers before registration or serialization.
         if (persist_id.empty())
         {
             return std::unexpected(
@@ -50,6 +51,13 @@ namespace cxxgpr::persist
         {
             return std::unexpected(
                 GprError::persist_failed(PersistErrorKind::InvalidPersistId, "persist_id must not start with 'cxxgpr.'")
+            );
+        }
+        // config.json is UTF-8 JSON, so an identifier that is not valid UTF-8 could never be written into it.
+        if (!detail::is_valid_utf8(persist_id))
+        {
+            return std::unexpected(
+                GprError::persist_failed(PersistErrorKind::InvalidPersistId, "persist_id must be valid UTF-8")
             );
         }
         return {};

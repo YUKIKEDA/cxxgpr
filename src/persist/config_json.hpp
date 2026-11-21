@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "kernel/distance_desc.hpp"
 
@@ -68,6 +69,11 @@ namespace cxxgpr::persist::detail
         /// @brief True when a supplied-distance checkpoint stores coordinates (with_points).
         bool distance_with_points{false};
     };
+
+    /// @brief Reports whether text is valid UTF-8, that is, whether it can be written as a JSON string.
+    /// @param[in] text Bytes to check.
+    /// @return True when the JSON serializer accepts text as a string value.
+    [[nodiscard]] bool is_valid_utf8(std::string_view text);
 
     /// @brief Serializes model metadata, kernel tree, likelihood, jitter, and transforms into config.json text.
     /// @details Encodes bounded parameters with open intervals and delegates custom kernel/transform state
