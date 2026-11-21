@@ -2,18 +2,25 @@
 /// @file exact_bench.cpp
 /// @brief Google Benchmark suite for Exact GPR fit, factor, prediction, kernel exp, and distance paths.
 /// @details Measures build_info overhead, Forrester 1D factorization/L-BFGS/predict_into,
+/// repeated predict_into on fitted and loaded models across training and query sizes,
 /// 8D ARD sphere L-BFGS and FSA cached optimization, Accurate vs FastApprox KernelExp evaluation,
 /// and coordinate vs supplied-distance kernel Gram evaluation.
 
 #include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
+#include "cxxgpr/persist/persist.hpp"
 
 #include <benchmark/benchmark.h>
 
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <string>
+#include <system_error>
 #include <vector>
 
 namespace
@@ -288,6 +295,131 @@ namespace
             auto res = fit.predict_into(xq_ref, pred);
             benchmark::DoNotOptimize(res);
             benchmark::DoNotOptimize(pred.mean.data());
+        }
+    }
+
+    /// @brief Fitted and loaded n x 3 Constant * Rbf models shared by the repeated-prediction benchmarks.
+    /// @details Each training size is factored once; the loaded model is saved with its factor and loaded back,
+    /// so a DoublePrecision factor is memory-mapped. The destructor releases the maps before deleting the files.
+    struct RepeatedPredictModels
+    {
+        /// @brief Fixed-hyperparameter fitted model per training size n.
+        std::map<std::size_t, cxxgpr::FittedGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>> fitted;
+        /// @brief Model loaded from save_with_factor() output per training size n.
+        std::map<std::size_t, cxxgpr::persist::LoadedGpr> loaded;
+        /// @brief Directories holding the saved models, removed on destruction.
+        std::vector<std::filesystem::path> dirs;
+
+        /// @brief Constructs an empty model cache.
+        RepeatedPredictModels() = default;
+        /// @brief Copying is disabled because the cache owns temporary directories.
+        RepeatedPredictModels(const RepeatedPredictModels&) = delete;
+        /// @brief Copy assignment is disabled because the cache owns temporary directories.
+        /// @return Never returns.
+        RepeatedPredictModels& operator=(const RepeatedPredictModels&) = delete;
+        /// @brief Moving is disabled because the cache is a function-local singleton.
+        RepeatedPredictModels(RepeatedPredictModels&&) = delete;
+        /// @brief Move assignment is disabled because the cache is a function-local singleton.
+        /// @return Never returns.
+        RepeatedPredictModels& operator=(RepeatedPredictModels&&) = delete;
+
+        /// @brief Unmaps the loaded models, then deletes their saved files.
+        ~RepeatedPredictModels()
+        {
+            loaded.clear();
+            for (const auto& dir : dirs)
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(dir, ec);
+            }
+        }
+
+        /// @brief Returns the cache, factoring and saving the model for n on first use.
+        /// @param[in] n Training sample count.
+        /// @return The cache, or nullptr when factoring, saving, or loading failed.
+        static RepeatedPredictModels* ensure(std::size_t n)
+        {
+            static RepeatedPredictModels models;
+            if (models.fitted.contains(n))
+            {
+                return &models;
+            }
+            const ArdSphereDataset data(n, 3U);
+            const cxxgpr::MatrixRef<double> x(data.x_train.data(), data.n, data.d, data.n);
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+                * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+            auto fit =
+                cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value().factor(x, data.y_train);
+            if (!fit)
+            {
+                return nullptr;
+            }
+            auto dir = std::filesystem::temp_directory_path() / ("cxxgpr_bench_loaded_" + std::to_string(n));
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir, ec);
+            models.dirs.push_back(dir);
+            if (!cxxgpr::persist::save_with_factor(*fit, dir))
+            {
+                return nullptr;
+            }
+            auto loaded = cxxgpr::persist::LoadedGpr::load(dir);
+            if (!loaded)
+            {
+                return nullptr;
+            }
+            models.fitted.emplace(n, std::move(*fit));
+            models.loaded.emplace(n, std::move(*loaded));
+            return &models;
+        }
+    };
+
+    /// @brief Times repeated predict_into() (mean and diagonal variance) on a warmed-up model.
+    /// @details Uses n x 3 sphere inputs with a Constant * Rbf kernel and m query points offset from the training
+    /// inputs; the first call outside the timed loop grows the query workspace and output buffers.
+    /// @tparam Loaded Times LoadedGpr (memory-mapped factor) when true and FittedGpr otherwise.
+    /// @param[in,out] state Benchmark state with training size n and query count m.
+    template <bool Loaded> void bm_repeated_predict_into(benchmark::State& state)
+    {
+        const auto n = static_cast<std::size_t>(state.range(0));
+        const auto m = static_cast<std::size_t>(state.range(1));
+        auto* models = RepeatedPredictModels::ensure(n);
+        if (models == nullptr)
+        {
+            state.SkipWithError("model setup failed");
+            return;
+        }
+        std::vector<double> xq(m * 3U);
+        for (std::size_t j = 0; j < m; ++j)
+        {
+            for (std::size_t dim = 0; dim < 3U; ++dim)
+            {
+                xq[(dim * m) + j] = std::sin((0.53 * static_cast<double>((j * (dim + 1U)) + dim)) + 0.5);
+            }
+        }
+        const cxxgpr::MatrixRef<double> xq_ref(xq.data(), m, 3U, m);
+        cxxgpr::Prediction<double> pred;
+        const auto predict = [&]()
+        {
+            if constexpr (Loaded)
+            {
+                return models->loaded.at(n).predict_into(xq_ref, pred);
+            }
+            else
+            {
+                return models->fitted.at(n).predict_into(xq_ref, pred);
+            }
+        };
+        if (!predict())
+        {
+            state.SkipWithError("warm-up prediction failed");
+            return;
+        }
+        for (auto _ : state)
+        {
+            auto res = predict();
+            benchmark::DoNotOptimize(res);
+            benchmark::DoNotOptimize(pred.variance.data());
         }
     }
 
@@ -609,6 +741,18 @@ namespace
         ->UseRealTime();
     BENCHMARK(bm_distance_supply_apply_double);
     BENCHMARK(bm_distance_supply_scalar_only_double);
+    BENCHMARK_TEMPLATE(bm_repeated_predict_into, false)
+        ->ArgsProduct({
+            {256, 1024, 4096},
+            {  1,    8,   64}
+    })
+        ->UseRealTime();
+    BENCHMARK_TEMPLATE(bm_repeated_predict_into, true)
+        ->ArgsProduct({
+            {256, 1024, 4096},
+            {  1,    8,   64}
+    })
+        ->UseRealTime();
 
 }  // namespace
 

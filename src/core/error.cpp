@@ -367,7 +367,7 @@ namespace cxxgpr
     /// @return GprError with code GprErrorCode::OptimizationNotConverged.
     GprError GprError::optimization_not_converged(std::size_t iterations)
     {
-        // Preserve iteration count for callers inspecting optimizer budget exhaustion.
+        // Preserve the iteration count reported by the user-defined optimizer that gave up.
         GprError err(
             GprErrorCode::OptimizationNotConverged,
             std::format("optimizer did not converge after {} iterations", iterations)

@@ -142,7 +142,7 @@ into_fitted<SinglePrecision> on a double model: persist failed (wrong_model): re
 マップは、`LoadedGpr` のコピーが 1 つでも生きている間は保たれる。コピーは内部のデータを共有し、最後の 1 つが破棄されるまでファイルはマップされたままである。
 
 :::{warning}
-`LoadedGpr` がマップしている `model.safetensors` を、その場で書き換えてはならない。読み込んだモデルが、変更されたバイトを読むことになる。ファイルは、`save` と同様に置き換えること（上の Windows の制約に従う）。
+`LoadedGpr` がマップしている `model.safetensors` を、その場で書き換えてはならない。読み込んだモデルが、変更されたバイトを読むことになる。予測は `load` の後に因子を検査し直さないので、結果は不定になり、エラーなしに誤った値を返すこともある。ファイルは、`save` と同様に置き換えること（上の Windows の制約に従う）。
 :::
 
 (persist-models-custom)=

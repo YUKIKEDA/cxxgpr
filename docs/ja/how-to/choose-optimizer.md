@@ -258,6 +258,8 @@ two evaluations at the same point cost 1 objective call(s)
 モデルは自作の最適化器にも `TwiceDifferentiable` の目的関数を渡す。必要なら `gradient_into` や `hessian_into` を呼んでよい。モデルが値のみとして扱うのは `NelderMead` と `FastSimulatedAnnealing` だけである。自作の最適化器に、それ以外の特別扱いはない。
 :::
 
+自分の停止判定を満たす前に止まったが使える点は得られた、と知らせるには、組込みの最適化器と同じく、最良の点を `converged = false` で返す。このとき `fit` は成功する。`fit` を失敗させたいときは、`std::unexpected(GprError::optimization_not_converged(iterations))`（または他の `GprError`）を返す。`fit` はそのエラーを変えずに返す。{doc}`handle-errors` を参照。
+
 最適化器が提案する点は、`LogBounds::validate_log_params` で確かめるか、`sample_log_uniform` で引き、開区間の厳密に内側に保つ。外側の点は、目的関数が `GprErrorCode::InvalidInterval` などのエラーで拒否する。
 
 ## API 一覧

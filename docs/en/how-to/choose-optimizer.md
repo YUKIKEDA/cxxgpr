@@ -258,6 +258,8 @@ It reaches an NLML of $-14.49$ in the comparison table above, close to the $-14.
 The model passes your optimizer a `TwiceDifferentiable` objective, so you may call `gradient_into` and `hessian_into` if you want them. Only `NelderMead` and `FastSimulatedAnnealing` are treated by the model as value-only; a custom optimizer gets no other special treatment.
 :::
 
+To report that your optimizer stopped before meeting its own stopping test but still found a usable point, return the best point with `converged = false`, as the built-in optimizers do; `fit` then succeeds. To make `fit` fail instead, return `std::unexpected(GprError::optimization_not_converged(iterations))` (or any other `GprError`); `fit` returns that error unchanged, see {doc}`handle-errors`.
+
 Check the points your optimizer proposes with `LogBounds::validate_log_params` (or draw them with `sample_log_uniform`) so they stay strictly inside the open bounds; a point outside them is rejected by the objective with an error such as `GprErrorCode::InvalidInterval`.
 
 ## API summary

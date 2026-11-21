@@ -46,6 +46,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     [[nodiscard]] std::expected<void, GprError> predict_into(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -77,6 +78,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     [[nodiscard]] std::expected<Prediction<typename P::Refine>, GprError> predict(
         const CompiledKernel<typename P::Storage>& kernel,

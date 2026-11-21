@@ -290,6 +290,7 @@ namespace cxxgpr::persist
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
             MatrixRef<double> xs, const PredictOptions& options = {}
         ) const;
@@ -307,6 +308,7 @@ namespace cxxgpr::persist
         /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != d().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
@@ -328,6 +330,7 @@ namespace cxxgpr::persist
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<double>& out, const PredictOptions& options = {}
         ) const;

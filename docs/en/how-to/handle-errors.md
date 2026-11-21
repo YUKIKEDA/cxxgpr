@@ -133,7 +133,7 @@ A full table with the circumstances of each code follows. The one-line version i
 
 **`NonFiniteInput`**: NaN or infinity in training inputs, targets, query points or parameters. Clean the data first.
 
-**`NonFiniteKernelValue`**: a kernel evaluation, the marginal likelihood or a back-transformed value is NaN or infinite. Reduce extreme hyperparameters or tighten their bounds.
+**`NonFiniteKernelValue`**: a kernel evaluation, the marginal likelihood, a latent predictive variance or a back-transformed value is NaN or infinite. Reduce extreme hyperparameters or tighten their bounds.
 
 **`InvalidHyperparameter`**: a fitted transform is built from parts (`from_parts`, or while loading a saved model) with an invalid parameter, such as a standardization scale that is not positive or a minimum above the maximum. Ordinary `fit` does not produce it; constant columns and targets are handled by the transforms.
 
