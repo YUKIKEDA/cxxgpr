@@ -418,8 +418,9 @@ namespace cxxgpr::persist
         }
 
         /// @brief Evaluates double-promoted posterior mean and variance on a loaded precision state.
-        /// @details Validates xs, applies in_tf, casts to Storage, invokes predict_into<P>(), promotes float
-        /// outputs to double when Refine is float, and applies tgt_tf inverse mean and variance transforms.
+        /// @details Validates xs, applies in_tf, casts to Storage, invokes detail::predict_diagonal_into<P>() with
+        /// FactorValidation::AlreadyValidated (the factor was checked once by load), promotes float outputs to double
+        /// when Refine is float, and applies tgt_tf inverse mean and variance transforms.
         /// @tparam P Precision policy active in st.
         /// @param[in] st Loaded typed precision state owning compiled kernel, factor view, and query workspace.
         /// @param[in] lik Restored Gaussian observation noise likelihood.
@@ -430,7 +431,7 @@ namespace cxxgpr::persist
         /// @param[in] xs Column-major query feature matrix (m x d).
         /// @param[in] options Prediction variance controls.
         /// @param[out] out Destination double-precision Prediction struct populated on the original target scale.
-        /// @return Empty expected on success, or GprError on query validation or transform failure.
+        /// @return Empty expected on success, or GprError on query validation, prediction, or transform failure.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> loaded_predict_typed(
             const LoadedTypedState<P>& st,
