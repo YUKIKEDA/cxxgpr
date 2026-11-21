@@ -155,7 +155,7 @@ def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarr
 
 ## FMT-09 Pairing identifier of `config.json` and `model.safetensors`
 
-Status: specified; the implementation is roadmap row `REL-11`. Until that row is Done, `save` / `save_with_factor` write no identifier, `load` performs no pairing check, and the two files are paired only by the per-file checks of `FMT-02`.
+Status: implemented (`REL-11`). `save` / `save_with_factor` write `save_id` and `cxxgpr.save_id`, and `LoadedGpr::load` / `LoadedDistanceGpr<C>::load` verify pairing on load.
 
 `save` replaces the two files with two separate renames (`FMT-02`). When the process stops between them, or the second rename fails, the directory holds the new `model.safetensors` beside the old `config.json`. The per-file checks reject such a pair only when a tensor's shape or dtype, or the presence of a tensor, disagrees with `config.json`. Each save therefore writes one identifier into both files, and `load` rejects a pair whose identifiers differ.
 

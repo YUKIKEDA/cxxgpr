@@ -52,6 +52,7 @@ The file is a single JSON object. The writer emits it with two-space indentation
 | `y_unfitted` | transform | yes | — | target transform configuration before fitting |
 | `y_transform` | transform | yes | — | fitted target transform |
 | `distance` | object | only for a supplied-distance model | — | the mode and the distance slots, see below |
+| `save_id` | string (32 lowercase hex digits) | no | absent (no pairing check) | content-hash pairing identifier matching `cxxgpr.save_id` in `model.safetensors` |
 
 The writer omits `residual` unless `precision` is `"mixed"`. The `precision` and `residual` pair identifies the model's `PersistPrecisionKind`:
 
@@ -232,7 +233,7 @@ The file follows the safetensors specification:
 | 8 | $H$ bytes | a JSON object mapping each tensor name to `{"dtype", "shape", "data_offsets"}` |
 | $8 + H$ | rest | the tensor bytes; `data_offsets` are `[begin, end)` relative to this position |
 
-The writer pads the header so that $8 + H$ is a multiple of 8, and starts every tensor at an offset that is a multiple of 8. No `__metadata__` entry is written. All numbers are little-endian IEEE 754.
+The writer pads the header so that $8 + H$ is a multiple of 8, and starts every tensor at an offset that is a multiple of 8. `__metadata__` holds `{"cxxgpr.save_id": "<32 lowercase hex digits>"}` matching `save_id` in `config.json`. All numbers are little-endian IEEE 754.
 
 ### Tensors
 

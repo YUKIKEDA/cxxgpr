@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "json_depth.hpp"
+#include "persist/save_id.hpp"
 
 #ifdef _WIN32
 #    ifndef NOMINMAX
@@ -281,12 +282,44 @@ namespace cxxgpr::persist::detail
 
         const std::size_t data_section_bytes = file->size() - data_base;
         std::unordered_map<std::string, TensorRecord> records;
+        std::optional<std::string> parsed_save_id;
 
         // Validate every tensor descriptor entry for dtype, overflow-safe shape, alignment, and byte bounds.
         for (const auto& [name, meta] : header_json.items())
         {
             if (name == "__metadata__")
             {
+                if (!meta.is_object())
+                {
+                    return std::unexpected(
+                        GprError::persist_failed(PersistErrorKind::Tensor, "safetensors __metadata__ must be an object")
+                    );
+                }
+                for (const auto& [mk, mv] : meta.items())
+                {
+                    if (!mv.is_string())
+                    {
+                        return std::unexpected(
+                            GprError::persist_failed(
+                                PersistErrorKind::Tensor, "safetensors __metadata__ entries must all be strings"
+                            )
+                        );
+                    }
+                    if (mk == "cxxgpr.save_id")
+                    {
+                        const auto& sid = mv.get_ref<const std::string&>();
+                        if (!is_valid_save_id(sid))
+                        {
+                            return std::unexpected(
+                                GprError::persist_failed(
+                                    PersistErrorKind::Tensor,
+                                    "cxxgpr.save_id in model.safetensors must be 32 lowercase hexadecimal digits"
+                                )
+                            );
+                        }
+                        parsed_save_id = sid;
+                    }
+                }
                 continue;
             }
             if (!meta.is_object() || !meta.contains("dtype") || !meta.contains("shape")
@@ -382,6 +415,7 @@ namespace cxxgpr::persist::detail
         result->file_ = std::move(*file);
         result->data_base_offset_ = data_base;
         result->records_ = std::move(records);
+        result->save_id_ = std::move(parsed_save_id);
         return result;
     }
 
@@ -500,14 +534,21 @@ namespace cxxgpr::persist::detail
     /// preceded by zero-byte alignment padding.
     /// @param[in] path Destination binary file path.
     /// @param[in] tensors Tensor descriptors and little-endian byte spans to write.
+    /// @param[in] save_id Optional pairing identifier written under `__metadata__["cxxgpr.save_id"]`.
     /// @return Empty expected on success, or PersistFailed(Io) on stream open or write failure.
     /// @retval GprErrorCode::PersistFailed When opening, writing, or flushing path fails.
     std::expected<void, GprError> write_safetensors_file(
-        const std::filesystem::path& path, std::span<const TensorWriteView> tensors
+        const std::filesystem::path& path,
+        std::span<const TensorWriteView> tensors,
+        std::optional<std::string_view> save_id
     )
     {
         // Plan 8-byte aligned offsets for every tensor and construct the JSON header map.
         nlohmann::json header = nlohmann::json::object();
+        if (save_id.has_value())
+        {
+            header["__metadata__"] = nlohmann::json{{"cxxgpr.save_id", std::string(*save_id)}};
+        }
         std::size_t cursor = 0U;
         std::vector<std::pair<std::size_t, std::size_t>> offsets;
         offsets.reserve(tensors.size());
