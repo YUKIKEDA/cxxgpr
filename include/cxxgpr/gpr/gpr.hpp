@@ -255,6 +255,8 @@ namespace cxxgpr
         /// @return OptimizerResult with final parameters and convergence flags, or GprError on failure.
         /// @note Failing to converge is not an error: the result is returned with converged == false. The built-in
         /// optimizers report only invalid configuration or objective failures through GprError.
+        /// @note A GprError returned by a user-defined optimizer, such as GprErrorCode::OptimizationNotConverged, is
+        /// forwarded unchanged.
         template <typename O>
         [[nodiscard]] std::expected<optimizer::OptimizerResult, GprError> invoke_optimizer(
             const O& opt, optimizer::TwiceDifferentiable& obj, std::span<const double> initial_params

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Spec: REQ-01, REQ-05, REQ-08, REQ-09, REQ-11, DES-01, DES-05, DES-11, DES-15, DES-16, DES-17
+// Spec: REQ-01, REQ-02, REQ-05, REQ-08, REQ-09, REQ-11, DES-01, DES-02, DES-05, DES-11, DES-15, DES-16, DES-17, DES-19
 /// @file gpr_test.cpp
 /// @brief Unit and integration tests for Gpr and FittedGpr compile-time state separation and workflows.
 /// @details Verifies compile-time concept rejection of predict/loo_predict on unfitted Gpr,
 /// end-to-end fit/factor/predict/covariance/sample/LOO/refit across all five optimizer policies
 /// with input and target preprocessing, MixedPrecision iterative refinement parity, zero-alloc
-/// predict_into(), and immutable parent state preservation on negative inputs.
+/// predict_into(), immutable parent state preservation on negative inputs, non-convergence reported as a
+/// successful fit, and unchanged propagation of user-defined optimizer outcomes.
 
 #include "cxxgpr/gpr/gpr.hpp"
 
@@ -17,10 +18,12 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <expected>
 #include <limits>
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "allocation_audit.hpp"
@@ -43,6 +46,87 @@ namespace
     static_assert(!HasLooPredict<cxxgpr::Gpr<>>);
     static_assert(HasPredict<cxxgpr::FittedGpr<>>);
     static_assert(HasLooPredict<cxxgpr::FittedGpr<>>);
+
+    /// @brief User-defined optimizer that evaluates the objective once and then gives up with a GprError.
+    /// @details Models a custom optimizer reporting non-convergence through
+    /// GprError::optimization_not_converged() instead of a successful OptimizerResult.
+    struct GiveUpOptimizer
+    {
+        /// @brief Iteration count reported in the returned error payload.
+        static constexpr std::size_t k_iterations = 7U;
+        /// @brief Declares that the optimizer does not supply changed parameter indices.
+        static constexpr bool uses_change_indices = false;
+
+        /// @brief Evaluates obj at initial_params and returns OptimizationNotConverged.
+        /// @param[in,out] obj Objective supplied by Gpr::fit().
+        /// @param[in] initial_params Starting log-space parameter vector.
+        /// @return The objective error if the evaluation fails, otherwise OptimizationNotConverged.
+        [[nodiscard]] std::expected<cxxgpr::optimizer::OptimizerResult, cxxgpr::GprError> optimize(
+            cxxgpr::optimizer::TwiceDifferentiable& obj, std::span<const double> initial_params
+        ) const
+        {
+            if (auto v = obj.value(initial_params); !v.has_value())
+            {
+                return std::unexpected(std::move(v).error());
+            }
+            return std::unexpected(cxxgpr::GprError::optimization_not_converged(k_iterations));
+        }
+    };
+
+    /// @brief User-defined optimizer that stops without converging but returns a usable point.
+    /// @details Returns initial_params with converged == false, as the built-in optimizers do at their limit.
+    struct StopEarlyOptimizer
+    {
+        /// @brief Iteration count reported in the returned OptimizerResult.
+        static constexpr std::size_t k_iterations = 4U;
+        /// @brief Declares that the optimizer does not supply changed parameter indices.
+        static constexpr bool uses_change_indices = false;
+
+        /// @brief Evaluates obj at initial_params and returns it as a non-converged result.
+        /// @param[in,out] obj Objective supplied by Gpr::fit().
+        /// @param[in] initial_params Starting log-space parameter vector.
+        /// @return OptimizerResult at initial_params with converged == false, or the objective error.
+        [[nodiscard]] std::expected<cxxgpr::optimizer::OptimizerResult, cxxgpr::GprError> optimize(
+            cxxgpr::optimizer::TwiceDifferentiable& obj, std::span<const double> initial_params
+        ) const
+        {
+            auto v = obj.value(initial_params);
+            if (!v.has_value())
+            {
+                return std::unexpected(std::move(v).error());
+            }
+            return cxxgpr::optimizer::OptimizerResult{
+                .params = std::vector<double>(initial_params.begin(), initial_params.end()),
+                .value = *v,
+                .iterations = k_iterations,
+                .converged = false,
+            };
+        }
+    };
+
+    /// @brief Training data y = 10 + 3*sin(x) + 0.2*x sampled at 10 points on [-2, 2] (1 feature).
+    struct SineData
+    {
+        /// @brief Column-major training features (n x 1).
+        std::vector<double> x;
+        /// @brief Training targets of length n.
+        std::vector<double> y;
+    };
+
+    /// @brief Builds the 10-point sinusoidal training set shared by the optimizer-outcome tests.
+    /// @return Training features and targets.
+    SineData make_sine_data()
+    {
+        constexpr std::size_t n = 10U;
+        SineData data{.x = std::vector<double>(n), .y = std::vector<double>(n)};
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double x = -2.0 + (4.0 * static_cast<double>(i) / static_cast<double>(n - 1U));
+            data.x[i] = x;
+            data.y[i] = 10.0 + (3.0 * std::sin(x)) + (0.2 * x);
+        }
+        return data;
+    }
 
     /// @brief Verifies fit/factor/predict/LOO/refit across all five optimizers and preprocessing transforms.
     /// @details Fits 1D sinusoidal data with StandardizeInput and StandardizeTarget using L-BFGS,
@@ -635,6 +719,119 @@ namespace
                 EXPECT_NEAR(result.params[k], ref_theta[k], theta_tol) << "start " << start << " parameter " << k;
             }
         }
+    }
+
+    /// @brief Verifies that the built-in optimizers report non-convergence as a successful fit.
+    /// @details Limits Lbfgs (also with restarts), TrustRegion, and NelderMead to one iteration so that their
+    /// stopping tests cannot hold, and checks that fit() succeeds with converged == false and the completed
+    /// iteration count. FastSimulatedAnnealing runs its whole schedule and Fixed performs no iterations; both
+    /// report converged == true.
+    TEST(GprModelsTest, BuiltInOptimizersReportNonConvergenceAsSuccessfulFit)
+    {
+        // Spec: DES-02, DES-19
+        const SineData data = make_sine_data();
+        const std::size_t n = data.y.size();
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x.data(), n, 1U, n);
+
+        // One iteration from the (1, 1, 1e-2) start cannot meet the default sqrt(eps) tolerance.
+        const auto lbfgs =
+            cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(1U))
+                .fit(x_ref, data.y);
+        if (!lbfgs.has_value())
+        {
+            FAIL() << "Lbfgs fit failed: " << lbfgs.error().message();
+        }
+        EXPECT_FALSE(lbfgs->optimizer_result().converged);
+        EXPECT_EQ(lbfgs->optimizer_result().iterations, 1U);
+
+        const auto lbfgs_restarts = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(
+            spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(1U).with_restarts(2U, 11ULL)
+        )
+                                        .fit(x_ref, data.y);
+        if (!lbfgs_restarts.has_value())
+        {
+            FAIL() << "Lbfgs fit with restarts failed: " << lbfgs_restarts.error().message();
+        }
+        EXPECT_FALSE(lbfgs_restarts->optimizer_result().converged);
+        EXPECT_EQ(lbfgs_restarts->optimizer_result().iterations, 1U);
+
+        const auto tr =
+            cxxgpr::Gpr<cxxgpr::optimizer::TrustRegion>(spec, cxxgpr::optimizer::TrustRegion().with_max_iterations(1U))
+                .fit(x_ref, data.y);
+        if (!tr.has_value())
+        {
+            FAIL() << "TrustRegion fit failed: " << tr.error().message();
+        }
+        EXPECT_FALSE(tr->optimizer_result().converged);
+        EXPECT_EQ(tr->optimizer_result().iterations, 1U);
+
+        const auto nm =
+            cxxgpr::Gpr<cxxgpr::optimizer::NelderMead>(spec, cxxgpr::optimizer::NelderMead().with_max_iterations(1U))
+                .fit(x_ref, data.y);
+        if (!nm.has_value())
+        {
+            FAIL() << "NelderMead fit failed: " << nm.error().message();
+        }
+        EXPECT_FALSE(nm->optimizer_result().converged);
+        EXPECT_EQ(nm->optimizer_result().iterations, 1U);
+
+        // FastSimulatedAnnealing has no stopping test: it spends the whole schedule and reports converged.
+        const auto fsa = cxxgpr::Gpr<cxxgpr::optimizer::FastSimulatedAnnealing>(
+            spec, cxxgpr::optimizer::FastSimulatedAnnealing().with_max_iterations(5U).with_seed(3ULL)
+        )
+                             .fit(x_ref, data.y);
+        if (!fsa.has_value())
+        {
+            FAIL() << "FastSimulatedAnnealing fit failed: " << fsa.error().message();
+        }
+        EXPECT_TRUE(fsa->optimizer_result().converged);
+        EXPECT_EQ(fsa->optimizer_result().iterations, 5U);
+
+        const auto fixed = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).fit(x_ref, data.y);
+        if (!fixed.has_value())
+        {
+            FAIL() << "Fixed fit failed: " << fixed.error().message();
+        }
+        EXPECT_TRUE(fixed->optimizer_result().converged);
+        EXPECT_EQ(fixed->optimizer_result().iterations, 0U);
+    }
+
+    /// @brief Verifies that fit() forwards a user-defined optimizer's outcome unchanged.
+    /// @details A custom optimizer returning GprError::optimization_not_converged() makes fit() fail with an
+    /// error equal in code, message, and payload, and leaves the trainer usable; a custom optimizer returning a
+    /// non-converged OptimizerResult makes fit() succeed with that result.
+    TEST(GprModelsTest, CustomOptimizerOutcomePropagatesUnchangedFromFit)
+    {
+        // Spec: REQ-02, DES-02, DES-19
+        const SineData data = make_sine_data();
+        const std::size_t n = data.y.size();
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto x_ref = cxxgpr::MatrixRef<double>(data.x.data(), n, 1U, n);
+
+        const cxxgpr::Gpr<GiveUpOptimizer> give_up(spec);
+        const auto expected_error = cxxgpr::GprError::optimization_not_converged(GiveUpOptimizer::k_iterations);
+        const auto failed = give_up.fit(x_ref, data.y);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error(), expected_error);
+        EXPECT_EQ(failed.error().code(), cxxgpr::GprErrorCode::OptimizationNotConverged);
+        EXPECT_EQ(failed.error().iterations(), std::optional<std::size_t>(GiveUpOptimizer::k_iterations));
+        EXPECT_EQ(failed.error().message(), "optimizer did not converge after 7 iterations");
+
+        // The trainer is unchanged: a second fit fails identically and factor() still succeeds.
+        const auto failed_again = give_up.fit(x_ref, data.y);
+        ASSERT_FALSE(failed_again.has_value());
+        EXPECT_EQ(failed_again.error(), expected_error);
+        EXPECT_TRUE(give_up.factor(x_ref, data.y).has_value());
+
+        const auto stopped = cxxgpr::Gpr<StopEarlyOptimizer>(spec).fit(x_ref, data.y);
+        if (!stopped.has_value())
+        {
+            FAIL() << "fit with a non-converged custom result failed: " << stopped.error().message();
+        }
+        EXPECT_FALSE(stopped->optimizer_result().converged);
+        EXPECT_EQ(stopped->optimizer_result().iterations, StopEarlyOptimizer::k_iterations);
     }
 
 }  // namespace
