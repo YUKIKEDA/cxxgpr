@@ -18,14 +18,21 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
+#include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
+
+#include "allocation_audit.hpp"
+#include "span_shape_contract.hpp"
 
 namespace
 {
@@ -429,7 +436,7 @@ namespace
 
             auto typed = loaded->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
             ASSERT_TRUE(typed.has_value());
-            EXPECT_NEAR(typed->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
+            EXPECT_NEAR(typed->neg_log_marginal_likelihood(), fitted->neg_log_marginal_likelihood(), 1e-12);
             auto typed_pred = typed->predict(xq_ref);
             ASSERT_TRUE(typed_pred.has_value());
             EXPECT_EQ(typed_pred->mean, orig_pred->mean);
@@ -451,7 +458,7 @@ namespace
         }
         auto typed_nf = loaded_nf->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
         ASSERT_TRUE(typed_nf.has_value());
-        EXPECT_NEAR(typed_nf->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
+        EXPECT_NEAR(typed_nf->neg_log_marginal_likelihood(), fitted->neg_log_marginal_likelihood(), 1e-12);
     }
 
     /// @brief Verifies MixedPrecision<ReevaluateKernel> and CustomKernel PersistRegistry persistence.
@@ -542,6 +549,174 @@ namespace
         auto reg_load = cxxgpr::persist::LoadedGpr::load(dir_custom.path, reg);
         ASSERT_TRUE(reg_load.has_value());
         EXPECT_NEAR(reg_load->predict(xq_ref)->mean[0], c_fit->predict(xq_ref)->mean[0], 1e-12);
+    }
+
+    /// @brief Verifies the raw-span overload of LoadedGpr::predict against the span shape contract.
+    /// @details Runs the shared shape cases (short span, long span, overflowing dimensions, empty span with a null
+    /// or non-null pointer, zero dimension) on a loaded model, checks that a wrong length is reported before a
+    /// wrong feature count, and that the loaded model predicts bitwise identically afterwards.
+    TEST(PersistModelsTest, LoadedGprSpanPredictRejectsLengthsThatDisagreeWithDimensions)
+    {
+        // Spec: REQ-03, DES-02
+        using cxxgpr::test_support::error_code_of;
+        const std::vector<double> x_train{0.0, 1.0};
+        const std::vector<double> y_train{0.5, 1.5};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const TempDirGuard dir("span_shape_contract");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+        auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_TRUE(loaded.has_value());
+
+        const std::vector<double> query{0.5, 1.5};
+        const auto before = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(before.has_value());
+
+        cxxgpr::test_support::expect_span_shape_contract(
+            [&](std::span<const double> xs, std::size_t n_rows, std::size_t n_cols)
+        { return error_code_of(loaded->predict(xs, n_rows, n_cols)); }, query, 2U, 1U
+        );
+
+        // Three values declared as 2 x 2: the length is reported before the feature count.
+        const std::vector<double> q3{0.5, 1.5, 2.5};
+        EXPECT_EQ(error_code_of(loaded->predict(q3, 2U, 2U)), std::optional{cxxgpr::GprErrorCode::LengthMismatch});
+
+        const auto after = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(after.has_value());
+        EXPECT_EQ(*after, *before);
+    }
+
+    /// @brief Returns the byte offset of element (row, col) of the stored column-major `l` tensor in a model file.
+    /// @param[in] file Path of a `model.safetensors` file written by save_with_factor().
+    /// @param[in] n Training sample count (the factor is n x n).
+    /// @param[in] element_size Size in bytes of one stored factor element (8 for F64, 4 for F32).
+    /// @param[in] row Row index of the element.
+    /// @param[in] col Column index of the element.
+    /// @return Absolute byte offset of the element, or 0 when the header cannot be parsed.
+    std::size_t stored_factor_offset(
+        const std::filesystem::path& file, std::size_t n, std::size_t element_size, std::size_t row, std::size_t col
+    )
+    {
+        std::ifstream in(file, std::ios::binary);
+        std::uint64_t header_len = 0;
+        in.read(reinterpret_cast<char*>(&header_len), sizeof(header_len));
+        std::string header(static_cast<std::size_t>(header_len), '\0');
+        in.read(header.data(), static_cast<std::streamsize>(header.size()));
+        const auto key = header.find("\"l\":");
+        const auto offsets = (key == std::string::npos) ? key : header.find("\"data_offsets\":[", key);
+        if (!in || offsets == std::string::npos)
+        {
+            return 0U;
+        }
+        const auto begin = static_cast<std::size_t>(std::stoull(header.substr(offsets + 16U)));
+        return sizeof(header_len) + static_cast<std::size_t>(header_len) + begin + (((col * n) + row) * element_size);
+    }
+
+    /// @brief Overwrites element (row, col) of the stored `l` tensor in place with value in storage precision.
+    /// @tparam Storage Stored factor scalar type (double for F64, float for F32).
+    /// @param[in] file Path of a `model.safetensors` file written by save_with_factor().
+    /// @param[in] n Training sample count (the factor is n x n).
+    /// @param[in] row Row index of the element.
+    /// @param[in] col Column index of the element.
+    /// @param[in] value Replacement value.
+    /// @return True when the element was located and rewritten.
+    template <typename Storage>
+    bool overwrite_stored_factor(
+        const std::filesystem::path& file, std::size_t n, std::size_t row, std::size_t col, Storage value
+    )
+    {
+        const std::size_t position = stored_factor_offset(file, n, sizeof(Storage), row, col);
+        if (position == 0U || position + sizeof(Storage) > std::filesystem::file_size(file))
+        {
+            return false;
+        }
+        // Rewrite in place (no truncation) so an existing memory map of the file observes the change.
+        std::fstream io(file, std::ios::binary | std::ios::in | std::ios::out);
+        io.seekp(static_cast<std::streamoff>(position));
+        io.write(reinterpret_cast<const char*>(&value), sizeof(Storage));
+        io.flush();
+        return static_cast<bool>(io);
+    }
+
+    /// @brief Verifies a corrupt Cholesky factor is rejected at load, because predictions no longer rescan it.
+    /// @details LoadedGpr predictions skip the per-call factor validation and rely on load having checked every
+    /// element for finiteness and the diagonal for positivity. A NaN below the diagonal and a zero diagonal entry
+    /// in the stored `l` tensor must therefore fail `LoadedGpr::load` instead of reaching a prediction, for the
+    /// memory-mapped F64 factor of DoublePrecision and the copied F32 factors of SinglePrecision and both
+    /// MixedPrecision policies.
+    TEST(PersistModelsTest, LoadRejectsCorruptCholeskyFactorBecausePredictionsDoNotRescanIt)
+    {
+        // Spec: FMT-02, FMT-05, DES-16
+        const std::vector<double> x_train{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4, 0.7};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+
+        const auto check_policy = [&]<typename P>(const std::string& tag)
+        {
+            using Storage = P::Storage;
+            const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).factor(x_train, 4U, 1U, y_train);
+            ASSERT_TRUE(fit.has_value()) << tag;
+
+            const auto corrupt = [&](const std::string& name, std::size_t row, std::size_t col, Storage value)
+            {
+                const TempDirGuard dir(name + "_" + tag);
+                ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+                ASSERT_TRUE(overwrite_stored_factor<Storage>(dir.path / "model.safetensors", 4U, row, col, value));
+                const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+                EXPECT_FALSE(loaded.has_value()) << name << " " << tag;
+            };
+            corrupt("corrupt_l_nan_below_diagonal", 2U, 1U, std::numeric_limits<Storage>::quiet_NaN());
+            corrupt("corrupt_l_zero_diagonal", 1U, 1U, Storage{0});
+
+            // The unmodified model still loads and predicts.
+            const TempDirGuard clean("clean_factor_for_rescan_test_" + tag);
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, clean.path).has_value());
+            const auto loaded = cxxgpr::persist::LoadedGpr::load(clean.path);
+            ASSERT_TRUE(loaded.has_value()) << tag;
+            EXPECT_EQ(loaded->has_mmap_factor(), (std::same_as<Storage, double>)) << tag;
+            const std::vector<double> query{0.5, 1.5};
+            EXPECT_TRUE(loaded->predict(query, 2U, 1U).has_value()) << tag;
+        };
+        check_policy.template operator()<cxxgpr::DoublePrecision>("double");
+        check_policy.template operator()<cxxgpr::SinglePrecision>("single");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>("mixed_promote");
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>("mixed_reevaluate");
+    }
+
+    /// @brief Verifies a factor rewritten in place after load makes predictions fail instead of collapsing variance.
+    /// @details Rewriting the memory-mapped `model.safetensors` while a LoadedGpr maps it violates the mmap contract,
+    /// and predictions do not re-check the factor. A NaN or zero written onto the diagonal after load must not be
+    /// turned into a clamped zero latent variance (which would report only the noise variance); the non-finite
+    /// latent variance is reported as NonFiniteKernelValue. Runs only where the map observes in-place writes (Linux).
+    TEST(PersistModelsTest, FactorRewrittenAfterLoadFailsPredictionInsteadOfCollapsingVariance)
+    {
+        // Spec: FMT-05, DES-16
+#ifndef __linux__
+        GTEST_SKIP() << "an in-place write is observed through a private file mapping only on Linux";
+#else
+        const std::vector<double> x_train{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4, 0.7};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 4U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const std::vector<double> query{0.5, 1.5};
+
+        for (const double value : {std::numeric_limits<double>::quiet_NaN(), 0.0})
+        {
+            const TempDirGuard dir(std::isnan(value) ? "rewrite_after_load_nan" : "rewrite_after_load_zero");
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+            const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_TRUE(loaded.has_value());
+            ASSERT_TRUE(loaded->has_mmap_factor());
+            ASSERT_TRUE(loaded->predict(query, 2U, 1U).has_value());
+
+            ASSERT_TRUE(overwrite_stored_factor<double>(dir.path / "model.safetensors", 4U, 1U, 1U, value));
+            const auto pred = loaded->predict(query, 2U, 1U);
+            ASSERT_FALSE(pred.has_value()) << value;
+            EXPECT_EQ(pred.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue) << value;
+        }
+#endif
     }
 
     /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.
@@ -658,6 +833,190 @@ namespace
         auto err_st_deep = cxxgpr::persist::LoadedGpr::load(dir_st_deep.path);
         ASSERT_FALSE(err_st_deep.has_value());
         EXPECT_EQ(err_st_deep.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+    }
+
+    /// @brief Checks that query batch sizes may shrink and grow in any order on one LoadedGpr.
+    /// @details Fits a 2-feature model under precision policy P with fitted input and target transforms,
+    /// saves it, and loads it several times. One loaded model sees an 8-point batch first; the following
+    /// 3-point batch must match bitwise a loaded model that never saw the larger batch, for predict,
+    /// predict_covariance, and sample, and returning to 8 points must match a model that never saw the
+    /// smaller batch. Finally audits that predict_into() allocates nothing for a smaller batch after a larger one.
+    /// @tparam P Precision policy of the saved model.
+    /// @param[in] dir_name Unique temporary directory suffix for this policy.
+    /// @param[in] with_factor Whether the factor is stored (save_with_factor) or rebuilt on load (save).
+    template <cxxgpr::PrecisionPolicyConcept P>
+    void verify_loaded_query_batch_may_shrink(const std::string& dir_name, bool with_factor)
+    {
+        const std::size_t n = 20;
+        const std::size_t d = 2;
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            x[i] = 0.3 * static_cast<double>(i);
+            x[n + i] = 0.25 * static_cast<double>((i * 5U) % 7U);
+            y[i] = 4.0 + std::sin(x[i]) + (0.5 * x[n + i]);
+        }
+        const std::vector<double> big{0.1, 0.5, 0.9, 1.3, 1.7, 2.1, 2.5, 2.9, 0.2, 1.4, 0.6, 1.0, 0.3, 1.2, 0.8, 0.4};
+        const std::vector<double> small{0.2, 1.1, 2.3, 0.7, 0.1, 1.3};
+        const auto big_ref = cxxgpr::MatrixRef<double>(big.data(), 8U, d, 8U);
+        const auto small_ref = cxxgpr::MatrixRef<double>(small.data(), 3U, d, 3U);
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array<double, 2>{1.0, 1.5}).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec)
+                                 .with_input_transform(cxxgpr::transform::StandardizeInput())
+                                 .with_target_transform(cxxgpr::transform::StandardizeTarget())
+                                 .with_noise_variance(1e-3);
+        ASSERT_TRUE(trainer.has_value());
+        const auto fitted = trainer->factor(x, n, d, y);
+        ASSERT_TRUE(fitted.has_value());
+
+        const TempDirGuard dir(dir_name);
+        if (with_factor)
+        {
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fitted, dir.path).has_value());
+        }
+        else
+        {
+            ASSERT_TRUE(cxxgpr::persist::save(*fitted, dir.path).has_value());
+        }
+        // Every load() yields an independent model with an empty query workspace.
+        const auto load = [&]
+        {
+            return cxxgpr::persist::LoadedGpr::load(dir.path);
+        };
+
+        // predict: large -> small -> large on one loaded model.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->predict(big_ref).has_value());
+            auto shrunk = used->predict(small_ref);
+            auto shrunk_expected = never_big->predict(small_ref);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(shrunk->mean, shrunk_expected->mean);
+            EXPECT_EQ(shrunk->variance, shrunk_expected->variance);
+
+            auto regrown = used->predict(big_ref);
+            auto regrown_expected = never_small->predict(big_ref);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(regrown->mean, regrown_expected->mean);
+            EXPECT_EQ(regrown->variance, regrown_expected->variance);
+        }
+
+        // predict_covariance: large -> small -> large.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->predict_covariance(big_ref).has_value());
+            auto shrunk = used->predict_covariance(small_ref);
+            auto shrunk_expected = never_big->predict_covariance(small_ref);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(shrunk->mean, shrunk_expected->mean);
+            EXPECT_EQ(shrunk->covariance, shrunk_expected->covariance);
+
+            auto regrown = used->predict_covariance(big_ref);
+            auto regrown_expected = never_small->predict_covariance(big_ref);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(regrown->mean, regrown_expected->mean);
+            EXPECT_EQ(regrown->covariance, regrown_expected->covariance);
+        }
+
+        // sample with a fixed seed: large -> small -> large.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->sample(big_ref, 2U, 7U).has_value());
+            auto shrunk = used->sample(small_ref, 2U, 7U);
+            auto shrunk_expected = never_big->sample(small_ref, 2U, 7U);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(*shrunk, *shrunk_expected);
+
+            auto regrown = used->sample(big_ref, 2U, 7U);
+            auto regrown_expected = never_small->sample(big_ref, 2U, 7U);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(*regrown, *regrown_expected);
+        }
+
+        // predict_into: after the larger batch sized the workspace and the output, a smaller batch and a
+        // return to the larger batch perform no heap allocation.
+        {
+            auto used = load();
+            auto never_big = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            cxxgpr::Prediction<double> out;
+            ASSERT_TRUE(used->predict_into(big_ref, out).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                const auto res = used->predict_into(small_ref, out);
+                const std::size_t allocations = no_alloc.delta_allocations();
+                ASSERT_TRUE(res.has_value());
+                EXPECT_EQ(allocations, 0U);
+            }
+            auto shrunk_expected = never_big->predict(small_ref);
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(out.mean, shrunk_expected->mean);
+            EXPECT_EQ(out.variance, shrunk_expected->variance);
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                const auto res = used->predict_into(big_ref, out);
+                const std::size_t allocations = no_alloc.delta_allocations();
+                ASSERT_TRUE(res.has_value());
+                EXPECT_EQ(allocations, 0U);
+            }
+        }
+    }
+
+    /// @brief Verifies a LoadedGpr accepts a smaller query batch after a larger one.
+    /// @details Covers all four precision policies with a stored factor, plus the rebuild-on-load path,
+    /// for predict, predict_covariance, sample, and allocation-free predict_into.
+    TEST(PersistModelsTest, LoadedQueryBatchSizeMayShrinkAfterLargerBatch)
+    {
+        // Spec: REQ-07, REQ-10, REQ-11, REQ-12, DES-05, DES-16, DES-17, DES-18, FMT-05
+        {
+            SCOPED_TRACE("DoublePrecision, stored factor");
+            verify_loaded_query_batch_may_shrink<cxxgpr::DoublePrecision>("shrink_f64", true);
+        }
+        {
+            SCOPED_TRACE("DoublePrecision, factor rebuilt on load");
+            verify_loaded_query_batch_may_shrink<cxxgpr::DoublePrecision>("shrink_f64_refactor", false);
+        }
+        {
+            SCOPED_TRACE("SinglePrecision");
+            verify_loaded_query_batch_may_shrink<cxxgpr::SinglePrecision>("shrink_f32", true);
+        }
+        {
+            SCOPED_TRACE("MixedPrecision<PromoteStorage>");
+            verify_loaded_query_batch_may_shrink<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(
+                "shrink_mixed_promote", true
+            );
+        }
+        {
+            SCOPED_TRACE("MixedPrecision<ReevaluateKernel>");
+            verify_loaded_query_batch_may_shrink<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
+                "shrink_mixed_reevaluate", true
+            );
+        }
     }
 
 }  // namespace

@@ -997,7 +997,7 @@ namespace cxxgpr::detail
             .n_train = n,
             .n_features = d,
             .factor_jitter = buffers->core.factor_jitter,
-            .log_marginal_likelihood = final_mll,
+            .neg_log_marginal_likelihood = final_mll,
             .refinement_summary = ref_summary,
             .optimizer_result = std::move(opt_res),
         };
@@ -1035,7 +1035,7 @@ namespace cxxgpr::detail
                 return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
             }
             // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
-            if (auto ens = workspace.ensure_prediction(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
+            if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
                 !ens.has_value())
             {
                 return std::unexpected(std::move(ens).error());
@@ -1055,8 +1055,10 @@ namespace cxxgpr::detail
                 }
             }
 
-            // Apply fitted input transform in double precision before casting down to Storage.
-            if (auto ap = payload.input_transform->apply(workspace.query_xs, m, d); !ap.has_value())
+            // Apply fitted input transform in double precision before casting down to Storage. The workspace only
+            // grows, so restrict the span to exactly m * d values (a smaller batch may follow a larger one).
+            const std::span<double> query_span(workspace.query_xs.data(), m * d);
+            if (auto ap = payload.input_transform->apply(query_span, m, d); !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
             }
@@ -1154,6 +1156,7 @@ namespace cxxgpr::detail
     /// @retval GprErrorCode::EmptyInput When xs is empty or null.
     /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
     /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> fitted_predict_into(
         const FittedPayload<P>& payload,

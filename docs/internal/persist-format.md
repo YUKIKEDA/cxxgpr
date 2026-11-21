@@ -1,6 +1,6 @@
 # Persistence format specification
 
-This specification defines the format (`FMT-01` to `FMT-08`) in which `cxxgpr` (Exact GPR) saves to and loads from a single directory on disk. The format version is `FORMAT_VERSION = 1`. The files are `config.json` + `model.safetensors`. Note that `factor_kind: "ldlt"` and `point_ids` for online models, and Sparse models, are out of scope and are rejected on load.
+This specification defines the format (`FMT-01` to `FMT-09`) in which `cxxgpr` (Exact GPR) saves to and loads from a single directory on disk. The format version is `FORMAT_VERSION = 1`. The files are `config.json` + `model.safetensors`. Note that `factor_kind: "ldlt"` and `point_ids` for online models, and Sparse models, are out of scope and are rejected on load.
 
 ---
 
@@ -18,6 +18,7 @@ The constant `cxxgpr::persist::FORMAT_VERSION = 1` (`std::uint32_t`) is defined.
 ## FMT-02 Atomic writes and the input trust boundary
 
 - **Atomic save**: `save` / `save_with_factor` write temporary files inside the output directory (created if it does not exist) and, after flushing completes, rename-replace them to the final names (`config.json`, `model.safetensors`) in the same directory. Even when re-saving over an existing directory, files that are currently mapped are never destructively rewritten in place.
+- **Pairing of the two files**: the two renames are separate, so the pair is not replaced as a unit. `FMT-09` specifies the identifier with which `load` rejects a `config.json` and a `model.safetensors` that come from different saves (not implemented until roadmap row `REL-11` is Done).
 - **Trust boundary and validation**: the directory to load is verified as untrusted external input.
   - If the JSON nesting depth (`sum`/`product`/`pipeline`/`columnwise`) exceeds 128 levels, it is rejected with `PersistFailed(Config)`.
   - On load, the shape, dtype, and 8-byte alignment of every tensor (`x`, `y`, `l`, `alpha`, `d2.*`) are verified, as is that **every element is finite (not `NaN` and not `±∞`)**.
@@ -30,6 +31,7 @@ The constant `cxxgpr::persist::FORMAT_VERSION = 1` (`std::uint32_t`) is defined.
 | Key | Type / allowed values | Default when omitted (load) | Description |
 |---|---|---|---|
 | `format_version` | integer `1` | (required) | Format version |
+| `save_id` | string of 32 lowercase hexadecimal digits | absent: no pairing check | Pairing identifier of this save; equal to `cxxgpr.save_id` in `model.safetensors` (`FMT-09`) |
 | `n` | integer ($> 0$) | (required) | Number of training data points |
 | `d` | integer ($0$ only for `distance_only`) | (required) | Feature dimension of the training data |
 | `has_factor` | bool | (required) | Whether `model.safetensors` contains `l` and `alpha` (`false` for `save`, `true` for `save_with_factor`) |
@@ -56,7 +58,7 @@ Floating-point JSON values are written in a high-precision round-trip notation w
 
 ## FMT-04 `model.safetensors` layout and the column-major contract
 
-The file conforms to the [safetensors](https://github.com/huggingface/safetensors) specification (the first 8 bytes are a little-endian `uint64` header length, followed by the JSON header and the raw tensor data; `__metadata__` is not emitted). **Two-dimensional matrices (`x`, `l`) are stored column-major (Column-major / Fortran order)**, and the position of element `(i, j)` is `j * n + i`. On the other hand, the ARD slots `d2.<k>` are stored as concatenated per-dimension blocks (the `dims` axis outermost, the `n(n+1)/2` packed axis innermost with stride 1). The data section must be aligned to an 8-byte boundary.
+The file conforms to the [safetensors](https://github.com/huggingface/safetensors) specification (the first 8 bytes are a little-endian `uint64` header length, followed by the JSON header and the raw tensor data; `__metadata__` holds only the pairing identifier `cxxgpr.save_id` of `FMT-09`). **Two-dimensional matrices (`x`, `l`) are stored column-major (Column-major / Fortran order)**, and the position of element `(i, j)` is `j * n + i`. On the other hand, the ARD slots `d2.<k>` are stored as concatenated per-dimension blocks (the `dims` axis outermost, the `n(n+1)/2` packed axis innermost with stride 1). The data section must be aligned to an 8-byte boundary.
 
 | Tensor name | `shape` | `dtype` | Stored when | Contents |
 |---|---|---|---|---|
@@ -77,7 +79,7 @@ When verifying or using the file directly from NumPy, column-major matrices such
 | `save(dir)` | `false` | `x`, `y` (+ `d2.*`) | Rebuilds the Gram matrix from the saved transforms, $\theta$, `jitter`, and `factor_jitter`, then reconstructs the Cholesky factorization and $\alpha$ in $O(n^3)$ |
 | `save_with_factor(dir)` | `true` | `x`, `y`, `l`, `alpha` (+ `d2.*`) | Skips refactorization. The `F64` factor `l` of `DoublePrecision` is referenced directly through a read-only memory map (`mmap`) by both loaders (`has_mmap_factor()` is `true`); an `F32` factor is copied into memory. Typed extraction (`into_fitted`) copies the factor into the returned fitted model, which does not depend on the file |
 
-- **`mmap` safety requirements**: the `mmap` of the `F64` factor `l` verifies that the data start offset is aligned to an 8-byte boundary before mapping (Windows `CreateFileMapping`/`MapViewOfFile`, Linux `mmap(PROT_READ, MAP_PRIVATE)`). The contract is that no external process rewrites the file in place during the model's lifetime; replacement by `save` is done by atomic rename and therefore does not break a map in progress.
+- **`mmap` safety requirements**: the `mmap` of the `F64` factor `l` verifies that the data start offset is aligned to an 8-byte boundary before mapping (Windows `CreateFileMapping`/`MapViewOfFile`, Linux `mmap(PROT_READ, MAP_PRIVATE)`). The contract is that no external process rewrites the file in place during the model's lifetime; replacement by `save` is done by atomic rename and therefore does not break a map in progress. Predictions trust the validation done by `load` (every element finite, positive diagonal) and do not re-check the factor on each call, so the result of violating this contract is unspecified: a rewritten value can yield a silently wrong prediction, and only a non-finite latent predictive variance is still reported (`NonFiniteKernelValue`, DES-16).
 - **Loader return types**: `LoadedGpr` (a tagged union / `std::variant` wrapper holding the four Exact LLT variants `double`, `single`, `mixed_promote`, and `mixed_reevaluate`) and `LoadedDistanceGpr<C>` (`C = DistanceOnly | WithPoints`). They commonly provide `predict` (widened to `double`), `n()`, and `d()` independent of the model kind, and can be converted to a `FittedGpr` by typed extraction. A `load`ed model uses the `Retain` policy and can `refit` after `with_optimizer`.
 
 ---
@@ -105,6 +107,7 @@ For `DistanceKernel<C>` models, a `distance` section is added to `config.json`, 
 }
 ```
 
+- **Pairing identifier**: distance models carry the `FMT-09` identifier exactly as coordinate models do; it covers the `distance` section and every `d2.<k>` tensor.
 - `points` is `"distance_only"` or `"with_points"`. Loading a `DistanceKernel<WithPoints>` with a `DistanceOnly` loader (or the reverse, or with a coordinate `LoadedGpr`) always returns `PersistFailed(WrongModel)`.
 - `slots` must match the order of `DistanceKernel::slots()` (depth-first, order of first appearance). A `distance_only` kernel that contains a coordinate-dependent leaf (`rbf_ard`, `linear`, etc.) is also rejected with `PersistFailed(Config)`.
 - **`d2.<k>` storage rule**: for a scalar distance slot, the lower-triangular elements `j..n` of column $j$ (diagonal included) are packed in column order (packed position $p = jn - j(j-1)/2 + (i - j)$, length $n(n+1)/2$). For an ARD distance slot (header `shape` is `[dims, n(n+1)/2]`), a lower-triangular packed array of length $\text{packed\_len} = n(n+1)/2$ is concatenated for each dimension $m \in [0, \text{dims})$ in order (flat index `m * packed_len + p`, with the inner axis being `packed_len`). Therefore, when reading with NumPy or similar, interpret the two-dimensional column-major matrices (`x`, `l`) with `flat.reshape(meta["shape"], order="F")` and the distance tensor `d2.<k>` with `flat.reshape(meta["shape"], order="C")` (a one-dimensional scalar `d2.<k>` is identical under either `F` or `C`). For a `MixedPrecision` model, the retained high-precision `double` $d^2$ is written out and re-rounded to `float` on load.
@@ -134,3 +137,42 @@ def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarr
 | `format_version != 1` | `UnsupportedPersistVersion { found, supported: 1 }` |
 | `d2.<k>` non-finite, negative, or non-zero diagonal | `InvalidDistance` |
 | Invalid saved interval, Jitter, or kernel value | The `GprError` of the respective constructor / factory |
+| `save_id` in `config.json` that is not 32 lowercase hexadecimal digits (`FMT-09`) | `PersistFailed { PersistErrorKind::Config, reason }` |
+| Malformed `__metadata__` or `cxxgpr.save_id` in `model.safetensors`; pairing identifiers that differ, or an identifier in only one of the two files (`FMT-09`) | `PersistFailed { PersistErrorKind::Tensor, reason }` |
+
+---
+
+## FMT-09 Pairing identifier of `config.json` and `model.safetensors`
+
+Status: specified; the implementation is roadmap row `REL-11`. Until that row is Done, `save` / `save_with_factor` write no identifier, `load` performs no pairing check, and the two files are paired only by the per-file checks of `FMT-02`.
+
+`save` replaces the two files with two separate renames (`FMT-02`). When the process stops between them, or the second rename fails, the directory holds the new `model.safetensors` beside the old `config.json`. The per-file checks reject such a pair only when a tensor's shape or dtype, or the presence of a tensor, disagrees with `config.json`. Each save therefore writes one identifier into both files, and `load` rejects a pair whose identifiers differ.
+
+- **Format**: the identifier is a string of exactly 32 lowercase hexadecimal digits (`[0-9a-f]{32}`). It encodes, first byte first, the first 16 bytes (128 bits) of the SHA-256 digest (FIPS 180-4) of the message $M$ defined below.
+- **Content hash, not a random value**: the identifier is a function of the saved content only. It does not depend on the time, the process, the directory path, or a random source. Hence:
+  - `save` / `save_with_factor` are deterministic: for two models whose saved state (every `config.json` value and every tensor) is bit-identical, the same version of `cxxgpr` writes byte-identical `config.json` and `model.safetensors`.
+  - Two saves whose content differs get different identifiers, except with probability about $2^{-128}$ for a given pair of saves.
+  - Two saves whose content is identical get the same identifier. A directory that mixes their files is a consistent pair of that content and loads.
+- **Hashed message $M$**: the concatenation, in this order, of the parts below. `le64(v)` is `v` as an 8-byte little-endian unsigned integer.
+  1. The 17 ASCII bytes `cxxgpr.save_id.v1` followed by one `0x00` byte.
+  2. `le64(|C|)` and the bytes `C`, where `C` is `config.json` exactly as `save` writes it except that the `save_id` key is not serialized.
+  3. `le64(k)`, where `k` is the number of tensors, then for each tensor in the order of its data offsets in `model.safetensors`: `le64` of the name's byte length and the name (UTF-8); `le64` of the dtype string's length and the dtype string (`F64` or `F32`); `le64` of the rank and `le64` of each dimension; `le64` of the tensor's byte length and its bytes exactly as stored in the data section.
+
+  The safetensors header JSON, its padding, and `__metadata__` are not hashed: part 3 describes every tensor, and the padding carries no content. `config.json` is part of $M$ because a tensor-only hash cannot tell two saves apart that differ only in `config.json`: a `save` (no factor) after `refit` writes the same `x` and `y` with new hyperparameters.
+- **Placement**:
+  - `config.json`: the top-level key `save_id` (`FMT-03`).
+  - `model.safetensors`: the header entry `"__metadata__": {"cxxgpr.save_id": "<identifier>"}` (safetensors defines `__metadata__` as a string-to-string map). The writer emits no other `__metadata__` entry.
+- **Load check**: `LoadedGpr::load` and `LoadedDistanceGpr<C>::load` (`FMT-07`) check the pair in this order.
+  1. `config.json` is parsed and validated (`FMT-01`, `FMT-03`). A `save_id` that is not a string of 32 lowercase hexadecimal digits gives `PersistFailed(Config)`.
+  2. The `model.safetensors` header is parsed and validated (`FMT-04`). A `__metadata__` that is not a JSON object whose values are all strings, or a `cxxgpr.save_id` that is not a string of 32 lowercase hexadecimal digits, gives `PersistFailed(Tensor)`. Other `__metadata__` keys are ignored.
+  3. If both files carry an identifier and the two are equal, loading continues. If neither carries one, loading continues without a pairing check. If they differ, or only one file carries an identifier, `load` returns `PersistFailed(Tensor)` with a reason stating that the two files come from different saves.
+  4. Only then are the tensors read and checked (shape, dtype, finiteness, and `d2.<k>` by `FMT-07`). A pair from different saves is therefore reported by the pairing check even when its shapes also differ.
+
+  `load` compares the two stored strings and does not recompute the hash. Recomputing it would require reproducing the `config.json` bytes exactly, which depends on the serializer's version and would reject pairs written by other versions or tools. The identifier detects files from different saves; it is not an integrity or authenticity check (`FMT-02` treats the directory as untrusted input, and a writer can always write matching identifiers).
+- **Distance models**: `FittedDistanceGpr` saves carry the identifier exactly as coordinate models do. `C` includes the `distance` section, and part 3 includes every `d2.<k>` tensor (and no `x` for a distance-only model).
+- **Format version and backward compatibility**: `FORMAT_VERSION` stays `1`; the identifier is optional in the schema.
+  - A pair in which neither file carries an identifier (written before `REL-11`, or by an external tool) loads as before, without the pairing check.
+  - A reader that predates the identifier ignores the `save_id` key (unknown top-level keys are ignored, `FMT-03`) and skips `__metadata__`, so it loads a pair with the identifier without checking it.
+  - A pair in which only one file carries an identifier is rejected (step 3). An interrupted save leaves exactly this state when a writer that writes the identifier saves over a directory written without it, or the reverse.
+- **External tools**: a tool that writes a pair writes the same identifier of the format above into both files, or writes it into neither. A tool that rewrites one file of a pair keeps the identifier only when the result is still a consistent pair.
+- **Failure paths of `save`**: the identifier does not make the replacement of the pair atomic. After the second rename fails, `save` still returns `PersistFailed(Io)` (`FMT-02`), and the directory then fails to load by step 3 until the next successful save into it, unless the two saves wrote identical content.

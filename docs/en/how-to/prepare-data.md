@@ -38,8 +38,8 @@ Every model entry point comes in two forms that differ only in how the matrix is
 
 The span form assumes a tightly packed matrix with column stride equal to `n_rows`. Both forms return `std::expected`; for example a target vector whose length differs from the row count gives `GprErrorCode::LengthMismatch`, empty data gives `GprErrorCode::EmptyInput`, and NaN or infinity gives `GprErrorCode::NonFiniteInput`.
 
-:::{warning}
-The span form passes only the pointer of the span on to the model, together with `n_rows` and `n_cols`. The library cannot check that the buffer really holds `n_rows * n_cols` elements, and neither can it for the pointer inside a `MatrixRef`. Getting the extents right is your responsibility; use `validate_matrix` (below) to check a span against the shape you intend to pass.
+:::{note}
+The span form checks the span against the shape before it reads any element. An empty span, or a zero `n_rows` or `n_cols`, gives `GprErrorCode::EmptyInput`; dimensions whose product overflows give `GprErrorCode::SizeOverflow`; a span whose size is not exactly `n_rows * n_cols` gives `GprErrorCode::LengthMismatch`. When several of these hold, the first one in this order is returned. The `MatrixRef` form does not re-check the buffer length because a `MatrixRef` stores a pointer and the extents, not the length of the buffer. Getting the extents right when constructing a `MatrixRef` from a raw pointer is your responsibility; when your data is a `std::span`, use `MatrixRef<double>::from_span(span, n_rows, n_cols)` or the span overload directly.
 :::
 
 ## Use `MatrixRef` and `MatrixMut`
@@ -59,22 +59,23 @@ Output:
 a(2, 1) = 6, rows = 3, cols = 2, col_stride = 3, contiguous = true
 column 1 has 3 elements, first = 4
 block(0, 0) = 2, block(1, 1) = 6, contiguous = false
+from_span(5 values, 3 x 2): length mismatch: expected 6 matrix values, got 5
 after write: a(0, 0) = 10, via MatrixMut::as_ref = 10, via conversion = 10
 default view: is_empty = true, is_square = true
 ```
 
 ### Constructing views
 
-Both classes have the same four constructors:
+Both classes have the same three constructors and one checked factory:
 
-| Constructor | Meaning |
+| Constructor or factory | Meaning |
 |---|---|
 | `MatrixRef()` / `MatrixMut()` | Empty view: null pointer, zero extents. |
 | `(data, rows, cols, col_stride)` | General strided view over a pointer; requires `col_stride >= rows`. Use it for a sub-block, as `block` does above. |
-| `(data, rows, cols)` | Tightly packed view; `col_stride` equals `rows`. |
-| `(span, rows, cols)` | Tightly packed view over a span; you ensure `span.size() >= rows * cols`. |
+| `(data, rows, cols)` | Tightly packed view over a pointer; `col_stride` equals `rows`. |
+| `from_span(span, rows, cols)` | Static factory for a tightly packed view over a span. Returns `std::expected`, and the view only when `span.size() == rows * cols`. |
 
-`MatrixRef<T>` takes `const T*` or `std::span<const T>`; `MatrixMut<T>` takes `T*` or `std::span<T>`. The constructors do no validation.
+The constructors take a pointer (`const T*` for `MatrixRef<T>`, `T*` for `MatrixMut<T>`) and do no validation: you ensure that the pointer addresses every element the extents and the stride describe. `from_span` takes `std::span<const T>` for `MatrixRef<T>` and `std::span<T>` for `MatrixMut<T>`, and checks the span against the shape before it binds the pointer. An empty span, or a zero `rows` or `cols`, gives `GprErrorCode::EmptyInput`; extents whose product overflows `std::size_t` give `GprErrorCode::SizeOverflow`; a span whose size is not exactly `rows * cols` gives `GprErrorCode::LengthMismatch`. When several of these hold, the first one in this order is returned. A longer span is rejected too: to view a prefix of a buffer, pass `span.first(rows * cols)`.
 
 ### Accessors
 

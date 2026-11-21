@@ -16,3 +16,4 @@
 - `config.json` / `model.safetensors` による永続化（原子保存、`f64` 因子 mmap 読込、`PersistRegistry`）。
 - CMake `install` / `find_package(cxxgpr CONFIG)` / `FetchContent` パッケージ体裁と `0.1.0` 版統一（`REL-1`）。
 - 総合検証スイート（`path_matrix`・golden 数値照合・ホットパス確保ゼロラチェット・Google Benchmark・QA ゲート）。
+- `MatrixRef<T>::from_span(span, rows, cols)` と `MatrixMut<T>::from_span(span, rows, cols)`：スパンの長さを寸法と照合してからビューを返す検査付きファクトリ（`EmptyInput` → `SizeOverflow` → `LengthMismatch`）。スパンからビューを作る手段はこれだけで、長さを捨てる `(span, rows, cols)` コンストラクタは持たない。ポインタを受けるコンストラクタは検査せず、長さは呼び出し側が保証する。

@@ -128,7 +128,7 @@ namespace cxxgpr
             const std::size_t d = x_train.cols();
 
             // Grow query workspace once if dimensions exceed current capacity.
-            if (auto ens = workspace.ensure_prediction(n, m, d, kernel.nested_depth()); !ens.has_value())
+            if (auto ens = workspace.ensure(n, m, d, kernel.nested_depth()); !ens.has_value())
             {
                 return ens;
             }
@@ -194,6 +194,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> detail::predict_diagonal_into(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -238,7 +239,7 @@ namespace cxxgpr
         const Storage* kss_ptr = workspace.query_kss.data();
         Refine* var_ptr = out.variance.data();
 
-        // Form diagonal predictive variance max(0, k(x*_j, x*_j) - ||V_:,j||_2^2) + noise_var.
+        // Store the unclamped latent variance k(x*_j, x*_j) - ||V_:,j||_2^2 for every query column.
         const auto m_signed = static_cast<std::ptrdiff_t>(m);
 #ifdef _OPENMP
 #    pragma omp parallel for schedule(static) if ((n * m) >= 65536U)
@@ -249,8 +250,19 @@ namespace cxxgpr
             const Storage* v_col = v_ptr + (j * n);
             const auto sq_norm = detail::sq_norm_mixed_simd<Storage, Refine>(v_col, n);
             const auto prior_var = static_cast<Refine>(kss_ptr[j]);
-            const Refine latent_var = std::max(Refine{0}, prior_var - sq_norm);
-            var_ptr[j] = latent_var + noise_var;
+            var_ptr[j] = prior_var - sq_norm;
+        }
+
+        // Reject a non-finite latent variance before clamping: max(0, NaN) and max(0, -Inf) would both
+        // silently become 0. Then clamp rounding-induced negatives to 0 and add the observation noise.
+        for (std::size_t j = 0; j < m; ++j)
+        {
+            const Refine latent_var = var_ptr[j];
+            if (!std::isfinite(latent_var))
+            {
+                return std::unexpected(GprError::non_finite_kernel_value());
+            }
+            var_ptr[j] = std::max(Refine{0}, latent_var) + noise_var;
         }
 
         return {};
@@ -276,6 +288,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> predict_into(
         const CompiledKernel<typename P::Storage>& kernel,
@@ -313,6 +326,7 @@ namespace cxxgpr
     /// @retval GprErrorCode::NonFiniteInput When alpha or coordinates contain NaN or +/-Inf.
     /// @retval GprErrorCode::SizeOverflow When workspace sizing overflows std::size_t.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor has a non-positive diagonal pivot.
+    /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> predict(
         const CompiledKernel<typename P::Storage>& kernel,

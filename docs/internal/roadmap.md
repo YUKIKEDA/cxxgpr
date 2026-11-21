@@ -101,6 +101,9 @@ flowchart LR
 | REL-6 | Feat | `DistanceGpr` / `FittedDistanceGpr`: fit, factor, predict, covariance, sampling, LOO for `DistanceOnly` and `WithPoints` | #105 | Done |
 | REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Todo |
 | REL-8 | Design | Decide the `MixedPrecision<PromoteStorage>` acceptance rule (DES-05) | #108 | Done |
+| REL-9 | Design | Align the `OptimizationNotConverged` specification with the implementation: built-in optimizers report non-convergence as success with `converged == false`; the code remains for user-defined optimizers | #111 | Done |
+| REL-10 | Design | Checked `from_span` factories for `MatrixRef` / `MatrixMut` and removal of the unchecked `(span, rows, cols)` constructors | #113 | Done |
+| REL-11 | Design | Per-save pairing identifier of `config.json` and `model.safetensors` (FMT-09): specification, then implementation for `LoadedGpr` and `LoadedDistanceGpr<C>` after REL-7 and PR #101 merge | #114 | In progress |
 
 ## Out of scope
 
