@@ -39,7 +39,7 @@ x(1, 1) = 20, buffer = 1 2 3 | 10 20 30
 スパンの形は、列ストライドが `n_rows` に等しい密な行列を前提にする。どちらの形も `std::expected` を返す。たとえば、目的変数の長さが行数と違えば `GprErrorCode::LengthMismatch`、データが空なら `GprErrorCode::EmptyInput`、NaN や無限大があれば `GprErrorCode::NonFiniteInput` になる。
 
 :::{note}
-スパンの形は、要素を読む前に、スパンと形状が合っているかを検査する。スパンが空か、`n_rows` または `n_cols` が 0 なら `GprErrorCode::EmptyInput` になる。次元の積があふれる場合は `GprErrorCode::SizeOverflow`、スパンの大きさが `n_rows * n_cols` と一致しない場合は `GprErrorCode::LengthMismatch` になる。複数が同時に成り立つときは、この順で最初のものを返す。`MatrixRef` の形は検査しない。`MatrixRef` が持つのはポインタと寸法だけで、バッファの長さは持たない。`(span, rows, cols)` のコンストラクタで作っても同じで、`span.data()` だけを保持し、`span.size()` は捨てる。`MatrixRef` の寸法を正しく与える責任は、呼び出し側にある。データがスパンなら、スパンの形を使うのがよい。そうでなければ、ビューを作る前に `validate_matrix(span, n_rows, n_cols)`（後述）で検査する。
+スパンの形は、要素を読む前に、スパンと形状が合っているかを検査する。スパンが空か、`n_rows` または `n_cols` が 0 なら `GprErrorCode::EmptyInput` になる。次元の積があふれる場合は `GprErrorCode::SizeOverflow`、スパンの大きさが `n_rows * n_cols` と一致しない場合は `GprErrorCode::LengthMismatch` になる。複数が同時に成り立つときは、この順で最初のものを返す。`MatrixRef` の形はバッファ長を再検査しない。`MatrixRef` が持つのはポインタと寸法だけで、バッファの長さは持たないためである。生ポインタから `MatrixRef` を作る場合は、正しい寸法を与える責任が呼び出し側にある。データが `std::span` なら、`MatrixRef<double>::from_span(span, n_rows, n_cols)` またはスパンのオーバーロードを直接使うのがよい。
 :::
 
 ## `MatrixRef` と `MatrixMut` を使う
@@ -59,22 +59,23 @@ x(1, 1) = 20, buffer = 1 2 3 | 10 20 30
 a(2, 1) = 6, rows = 3, cols = 2, col_stride = 3, contiguous = true
 column 1 has 3 elements, first = 4
 block(0, 0) = 2, block(1, 1) = 6, contiguous = false
+from_span(5 values, 3 x 2): length mismatch: expected 6 matrix values, got 5
 after write: a(0, 0) = 10, via MatrixMut::as_ref = 10, via conversion = 10
 default view: is_empty = true, is_square = true
 ```
 
 ### ビューを作る
 
-2 つのクラスは、同じ 4 つのコンストラクタを持つ。
+2 つのクラスは、同じ 3 つのコンストラクタと、検査付きのファクトリ 1 つを持つ。
 
-| コンストラクタ | 意味 |
+| コンストラクタ・ファクトリ | 意味 |
 |---|---|
 | `MatrixRef()` / `MatrixMut()` | 空のビュー。ポインタは null、大きさは 0。 |
 | `(data, rows, cols, col_stride)` | ポインタ上の一般のストライドつきビュー。`col_stride >= rows` が必要。上の `block` のように部分ブロックに使う。 |
-| `(data, rows, cols)` | 密なビュー。`col_stride` は `rows` に等しい。 |
-| `(span, rows, cols)` | スパン上の密なビュー。`span.size() >= rows * cols` は呼び出し側が保証する。 |
+| `(data, rows, cols)` | ポインタ上の密なビュー。`col_stride` は `rows` に等しい。 |
+| `from_span(span, rows, cols)` | スパン上の密なビューを作る静的ファクトリ。`std::expected` を返し、`span.size() == rows * cols` のときだけビューを返す。 |
 
-`MatrixRef<T>` は `const T*` か `std::span<const T>` を取る。`MatrixMut<T>` は `T*` か `std::span<T>` を取る。コンストラクタは検査をしない。
+コンストラクタはポインタを取り（`MatrixRef<T>` は `const T*`、`MatrixMut<T>` は `T*`）、検査をしない。寸法とストライドが指す全ての要素をポインタが指していることは、呼び出し側が保証する。`from_span` は、`MatrixRef<T>` なら `std::span<const T>`、`MatrixMut<T>` なら `std::span<T>` を取り、ポインタを結び付ける前にスパンと形状を照合する。スパンが空か、`rows` または `cols` が 0 なら `GprErrorCode::EmptyInput` になる。寸法の積が `std::size_t` をあふれる場合は `GprErrorCode::SizeOverflow`、スパンの大きさが `rows * cols` とちょうど一致しない場合は `GprErrorCode::LengthMismatch` になる。複数が同時に成り立つときは、この順で最初のものを返す。長すぎるスパンも拒否する。バッファの先頭部分だけを見たいときは、`span.first(rows * cols)` を渡す。
 
 ### アクセサ
 

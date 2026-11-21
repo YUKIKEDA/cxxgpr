@@ -102,6 +102,7 @@ flowchart LR
 | REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Todo |
 | REL-8 | Design | Decide the `MixedPrecision<PromoteStorage>` acceptance rule (DES-05) | #108 | Done |
 | REL-9 | Design | Align the `OptimizationNotConverged` specification with the implementation: built-in optimizers report non-convergence as success with `converged == false`; the code remains for user-defined optimizers | #111 | Done |
+| REL-10 | Design | Checked `from_span` factories for `MatrixRef` / `MatrixMut` and removal of the unchecked `(span, rows, cols)` constructors | #113 | Done |
 
 ## Out of scope
 
