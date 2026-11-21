@@ -98,9 +98,16 @@ namespace cxxgpr
         };
 
         /// @brief Reusable query scratch buffers owned by one fitted model object.
+        /// @details Every member grows monotonically and is reused, so a prediction of the same or a smaller size
+        /// than an earlier one allocates nothing. The contents are scratch: a failed call may leave them partially
+        /// written, and every call rewrites what it reads.
         /// @tparam Storage Storage scalar type.
         template <typename Storage> struct DistanceQueryScratch
         {
+            /// @brief Validated cross tables of the latest query, refilled in place by every call.
+            std::optional<CheckedDistanceStore<Storage>> cross_store;
+            /// @brief Scratch of the prior-diagonal evaluation.
+            std::vector<Storage> diag_scratch;
             /// @brief Cross-covariance K(X, X*) and then L^-1 K(X, X*), n x m.
             std::vector<Storage> k_star;
             /// @brief Scratch for the kernel tree evaluation, n x m.
@@ -302,15 +309,22 @@ namespace cxxgpr
         ~FittedDistanceGpr() = default;
 
         /// @brief Posterior mean and diagonal variance at m query points.
+        /// @details The inputs are checked in this order, and the first failure is returned: the structure of the
+        /// tables (slots, emptiness, size products, shapes), their row count, the number of ARD tables, and only
+        /// then the table values. A failure leaves the fitted state unchanged.
         /// @param[in] cross Rectangular n x m tables of squared distances from training points to query points,
         /// bound to the slots of kernel().
         /// @param[in] options Variance selection.
         /// @return Prediction on the original target scale, or GprError.
-        /// @retval GprErrorCode::DistanceSlot When a slot is missing or duplicated.
-        /// @retval GprErrorCode::LengthMismatch When the tables do not have n rows.
-        /// @retval GprErrorCode::InvalidDistance When a table is non-finite or negative.
-        /// @retval GprErrorCode::UnsupportedKernelOperation When this is a WithPoints model (use the overload with
-        /// coordinates).
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of cross is invalid.
+        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
+        /// @retval GprErrorCode::EmptyInput When a table is empty.
+        /// @retval GprErrorCode::LengthMismatch When the tables differ in shape or do not have n_train() rows.
+        /// @retval GprErrorCode::DimensionMismatch When an ARD slot supplies the wrong number of tables.
+        /// @retval GprErrorCode::InvalidDistance When a table entry is non-finite or negative.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf before its
+        /// clamp at zero.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
             const DistanceSource& cross, const PredictOptions& options = {}
         ) const
@@ -325,11 +339,24 @@ namespace cxxgpr
         }
 
         /// @brief Posterior mean and diagonal variance at m query points of a WithPoints model.
+        /// @details Checks, in this order: empty xq, the structure of the tables, their row count and the rows of
+        /// xq, the number of ARD tables and the columns of xq, the finiteness of xq, and the table values. A
+        /// failure leaves the fitted state unchanged.
         /// @param[in] cross Rectangular n x m tables of squared distances from training points to query points.
         /// @param[in] xq Query coordinates, m x d.
         /// @param[in] options Variance selection.
         /// @return Prediction on the original target scale, or GprError.
-        /// @retval GprErrorCode::DimensionMismatch When xq.cols() != n_features().
+        /// @retval GprErrorCode::EmptyInput When xq or a table is empty.
+        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
+        /// @retval GprErrorCode::LengthMismatch When the tables differ in shape, do not have n_train() rows, or
+        /// xq.rows() differs from the table columns.
+        /// @retval GprErrorCode::DimensionMismatch When xq.cols() != n_features() or an ARD slot supplies the wrong
+        /// number of tables.
+        /// @retval GprErrorCode::NonFiniteInput When xq contains NaN or Inf.
+        /// @retval GprErrorCode::InvalidDistance When a table entry is non-finite or negative.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf before its
+        /// clamp at zero.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
             const DistanceSource& cross, MatrixRef<double> xq, const PredictOptions& options = {}
         ) const
@@ -343,11 +370,15 @@ namespace cxxgpr
             return out;
         }
 
-        /// @brief Same as predict(), writing into out so that repeated calls allocate nothing after warm-up.
+        /// @brief Same as predict(), writing into out and reusing this object's query workspace.
+        /// @details The validated cross tables, the dense query buffers and out grow to the largest query count
+        /// seen. After one call with m queries, a call with the same slots and at most m queries performs no heap
+        /// allocation; only the first call and a call with more queries (or more ARD dimensions) allocate.
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[out] out Prediction buffers.
         /// @param[in] options Variance selection.
         /// @return Empty expected on success, or GprError (see predict()).
+        /// @note Copies of a model own separate workspaces; one object must not be queried from two threads at once.
         [[nodiscard]] std::expected<void, GprError> predict_into(
             const DistanceSource& cross, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
@@ -356,7 +387,9 @@ namespace cxxgpr
             return detail::predict_distance_into<P, C>(*payload_, scratch_, cross, std::nullopt, options, out);
         }
 
-        /// @brief Same as predict() for a WithPoints model, writing into out.
+        /// @brief Same as predict() for a WithPoints model, writing into out and reusing the query workspace.
+        /// @details Allocates nothing after a warm-up call with the same slots and at least as many queries; see
+        /// the DistanceOnly overload.
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[in] xq Query coordinates, m x d.
         /// @param[out] out Prediction buffers.
@@ -707,12 +740,19 @@ namespace cxxgpr
         /// the kernel.
         /// @param[in] y Training targets, one per training point.
         /// @return Fitted model, or GprError leaving this trainer unchanged.
+        /// @details Checks, in this order: empty y, the structure of the tables (slots, emptiness, size products,
+        /// shapes), y.size() against the table order, the number of ARD tables, the finiteness of y, and only then
+        /// the table values; the table is validated once, not per objective evaluation.
         /// @retval GprErrorCode::EmptyInput When y or a table is empty.
-        /// @retval GprErrorCode::LengthMismatch When y.size() differs from the table order.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of train is invalid.
+        /// @retval GprErrorCode::UnsupportedKernelOperation When train binds a slot of another kernel.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
+        /// @retval GprErrorCode::LengthMismatch When a table is not square, the tables differ in shape, or y.size()
+        /// differs from the table order.
+        /// @retval GprErrorCode::DimensionMismatch When an ARD slot supplies the wrong number of tables.
         /// @retval GprErrorCode::NonFiniteInput When y contains NaN or Inf.
         /// @retval GprErrorCode::InvalidDistance When a table is non-finite, negative, asymmetric or nonzero on the
         /// diagonal (unless repaired with DistanceSource::tidy()).
-        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or mismatched.
         /// @retval GprErrorCode::CholeskyFailed When factorization fails after the jitter policy is exhausted.
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
             const DistanceSource& train, std::span<const double> y
@@ -723,10 +763,16 @@ namespace cxxgpr
         }
 
         /// @brief Optimizes the hyperparameters and fits a WithPoints model.
+        /// @details Checks as the DistanceOnly overload, with x added: empty x with y, x.rows() with the table
+        /// order, x.cols() against the coordinate leaves with the ARD table counts, and the finiteness of x with y.
         /// @param[in] train Square tables of squared distances between the training points.
         /// @param[in] x Training coordinates, n x d, for the coordinate leaves of the kernel.
         /// @param[in] y Training targets.
         /// @return Fitted model, or GprError leaving this trainer unchanged.
+        /// @retval GprErrorCode::EmptyInput When y, x or a table is empty.
+        /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from the table order.
+        /// @retval GprErrorCode::DimensionMismatch When x.cols() does not match an ARD coordinate leaf.
+        /// @retval GprErrorCode::NonFiniteInput When y or x contains NaN or Inf.
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
             const DistanceSource& train, MatrixRef<double> x, std::span<const double> y
         ) const

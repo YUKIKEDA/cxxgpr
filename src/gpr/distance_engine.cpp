@@ -20,6 +20,7 @@
 #include <numbers>
 
 #include "gpr/refine_constants.hpp"
+#include "kernel/distance_store.hpp"
 #include "linalg/factor_validation.hpp"
 #include "workspace/mll_kernels.hpp"
 #include "workspace/sample_draws.hpp"
@@ -706,9 +707,9 @@ namespace cxxgpr
                     {
                         return std::unexpected(std::move(b_inf).error());
                     }
-                    const double storage_tol = detail::promote_storage_accept_factor
-                        * static_cast<double>(std::numeric_limits<float>::epsilon());
-                    return meets_relative_residual(*b_inf, w, y64_, r_true, std::max(tol, storage_tol));
+                    return meets_relative_residual(
+                        *b_inf, w, y64_, r_true, detail::promote_storage_accept_tolerance(tol)
+                    );
                 }
             }
 
@@ -835,27 +836,50 @@ namespace cxxgpr
         using Refine = typename P::Refine;
         constexpr bool with_points = std::same_as<C, WithPoints>;
 
-        // Validation order: empty inputs, target length against the tables, finiteness, tables, transforms.
+        // Validation order (each phase in the order of the error-code contract): empty arguments, structure of the
+        // supplied tables (slots, emptiness, size products, shapes) without reading values, lengths against the table
+        // order, dimensions, finiteness of the targets and points, and only then the table values.
         const std::size_t n = y.size();
         if (n == 0U)
         {
             return std::unexpected(GprError::empty_input());
         }
-        std::vector<double> x_f64;
-        std::size_t d = 0;
         if constexpr (with_points)
         {
-            if (!x.has_value())
+            if (!x.has_value() || x->is_empty() || x->data() == nullptr)
             {
                 return std::unexpected(GprError::empty_input());
             }
+        }
+
+        auto compiled = std::make_shared<CompiledDistanceKernel<Storage>>(cfg.kernel.template compile<Storage>());
+        compiled->set_kernel_exp(cfg.kernel_exp);
+        auto shape = check_distance_structure(*compiled, train, true);
+        if (!shape.has_value())
+        {
+            return std::unexpected(std::move(shape).error());
+        }
+        if (shape->rows != n)
+        {
+            return std::unexpected(GprError::length_mismatch("target length must match training table order"));
+        }
+        if constexpr (with_points)
+        {
             if (x->rows() != n)
             {
-                return std::unexpected(GprError::length_mismatch("target length must match training row count"));
+                return std::unexpected(GprError::length_mismatch("training point rows must match the table order"));
             }
-            if (auto cp = copy_points(*x, x_f64); !cp.has_value())
+        }
+        if (auto counts = check_distance_ard_counts(*compiled, train); !counts.has_value())
+        {
+            return std::unexpected(std::move(counts).error());
+        }
+        std::size_t d = 0;
+        if constexpr (with_points)
+        {
+            if (auto cols = check_distance_point_cols(*compiled, x->cols()); !cols.has_value())
             {
-                return std::unexpected(std::move(cp).error());
+                return std::unexpected(std::move(cols).error());
             }
             d = x->cols();
         }
@@ -866,17 +890,18 @@ namespace cxxgpr
                 return std::unexpected(GprError::non_finite_input());
             }
         }
-
-        auto compiled = std::make_shared<CompiledDistanceKernel<Storage>>(cfg.kernel.template compile<Storage>());
-        compiled->set_kernel_exp(cfg.kernel_exp);
-        auto store = compiled->prepare_square(train);
+        std::vector<double> x_f64;
+        if constexpr (with_points)
+        {
+            if (auto cp = copy_points(*x, x_f64); !cp.has_value())
+            {
+                return std::unexpected(std::move(cp).error());
+            }
+        }
+        auto store = make_distance_store(*compiled, train, *shape, true);
         if (!store.has_value())
         {
             return std::unexpected(std::move(store).error());
-        }
-        if (store->rows() != n)
-        {
-            return std::unexpected(GprError::length_mismatch("target length must match training table order"));
         }
 
         DistanceFittedPayload<P, C> payload{
@@ -1088,14 +1113,103 @@ namespace cxxgpr
     namespace
     {
 
-        /// @brief Validates the query coordinates of a WithPoints model and stages them in double and storage scalar.
+        /// @brief Shapes of the tables of a query whose structure, lengths and dimensions were checked.
+        struct QueryShapes
+        {
+            /// @brief Shape of the cross tables (n_train x m).
+            detail::DistanceTableShape cross;
+            /// @brief Shape of the query-to-query tables (m x m), when the call takes them.
+            detail::DistanceTableShape query;
+        };
+
+        /// @brief Runs the shape phases of query validation without reading any table value or coordinate.
+        /// @details Order: EmptyInput for missing or empty query points (WithPoints); the structure of the cross
+        /// tables and then of the query-to-query tables; LengthMismatch for cross rows against the training size,
+        /// for query point rows and for the query-to-query order against the query count; DimensionMismatch for ARD
+        /// table counts and for the query point columns against the training features.
         /// @tparam P Precision policy.
         /// @tparam C Distance mode.
         /// @param[in] payload Fitted state.
-        /// @param[in] xq Query coordinates (required for WithPoints).
+        /// @param[in] cross Cross tables (n_train x m).
+        /// @param[in] query Query-to-query tables (m x m), or nullptr for a call that does not take them.
+        /// @param[in] xq Optional query coordinates (WithPoints).
+        /// @return Table shapes, or the first violated GprError.
+        template <PrecisionPolicyConcept P, DistanceModeConcept C>
+        [[nodiscard]] std::expected<QueryShapes, GprError> check_query_shapes(
+            const detail::DistanceFittedPayload<P, C>& payload,
+            const DistanceSource& cross,
+            const DistanceSource* query,
+            std::optional<MatrixRef<double>> xq
+        )
+        {
+            if constexpr (std::same_as<C, WithPoints>)
+            {
+                if (!xq.has_value() || xq->is_empty() || xq->data() == nullptr)
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+            }
+            auto cross_shape = detail::check_distance_structure(*payload.compiled, cross, false);
+            if (!cross_shape.has_value())
+            {
+                return std::unexpected(std::move(cross_shape).error());
+            }
+            QueryShapes shapes{.cross = *cross_shape, .query = {}};
+            if (query != nullptr)
+            {
+                auto query_shape = detail::check_distance_structure(*payload.compiled, *query, true);
+                if (!query_shape.has_value())
+                {
+                    return std::unexpected(std::move(query_shape).error());
+                }
+                shapes.query = *query_shape;
+            }
+            if (shapes.cross.rows != payload.n_train)
+            {
+                return std::unexpected(GprError::length_mismatch("cross tables must have one row per training point"));
+            }
+            const std::size_t m = shapes.cross.cols;
+            if constexpr (std::same_as<C, WithPoints>)
+            {
+                if (xq->rows() != m)
+                {
+                    return std::unexpected(GprError::length_mismatch("query coordinate rows must match the tables"));
+                }
+            }
+            if (query != nullptr && shapes.query.rows != m)
+            {
+                return std::unexpected(GprError::length_mismatch("query tables must match the cross tables"));
+            }
+            if (auto counts = detail::check_distance_ard_counts(*payload.compiled, cross); !counts.has_value())
+            {
+                return std::unexpected(std::move(counts).error());
+            }
+            if (query != nullptr)
+            {
+                if (auto counts = detail::check_distance_ard_counts(*payload.compiled, *query); !counts.has_value())
+                {
+                    return std::unexpected(std::move(counts).error());
+                }
+            }
+            if constexpr (std::same_as<C, WithPoints>)
+            {
+                if (xq->cols() != payload.n_features)
+                {
+                    return std::unexpected(GprError::dimension_mismatch(xq->cols(), payload.n_features));
+                }
+            }
+            return shapes;
+        }
+
+        /// @brief Checks the finiteness of the query coordinates and stages them, transformed, in the scratch.
+        /// @details Called after check_query_shapes(); reuses the grow-only coordinate buffers of @p scratch.
+        /// @tparam P Precision policy.
+        /// @tparam C Distance mode.
+        /// @param[in] payload Fitted state.
         /// @param[in,out] scratch Query buffers receiving the staged coordinates.
+        /// @param[in] xq Query coordinates (required for WithPoints).
         /// @param[in] m Number of query points defined by the cross tables.
-        /// @return Staged coordinates, or GprError.
+        /// @return Staged coordinates (std::nullopt for DistanceOnly), or GprError.
         template <PrecisionPolicyConcept P, DistanceModeConcept C>
         [[nodiscard]] std::expected<std::optional<MatrixRef<typename P::Storage>>, GprError> stage_queries(
             const detail::DistanceFittedPayload<P, C>& payload,
@@ -1107,19 +1221,7 @@ namespace cxxgpr
             using Storage = typename P::Storage;
             if constexpr (std::same_as<C, WithPoints>)
             {
-                if (!xq.has_value() || xq->is_empty() || xq->data() == nullptr)
-                {
-                    return std::unexpected(GprError::empty_input());
-                }
-                if (xq->cols() != payload.n_features)
-                {
-                    return std::unexpected(GprError::dimension_mismatch(xq->cols(), payload.n_features));
-                }
-                if (xq->rows() != m)
-                {
-                    return std::unexpected(GprError::length_mismatch("query coordinate rows must match the tables"));
-                }
-                if (auto cp = copy_points(*xq, scratch.xq_double); !cp.has_value())
+                if (auto cp = copy_points(xq.value_or(MatrixRef<double>{}), scratch.xq_double); !cp.has_value())
                 {
                     return std::unexpected(std::move(cp).error());
                 }
@@ -1146,53 +1248,44 @@ namespace cxxgpr
             }
         }
 
-        /// @brief Computes K(X, X*), the posterior mean weights and V = L^-1 K(X, X*) in the scratch buffers.
+        /// @brief Validates the cross table values, computes K(X, X*), the posterior mean and V = L^-1 K(X, X*).
+        /// @details Called after check_query_shapes() and stage_queries(). The cross store and the dense buffers
+        /// of @p scratch grow monotonically; only the active n x m views are passed to the size-checked routines.
         /// @tparam P Precision policy.
         /// @tparam C Distance mode.
         /// @param[in] payload Fitted state.
         /// @param[in,out] scratch Query buffers; k_star holds V on success.
         /// @param[in] cross Rectangular n x m tables.
-        /// @param[in] xq Optional query coordinates (WithPoints).
+        /// @param[in] cross_shape Shape returned by check_query_shapes().
+        /// @param[in] xq_staged Staged query coordinates (WithPoints).
         /// @param[out] mean_t Posterior mean on the transformed scale, length m.
-        /// @param[out] xq_staged Staged query coordinates for the prior variance.
-        /// @return Number of query points, or GprError.
+        /// @return Empty expected, or GprError.
         template <PrecisionPolicyConcept P, DistanceModeConcept C>
-        [[nodiscard]] std::expected<std::size_t, GprError> cross_and_solve(
+        [[nodiscard]] std::expected<void, GprError> cross_and_solve(
             const detail::DistanceFittedPayload<P, C>& payload,
             detail::DistanceQueryScratch<typename P::Storage>& scratch,
             const DistanceSource& cross,
-            std::optional<MatrixRef<double>> xq,
-            std::vector<typename P::Refine>& mean_t,
-            std::optional<MatrixRef<typename P::Storage>>& xq_staged
+            detail::DistanceTableShape cross_shape,
+            std::optional<MatrixRef<typename P::Storage>> xq_staged,
+            std::vector<typename P::Refine>& mean_t
         )
         {
             using Storage = typename P::Storage;
             using Refine = typename P::Refine;
             const std::size_t n = payload.n_train;
+            const std::size_t m = cross_shape.cols;
 
-            // Validate the query supply before any workspace growth.
-            auto cross_store = payload.compiled->prepare_cross(cross);
+            auto cross_store =
+                detail::fill_distance_store(*payload.compiled, cross, cross_shape, false, scratch.cross_store);
             if (!cross_store.has_value())
             {
                 return std::unexpected(std::move(cross_store).error());
             }
-            if (cross_store->rows() != n)
-            {
-                return std::unexpected(GprError::length_mismatch("cross tables must have one row per training point"));
-            }
-            const std::size_t m = cross_store->cols();
             auto nm = checked_mul(n, m);
             if (!nm.has_value())
             {
                 return std::unexpected(std::move(nm).error());
             }
-            auto staged = stage_queries<P, C>(payload, scratch, xq, m);
-            if (!staged.has_value())
-            {
-                return std::unexpected(std::move(staged).error());
-            }
-            xq_staged = *staged;
-
             if (scratch.k_star.size() < *nm)
             {
                 scratch.k_star.resize(*nm);
@@ -1204,7 +1297,10 @@ namespace cxxgpr
             if (scratch.nested.depth() < payload.compiled->nested_depth() || scratch.nested.rows() < n
                 || scratch.nested.cols() < m)
             {
-                scratch.nested.resize(payload.compiled->nested_depth(), n, m);
+                scratch.nested.resize(
+                    std::max(scratch.nested.depth(), payload.compiled->nested_depth()),
+                    std::max(scratch.nested.rows(), n), std::max(scratch.nested.cols(), m)
+                );
             }
             std::optional<MatrixRef<Storage>> x_train;
             if constexpr (std::same_as<C, WithPoints>)
@@ -1214,7 +1310,7 @@ namespace cxxgpr
             MatrixMut<Storage> k_star(scratch.k_star.data(), n, m, n);
             MatrixMut<Storage> k_scratch(scratch.scratch.data(), n, m, n);
             if (auto ap =
-                    payload.compiled->apply_cross(*cross_store, x_train, xq_staged, k_star, k_scratch, scratch.nested);
+                    payload.compiled->apply_cross(**cross_store, x_train, xq_staged, k_star, k_scratch, scratch.nested);
                 !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
@@ -1244,7 +1340,7 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(sv).error());
             }
-            return m;
+            return {};
         }
 
         /// @brief Applies the inverse target transform to a mean vector through the double staging buffer.
@@ -1311,23 +1407,27 @@ namespace cxxgpr
             using Refine = typename P::Refine;
             const std::size_t n = payload.n_train;
 
-            std::vector<Refine> mean_t;
-            std::optional<MatrixRef<Storage>> xq_staged;
-            auto m_res = cross_and_solve<P, C>(payload, scratch, cross, xq, mean_t, xq_staged);
-            if (!m_res.has_value())
+            auto shapes = check_query_shapes<P, C>(payload, cross, &query, xq);
+            if (!shapes.has_value())
             {
-                return std::unexpected(std::move(m_res).error());
+                return std::unexpected(std::move(shapes).error());
             }
-            const std::size_t m = *m_res;
-
-            auto query_store = payload.compiled->prepare_square(query);
+            const std::size_t m = shapes->cross.cols;
+            auto xq_staged = stage_queries<P, C>(payload, scratch, xq, m);
+            if (!xq_staged.has_value())
+            {
+                return std::unexpected(std::move(xq_staged).error());
+            }
+            std::vector<Refine> mean_t;
+            if (auto solved = cross_and_solve<P, C>(payload, scratch, cross, shapes->cross, *xq_staged, mean_t);
+                !solved.has_value())
+            {
+                return std::unexpected(std::move(solved).error());
+            }
+            auto query_store = detail::make_distance_store(*payload.compiled, query, shapes->query, true);
             if (!query_store.has_value())
             {
                 return std::unexpected(std::move(query_store).error());
-            }
-            if (query_store->rows() != m)
-            {
-                return std::unexpected(GprError::length_mismatch("query tables must match the cross tables"));
             }
             auto mm = checked_mul(m, m);
             if (!mm.has_value())
@@ -1339,8 +1439,9 @@ namespace cxxgpr
             auto nested = payload.compiled->make_nested_buffers(m, m);
             MatrixMut<Storage> kqq_mut(k_qq.data(), m, m, m);
             MatrixMut<Storage> kqq_scratch_mut(k_qq_scratch.data(), m, m, m);
-            if (auto ap =
-                    payload.compiled->apply(*query_store, xq_staged, kqq_mut, Triangle::Lower, kqq_scratch_mut, nested);
+            if (auto ap = payload.compiled->apply(
+                    *query_store, *xq_staged, kqq_mut, Triangle::Lower, kqq_scratch_mut, nested
+                );
                 !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
@@ -1408,20 +1509,32 @@ namespace cxxgpr
         using Refine = typename P::Refine;
         const std::size_t n = payload.n_train;
 
-        std::optional<MatrixRef<Storage>> xq_staged;
-        auto m_res = cross_and_solve<P, C>(payload, scratch, cross, xq, out.mean, xq_staged);
-        if (!m_res.has_value())
+        // Shapes of every input first, then the coordinates, then the table values (see check_query_shapes()).
+        auto shapes = check_query_shapes<P, C>(payload, cross, nullptr, xq);
+        if (!shapes.has_value())
         {
-            return std::unexpected(std::move(m_res).error());
+            return std::unexpected(std::move(shapes).error());
         }
-        const std::size_t m = *m_res;
+        const std::size_t m = shapes->cross.cols;
+        auto xq_staged = stage_queries<P, C>(payload, scratch, xq, m);
+        if (!xq_staged.has_value())
+        {
+            return std::unexpected(std::move(xq_staged).error());
+        }
+        if (auto solved = cross_and_solve<P, C>(payload, scratch, cross, shapes->cross, *xq_staged, out.mean);
+            !solved.has_value())
+        {
+            return solved;
+        }
 
-        // Prior variances k(x*, x*) at zero distance.
+        // Prior variances k(x*, x*) at zero distance, with grow-only scratch.
         if (scratch.k_ss.size() < m)
         {
             scratch.k_ss.resize(m);
         }
-        if (auto diag = payload.compiled->fill_diag(m, xq_staged, std::span<Storage>(scratch.k_ss.data(), m));
+        if (auto diag = fill_distance_diag(
+                *payload.compiled, m, *xq_staged, std::span<Storage>(scratch.k_ss.data(), m), scratch.diag_scratch
+            );
             !diag.has_value())
         {
             return diag;
@@ -1444,8 +1557,19 @@ namespace cxxgpr
             {
                 sq += static_cast<double>(v_col[i]) * static_cast<double>(v_col[i]);
             }
-            const double latent = std::max(0.0, static_cast<double>(scratch.k_ss[j]) - sq);
-            out.variance[j] = static_cast<Refine>(latent) + noise;
+            // Store the unclamped latent variance; it is checked and clamped below.
+            out.variance[j] = static_cast<Refine>(static_cast<double>(scratch.k_ss[j]) - sq);
+        }
+        // Reject a non-finite latent variance before clamping: max(0, NaN) and max(0, -Inf) would both silently
+        // become 0. Then clamp rounding-induced negatives to 0 and add the observation noise.
+        for (std::size_t j = 0; j < m; ++j)
+        {
+            const Refine latent = out.variance[j];
+            if (!std::isfinite(latent))
+            {
+                return std::unexpected(GprError::non_finite_kernel_value());
+            }
+            out.variance[j] = std::max(Refine{0}, latent) + noise;
         }
 
         if (auto r = inverse_mean<Refine>(*payload.target_transform, std::span<Refine>(out.mean), scratch.mean_tmp);

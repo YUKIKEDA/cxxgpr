@@ -62,7 +62,7 @@
 :end-before: // [end]
 ```
 
-`predict` は元の目的変数の尺度で、平均と周辺分散を返す。`predict_into` は自分で持つ `Prediction` へ書き込むので、繰り返し呼ぶときに記憶領域を再利用できる。`WithPoints` のモデルでは、表の後ろに予測点の座標を渡す（`predict(cross, xq)`）。
+`predict` は元の目的変数の尺度で、平均と周辺分散を返す。`predict_into` は自分で持つ `Prediction` へ書き込み、モデルの問い合わせ用作業領域を使い回す。m 点で一度呼んだ後は、同じスロットで m 点以下の呼び出しはメモリを確保しない。`WithPoints` のモデルでは、表の後ろに予測点の座標を渡す（`predict(cross, xq)`）。
 
 ## 手順 4: 共分散・サンプル・交差検証
 
@@ -91,8 +91,12 @@
 | `GprErrorCode` | 原因 |
 |---|---|
 | `InvalidDistance` | 表が非有限・負・非対称、または対角が 0 でない |
-| `DistanceSlot` | スロットが無い・二重に結び付いている、または表の形が合わない |
-| `UnsupportedKernelOperation` | `WithPoints` のモデルに `predict(cross)` を呼んだ（座標を渡すこと） |
+| `DistanceSlot` | スロットが無い・二重に結び付いている、または別の種類の表（ARD の代わりにスカラー、またはその逆）を結び付けた |
+| `LengthMismatch` | 学習の表が正方でない、同じ供給の表どうしで形が違う、または表の次数が目的変数・学習点・問い合わせ座標と合わない |
+| `DimensionMismatch` | ARD のスロットに、宣言と違う枚数の次元別の表を結び付けた |
+| `UnsupportedKernelOperation` | 供給が別のカーネルのスロットを結び付けている（別のモデルのスロットなど） |
+
+形の誤りは、表の値を読む前にすべて報告される。形も値も誤っている供給では、形の誤りが返る。
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp
