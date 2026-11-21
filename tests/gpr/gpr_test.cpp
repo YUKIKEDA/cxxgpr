@@ -252,4 +252,59 @@ namespace
         EXPECT_EQ(err_qdim.error().code(), cxxgpr::GprErrorCode::DimensionMismatch);
     }
 
+    /// @brief Verifies prediction batch sizes may shrink and grow in any order on one fitted model.
+    /// @details The query workspace only grows; a smaller batch after a larger one must give the same values as a
+    /// fresh model that never saw the larger batch (bitwise), for predict, predict_covariance, and sample.
+    TEST(GprModelsTest, QueryBatchSizeMayShrinkAfterLargerBatch)
+    {
+        // Spec: DES-16, DES-17
+        std::vector<double> x(20);
+        std::vector<double> y(20);
+        for (std::size_t i = 0; i < x.size(); ++i)
+        {
+            x[i] = 0.3 * static_cast<double>(i);
+            y[i] = std::sin(x[i]);
+        }
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
+        auto used = gpr.factor(x, 20U, 1U, y);
+        auto fresh = gpr.factor(x, 20U, 1U, y);
+        ASSERT_TRUE(used.has_value());
+        ASSERT_TRUE(fresh.has_value());
+
+        const std::vector<double> big{0.1, 0.5, 0.9, 1.3, 1.7, 2.1, 2.5, 2.9};
+        const std::vector<double> small{0.2, 1.1, 2.3};
+
+        // Grow the query workspace with the larger batch first, then shrink.
+        ASSERT_TRUE(used->predict(big, 8U, 1U).has_value());
+        auto shrunk = used->predict(small, 3U, 1U);
+        auto reference = fresh->predict(small, 3U, 1U);
+        ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+        ASSERT_TRUE(reference.has_value());
+        EXPECT_EQ(shrunk->mean, reference->mean);
+        EXPECT_EQ(shrunk->variance, reference->variance);
+
+        // Growing again after shrinking still works and matches the reference.
+        auto regrown = used->predict(big, 8U, 1U);
+        auto big_reference = fresh->predict(big, 8U, 1U);
+        ASSERT_TRUE(regrown.has_value());
+        ASSERT_TRUE(big_reference.has_value());
+        EXPECT_EQ(regrown->mean, big_reference->mean);
+
+        // Joint covariance takes the same preparation path.
+        auto cov_shrunk = used->predict_covariance(small, 3U, 1U);
+        auto cov_reference = fresh->predict_covariance(small, 3U, 1U);
+        ASSERT_TRUE(cov_shrunk.has_value()) << cov_shrunk.error().message();
+        ASSERT_TRUE(cov_reference.has_value());
+        EXPECT_EQ(cov_shrunk->covariance, cov_reference->covariance);
+
+        // Posterior sampling after a larger sampling batch matches a fresh model for the same seed.
+        ASSERT_TRUE(used->sample(big, 8U, 1U, 2U, 7U).has_value());
+        auto draws_shrunk = used->sample(small, 3U, 1U, 2U, 7U);
+        auto draws_reference = fresh->sample(small, 3U, 1U, 2U, 7U);
+        ASSERT_TRUE(draws_shrunk.has_value()) << draws_shrunk.error().message();
+        ASSERT_TRUE(draws_reference.has_value());
+        EXPECT_EQ(*draws_shrunk, *draws_reference);
+    }
+
 }  // namespace

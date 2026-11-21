@@ -50,16 +50,12 @@ larger batch (256 points): first call 8 allocations, second call 0
 ### Rules for allocation-free prediction
 
 1. **Reuse one `Prediction` object.** Its `mean` and `variance` vectors keep their capacity between calls.
-2. **Keep the batch size, or grow it.** The workspace grows monotonically. A larger batch allocates once (the last line above) and is allocation-free from then on.
+2. **Any batch size works.** The workspace only grows. A larger batch allocates once (the last line above); smaller batches reuse the existing space, and everything is allocation-free from then on.
 3. **Pass `PredictOptions` to choose the variance.** `predict_into(xs, out, options)` and `predict_with_into(xs, options, out)` take a `PredictOptions`; `VarianceKind::Latent` omits the observation noise from the variance and `VarianceKind::Observation` (the default) includes it.
 4. **Use one `FittedGpr` per thread.** See the warning below.
 
 :::{warning}
 `predict_into` is a `const` member function, but it modifies the model's internal `QueryWorkspace`. Two threads must never call `predict`, `predict_into`, `predict_covariance` or `sample` on the same `FittedGpr` object at the same time. Copy the model instead: the copy constructor gives the copy its own, empty `QueryWorkspace`, so each worker thread can have an independent object.
-:::
-
-:::{warning}
-In the current release, a query batch that is *smaller* than an earlier, larger batch on the same `FittedGpr` fails with `GprErrorCode::LengthMismatch` (`length mismatch: expected 3 values, got 8` for a batch of 3 after a batch of 8). A batch that is as large as, or larger than, every earlier batch is accepted. Until this is fixed, call `predict_into` with one fixed batch size (pad the last batch with a repeated valid point and ignore the extra results), or predict from a fresh copy of the model when the batch size shrinks. The low-level `predict_into<P>` described in {doc}`use-low-level-building-blocks` is not affected.
 :::
 
 :::{note}
