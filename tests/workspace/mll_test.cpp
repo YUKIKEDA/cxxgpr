@@ -759,4 +759,117 @@ namespace
         check_policy.template operator()<cxxgpr::SinglePrecision>(389U);
     }
 
+    /// @brief Verifies set_params and mll_and_gradient_into perform zero heap allocations across scalar, ARD, and
+    /// composite kernels and all four precision policies, and that failed set_params leaves kernels unchanged.
+    TEST(WorkspaceMllTest, SetParamsAndMllGradZeroAllocAcrossAllKernelsAndPrecisions)
+    {
+        // Spec: REQ-02, REQ-11, DES-13
+        constexpr std::size_t n = 12;
+        constexpr std::size_t d = 2;
+        std::vector<double> x_raw(n * d);
+        std::vector<double> y_raw(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            x_raw[i] = 0.1 * static_cast<double>(i);
+            x_raw[n + i] = 0.15 * static_cast<double>(i);
+            y_raw[i] = std::sin(x_raw[i]) + (0.2 * x_raw[n + i]);
+        }
+        const cxxgpr::MatrixRef<double> x(x_raw.data(), n, d, n);
+        const auto lik = cxxgpr::GaussianLikelihood::create(0.05).value();
+        const auto jitter = cxxgpr::JitterPolicy::fixed(1e-8).value();
+
+        const auto scalar_spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.8).value());
+        const auto ard_spec = cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array{0.7, 1.3}).value());
+        const auto composite_spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value())
+                * cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::ThreeHalves).value())
+            + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticArdKernel::create(std::array{0.9, 1.4}, 2.0).value());
+
+        auto check = [&]<typename P>(const cxxgpr::KernelSpec& spec, const char* label)
+        {
+            using Scalar = typename P::Storage;
+            SCOPED_TRACE(label);
+            auto compiled = spec.compile<Scalar>();
+            const std::size_t nk = compiled.num_params();
+            std::vector<double> params(nk);
+            ASSERT_TRUE(compiled.get_params(params).has_value());
+            std::vector<double> shifted(nk);
+            for (std::size_t i = 0; i < nk; ++i)
+            {
+                shifted[i] = params[i] + 0.15;
+            }
+
+            // Failed set_params (out-of-bounds) must leave params unchanged.
+            std::vector<double> bad = shifted;
+            bad[nk - 1U] = 100.0;
+            EXPECT_FALSE(compiled.set_params(bad).has_value());
+            std::vector<double> after_bad(nk);
+            ASSERT_TRUE(compiled.get_params(after_bad).has_value());
+            EXPECT_EQ(after_bad, params);
+
+            auto bufs = cxxgpr::FitBuffers<P>::create(
+                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain
+            );
+            ASSERT_TRUE(bufs.has_value());
+            std::vector<Scalar> x_s(x_raw.size());
+            std::vector<Scalar> y_s(y_raw.size());
+            for (std::size_t i = 0; i < x_raw.size(); ++i)
+            {
+                x_s[i] = static_cast<Scalar>(x_raw[i]);
+            }
+            for (std::size_t i = 0; i < y_raw.size(); ++i)
+            {
+                y_s[i] = static_cast<Scalar>(y_raw[i]);
+            }
+            const cxxgpr::MatrixRef<Scalar> x_ref(x_s.data(), n, d, n);
+            std::vector<double> grad(nk + 1U, 0.0);
+            ASSERT_TRUE(cxxgpr::mll_and_gradient_into(compiled, lik, x_ref, y_s, jitter, *bufs, grad).has_value());
+
+            {
+                const cxxgpr::test_support::NoAllocationScope audit_set;
+                ASSERT_TRUE(compiled.set_params(shifted).has_value());
+                EXPECT_EQ(audit_set.delta_allocations(), 0U);
+            }
+            {
+                const cxxgpr::test_support::NoAllocationScope audit_fac;
+                ASSERT_TRUE(cxxgpr::factor_and_mll(compiled, lik, x_ref, y_s, jitter, *bufs).has_value());
+                EXPECT_EQ(audit_fac.delta_allocations(), 0U);
+            }
+            double mll_after = 0.0;
+            {
+                const cxxgpr::test_support::NoAllocationScope audit_eval;
+                const auto mll2 = cxxgpr::mll_and_gradient_into(compiled, lik, x_ref, y_s, jitter, *bufs, grad);
+                ASSERT_TRUE(mll2.has_value());
+                EXPECT_EQ(audit_eval.delta_allocations(), 0U);
+                mll_after = *mll2;
+            }
+
+            // Bitwise equivalence with a freshly compiled kernel updated to the same shifted parameters.
+            auto fresh = spec.compile<Scalar>();
+            ASSERT_TRUE(fresh.set_params(shifted).has_value());
+            auto fresh_bufs = cxxgpr::FitBuffers<P>::create(
+                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain
+            );
+            ASSERT_TRUE(fresh_bufs.has_value());
+            std::vector<double> fresh_grad(nk + 1U, 0.0);
+            const auto fresh_mll = cxxgpr::mll_and_gradient_into(fresh, lik, x_ref, y_s, jitter, *fresh_bufs, fresh_grad);
+            ASSERT_TRUE(fresh_mll.has_value());
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(mll_after), std::bit_cast<std::uint64_t>(*fresh_mll));
+            for (std::size_t i = 0; i < grad.size(); ++i)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(grad[i]), std::bit_cast<std::uint64_t>(fresh_grad[i]));
+            }
+        };
+
+        for (const auto& [name, spec] : std::array<std::pair<const char*, cxxgpr::KernelSpec>, 3>{
+                 {{"scalar", scalar_spec}, {"ard", ard_spec}, {"composite", composite_spec}}
+        })
+        {
+            SCOPED_TRACE(name);
+            check.template operator()<cxxgpr::DoublePrecision>(spec, "DoublePrecision");
+            check.template operator()<cxxgpr::SinglePrecision>(spec, "SinglePrecision");
+            check.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(spec, "MixedPromote");
+            check.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(spec, "MixedReevaluate");
+        }
+    }
+
 }  // namespace

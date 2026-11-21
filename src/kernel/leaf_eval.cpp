@@ -1867,6 +1867,209 @@ namespace cxxgpr::detail
         return std::visit([params](auto& k) { return k.set_params(params); }, leaf);
     }
 
+    /// @brief Internal friend accessor reading ARD leaf lengthscales into preallocated buffers without allocating.
+    struct ArdLengthscaleAccess
+    {
+        /// @brief Copies bounded lengthscale values from an ARD leaf into out while reusing its capacity.
+        /// @tparam ArdLeaf RbfArdKernel, MaternArdKernel, or RationalQuadraticArdKernel.
+        /// @param[in] leaf ARD kernel leaf.
+        /// @param[out] out Destination vector resized to the number of dimensions.
+        template <typename ArdLeaf> static void fill(const ArdLeaf& leaf, std::vector<double>& out)
+        {
+            const std::size_t dims = leaf.lengthscales_.size();
+            out.resize(dims);
+            for (std::size_t i = 0; i < dims; ++i)
+            {
+                out[i] = leaf.lengthscales_[i].value();
+            }
+        }
+
+        /// @brief Validates log-space lengthscale parameters against an ARD leaf's bounds without allocating.
+        /// @tparam ArdLeaf RbfArdKernel, MaternArdKernel, or RationalQuadraticArdKernel.
+        /// @param[in] leaf ARD kernel leaf.
+        /// @param[in] params Leading dims log-space lengthscale parameters.
+        /// @return Empty expected if valid, or NonFiniteInput / InvalidInterval.
+        template <typename ArdLeaf>
+        [[nodiscard]] static std::expected<void, GprError> validate_lengthscales(
+            const ArdLeaf& leaf, std::span<const double> params
+        )
+        {
+            for (std::size_t i = 0; i < leaf.lengthscales_.size(); ++i)
+            {
+                const double p = params[i];
+                if (!std::isfinite(p))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                if (auto bp = BoundedParam::create(std::exp(p), leaf.lengthscales_[i].interval()); !bp.has_value())
+                {
+                    return std::unexpected(std::move(bp).error());
+                }
+            }
+            return {};
+        }
+    };
+
+    namespace
+    {
+        /// @brief Validates a single unconstrained log-space parameter against an open interval.
+        /// @param[in] log_val Unconstrained log-space parameter value.
+        /// @param[in] iv Open bounding interval in user units.
+        /// @return Empty expected if finite and inside iv after exponentiation, or GprError.
+        [[nodiscard]] std::expected<void, GprError> validate_log_param(double log_val, const Interval& iv)
+        {
+            if (!std::isfinite(log_val))
+            {
+                return std::unexpected(GprError::non_finite_input());
+            }
+            if (auto bp = BoundedParam::create(std::exp(log_val), iv); !bp.has_value())
+            {
+                return std::unexpected(std::move(bp).error());
+            }
+            return {};
+        }
+
+        /// @brief Validates all log-space parameters of a built-in kernel leaf without mutating or allocating.
+        /// @param[in] leaf Kernel leaf variant to validate against.
+        /// @param[in] params Log-space parameter slice for leaf.
+        /// @return Empty expected if all parameters are valid, or GprError.
+        [[nodiscard]] std::expected<void, GprError> validate_builtin_leaf_params(
+            const KernelLeaf& leaf, std::span<const double> params
+        )
+        {
+            return std::visit(
+                [params]<typename LeafT>(const LeafT& k) -> std::expected<void, GprError>
+                {
+                    if constexpr (std::same_as<LeafT, RbfKernel> || std::same_as<LeafT, MaternKernel>
+                                  || std::same_as<LeafT, ConstantKernel> || std::same_as<LeafT, LinearKernel>
+                                  || std::same_as<LeafT, WhiteKernel>)
+                    {
+                        return validate_log_param(params[0], k.interval());
+                    }
+                    else if constexpr (std::same_as<LeafT, PeriodicKernel>)
+                    {
+                        if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
+                        {
+                            return r;
+                        }
+                        return validate_log_param(params[1], k.period_interval());
+                    }
+                    else if constexpr (std::same_as<LeafT, RationalQuadraticKernel>)
+                    {
+                        if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
+                        {
+                            return r;
+                        }
+                        return validate_log_param(params[1], k.alpha_interval());
+                    }
+                    else if constexpr (std::same_as<LeafT, RbfArdKernel> || std::same_as<LeafT, MaternArdKernel>)
+                    {
+                        return ArdLengthscaleAccess::validate_lengthscales(k, params);
+                    }
+                    else if constexpr (std::same_as<LeafT, RationalQuadraticArdKernel>)
+                    {
+                        const std::size_t dims = k.num_params() - 1U;
+                        if (auto r = ArdLengthscaleAccess::validate_lengthscales(k, params.subspan(0, dims));
+                            !r.has_value())
+                        {
+                            return r;
+                        }
+                        return validate_log_param(params[dims], k.alpha_interval());
+                    }
+                    else
+                    {
+                        return {};
+                    }
+                },
+                leaf
+            );
+        }
+    }  // namespace
+
+    /// @brief Populates per-leaf cached ARD lengthscale vectors in place without reallocating existing capacities.
+    /// @param[in] leaves Compiled kernel leaf vector.
+    /// @param[in,out] cached_ls Per-leaf lengthscale snapshot vectors resized to leaves.size().
+    void refresh_cached_ls_entries(std::span<const KernelLeaf> leaves, std::vector<std::vector<double>>& cached_ls)
+    {
+        cached_ls.resize(leaves.size());
+        for (std::size_t idx = 0; idx < leaves.size(); ++idx)
+        {
+            if (const auto* k = std::get_if<RbfArdKernel>(&leaves[idx]))
+            {
+                ArdLengthscaleAccess::fill(*k, cached_ls[idx]);
+            }
+            else if (const auto* km = std::get_if<MaternArdKernel>(&leaves[idx]))
+            {
+                ArdLengthscaleAccess::fill(*km, cached_ls[idx]);
+            }
+            else if (const auto* krq = std::get_if<RationalQuadraticArdKernel>(&leaves[idx]))
+            {
+                ArdLengthscaleAccess::fill(*krq, cached_ls[idx]);
+            }
+            else
+            {
+                cached_ls[idx].clear();
+            }
+        }
+    }
+
+    /// @brief Atomically updates all leaf hyperparameters in leaves from log-space params without hot-path allocations.
+    /// @param[in,out] leaves Compiled kernel leaf vector to update.
+    /// @param[in] params Log-space parameter span of length expected_params.
+    /// @param[in] expected_params Expected flattened parameter count across leaves.
+    /// @return Empty expected on success, or GprError leaving leaves unchanged.
+    std::expected<void, GprError> set_leaves_params_atomic(
+        std::vector<KernelLeaf>& leaves, std::span<const double> params, std::size_t expected_params
+    )
+    {
+        if (auto cnt = require_count(params.size(), expected_params, "params"); !cnt.has_value())
+        {
+            return std::unexpected(std::move(cnt).error());
+        }
+        const bool has_custom = std::ranges::any_of(leaves, [](const KernelLeaf& leaf) {
+            return std::holds_alternative<CustomKernel>(leaf);
+        });
+        if (has_custom)
+        {
+            std::vector<KernelLeaf> updated = leaves;
+            std::size_t offset = 0;
+            for (auto& leaf : updated)
+            {
+                const std::size_t count = leaf_num_params(leaf);
+                if (auto res = leaf_set_params(leaf, params.subspan(offset, count)); !res.has_value())
+                {
+                    return res;
+                }
+                offset += count;
+            }
+            leaves = std::move(updated);
+            return {};
+        }
+
+        // Validate all built-in leaves first so errors preserve all leaves without allocating a staging vector.
+        std::size_t offset = 0;
+        for (const auto& leaf : leaves)
+        {
+            const std::size_t count = leaf_num_params(leaf);
+            if (auto res = validate_builtin_leaf_params(leaf, params.subspan(offset, count)); !res.has_value())
+            {
+                return res;
+            }
+            offset += count;
+        }
+        offset = 0;
+        for (auto& leaf : leaves)
+        {
+            const std::size_t count = leaf_num_params(leaf);
+            if (auto res = leaf_set_params(leaf, params.subspan(offset, count)); !res.has_value())
+            {
+                return res;
+            }
+            offset += count;
+        }
+        return {};
+    }
+
     /// @brief Copies a leaf's open hyperparameter intervals into `out`.
     /// @details Dispatches to `bounds_into` of the underlying leaf variant.
     /// @param[in] leaf Kernel leaf variant.

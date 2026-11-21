@@ -20,6 +20,13 @@
 namespace cxxgpr
 {
 
+    /// @brief Internal implementation helpers for kernel leaves.
+    namespace detail
+    {
+        /// @brief Internal friend accessor reading ARD leaf lengthscales without heap allocation.
+        struct ArdLengthscaleAccess;
+    }  // namespace detail
+
     /// @brief Smoothness parameter nu for isotropic and ARD Matern kernels.
     /// @details Selects the half-integer order controlling sample-path differentiability.
     enum class MaternNu : std::uint8_t
@@ -190,6 +197,7 @@ namespace cxxgpr
 
         /// @brief Per-dimension strictly positive lengthscale parameters.
         std::vector<BoundedParam> lengthscales_;
+        friend struct detail::ArdLengthscaleAccess;
     };
 
     /// @brief Isotropic Matern kernel for nu in {1/2, 3/2, 5/2}.
@@ -378,6 +386,7 @@ namespace cxxgpr
         std::vector<BoundedParam> lengthscales_;
         /// @brief Fixed half-integer smoothness order nu in {1/2, 3/2, 5/2}.
         MaternNu nu_{MaternNu::FiveHalves};
+        friend struct detail::ArdLengthscaleAccess;
     };
 
     /// @brief Isotropic periodic kernel: k(d) = exp(-2 * sin^2(pi * d / period) / lengthscale^2).
@@ -685,6 +694,7 @@ namespace cxxgpr
         std::vector<BoundedParam> lengthscales_;
         /// @brief Strictly positive scale-mixture shape parameter alpha (index dims).
         BoundedParam alpha_;
+        friend struct detail::ArdLengthscaleAccess;
     };
 
     /// @brief Constant kernel: k(x, x') = constant.

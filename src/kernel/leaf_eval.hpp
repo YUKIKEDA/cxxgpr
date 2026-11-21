@@ -14,10 +14,33 @@
 #include <cstddef>
 #include <expected>
 #include <span>
+#include <vector>
 
 /// @brief Internal implementation helpers for kernel leaf evaluation and parameter dispatch.
 namespace cxxgpr::detail
 {
+
+    /// @brief Populates per-leaf cached ARD lengthscale vectors in place without reallocating existing capacities.
+    /// @details Writes each ARD leaf's lengthscales into cached_ls[idx] and clears non-ARD entries while retaining
+    /// vector capacity.
+    /// @param[in] leaves Compiled kernel leaf vector.
+    /// @param[in,out] cached_ls Per-leaf lengthscale snapshot vectors resized to leaves.size().
+    void refresh_cached_ls_entries(std::span<const KernelLeaf> leaves, std::vector<std::vector<double>>& cached_ls);
+
+    /// @brief Atomically updates all leaf hyperparameters in leaves from log-space params without hot-path allocations.
+    /// @details When leaves contains only built-in leaf types, validates every parameter against its leaf bounds before
+    /// updating leaves in place so neither validation nor update allocates. When a CustomKernel is present, stages a
+    /// copy of leaves so any custom set_params() error rolls back all leaves atomically.
+    /// @param[in,out] leaves Compiled kernel leaf vector to update.
+    /// @param[in] params Log-space parameter span of length expected_params.
+    /// @param[in] expected_params Expected flattened parameter count across leaves.
+    /// @return Empty expected on success, or GprError leaving leaves unchanged.
+    /// @retval GprErrorCode::LengthMismatch When params.size() != expected_params.
+    /// @retval GprErrorCode::NonFiniteInput When any parameter is NaN or infinite.
+    /// @retval GprErrorCode::InvalidInterval When any exponentiated value exits its leaf interval.
+    [[nodiscard]] std::expected<void, GprError> set_leaves_params_atomic(
+        std::vector<KernelLeaf>& leaves, std::span<const double> params, std::size_t expected_params
+    );
 
     /// @brief Returns the coordinate representation mode required by a single kernel leaf.
     /// @details Maps isotropic leaves and CustomKernel to Dist, ARD and Linear leaves to Points,
