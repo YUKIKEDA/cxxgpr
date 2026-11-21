@@ -625,6 +625,63 @@ namespace
         EXPECT_EQ(err_diag.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
     }
 
+    /// @brief Verifies a non-finite latent variance is reported instead of being clamped to zero.
+    /// @details A subnormal positive diagonal is a valid finite factor, but solving against it overflows
+    /// V = L^-1 K_* to +Inf, so k_** - ||v||^2 is -Inf. Clamping that value at zero would return the bare noise
+    /// variance as if the query were perfectly known; every precision policy must instead fail with
+    /// NonFiniteKernelValue for both variance kinds, and the same workspace must then predict normally again.
+    TEST(WorkspaceInferenceTest, NonFiniteLatentVarianceIsReportedNotClampedToZero)
+    {
+        // Spec: DES-02, DES-16
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto check_policy = [&spec]<typename P>()
+        {
+            using Storage = P::Storage;
+            using Refine = P::Refine;
+            const auto kernel = spec.template compile<Storage>();
+            const auto likelihood = cxxgpr::GaussianLikelihood::create(0.1).value();
+            const std::vector<Storage> x_train{Storage{0}};
+            const std::vector<Storage> x_query{Storage{0}, Storage{2}};
+            const std::vector<Refine> alpha{Refine{0}};
+            const cxxgpr::MatrixRef<Storage> x_train_ref(x_train.data(), 1U, 1U, 1U);
+            const cxxgpr::MatrixRef<Storage> x_query_ref(x_query.data(), 2U, 1U, 2U);
+            cxxgpr::QueryWorkspace<P> workspace;
+            cxxgpr::Prediction<Refine> out;
+
+            // The overflowing factor: k(0, x*) / denorm_min is +Inf in storage precision for both queries.
+            const std::vector<Storage> overflowing{std::numeric_limits<Storage>::denorm_min()};
+            const cxxgpr::MatrixRef<Storage> overflowing_ref(overflowing.data(), 1U, 1U, 1U);
+            for (const auto kind : {cxxgpr::VarianceKind::Observation, cxxgpr::VarianceKind::Latent})
+            {
+                const cxxgpr::PredictOptions options{.variance_kind = kind};
+                const auto res = cxxgpr::predict_into<P>(
+                    kernel, likelihood, x_train_ref, overflowing_ref, alpha, x_query_ref, options, workspace, out
+                );
+                ASSERT_FALSE(res.has_value());
+                EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
+            }
+
+            // A well-conditioned factor through the same workspace still yields the closed-form n = 1 variance
+            // k_** - k_*^2 / (1 + sigma_n^2) with k(0, 0) = 1 and k(0, 2) = exp(-2).
+            const std::vector<Storage> sane{static_cast<Storage>(std::sqrt(1.0 + 0.01))};
+            const cxxgpr::MatrixRef<Storage> sane_ref(sane.data(), 1U, 1U, 1U);
+            const cxxgpr::PredictOptions latent{.variance_kind = cxxgpr::VarianceKind::Latent};
+            const auto ok = cxxgpr::predict_into<P>(
+                kernel, likelihood, x_train_ref, sane_ref, alpha, x_query_ref, latent, workspace, out
+            );
+            ASSERT_TRUE(ok.has_value());
+            const double k_far = std::exp(-2.0);
+            // float storage rounds the factor and kernel to about 6e-8 relative; 1e-6 covers it with margin.
+            constexpr double tol = 1e-6;
+            EXPECT_NEAR(static_cast<double>(out.variance[0]), 1.0 - (1.0 / 1.01), tol);
+            EXPECT_NEAR(static_cast<double>(out.variance[1]), 1.0 - ((k_far * k_far) / 1.01), tol);
+        };
+        check_policy.template operator()<cxxgpr::DoublePrecision>();
+        check_policy.template operator()<cxxgpr::SinglePrecision>();
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>();
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>();
+    }
+
     /// @brief Verifies parallel predict_covariance_into() stays bit-identical across 1/2/4 threads for odd m.
     /// @details Evaluates DoublePrecision, SinglePrecision, and MixedPrecision<PromoteStorage> full covariance at
     /// n = 128, m = 67 and m = 200 under 1, 2, and 4 OpenMP threads, verifies exact bitwise equality across all mean

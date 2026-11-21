@@ -133,7 +133,7 @@ value outside interval -> InvalidInterval: value 5 is not strictly inside (0, 1)
 
 **`NonFiniteInput`**: 学習入力、目的変数、クエリ点、パラメータに NaN か無限大がある。先にデータを整える。
 
-**`NonFiniteKernelValue`**: カーネル評価、周辺尤度、逆変換後の値が NaN か無限大になった。極端なハイパーパラメータを避けるか、範囲を狭める。
+**`NonFiniteKernelValue`**: カーネル評価、周辺尤度、潜在予測分散、逆変換後の値が NaN か無限大になった。極端なハイパーパラメータを避けるか、範囲を狭める。
 
 **`InvalidHyperparameter`**: 学習済みの変換が、`from_parts` またはモデルの読み込み時に、不正なパラメータから作られた。標準化のスケールが正でない場合や、最小値が最大値を超える場合などである。通常の `fit` では生じない。定数の列や目的変数は、変換が処理する。
 

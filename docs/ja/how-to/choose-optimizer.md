@@ -12,7 +12,7 @@
 
 - **出発点はあなたのカーネルである。** `RbfKernel::create(1.0)` や `with_noise_variance(1e-2)` に渡した値から探索が始まる。妥当なスケールから遠い出発点では、悪い局所解に落ちることがある（後述の警告を参照）。
 - **範囲が到達できる領域を決める。** カーネルの `create` に `Interval` を渡せば、間違いとわかっている領域に長さスケールが入り込むのを防げる。
-- **小さいほど良い。** `FittedGpr::log_marginal_likelihood()` が返すのは、*負の*対数周辺尤度の最終値である。`OptimizerResult::value` も同じ向きだ。
+- **小さいほど良い。** `FittedGpr::neg_log_marginal_likelihood()` が返すのは、*負の*対数周辺尤度の最終値である。`OptimizerResult::value` も同じ向きだ。
 
 ## 最適化器を選ぶ
 
@@ -40,24 +40,24 @@
 ```{code-block} text
 truth at 0.35 = 1.0382
 optimizer               iters  converged  neg-log-ML mean@0.35
-Lbfgs                      17        yes    -14.5571    1.0564
+Lbfgs                      19        yes    -14.5571    1.0564
 TrustRegion                16        yes    -14.5571    1.0564
 NelderMead                101        yes    -14.5571    1.0564
 FastSimulatedAnnealing    400        yes    -14.5462    1.0561
-Lbfgs + 3 restarts         17        yes    -14.5571    1.0564
+Lbfgs + 3 restarts         50        yes    -14.5571    1.0564
 Fixed                       0        yes    -10.4670    1.0605
 RandomSearch (custom)     300        yes    -14.4880    1.0560
 ```
 
 表の読み方は次のとおりである。
 
-- 3 つの局所最適化器は、小数点以下 4 桁まで同じ最小値を見つけた。`TrustRegion` と `Lbfgs` は 16〜17 反復で済む。`NelderMead` は微分を使わないので、その 6 倍ほどかかる。
+- 3 つの局所最適化器は、小数点以下 4 桁まで同じ最小値を見つけた。`TrustRegion` と `Lbfgs` は 16〜19 反復で済む。`NelderMead` は微分を使わないので、その 6 倍ほどかかる。
 - `FastSimulatedAnnealing` は反復の予算（ここでは 400）を使い切り、最小値のそばには着くが、ぴたりとは一致しない。
 - `Fixed` は最適化しない。初期のハイパーパラメータを 1 回評価するだけである。NLML は $-10.47$ で、最適化した $-14.56$ より悪い。ただし 0.35 での予測は、真の値に近いままである。
 - NLML が小さいほど、最適化器がより良いハイパーパラメータを見つけたことになる。比べるのはこの列である。データが易しいので、予測はどれも近い。
 
-:::{warning}
-出発点は結果を左右する。上のプログラムは長さスケールを $0.3$ から始めている。同じデータで $1.0$ から始めると、素の `Lbfgs` は 1 反復で止まる。そのときの NLML は $210.7$ で、最小値よりはるかに悪い。0.35 での予測も、$1.04$ ではなく $0.25$ になる。それでも最適化器は `converged = yes` と報告する。モデルが良いからではなく、最適化器自身の停止判定が働いたからである。結果が怪しいときは、複数の実行で `log_marginal_likelihood()` を比べる。`with_restarts` を加える、`TrustRegion` を試す、という対処も有効である。
+:::{note}
+この問題では、`Lbfgs` は長さスケールの初期値 $0.05$、$0.1$、$0.3$、$0.6$、$1$、$2$、$5$ のどれから始めても、同じ最小値（NLML $-14.56$）に着き、収束を報告する。一般には保証されない。局所最適化器は、出発点が導いた先の極小で止まる。多峰性の目的関数では、`with_restarts` を足すか `FastSimulatedAnnealing` を使い、候補の実行どうしを `log_marginal_likelihood()` で比べる。
 :::
 
 ## 最適化器を設定する
@@ -69,7 +69,7 @@ RandomSearch (custom)     300        yes    -14.4880    1.0560
 | 設定 | メソッド | アクセサ | 既定値 | 有効な値 |
 |---|---|---|---|---|
 | 1 回の出発あたりの反復数 | `with_max_iterations` | `max_iterations` | 100 | 任意 |
-| 収束判定の許容値 | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}\approx 1.5\times 10^{-8}$ | 有限、$\ge 0$ |
+| 停留判定の許容値（対数空間の射影勾配） | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}\approx 1.5\times 10^{-8}$ | 有限、$\ge 0$ |
 | 保持する曲率ペアの数 | `with_history_size` | `history_size` | 10 | $\ge 1$ |
 | リスタート | `with_restarts` | `restarts` | なし | — |
 
@@ -78,7 +78,7 @@ RandomSearch (custom)     300        yes    -14.4880    1.0560
 | 設定 | メソッド | アクセサ | 既定値 | 有効な値 |
 |---|---|---|---|---|
 | 1 回の出発あたりの反復数 | `with_max_iterations` | `max_iterations` | 100 | 任意 |
-| 収束判定の許容値 | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}$ | 有限、$\ge 0$ |
+| 停留判定の許容値（対数空間の射影勾配） | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}$ | 有限、$\ge 0$ |
 | 初期半径 | `with_initial_radius` | `initial_radius` | 1.0 | 有限、$> 0$、最大半径以下 |
 | 最大半径 | `with_max_radius` | `max_radius` | 100.0 | 有限、初期半径以上 |
 | リスタート | `with_restarts` | `restarts` | なし | — |
@@ -112,7 +112,7 @@ RandomSearch (custom)     300        yes    -14.4880    1.0560
 
 ### 許容値と反復の予算
 
-反復の上限は、1 回の出発ごとに適用される。許容値を満たす前に上限で止まると、`OptimizerResult::converged` は `false` になるが、見つかった最良の点は返され、`fit` も成功する。`GprErrorCode::OptimizationNotConverged` では失敗しない。気になるときは `FittedGpr::optimizer_result()` を確認する。
+反復の上限は、1 回の出発ごとに適用される。許容値を満たす前に上限で止まると、`OptimizerResult::converged` は `false` になるが、見つかった最良の点は返され（`converged` は常に返したパラメータについての判定である）、`fit` も成功する。`GprErrorCode::OptimizationNotConverged` では失敗しない。気になるときは `FittedGpr::optimizer_result()` を確認する。
 
 ```cpp
 const auto& r = model->optimizer_result();   // OptimizerResult
@@ -168,15 +168,15 @@ restarts with the same seed give bit-identical results: yes
 ```
 
 ```{code-block} text
-Lbfgs: converged = true, iterations = 11, value = 8.70e-20
+Lbfgs: converged = true, iterations = 13, value = 1.83e-21
   parameters = 2.0000 0.5000 10.0000 
-TrustRegion value = 2.82e-15 (7 iterations)
+TrustRegion value = 1.11e-29 (8 iterations)
 NelderMead  value = 3.62e-18 (128 iterations)
 FSA         value = 1.60e-03 (3000 iterations)
 Fixed       value = 1.86e+00 (0 iterations)
 ```
 
-この滑らかな問題では、微分を使う最適化器は 7〜11 反復で厳密な最小値に届く。`NelderMead` は 128 反復、`FastSimulatedAnnealing` は 3000 反復で近くまで来る。これは桁の目安であり、ベンチマークではない。最適な選択は問題によって変わる。
+この滑らかな問題では、微分を使う最適化器は 8〜13 反復で厳密な最小値に届く。`NelderMead` は 128 反復、`FastSimulatedAnnealing` は 3000 反復で近くまで来る。これは桁の目安であり、ベンチマークではない。最適な選択は問題によって変わる。
 
 `OptimizerResult` は `params`（対数空間で最良のベクトル）、`value`、`iterations`、`converged` を持つ。`Fixed::optimize` は `initial_params` をそのまま返し、`iterations = 0`、`converged = true` とする。
 
@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` は、次を備えたコピー可能な任意の型 `O` を受け付ける。
 
-- `static constexpr bool uses_change_indices`（`OptimizerTraits<O>::uses_change_indices` 経由で読まれる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
+- `static constexpr bool uses_change_indices`（モデルは `cxxgpr/workspace/leaf_cache.hpp` の `cxxgpr::optimizer_uses_change_indices_v<O>` 経由で読む。このメンバーを持たない型では `false` になる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`
 
 モデルは、組込みの最適化器と同じ目的関数を渡す。次の例は、最良点を揺らして改善だけを採る最適化器で、`LogBounds`、`Xoshiro256PlusPlus`、`OptimizerResult` を使っている。
@@ -258,6 +258,8 @@ two evaluations at the same point cost 1 objective call(s)
 モデルは自作の最適化器にも `TwiceDifferentiable` の目的関数を渡す。必要なら `gradient_into` や `hessian_into` を呼んでよい。モデルが値のみとして扱うのは `NelderMead` と `FastSimulatedAnnealing` だけである。自作の最適化器に、それ以外の特別扱いはない。
 :::
 
+自分の停止判定を満たす前に止まったが使える点は得られた、と知らせるには、組込みの最適化器と同じく、最良の点を `converged = false` で返す。このとき `fit` は成功する。`fit` を失敗させたいときは、`std::unexpected(GprError::optimization_not_converged(iterations))`（または他の `GprError`）を返す。`fit` はそのエラーを変えずに返す。{doc}`handle-errors` を参照。
+
 最適化器が提案する点は、`LogBounds::validate_log_params` で確かめるか、`sample_log_uniform` で引き、開区間の厳密に内側に保つ。外側の点は、目的関数が `GprErrorCode::InvalidInterval` などのエラーで拒否する。
 
 ## API 一覧
@@ -273,7 +275,7 @@ two evaluations at the same point cost 1 objective call(s)
 | `Objective`、`Differentiable`、`TwiceDifferentiable` | 目的関数のインターフェース。`dim`、`value`、`value_at_changes`、`fill_intervals`、`gradient_into`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
 | `OptimizerResult` | `params`、`value`、`iterations`、`converged`、`operator==` |
 | `RestartConfig` | `count`、`seed`、`operator==` |
-| `OptimizerTraits` | 最適化器の型の `uses_change_indices` |
+| `cxxgpr::OptimizerTraits`、`cxxgpr::optimizer_uses_change_indices_v` | 最適化器の型の `uses_change_indices`。このメンバーを持たない型では `false`。宣言は `cxxgpr/workspace/leaf_cache.hpp` にあり、`optimizer` 名前空間や `cxxgpr/optimizer/optimizer.hpp` には含まれない |
 | `LogBounds` | 対数空間の境界と $\theta \leftrightarrow z$ の変換（メンバーは上の表） |
 | `EvalCache` | 1 エントリのキャッシュ。`eval_unconstrained`、`clear` |
 

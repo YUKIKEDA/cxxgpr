@@ -38,8 +38,8 @@ x(1, 1) = 20, buffer = 1 2 3 | 10 20 30
 
 スパンの形は、列ストライドが `n_rows` に等しい密な行列を前提にする。どちらの形も `std::expected` を返す。たとえば、目的変数の長さが行数と違えば `GprErrorCode::LengthMismatch`、データが空なら `GprErrorCode::EmptyInput`、NaN や無限大があれば `GprErrorCode::NonFiniteInput` になる。
 
-:::{warning}
-スパンの形がモデルへ渡すのは、スパンのポインタと `n_rows`、`n_cols` だけである。バッファに `n_rows * n_cols` 個の要素が本当にあるかどうかを、ライブラリは確かめられない。`MatrixRef` が持つポインタも同じである。範囲を正しく保つ責任は呼び出し側にある。渡そうとする形状に対してスパンが合っているかは、後述の `validate_matrix` で調べられる。
+:::{note}
+スパンの形は、要素を読む前に、スパンと形状が合っているかを検査する。スパンが空か、`n_rows` または `n_cols` が 0 なら `GprErrorCode::EmptyInput` になる。次元の積があふれる場合は `GprErrorCode::SizeOverflow`、スパンの大きさが `n_rows * n_cols` と一致しない場合は `GprErrorCode::LengthMismatch` になる。複数が同時に成り立つときは、この順で最初のものを返す。`MatrixRef` の形はバッファ長を再検査しない。`MatrixRef` が持つのはポインタと寸法だけで、バッファの長さは持たないためである。生ポインタから `MatrixRef` を作る場合は、正しい寸法を与える責任が呼び出し側にある。データが `std::span` なら、`MatrixRef<double>::from_span(span, n_rows, n_cols)` またはスパンのオーバーロードを直接使うのがよい。
 :::
 
 ## `MatrixRef` と `MatrixMut` を使う

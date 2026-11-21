@@ -14,6 +14,9 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "allocation_audit.hpp"
@@ -176,6 +179,161 @@ namespace
         cxxgpr::DistanceSource bad_tol_src;
         bad_tol_src.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(valid_d2.data(), 2, 2)).tidy(-0.1);
         EXPECT_EQ(compiled.prepare_square(bad_tol_src).error().code(), cxxgpr::GprErrorCode::InvalidConfig);
+    }
+
+    /// @brief Verifies a checked distance store can be moved out of std::expected and move-assigned.
+    /// @details The move operations must transfer the validated tables: the moved-to store reports the same shape
+    /// and the original (moved-from) store is not required to be usable. This compiles only when the move
+    /// constructor and assignment are defined where the implementation type is complete.
+    /// @tparam T Storage scalar type of the compiled distance kernel and its checked store.
+    template <typename T> void expect_checked_distance_store_is_movable()
+    {
+        const cxxgpr::ScalarDistance slot;
+        const auto rbf = cxxgpr::RbfKernel::create(1.0);
+        ASSERT_TRUE(rbf.has_value());
+        const auto compiled = slot.rbf(*rbf).template compile<T>();
+
+        std::array<double, 9> d2{0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0};
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), 3, 3));
+        std::array<double, 6> d2_cross{0.0, 1.0, 4.0, 1.0, 0.0, 1.0};
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), 2, 3));
+
+        auto prepared = compiled.prepare_square(src);
+        ASSERT_TRUE(prepared.has_value());
+        static_assert(std::is_nothrow_move_constructible_v<cxxgpr::CheckedDistanceStore<T>>);
+        static_assert(std::is_nothrow_move_assignable_v<cxxgpr::CheckedDistanceStore<T>>);
+
+        // Move-construct out of the std::expected.
+        cxxgpr::CheckedDistanceStore<T> moved(std::move(*prepared));
+        EXPECT_EQ(moved.rows(), 3U);
+        EXPECT_EQ(moved.cols(), 3U);
+        EXPECT_TRUE(moved.is_square());
+
+        // Move-assign over a store of a different shape, so the assertions below fail unless the
+        // assignment really replaced the 2 x 3 cross tables with the 3 x 3 square ones.
+        auto second = compiled.prepare_cross(cross_src);
+        ASSERT_TRUE(second.has_value());
+        cxxgpr::CheckedDistanceStore<T> target(std::move(*second));
+        EXPECT_EQ(target.rows(), 2U);
+        EXPECT_FALSE(target.is_square());
+        target = std::move(moved);
+        EXPECT_EQ(target.rows(), 3U);
+        EXPECT_EQ(target.cols(), 3U);
+        EXPECT_TRUE(target.is_square());
+    }
+
+    /// @brief Verifies a compiled distance kernel can be moved out of compile(), move-assigned, and then used.
+    /// @details Move construction and assignment must transfer the compiled tree: the moved-to kernel reports
+    /// the source hyperparameters, validates a distance source, and evaluates the same Gram matrix as an
+    /// untouched kernel compiled from the same tree. This compiles only when the move constructor and
+    /// assignment are defined where the implementation type is complete.
+    /// @tparam T Storage scalar type of the compiled distance kernel.
+    template <typename T> void expect_compiled_distance_kernel_is_movable()
+    {
+        using Compiled = cxxgpr::CompiledDistanceKernel<T>;
+        static_assert(std::is_nothrow_move_constructible_v<Compiled>);
+        static_assert(std::is_nothrow_move_assignable_v<Compiled>);
+
+        const cxxgpr::ScalarDistance slot;
+        const auto narrow = cxxgpr::RbfKernel::create(0.5);
+        const auto wide = cxxgpr::RbfKernel::create(2.0);
+        ASSERT_TRUE(narrow.has_value());
+        ASSERT_TRUE(wide.has_value());
+
+        std::array<double, 9> d2{0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0};
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), 3, 3));
+
+        // Evaluates the 3 x 3 Gram matrix of a compiled kernel from the bound squared distances.
+        const auto gram = [&src](const Compiled& kernel)
+        {
+            std::array<T, 9> k{};
+            const auto store = kernel.prepare_square(src);
+            EXPECT_TRUE(store.has_value());
+            if (store.has_value())
+            {
+                std::array<T, 9> scratch{};
+                EXPECT_TRUE(kernel
+                        .apply(
+                            *store, std::nullopt, cxxgpr::MatrixMut<T>(k.data(), 3, 3), cxxgpr::Triangle::Full,
+                            cxxgpr::MatrixMut<T>(scratch.data(), 3, 3)
+                        )
+                        .has_value());
+            }
+            return k;
+        };
+
+        // Reference values come from kernels that are never moved.
+        const Compiled narrow_ref = slot.rbf(*narrow).template compile<T>();
+        const Compiled wide_ref = slot.rbf(*wide).template compile<T>();
+        const auto k_narrow = gram(narrow_ref);
+        const auto k_wide = gram(wide_ref);
+        ASSERT_NE(k_narrow, k_wide);
+        // Closed form k = exp(-d2 / (2 l^2)) with l = 0.5; values are at most 1, so a few ulps of T suffice.
+        const T tol = T{4} * std::numeric_limits<T>::epsilon();
+        for (std::size_t i = 0; i < d2.size(); ++i)
+        {
+            EXPECT_NEAR(k_narrow.at(i), static_cast<T>(std::exp(-2.0 * d2.at(i))), tol);
+        }
+        ASSERT_EQ(narrow_ref.num_params(), 1U);
+        std::array<double, 1> narrow_params{};
+        ASSERT_TRUE(narrow_ref.get_params(narrow_params).has_value());
+
+        // Move-construct out of the compile() result.
+        Compiled source = slot.rbf(*narrow).template compile<T>();
+        Compiled moved(std::move(source));
+        EXPECT_EQ(moved.num_params(), 1U);
+        EXPECT_EQ(moved.num_leaves(), 1U);
+        std::array<double, 1> params{};
+        ASSERT_TRUE(moved.get_params(params).has_value());
+        EXPECT_EQ(params, narrow_params);
+        EXPECT_EQ(gram(moved), k_narrow);
+
+        // Move-assign over a kernel with a different lengthscale; the target must take the source state.
+        Compiled target = slot.rbf(*wide).template compile<T>();
+        EXPECT_EQ(gram(target), k_wide);
+        target = std::move(moved);
+        ASSERT_TRUE(target.get_params(params).has_value());
+        EXPECT_EQ(params, narrow_params);
+        EXPECT_EQ(gram(target), k_narrow);
+
+        // The moved-to kernel stays fully usable: parameter updates apply to it.
+        std::array<double, 1> wide_params{};
+        ASSERT_TRUE(wide_ref.get_params(wide_params).has_value());
+        ASSERT_TRUE(target.set_params(wide_params).has_value());
+        EXPECT_EQ(gram(target), k_wide);
+    }
+
+    /// @brief Verifies CheckedDistanceStore move construction and assignment for both storage scalars.
+    /// @details Runs the move checks for every explicitly instantiated scalar type (double and float).
+    TEST(DistanceKernelTest, CheckedDistanceStoreIsMovable)
+    {
+        // Spec: DES-10
+        {
+            SCOPED_TRACE("T = double");
+            expect_checked_distance_store_is_movable<double>();
+        }
+        {
+            SCOPED_TRACE("T = float");
+            expect_checked_distance_store_is_movable<float>();
+        }
+    }
+
+    /// @brief Verifies CompiledDistanceKernel move construction and assignment for both storage scalars.
+    /// @details Runs the move checks for every explicitly instantiated scalar type (double and float).
+    TEST(DistanceKernelTest, CompiledDistanceKernelIsMovable)
+    {
+        // Spec: DES-10
+        {
+            SCOPED_TRACE("T = double");
+            expect_compiled_distance_kernel_is_movable<double>();
+        }
+        {
+            SCOPED_TRACE("T = float");
+            expect_compiled_distance_kernel_is_movable<float>();
+        }
     }
 
     /// @brief Verifies hybrid DistanceKernel + LinearKernel parity and zero-allocation hot path.

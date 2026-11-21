@@ -195,6 +195,52 @@ namespace cxxgpr
             return GprError::length_mismatch(std::format("expected {} {}, got {}", expected, what, actual));
         }
 
+        /// @brief Wraps a raw column-major span as a MatrixRef after checking its length against the dimensions.
+        /// @details Applies the shared shape checks in the order EmptyInput -> SizeOverflow -> LengthMismatch before
+        /// the pointer is bound, so no caller can build a view that extends past the end of the span. An empty span
+        /// is rejected even when its pointer is non-null, because such a pointer may address no readable element.
+        /// @param[in] data Contiguous column-major matrix data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @return View with leading dimension n_rows, or GprError on an empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When data is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != n_rows * n_cols.
+        std::expected<MatrixRef<double>, GprError> matrix_view_from_span(
+            std::span<const double> data, std::size_t n_rows, std::size_t n_cols
+        )
+        {
+            // The view is only built once data.size() == n_rows * n_cols is established.
+            if (auto len = validate_shape_header(data.size(), n_rows, n_cols, "matrix"); !len.has_value())
+            {
+                return std::unexpected(std::move(len).error());
+            }
+            return MatrixRef<double>(data.data(), n_rows, n_cols, n_rows);
+        }
+
+        /// @brief Wraps a raw column-major training span as a MatrixRef, rejecting an empty target vector first.
+        /// @details Checks y for emptiness before the shape of x so EmptyInput keeps precedence over SizeOverflow
+        /// and LengthMismatch across both arguments, then delegates to matrix_view_from_span().
+        /// @param[in] x Contiguous column-major training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Training target vector.
+        /// @return View with leading dimension n_rows, or GprError on an empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
+        std::expected<MatrixRef<double>, GprError> training_view_from_span(
+            std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        )
+        {
+            // An empty target outranks every size error of x in the validation order.
+            if (y.empty())
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            return matrix_view_from_span(x, n_rows, n_cols);
+        }
+
     }  // namespace detail
 
     /// @brief Rejects any NaN or Inf entry in a double span with NonFiniteInput.

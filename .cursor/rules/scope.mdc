@@ -5,7 +5,7 @@ alwaysApply: true
 
 # スコープ管理
 
-対象は Exact GPR モデル（`Gpr` / `FittedGpr`）の C++23 実装であり、`Sgpr`・`Svgp`・`OnlineGpr`・誘導点座標微分は対象外である。
+対象は Exact GPR モデル（`Gpr` / `FittedGpr`、供給二乗距離のモデル `DistanceGpr` / `FittedDistanceGpr`）の C++23 実装であり、`Sgpr`・`Svgp`・`OnlineGpr`・誘導点座標微分は対象外である。
 
 - 実装の手間を理由に機能を削らない。たとえば「`DoublePrecision` のみ対応し `MixedPrecision` / `SinglePrecision` を落とす」「10 カーネルのうち一部だけ置く」「供給二乗距離や `Custom` 葉を省く」といった部分実装を正当化しない。
 - 分割する場合は必ず [docs/internal/roadmap.md](../../docs/internal/roadmap.md) の該当マイルストーン行と Issue で残作業の担い手を明示する。
