@@ -2,78 +2,35 @@ English | [日本語](README.ja.md)
 
 # cxxgpr
 
-Exact Gaussian Process Regression (GPR) library in C++23.
+**Exact Gaussian process regression for C++23.** Fit a model to your data, get predictions with calibrated uncertainty, and keep full control over numerics, memory and threads. No exceptions, no hidden allocation in the hot paths, and bit-identical results regardless of thread count.
 
-> **Status (`0.1.0`)**: Exact GPR implementation, persistence, CMake install/package support, and verification suites are complete. Public APIs follow pre-1.0 (`0.x`) stability expectations.
+[![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Scope
+> **Status: `0.1.0`.** The library is feature-complete and verified; the API may still change before 1.0.
 
-`cxxgpr` focuses exclusively on **Exact GPR** (`Gpr` / `FittedGpr`):
+## Why cxxgpr
 
-- **Model & inference**: `Gpr::fit` (`const`, non-mutating on failure), `Gpr::factor`, `predict`, `predict_with` (`VarianceKind::Observation` / `Latent`), `predict_into`, `predict_with_into` (zero allocation after warmup), `predict_covariance`, `sample` (deterministic `Xoshiro256++`), `loo_predict`, `neg_log_marginal_likelihood`, `value_and_gradient_into`, `hessian_into`, `get_params`, `set_params`, `refit`, `into_trainer`.
-- **Kernels**: All 10 built-in leaves (`RbfKernel`, `RbfArdKernel`, `MaternKernel` with $\nu \in \{1/2, 3/2, 5/2\}$, `MaternArdKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, `RationalQuadraticArdKernel`, `ConstantKernel`, `LinearKernel`, `WhiteKernel`), `+`/`*` composition via `KernelSpec` -> `CompiledKernel<T>`, user `Custom` leaves (`KernelTerm<T>`), `LeafCache` incremental updates, and supplied squared distances (`ScalarDistance`, `ArdDistance`, `DistanceKernel`).
-- **Optimizers**: Self-contained implementations of `Lbfgs` (Moré–Thuente), `NelderMead`, `TrustRegion` (analytic Hessian + Steihaug–Toint CG), `FastSimulatedAnnealing` (Cauchy/Metropolis/Ingber + incremental eval), and `Fixed`, with logit interval transforms and deterministic restarts.
-- **Transforms & policies**: Input/target transforms (`Identity*`, `Standardize*`, `MinMax*`, `Pipeline`, `TargetPipeline`, `ColumnwiseInput`, custom interfaces), `DoublePrecision` / `SinglePrecision` / `MixedPrecision<PromoteStorage | ReevaluateKernel>`, `KernelExp::{Accurate, FastApprox}`, `DistanceCachePolicy`, `CholeskyBuffer`, and `JitterPolicy::{Fixed, Adaptive}`.
-- **Persistence**: Directory format (`config.json` + `model.safetensors`) with `save`, `save_with_factor`, `LoadedGpr::load`, `LoadedDistanceGpr::load`, and `PersistRegistry`.
-- **Exclusions**: Sparse models (`Sgpr`, `Svgp`) and online updates (`OnlineGpr`) are intentionally outside scope.
+- **Errors are values.** Every fallible call returns `std::expected<T, GprError>`; nothing throws across the API.
+- **Reproducible.** Parallel results are bit-identical for any thread count, and random sampling is seeded and portable.
+- **Predictable cost.** Repeated predictions allocate nothing after the first call, and the memory/speed trade-off is yours to choose.
+- **Clean headers.** Eigen, nlohmann/json and OpenMP never appear in the public headers, so they never leak into your build.
+- **Safe by construction.** Failed calls leave your objects untouched, bounded hyperparameters cannot be set out of range, and trained and untrained models are different types.
 
-## Design Highlights
+## What you get
 
-- **C++23 & error handling**: Static library (`namespace cxxgpr`), no exceptions across the API boundary (`[[nodiscard]] std::expected<T, GprError>`).
-- **Column-major input**: Data matrices use column-major storage via `MatrixRef<double>` or `std::span<const double>` (`x`, `n_rows`, `n_cols`).
-- **Clean public headers**: Eigen, `nlohmann::json`, and OpenMP headers/types never leak into `include/cxxgpr/`.
-- **License**: Apache-2.0 (`LICENSE`). Third-party notices are tracked in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+| Area | Included |
+|---|---|
+| **Models** | `Gpr` (trainer) and `FittedGpr` (trained model): fit, predict mean and variance, joint covariance, posterior samples, leave-one-out, marginal likelihood with analytic gradient and Hessian |
+| **Kernels** | 10 built-in kernels (RBF, Matérn 1/2, 3/2 and 5/2, periodic, rational quadratic, constant, linear, white, plus ARD variants), sums and products, your own kernels, and precomputed distances |
+| **Optimizers** | L-BFGS, trust region, Nelder–Mead, fast simulated annealing, or fixed hyperparameters; deterministic restarts |
+| **Data handling** | Standardize, min–max and column-wise transforms for inputs and targets, chained in pipelines |
+| **Numerics** | Double, single and mixed precision with iterative refinement; adaptive jitter; fast approximate exponential on request |
+| **Persistence** | Save and load a trained model as a portable directory (`config.json` and `model.safetensors`), with optional memory-mapped loading |
 
-## Building & Integration
+Sparse approximations and online updates are intentionally not part of the library.
 
-### Requirements
-
-- C++23 compiler with `std::expected` support (MSVC 19.44+ / Visual Studio 17.14+, or GCC 14+)
-- CMake 3.25+, Ninja, and `vcpkg` (`VCPKG_ROOT` set)
-
-### Build & Test with Presets
-
-```sh
-# Linux (GCC 14)
-cmake --preset linux-release
-cmake --build --preset linux-release
-ctest --preset linux-release
-
-# Windows (MSVC, from Developer PowerShell or with VCPKG_ROOT)
-cmake --preset windows-msvc
-cmake --build --preset windows-release
-ctest --preset windows-release
-```
-
-### Install & `find_package(cxxgpr)`
-
-```sh
-cmake --install out/build/linux-release --prefix /path/to/install
-```
-
-```cmake
-cmake_minimum_required(VERSION 3.25)
-project(my_app LANGUAGES CXX)
-
-find_package(cxxgpr 0.1.0 CONFIG REQUIRED)
-add_executable(my_app main.cpp)
-target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
-```
-
-### `FetchContent`
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(
-    cxxgpr
-    GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.1.0
-)
-FetchContent_MakeAvailable(cxxgpr)
-target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
-```
-
-### Minimal Example
+## Quick start
 
 ```cpp
 #include <cxxgpr/gpr/gpr.hpp>
@@ -131,17 +88,45 @@ int main()
 }
 ```
 
-See the [first-regression tutorial](docs/en/tutorials/first-regression.md) for a line-by-line walkthrough.
+This fits a noisy sine curve and prints the predicted mean and standard deviation. The [first-regression tutorial](docs/en/tutorials/first-regression.md) walks through it line by line.
+
+## Install
+
+**Prebuilt packages.** Each [GitHub Release](https://github.com/YUKIKEDA/cxxgpr/releases) provides ready-to-use packages for Windows (MSVC) and Linux (GCC 14), the documentation, and SHA-256 checksums. Unpack one and point CMake at it:
+
+```cmake
+find_package(cxxgpr 0.1 CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
+```
+
+The package locates Eigen, nlohmann/json and (optionally) OpenMP when you configure, so they must be installed, for example through vcpkg.
+
+**From source with `FetchContent`.**
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    cxxgpr
+    GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
+    GIT_TAG v0.1.0
+)
+FetchContent_MakeAvailable(cxxgpr)
+target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
+```
+
+Requirements: a C++23 compiler with `std::expected` (MSVC 19.44 or newer, or GCC 14 or newer), CMake 3.25 or newer, Ninja, and vcpkg with `VCPKG_ROOT` set. Build options and presets are described in the [installation guide](docs/en/how-to/install-and-link.md).
 
 ## Documentation
 
-The user documentation follows the [Diataxis](https://diataxis.fr/) structure and is available in English and Japanese. Build it with `just docs`; the source is under `docs/en/` and `docs/ja/`.
-
-| Section | Contents |
+| | |
 |---|---|
-| [Tutorials](docs/en/tutorials/index.md) | Learn by building: first regression, multi-dimensional models, save and reload |
-| [How-to guides](docs/en/how-to/index.md) | Task recipes that together cover every public API |
-| [Reference](docs/en/reference/index.md) | API reference generated from the headers, error codes, build options, file format |
-| [Explanation](docs/en/explanation/index.md) | Gaussian-process background, kernels, numerical stability, design principles |
-| [`docs/internal/`](docs/internal/roadmap.md) | Developer documentation (English): specifications, ADRs, quality plan, roadmap |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Development workflow and gates |
+| [Tutorials](docs/en/tutorials/index.md) | Learn by building: first regression, a multi-dimensional model, save and reload |
+| [How-to guides](docs/en/how-to/index.md) | Recipes for specific tasks; together they cover every public API |
+| [Reference](docs/en/reference/index.md) | API reference, error codes, build options, file format |
+| [Explanation](docs/en/explanation/index.md) | Background on Gaussian processes, kernels, numerical stability and design |
+
+Build the documentation sites yourself with `just docs`. Contributors: see [`CONTRIBUTING.md`](CONTRIBUTING.md) and the developer documentation in [`docs/internal/`](docs/internal/roadmap.md).
+
+## License
+
+Apache-2.0, see [`LICENSE`](LICENSE). Third-party notices are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -2,77 +2,35 @@
 
 # cxxgpr
 
-C++23 の厳密ガウス過程回帰（Exact GPR）静的ライブラリ。
+**C++23 のための厳密ガウス過程回帰ライブラリ。** データにモデルを当てはめ、校正された不確かさつきで予測できます。数値・メモリ・スレッドを自分で制御できます。例外は投げず、ホットパスで確保せず、スレッド数が違っても結果はビット単位で一致します。
 
-> **現在地（`0.1.0`）**：Exact GPR 本体、永続化、CMake install / パッケージ対応、および検証スイートを実装済み。公開 API は 1.0 未満（`0.x`）の事前安定性規約に従う。
+[![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## 対象範囲
+> **状態：`0.1.0`。** 機能は揃い、検証も済んでいます。1.0 までは API が変わる可能性があります。
 
-`cxxgpr` は **Exact GPR**（`Gpr` / `FittedGpr`）に特化している。Sparse GPR（`Sgpr` / `Svgp`）およびオンライン学習（`OnlineGpr`）はスコープ外とする。
+## 特長
 
-- **推論・モデル操作**：`Gpr::fit`（`const` メンバ、失敗時も不変）、`Gpr::factor`、`predict`、`predict_with`（`VarianceKind::Observation` / `Latent`）、`predict_into`、`predict_with_into`（ウォームアップ後アロケーションゼロ）、`predict_covariance`、`sample`（決定的 `Xoshiro256++`）、`loo_predict`、`neg_log_marginal_likelihood`、`value_and_gradient_into`、`hessian_into`、`get_params` / `set_params`、`refit`、`into_trainer`。
-- **カーネル**：組込み 10 種の葉（`RbfKernel`、`RbfArdKernel`、`MaternKernel` $\nu \in \{1/2, 3/2, 5/2\}$、`MaternArdKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`RationalQuadraticArdKernel`、`ConstantKernel`、`LinearKernel`、`WhiteKernel`）、`+` / `*` 合成（`KernelSpec` -> `CompiledKernel<T>`）、`Custom` 葉（`KernelTerm<T>`）、`LeafCache` 増分更新、供給二乗距離（`ScalarDistance` / `ArdDistance` / `DistanceKernel`）。
-- **最適化器**：外部最適化ライブラリに頼らない自前実装（`Lbfgs` / `NelderMead` / `TrustRegion` / `FastSimulatedAnnealing` / `Fixed`）、区間 logit 変換、決定的リスタート。
-- **前処理・精度・方針**：入力／目的変数変換（`Identity*` / `Standardize*` / `MinMax*` / `Pipeline` / `TargetPipeline` / `ColumnwiseInput` / ユーザー定義）、`DoublePrecision` / `SinglePrecision` / `MixedPrecision<PromoteStorage | ReevaluateKernel>`、`KernelExp::{Accurate, FastApprox}`、`DistanceCachePolicy`、`CholeskyBuffer`、`JitterPolicy::{Fixed, Adaptive}`。
-- **永続化**：`config.json` と `model.safetensors`（原子的一時ファイル＋リネーム、`f64` 因子 mmap 読込、`PersistRegistry`）。
+- **エラーは値で返る。** 失敗しうる呼び出しはすべて `std::expected<T, GprError>` を返し、API の境界で例外は飛びません。
+- **再現できる。** 並列計算の結果はスレッド数によらずビット単位で一致し、乱数による標本抽出もシード付きで可搬です。
+- **コストが読める。** 2 回目以降の予測は確保ゼロで、メモリと速度のどちらを優先するかを選べます。
+- **ヘッダがきれい。** Eigen・nlohmann/json・OpenMP は公開ヘッダに現れず、利用側のビルドへ漏れません。
+- **構造で安全にする。** 失敗した呼び出しは対象を変えず、範囲つきのハイパーパラメータは範囲外にできず、学習前と学習後のモデルは別の型です。
 
-## 設計の特徴
+## できること
 
-- **C++23 とエラー契約**：API 境界に例外を送出せず `[[nodiscard]] std::expected<T, GprError>` を返す。
-- **列優先（Column-major）**：データ行列は `MatrixRef<double>` または `std::span<const double>`（`x`, `n_rows`, `n_cols`）として列優先で受け渡す。
-- **公開ヘッダ非漏洩**：Eigen・`nlohmann::json`・OpenMP は内部実装に閉じ込め、`include/cxxgpr/` に露出させない。
-- **ライセンス**：Apache-2.0（`LICENSE`）。第三者通知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) に記録する。
+| 領域 | 内容 |
+|---|---|
+| **モデル** | `Gpr`（学習器）と `FittedGpr`（学習済みモデル）。学習、予測平均と分散、同時共分散、事後標本、1 つ抜き交差検証、解析勾配とヘッセ行列つきの周辺尤度 |
+| **カーネル** | 組込み 10 種（RBF、Matérn 1/2・3/2・5/2、周期、有理二次、定数、線形、白色、および ARD 版）、和と積、独自カーネル、事前計算した距離 |
+| **最適化器** | L-BFGS、信頼領域、Nelder–Mead、高速焼きなまし、または固定。決定的な再開始 |
+| **データ処理** | 入力と目的変数の標準化、最小最大、列ごとの変換。パイプラインで連結できる |
+| **数値計算** | 倍精度・単精度・混合精度（反復改良）、適応的 Jitter、必要に応じた高速近似指数関数 |
+| **永続化** | 学習済みモデルを可搬なディレクトリ（`config.json` と `model.safetensors`）へ保存・読込。メモリマップ読込も選べる |
 
-## ビルドと組み込み
+疎な近似モデルとオンライン更新は、意図して含めていません。
 
-### 動作要件
-
-- `std::expected` に対応した C++23 コンパイラ（MSVC 19.44+ / Visual Studio 17.14+、または GCC 14+）
-- CMake 3.25+、Ninja、および `vcpkg`（環境変数 `VCPKG_ROOT` を設定）
-
-### プリセットによるビルドと試験
-
-```sh
-# Linux (GCC 14)
-cmake --preset linux-release
-cmake --build --preset linux-release
-ctest --preset linux-release
-
-# Windows (MSVC、Developer PowerShell または VCPKG_ROOT 設定済み環境)
-cmake --preset windows-msvc
-cmake --build --preset windows-release
-ctest --preset windows-release
-```
-
-### インストールと `find_package(cxxgpr)`
-
-```sh
-cmake --install out/build/linux-release --prefix /path/to/install
-```
-
-```cmake
-cmake_minimum_required(VERSION 3.25)
-project(my_app LANGUAGES CXX)
-
-find_package(cxxgpr 0.1.0 CONFIG REQUIRED)
-add_executable(my_app main.cpp)
-target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
-```
-
-### `FetchContent`
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(
-    cxxgpr
-    GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.1.0
-)
-FetchContent_MakeAvailable(cxxgpr)
-target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
-```
-
-### 最小利用例
+## はじめの一歩
 
 ```cpp
 #include <cxxgpr/gpr/gpr.hpp>
@@ -130,17 +88,45 @@ int main()
 }
 ```
 
-一行ずつの解説は[最初の回帰チュートリアル](docs/ja/tutorials/first-regression.md)を参照してください。
+ノイズ入りの正弦曲線に当てはめ、予測平均と標準偏差を表示します。一行ずつの解説は[最初の回帰チュートリアル](docs/ja/tutorials/first-regression.md)にあります。
+
+## 導入
+
+**ビルド済みパッケージ。** [GitHub Release](https://github.com/YUKIKEDA/cxxgpr/releases) に、Windows（MSVC）と Linux（GCC 14）の利用可能なパッケージ、文書、SHA-256 の一覧を置きます。展開して、CMake から指すだけで使えます。
+
+```cmake
+find_package(cxxgpr 0.1 CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
+```
+
+パッケージは、構成時に Eigen、nlohmann/json、（あれば）OpenMP を探します。vcpkg などで導入しておいてください。
+
+**ソースから `FetchContent` で。**
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    cxxgpr
+    GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
+    GIT_TAG v0.1.0
+)
+FetchContent_MakeAvailable(cxxgpr)
+target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
+```
+
+必要なもの：`std::expected` に対応した C++23 コンパイラ（MSVC 19.44 以降、または GCC 14 以降）、CMake 3.25 以降、Ninja、`VCPKG_ROOT` を設定した vcpkg。ビルドオプションとプリセットは[導入ガイド](docs/ja/how-to/install-and-link.md)にあります。
 
 ## 文書
 
-利用者向け文書は [Diataxis](https://diataxis.fr/) の構成で、日本語と英語の両方を用意しています。`just docs` でビルドできます。ソースは `docs/ja/` と `docs/en/` にあります。
-
-| 区分 | 内容 |
+| | |
 |---|---|
-| [チュートリアル](docs/ja/tutorials/index.md) | 作りながら学ぶ。最初の回帰、多次元モデル、保存と読込 |
+| [チュートリアル](docs/ja/tutorials/index.md) | 作りながら学ぶ：最初の回帰、多次元モデル、保存と読込 |
 | [ハウツーガイド](docs/ja/how-to/index.md) | 目的別の手順。全体で公開 API をすべて網羅 |
-| [リファレンス](docs/ja/reference/index.md) | ヘッダから生成した API リファレンス、エラーコード、ビルドオプション、ファイル形式 |
-| [解説](docs/ja/explanation/index.md) | ガウス過程の背景、カーネル、数値安定性、設計原則 |
-| [`docs/internal/`](docs/internal/roadmap.md) | 開発者向け文書（英語）：仕様、ADR、品質計画、ロードマップ |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 開発手順とゲート |
+| [リファレンス](docs/ja/reference/index.md) | API リファレンス、エラーコード、ビルドオプション、ファイル形式 |
+| [解説](docs/ja/explanation/index.md) | ガウス過程、カーネル、数値安定性、設計の背景 |
+
+文書サイトは `just docs` で自分でビルドできます。開発に参加する方は [`CONTRIBUTING.md`](CONTRIBUTING.md) と、開発者向け文書 [`docs/internal/`](docs/internal/roadmap.md)（英語）を読んでください。
+
+## ライセンス
+
+Apache-2.0。[`LICENSE`](LICENSE) を参照してください。第三者の通知は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) にあります。
