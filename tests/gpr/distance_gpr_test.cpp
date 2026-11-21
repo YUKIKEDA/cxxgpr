@@ -22,6 +22,10 @@
 #include <limits>
 #include <vector>
 
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
+
 namespace
 {
 
@@ -174,6 +178,7 @@ namespace
         };
     }
 
+    /// @brief Verifies that factoring on supplied distances reproduces the coordinate model at fixed hyperparameters.
     TEST(DistanceGprTest, FactorMatchesTheCoordinateModelAtFixedHyperparameters)
     {
         const Data data = make_data(14, 5, 2);
@@ -210,6 +215,8 @@ namespace
         EXPECT_EQ(model->optimizer_result().iterations, 0U);
     }
 
+    /// @brief Verifies that fitting with each derivative-based optimizer reaches the same optimum as the coordinate
+    /// model.
     TEST(DistanceGprTest, FitReachesTheCoordinateOptimumForTheDerivativeBasedOptimizers)
     {
         const Data data = make_data(16, 4, 2);
@@ -244,6 +251,8 @@ namespace
         check(cxxgpr::optimizer::TrustRegion{});
     }
 
+    /// @brief Verifies that the gradient-free optimizers lower the negative log marginal likelihood from the starting
+    /// point.
     TEST(DistanceGprTest, GradientFreeOptimizersImproveTheObjective)
     {
         const Data data = make_data(14, 4, 2);
@@ -271,6 +280,7 @@ namespace
         EXPECT_LT(fsa->neg_log_marginal_likelihood(), start->neg_log_marginal_likelihood());
     }
 
+    /// @brief Verifies that predictions, covariance, samples and leave-one-out results match the coordinate model.
     TEST(DistanceGprTest, PredictionsCovarianceSamplesAndLooMatchTheCoordinateModel)
     {
         const Data data = make_data(15, 6, 2);
@@ -340,6 +350,7 @@ namespace
         EXPECT_TRUE(none->empty());
     }
 
+    /// @brief Verifies that a per-dimension distance slot reproduces the coordinate ARD model.
     TEST(DistanceGprTest, ArdSlotMatchesTheCoordinateArdModel)
     {
         const Data data = make_data(13, 4, 2);
@@ -385,6 +396,7 @@ namespace
         EXPECT_LT(rel_diff(p_dist->variance, p_ref->variance), 1e-5);
     }
 
+    /// @brief Verifies that the with-points mode combines supplied-distance leaves with coordinate leaves correctly.
     TEST(DistanceGprTest, WithPointsMixesSuppliedDistancesAndCoordinateLeaves)
     {
         const Data data = make_data(12, 4, 2);
@@ -433,6 +445,7 @@ namespace
         EXPECT_EQ(wrong.error().code(), cxxgpr::GprErrorCode::DimensionMismatch);
     }
 
+    /// @brief Verifies that the single-precision model tracks the double-precision model within a loose tolerance.
     TEST(DistanceGprTest, SinglePrecisionTracksTheDoubleModel)
     {
         const Data data = make_data(14, 4, 2);
@@ -461,6 +474,7 @@ namespace
         EXPECT_LT(rel_diff(p_single->variance, p_ref->variance), 1e-3);
     }
 
+    /// @brief Verifies that invalid inputs are rejected with the expected error codes and the trainer remains usable.
     TEST(DistanceGprTest, RejectsInvalidInputsAndLeavesTheTrainerUsable)
     {
         const Data data = make_data(10, 3, 2);
@@ -530,6 +544,7 @@ namespace
         EXPECT_TRUE(model->predict(cross).has_value());
     }
 
+    /// @brief Verifies that copies, refit and conversion back into a trainer preserve the fitted model.
     TEST(DistanceGprTest, CopiesRefitAndIntoTrainerKeepTheFittedModel)
     {
         const Data data = make_data(12, 3, 2);
@@ -568,6 +583,7 @@ namespace
         EXPECT_NEAR(model->into_trainer().likelihood().noise_variance(), model->likelihood().noise_variance(), 1e-15);
     }
 
+    /// @brief Verifies that mixed-precision refinement converges against the exact system for both residual formulas.
     TEST(DistanceGprTest, MixedPrecisionRefinesAgainstTheExactSystemForBothResidualFormulas)
     {
         const Data data = make_data(60, 5, 2);
@@ -622,6 +638,72 @@ namespace
         ASSERT_TRUE(p_ref.has_value());
         ASSERT_TRUE(p_reeval.has_value()) << p_reeval.error().message();
         EXPECT_LT(rel_diff(p_reeval->mean, p_ref->mean), 1e-3);
+    }
+
+    /// @brief Verifies that results are bitwise identical regardless of the number of threads.
+    TEST(DistanceGprTest, ResultsAreBitwiseIdenticalAcrossThreadCounts)
+    {
+        const Data data = make_data(420, 40, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        cxxgpr::DistanceSource train;
+        cxxgpr::DistanceSource cross;
+        cxxgpr::DistanceSource query;
+        train.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cross.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+        query.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m));
+        auto run = [&](int threads)
+        {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+            auto model = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(distance_scalar_kernel(slot))
+                             .with_noise_variance(0.05)
+                             .value()
+                             .with_optimizer(cxxgpr::optimizer::Lbfgs{}.with_max_iterations(4))
+                             .fit(train, data.y);
+            EXPECT_TRUE(model.has_value());
+            return model;
+        };
+#ifdef _OPENMP
+        const int saved_threads = omp_get_max_threads();
+#endif
+        auto reference = run(1);
+        if (!reference.has_value())
+        {
+            FAIL() << "single-thread fit failed";
+        }
+        auto ref_pred = reference->predict_covariance(cross, query);
+        if (!ref_pred.has_value())
+        {
+            FAIL() << "single-thread covariance failed";
+        }
+        for (const int threads : {2, 4})
+        {
+            auto other = run(threads);
+            if (!other.has_value())
+            {
+                FAIL() << "fit failed for threads " << threads;
+            }
+            EXPECT_EQ(other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood());
+            ASSERT_EQ(other->alpha().size(), reference->alpha().size());
+            for (std::size_t i = 0; i < data.n; ++i)
+            {
+                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+            }
+            auto pred = other->predict_covariance(cross, query);
+            if (!pred.has_value())
+            {
+                FAIL() << "covariance failed for threads " << threads;
+            }
+            EXPECT_EQ(pred->mean, ref_pred->mean);
+            EXPECT_EQ(pred->covariance, ref_pred->covariance);
+        }
+#ifdef _OPENMP
+        omp_set_num_threads(saved_threads);
+#endif
     }
 
 }  // namespace

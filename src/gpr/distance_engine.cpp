@@ -2,8 +2,8 @@
 /// @file distance_engine.cpp
 /// @brief Training and prediction engine for Gaussian processes on caller-supplied squared distances.
 /// @details Evaluates the negative log marginal likelihood, its analytic gradient and Hessian for a
-/// CompiledDistanceKernel using the same dense kernels as the coordinate model (DES-13, DES-14), and predicts from
-/// rectangular cross-distance tables (DES-21).
+/// CompiledDistanceKernel using the same dense kernels as the coordinate model, and predicts from rectangular
+/// cross-distance tables.
 
 #include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/gpr/distance_gpr.hpp"
@@ -30,10 +30,15 @@ namespace cxxgpr
     namespace
     {
 
+        /// @brief Brings the shared dense fill_diagonal_scaled kernel into scope.
         using mll_kernels::fill_diagonal_scaled;
+        /// @brief Brings the shared dense frobenius_full_det kernel into scope.
         using mll_kernels::frobenius_full_det;
+        /// @brief Brings the shared dense frobenius_lower_det kernel into scope.
         using mll_kernels::frobenius_lower_det;
+        /// @brief Brings the shared dense gemv_sym_lower kernel into scope.
         using mll_kernels::gemv_sym_lower;
+        /// @brief Brings the shared dense transpose_square_in_place kernel into scope.
         using mll_kernels::transpose_square_in_place;
 
         /// @brief Copies a double matrix view into a column-major vector, rejecting non-finite entries.
@@ -287,6 +292,9 @@ namespace cxxgpr
             }
 
         private:
+            /// @brief Remembers the parameters and objective of the latest successful evaluation.
+            /// @param[in] params Parameter vector that was evaluated.
+            /// @param[in] mll Objective value at those parameters.
             void record(std::span<const double> params, double mll) noexcept
             {
                 std::ranges::copy(params, last_params_.begin());
@@ -294,6 +302,9 @@ namespace cxxgpr
                 valid_ = true;
             }
 
+            /// @brief Writes the optimizer parameter vector into the kernel and the likelihood.
+            /// @param[in] params Kernel parameters followed by the log noise variance.
+            /// @return Success, or GprError when the length or a value is invalid.
             [[nodiscard]] std::expected<void, GprError> apply_params(std::span<const double> params)
             {
                 const std::size_t nk = kernel_.num_params();
@@ -311,6 +322,7 @@ namespace cxxgpr
             }
 
             /// @brief Grows the shared scratch (kernel scratch, nested pool, second scratch matrix).
+            /// @return Success, or GprError when preparing the kernel scratch fails.
             [[nodiscard]] std::expected<void, GprError> ensure_scratch()
             {
                 auto& core = buffers_.core;
@@ -330,6 +342,8 @@ namespace cxxgpr
                 return {};
             }
 
+            /// @brief Returns the second scratch matrix as a square mutable view.
+            /// @return Mutable view over the second scratch matrix.
             [[nodiscard]] MatrixMut<Storage> scratch_b_mut()
             {
                 const std::size_t n = buffers_.core.order();
@@ -337,6 +351,7 @@ namespace cxxgpr
             }
 
             /// @brief Assembles K + noise I, factors it with jitter, solves for alpha, and returns the objective.
+            /// @return Negative log marginal likelihood, or GprError when the factorization or objective fails.
             [[nodiscard]] std::expected<double, GprError> factor_and_mll()
             {
                 auto& core = buffers_.core;
@@ -390,6 +405,7 @@ namespace cxxgpr
             }
 
             /// @brief Builds the lower triangle of W = alpha alpha^T - A^-1 from the live factor.
+            /// @return Success, or GprError when the computation fails.
             [[nodiscard]] std::expected<void, GprError> build_w()
             {
                 auto& core = buffers_.core;
@@ -399,6 +415,8 @@ namespace cxxgpr
             }
 
             /// @brief Fills -0.5 <W, dA/dtheta_p>_F for every parameter, including the log noise variance.
+            /// @param[out] out_grad Gradient with respect to the kernel parameters and the log noise variance.
+            /// @return Success, or GprError when the output length mismatches or a kernel gradient fails.
             [[nodiscard]] std::expected<void, GprError> fill_gradient(std::span<double> out_grad)
             {
                 auto& core = buffers_.core;
@@ -432,7 +450,9 @@ namespace cxxgpr
                 return {};
             }
 
-            /// @brief Fills the analytic log-space Hessian from the live factor and W (DES-14).
+            /// @brief Fills the analytic log-space Hessian from the live factor and W.
+            /// @param[out] out_hess Square Hessian whose side is the kernel parameter count plus one.
+            /// @return Success, or GprError when the output length mismatches or a kernel derivative fails.
             [[nodiscard]] std::expected<void, GprError> fill_hessian(std::span<double> out_hess)
             {
                 auto& core = buffers_.core;
@@ -561,23 +581,34 @@ namespace cxxgpr
                 return {};
             }
 
+            /// @brief Kernel being optimized.
             CompiledDistanceKernel<Storage>& kernel_;
+            /// @brief Likelihood holding the noise variance being optimized.
             GaussianLikelihood& likelihood_;
+            /// @brief Checked supplied distance tables.
             const CheckedDistanceStore<Storage>& store_;
+            /// @brief Optional training points (with-points mode).
             std::optional<MatrixRef<Storage>> x_;
+            /// @brief Standardised training targets.
             std::span<const Storage> y_;
+            /// @brief Jitter policy used when factoring.
             const JitterPolicy& jitter_;
+            /// @brief Shared fit buffers.
             FitBuffers<P>& buffers_;
+            /// @brief Second scratch matrix for kernel gradients and Hessian terms.
             std::vector<Storage> scratch_b_;
+            /// @brief Parameters of the latest successful evaluation.
             std::vector<double> last_params_;
+            /// @brief Objective value of the latest successful evaluation.
             double last_mll_{0.0};
+            /// @brief Whether the cached evaluation is valid.
             bool valid_{false};
         };
 
         /// @brief Iterative-refinement linear system of a supplied-distance model under a mixed-precision policy.
         /// @details The float factor corrects double-precision residuals. PromoteStorage evaluates the residual from
         /// the stored float matrix; ReevaluateKernel from the exact double Gram matrix built from the double tables.
-        /// The acceptance check and the fallback always use the exact double system (DES-05).
+        /// The acceptance check and the fallback always use the exact double system.
         /// @tparam P Mixed-precision policy.
         template <PrecisionPolicyConcept P> class DistanceRefineSystem final : public RefineSystem
         {
@@ -710,6 +741,9 @@ namespace cxxgpr
 
         private:
             /// @brief Residual against the exact double Gram matrix plus the diagonal offset.
+            /// @param[in] w Current solution vector.
+            /// @param[out] r Residual of the exact system at w.
+            /// @return Largest absolute row sum of the exact matrix, or GprError when the Gram matrix cannot be built.
             [[nodiscard]] std::expected<double, GprError> exact_residual(std::span<const double> w, std::span<double> r)
             {
                 const std::size_t n = y64_.size();
@@ -746,22 +780,44 @@ namespace cxxgpr
                 return inf_norm(row_abs_);
             }
 
+            /// @brief Double-precision kernel.
             const CompiledDistanceKernel<double>& kernel64_;
+            /// @brief Double-precision distance tables.
             const CheckedDistanceStore<double>& store64_;
+            /// @brief Optional double-precision training points (with-points mode).
             std::optional<MatrixRef<double>> x64_;
+            /// @brief Double-precision targets.
             std::span<const double> y64_;
+            /// @brief Single-precision Cholesky factor.
             MatrixRef<float> l_f32_;
+            /// @brief Single-precision system matrix.
             MatrixRef<float> a_f32_;
+            /// @brief Diagonal offset (noise variance plus jitter).
             double diag_offset_;
+            /// @brief Single-precision residual buffer.
             std::vector<float> r_f32_;
+            /// @brief Row absolute sums of the exact matrix.
             std::vector<double> row_abs_;
+            /// @brief Accumulator of the exact matrix-vector product.
             std::vector<double> sum_;
+            /// @brief Exact double Gram matrix storage.
             std::vector<double> gram64_;
+            /// @brief Scratch matrix for building the Gram matrix.
             std::vector<double> gram_scratch_;
         };
 
     }  // namespace
 
+    /// @brief Trains a supplied-distance model and returns its immutable fitted payload.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] cfg Training configuration (kernel, likelihood, jitter, transforms, optimization switch).
+    /// @param[in] train Supplied squared distances of the training set.
+    /// @param[in] x Optional training points (with-points mode).
+    /// @param[in] y Training targets.
+    /// @param[in] optimize_cb Type-erased optimizer entry point.
+    /// @param[in] optimize_ctx Opaque optimizer context passed to the entry point.
+    /// @return Fitted payload, or GprError.
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<detail::DistanceFittedPayload<P, C>, GprError> detail::train_distance_payload(
         const DistanceTrainConfig<C>& cfg,
@@ -1326,6 +1382,16 @@ namespace cxxgpr
 
     }  // namespace
 
+    /// @brief Predicts the mean and variance at query points from supplied cross distances.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] payload Fitted state.
+    /// @param[in,out] scratch Reusable query buffers.
+    /// @param[in] cross Cross squared distances between training and query points.
+    /// @param[in] xq Optional query points (with-points mode).
+    /// @param[in] options Prediction options.
+    /// @param[out] out Prediction written in place.
+    /// @return Success, or GprError.
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<void, GprError> detail::predict_distance_into(
         const DistanceFittedPayload<P, C>& payload,
@@ -1388,6 +1454,16 @@ namespace cxxgpr
         return inverse_variance<Refine>(*payload.target_transform, std::span<Refine>(out.variance), scratch.var_tmp);
     }
 
+    /// @brief Predicts the full posterior covariance at query points from supplied distances.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] payload Fitted state.
+    /// @param[in,out] scratch Reusable query buffers.
+    /// @param[in] cross Cross squared distances between training and query points.
+    /// @param[in] query Squared distances among the query points.
+    /// @param[in] xq Optional query points (with-points mode).
+    /// @param[in] options Prediction options.
+    /// @return Predictive covariance, or GprError.
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<PredictiveCovariance<typename P::Refine>, GprError> detail::predict_distance_covariance(
         const DistanceFittedPayload<P, C>& payload,
@@ -1420,6 +1496,18 @@ namespace cxxgpr
         return cov;
     }
 
+    /// @brief Draws joint posterior samples at query points from supplied distances.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] payload Fitted state.
+    /// @param[in,out] scratch Reusable query buffers.
+    /// @param[in] cross Cross squared distances between training and query points.
+    /// @param[in] query Squared distances among the query points.
+    /// @param[in] xq Optional query points (with-points mode).
+    /// @param[in] n_draws Number of samples to draw.
+    /// @param[in] seed Seed of the deterministic generator.
+    /// @param[in] options Prediction options.
+    /// @return Samples, or GprError.
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<std::vector<typename P::Refine>, GprError> detail::sample_distance(
         const DistanceFittedPayload<P, C>& payload,
@@ -1459,6 +1547,12 @@ namespace cxxgpr
         return samples;
     }
 
+    /// @brief Computes leave-one-out predictions of the training set.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode.
+    /// @param[in] payload Fitted state.
+    /// @param[in] options Prediction options.
+    /// @return Leave-one-out prediction, or GprError.
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<Prediction<typename P::Refine>, GprError> detail::loo_distance(
         const DistanceFittedPayload<P, C>& payload, const PredictOptions& options
@@ -1493,40 +1587,359 @@ namespace cxxgpr
         return out;
     }
 
-#define CXXGPR_INSTANTIATE_DISTANCE(P, C)                                                                          \
-    template std::expected<detail::DistanceFittedPayload<P, C>, GprError> detail::train_distance_payload<P, C>(    \
-        const DistanceTrainConfig<C>&, const DistanceSource&, std::optional<MatrixRef<double>>,                    \
-        std::span<const double>,                                                                                   \
-        std::expected<optimizer::OptimizerResult, GprError> (*)(                                                   \
-            void*, optimizer::TwiceDifferentiable&, std::span<const double>                                        \
-        ),                                                                                                         \
-        void*                                                                                                      \
-    );                                                                                                             \
-    template std::expected<void, GprError> detail::predict_distance_into<P, C>(                                    \
-        const DistanceFittedPayload<P, C>&, DistanceQueryScratch<P::Storage>&, const DistanceSource&,              \
-        std::optional<MatrixRef<double>>, const PredictOptions&, Prediction<P::Refine>&                            \
-    );                                                                                                             \
-    template std::expected<PredictiveCovariance<P::Refine>, GprError> detail::predict_distance_covariance<P, C>(   \
-        const DistanceFittedPayload<P, C>&, DistanceQueryScratch<P::Storage>&, const DistanceSource&,              \
-        const DistanceSource&, std::optional<MatrixRef<double>>, const PredictOptions&                             \
-    );                                                                                                             \
-    template std::expected<std::vector<P::Refine>, GprError> detail::sample_distance<P, C>(                        \
-        const DistanceFittedPayload<P, C>&, DistanceQueryScratch<P::Storage>&, const DistanceSource&,              \
-        const DistanceSource&, std::optional<MatrixRef<double>>, std::size_t, std::uint64_t, const PredictOptions& \
-    );                                                                                                             \
-    template std::expected<Prediction<P::Refine>, GprError> detail::loo_distance<P, C>(                            \
-        const DistanceFittedPayload<P, C>&, const PredictOptions&                                                  \
+    // Explicit instantiations of the supplied-distance engine for every precision policy and kernel mode.
+
+    template std::expected<detail::DistanceFittedPayload<DoublePrecision, DistanceOnly>, GprError> detail::
+        train_distance_payload<DoublePrecision, DistanceOnly>(
+            const DistanceTrainConfig<DistanceOnly>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<DoublePrecision, DistanceOnly>(
+        const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
+        DistanceQueryScratch<DoublePrecision::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<DoublePrecision::Refine>&
     );
+    template std::expected<PredictiveCovariance<DoublePrecision::Refine>, GprError> detail::
+        predict_distance_covariance<DoublePrecision, DistanceOnly>(
+            const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
+            DistanceQueryScratch<DoublePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<DoublePrecision::Refine>, GprError> detail::
+        sample_distance<DoublePrecision, DistanceOnly>(
+            const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
+            DistanceQueryScratch<DoublePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<DoublePrecision::Refine>, GprError> detail::
+        loo_distance<DoublePrecision, DistanceOnly>(
+            const DistanceFittedPayload<DoublePrecision, DistanceOnly>&, const PredictOptions&
+        );
 
-    CXXGPR_INSTANTIATE_DISTANCE(DoublePrecision, DistanceOnly)
-    CXXGPR_INSTANTIATE_DISTANCE(DoublePrecision, WithPoints)
-    CXXGPR_INSTANTIATE_DISTANCE(SinglePrecision, DistanceOnly)
-    CXXGPR_INSTANTIATE_DISTANCE(SinglePrecision, WithPoints)
-    CXXGPR_INSTANTIATE_DISTANCE(MixedPrecision<PromoteStorage>, DistanceOnly)
-    CXXGPR_INSTANTIATE_DISTANCE(MixedPrecision<PromoteStorage>, WithPoints)
-    CXXGPR_INSTANTIATE_DISTANCE(MixedPrecision<ReevaluateKernel>, DistanceOnly)
-    CXXGPR_INSTANTIATE_DISTANCE(MixedPrecision<ReevaluateKernel>, WithPoints)
+    template std::expected<detail::DistanceFittedPayload<DoublePrecision, WithPoints>, GprError> detail::
+        train_distance_payload<DoublePrecision, WithPoints>(
+            const DistanceTrainConfig<WithPoints>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<DoublePrecision, WithPoints>(
+        const DistanceFittedPayload<DoublePrecision, WithPoints>&,
+        DistanceQueryScratch<DoublePrecision::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<DoublePrecision::Refine>&
+    );
+    template std::expected<PredictiveCovariance<DoublePrecision::Refine>, GprError> detail::
+        predict_distance_covariance<DoublePrecision, WithPoints>(
+            const DistanceFittedPayload<DoublePrecision, WithPoints>&,
+            DistanceQueryScratch<DoublePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<DoublePrecision::Refine>, GprError> detail::
+        sample_distance<DoublePrecision, WithPoints>(
+            const DistanceFittedPayload<DoublePrecision, WithPoints>&,
+            DistanceQueryScratch<DoublePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<DoublePrecision::Refine>, GprError> detail::
+        loo_distance<DoublePrecision, WithPoints>(
+            const DistanceFittedPayload<DoublePrecision, WithPoints>&, const PredictOptions&
+        );
 
-#undef CXXGPR_INSTANTIATE_DISTANCE
+    template std::expected<detail::DistanceFittedPayload<SinglePrecision, DistanceOnly>, GprError> detail::
+        train_distance_payload<SinglePrecision, DistanceOnly>(
+            const DistanceTrainConfig<DistanceOnly>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<SinglePrecision, DistanceOnly>(
+        const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
+        DistanceQueryScratch<SinglePrecision::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<SinglePrecision::Refine>&
+    );
+    template std::expected<PredictiveCovariance<SinglePrecision::Refine>, GprError> detail::
+        predict_distance_covariance<SinglePrecision, DistanceOnly>(
+            const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
+            DistanceQueryScratch<SinglePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<SinglePrecision::Refine>, GprError> detail::
+        sample_distance<SinglePrecision, DistanceOnly>(
+            const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
+            DistanceQueryScratch<SinglePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<SinglePrecision::Refine>, GprError> detail::
+        loo_distance<SinglePrecision, DistanceOnly>(
+            const DistanceFittedPayload<SinglePrecision, DistanceOnly>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<SinglePrecision, WithPoints>, GprError> detail::
+        train_distance_payload<SinglePrecision, WithPoints>(
+            const DistanceTrainConfig<WithPoints>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<SinglePrecision, WithPoints>(
+        const DistanceFittedPayload<SinglePrecision, WithPoints>&,
+        DistanceQueryScratch<SinglePrecision::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<SinglePrecision::Refine>&
+    );
+    template std::expected<PredictiveCovariance<SinglePrecision::Refine>, GprError> detail::
+        predict_distance_covariance<SinglePrecision, WithPoints>(
+            const DistanceFittedPayload<SinglePrecision, WithPoints>&,
+            DistanceQueryScratch<SinglePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<SinglePrecision::Refine>, GprError> detail::
+        sample_distance<SinglePrecision, WithPoints>(
+            const DistanceFittedPayload<SinglePrecision, WithPoints>&,
+            DistanceQueryScratch<SinglePrecision::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<SinglePrecision::Refine>, GprError> detail::
+        loo_distance<SinglePrecision, WithPoints>(
+            const DistanceFittedPayload<SinglePrecision, WithPoints>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>, GprError>
+        detail::train_distance_payload<MixedPrecision<PromoteStorage>, DistanceOnly>(
+            const DistanceTrainConfig<DistanceOnly>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<PromoteStorage>, DistanceOnly>(
+        const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
+        DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<MixedPrecision<PromoteStorage>::Refine>&
+    );
+    template std::expected<PredictiveCovariance<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        predict_distance_covariance<MixedPrecision<PromoteStorage>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
+            DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        sample_distance<MixedPrecision<PromoteStorage>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
+            DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        loo_distance<MixedPrecision<PromoteStorage>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>, GprError> detail::
+        train_distance_payload<MixedPrecision<PromoteStorage>, WithPoints>(
+            const DistanceTrainConfig<WithPoints>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<PromoteStorage>, WithPoints>(
+        const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
+        DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<MixedPrecision<PromoteStorage>::Refine>&
+    );
+    template std::expected<PredictiveCovariance<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        predict_distance_covariance<MixedPrecision<PromoteStorage>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
+            DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        sample_distance<MixedPrecision<PromoteStorage>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
+            DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
+        loo_distance<MixedPrecision<PromoteStorage>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>, GprError>
+        detail::train_distance_payload<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceTrainConfig<DistanceOnly>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::
+        predict_distance_into<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
+            DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&,
+            Prediction<MixedPrecision<ReevaluateKernel>::Refine>&
+        );
+    template std::expected<PredictiveCovariance<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        predict_distance_covariance<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
+            DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        sample_distance<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
+            DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        loo_distance<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&, const PredictOptions&
+        );
+
+    template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>, GprError>
+        detail::train_distance_payload<MixedPrecision<ReevaluateKernel>, WithPoints>(
+            const DistanceTrainConfig<WithPoints>&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::span<const double>,
+            std::expected<optimizer::OptimizerResult, GprError> (*)(
+                void*, optimizer::TwiceDifferentiable&, std::span<const double>
+            ),
+            void*
+        );
+    template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<ReevaluateKernel>, WithPoints>(
+        const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
+        DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+        const DistanceSource&,
+        std::optional<MatrixRef<double>>,
+        const PredictOptions&,
+        Prediction<MixedPrecision<ReevaluateKernel>::Refine>&
+    );
+    template std::expected<PredictiveCovariance<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        predict_distance_covariance<MixedPrecision<ReevaluateKernel>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
+            DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            const PredictOptions&
+        );
+    template std::expected<std::vector<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        sample_distance<MixedPrecision<ReevaluateKernel>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
+            DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
+            const DistanceSource&,
+            const DistanceSource&,
+            std::optional<MatrixRef<double>>,
+            std::size_t,
+            std::uint64_t,
+            const PredictOptions&
+        );
+    template std::expected<Prediction<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
+        loo_distance<MixedPrecision<ReevaluateKernel>, WithPoints>(
+            const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&, const PredictOptions&
+        );
 
 }  // namespace cxxgpr

@@ -29,6 +29,7 @@
 #include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 
+/// @brief Dense marginal-likelihood helper kernels shared by the coordinate and supplied-distance engines.
 namespace cxxgpr::mll_kernels
 {
 

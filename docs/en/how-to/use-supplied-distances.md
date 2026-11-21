@@ -5,7 +5,7 @@ This guide shows how to evaluate kernels from squared distances that you compute
 Read {doc}`build-kernels` first. The symbols come from `cxxgpr/kernel/distance.hpp` and `cxxgpr/kernel/distance_cache.hpp`; signatures are in the [kernel API reference](../reference/api/kernel.md).
 
 :::{warning}
-Supplied-distance kernels are a **kernel-evaluation** API. The `Gpr` trainer accepts only a `KernelSpec`, so you cannot pass a `DistanceKernel` to `Gpr::fit`. Use `CompiledDistanceKernel` to build Gram matrices, cross-covariances and derivatives, and feed them to your own solver or to the building blocks in {doc}`use-low-level-building-blocks`.
+This guide covers the **kernel-evaluation** API: build Gram matrices, cross-covariances and derivatives with `CompiledDistanceKernel`. The `Gpr` trainer accepts only a `KernelSpec`. To train and predict with a `DistanceKernel`, use `DistanceGpr` ({doc}`fit-on-supplied-distances`).
 :::
 
 ## When to use supplied distances

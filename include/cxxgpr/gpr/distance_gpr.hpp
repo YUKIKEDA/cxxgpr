@@ -34,7 +34,15 @@
 namespace cxxgpr
 {
 
+    /// @brief Unfitted trainer for Gaussian process regression on supplied squared distances.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C> class DistanceGpr;
+    /// @brief Fitted supplied-distance model that owns its training result.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C> class FittedDistanceGpr;
 
     /// @brief Internal training and prediction engine for supplied-distance models.
@@ -525,6 +533,13 @@ namespace cxxgpr
     private:
         friend class DistanceGpr<O, P, C>;
 
+        /// @brief Constructs a fitted model from a training payload and the trainer configuration.
+        /// @param[in] payload Immutable fitted state shared between copies.
+        /// @param[in] optimizer Optimizer retained for refitting.
+        /// @param[in] jitter Jitter policy retained for refitting.
+        /// @param[in] input_transform Unfitted input transform retained for refitting.
+        /// @param[in] target_transform Unfitted target transform retained for refitting.
+        /// @param[in] kernel_exp Kernel exponential evaluation mode.
         FittedDistanceGpr(
             std::shared_ptr<const detail::DistanceFittedPayload<P, C>> payload,
             O optimizer,
@@ -542,12 +557,19 @@ namespace cxxgpr
         {
         }
 
+        /// @brief Immutable fitted state shared between copies.
         std::shared_ptr<const detail::DistanceFittedPayload<P, C>> payload_;
+        /// @brief Optimizer retained for refitting.
         O optimizer_;
+        /// @brief Jitter policy retained for refitting.
         JitterPolicy jitter_;
+        /// @brief Unfitted input transform retained for refitting.
         std::unique_ptr<transform::UnfittedInputTransform> input_transform_;
+        /// @brief Unfitted target transform retained for refitting.
         std::unique_ptr<transform::UnfittedTargetTransform> target_transform_;
+        /// @brief Kernel exponential evaluation mode.
         KernelExp kernel_exp_{KernelExp::Accurate};
+        /// @brief Per-model scratch buffers reused across prediction calls.
         mutable detail::DistanceQueryScratch<Storage> scratch_;
     };
 
@@ -599,9 +621,11 @@ namespace cxxgpr
         ~DistanceGpr() = default;
 
         /// @brief Copy assignment is deleted; build a new trainer instead.
+        /// @return Not applicable; the operator is deleted.
         DistanceGpr& operator=(const DistanceGpr&) = delete;
 
         /// @brief Move assignment is deleted; build a new trainer instead.
+        /// @return Not applicable; the operator is deleted.
         DistanceGpr& operator=(DistanceGpr&&) = delete;
 
         /// @brief Returns a trainer with a different initial observation noise variance.
@@ -756,6 +780,12 @@ namespace cxxgpr
         template <typename O2, PrecisionPolicyConcept P2, DistanceModeConcept C2> friend class DistanceGpr;
         friend class FittedDistanceGpr<O, P, C>;
 
+        /// @brief Trains a fitted model, optionally optimizing the hyperparameters first.
+        /// @param[in] train Supplied squared distances of the training set.
+        /// @param[in] x Optional training points (present in the with-points mode).
+        /// @param[in] y Training targets.
+        /// @param[in] optimize Whether to run the optimizer before the final fit.
+        /// @return Fitted model, or GprError.
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> run(
             const DistanceSource& train, std::optional<MatrixRef<double>> x, std::span<const double> y, bool optimize
         ) const
@@ -785,15 +815,27 @@ namespace cxxgpr
             );
         }
 
+        /// @brief Initial kernel.
         DistanceKernel<C> kernel_;
+        /// @brief Optimizer.
         O optimizer_;
+        /// @brief Gaussian likelihood with the initial noise variance.
         GaussianLikelihood likelihood_;
+        /// @brief Jitter policy.
         JitterPolicy jitter_;
+        /// @brief Unfitted input transform.
         std::unique_ptr<transform::UnfittedInputTransform> input_transform_;
+        /// @brief Unfitted target transform.
         std::unique_ptr<transform::UnfittedTargetTransform> target_transform_;
+        /// @brief Kernel exponential evaluation mode.
         KernelExp kernel_exp_{KernelExp::Accurate};
     };
 
+    /// @brief Converts the fitted model back into a trainer carrying the fitted hyperparameters.
+    /// @return Trainer initialised from the fitted kernel, likelihood and configuration.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
     DistanceGpr<O, P, C> FittedDistanceGpr<O, P, C>::into_trainer() const
     {
@@ -807,6 +849,13 @@ namespace cxxgpr
         return trainer;
     }
 
+    /// @brief Refits on new supplied distances starting from the fitted hyperparameters (distance-only mode).
+    /// @param[in] train Supplied squared distances of the new training set.
+    /// @param[in] y New training targets.
+    /// @return Refitted model, or GprError.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<FittedDistanceGpr<O, P, C>, GprError> FittedDistanceGpr<O, P, C>::refit(
         const DistanceSource& train, std::span<const double> y
@@ -816,6 +865,14 @@ namespace cxxgpr
         return into_trainer().fit(train, y);
     }
 
+    /// @brief Refits on new supplied distances and points starting from the fitted hyperparameters (with-points mode).
+    /// @param[in] train Supplied squared distances of the new training set.
+    /// @param[in] x New training points.
+    /// @param[in] y New training targets.
+    /// @return Refitted model, or GprError.
+    /// @tparam O Optimizer type.
+    /// @tparam P Precision policy.
+    /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<FittedDistanceGpr<O, P, C>, GprError> FittedDistanceGpr<O, P, C>::refit(
         const DistanceSource& train, MatrixRef<double> x, std::span<const double> y

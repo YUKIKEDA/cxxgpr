@@ -21,8 +21,8 @@ English | [日本語](README.ja.md)
 
 | Area | Included |
 |---|---|
-| **Models** | `Gpr` (trainer) and `FittedGpr` (trained model): fit, predict mean and variance, joint covariance, posterior samples, leave-one-out, marginal likelihood with analytic gradient and Hessian |
-| **Kernels** | 10 built-in kernels (RBF, Matérn 1/2, 3/2 and 5/2, periodic, rational quadratic, constant, linear, white, plus ARD variants), sums and products, your own kernels, and precomputed distances |
+| **Models** | `Gpr` (trainer) and `FittedGpr` (trained model): fit, predict mean and variance, joint covariance, posterior samples, leave-one-out, marginal likelihood with analytic gradient and Hessian. `DistanceGpr` and `FittedDistanceGpr` do the same on distances you supply |
+| **Kernels** | 10 built-in kernels (RBF, Matérn 1/2, 3/2 and 5/2, periodic, rational quadratic, constant, linear, white, plus ARD variants), sums and products, your own kernels, and distances you supply yourself |
 | **Optimizers** | L-BFGS, trust region, Nelder–Mead, fast simulated annealing, or fixed hyperparameters; deterministic restarts |
 | **Data handling** | Standardize, min–max and column-wise transforms for inputs and targets, chained in pipelines |
 | **Numerics** | Double, single and mixed precision with iterative refinement; adaptive jitter; fast approximate exponential on request |
