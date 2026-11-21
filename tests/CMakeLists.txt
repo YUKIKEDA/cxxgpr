@@ -197,6 +197,11 @@ cxxgpr_add_test(gpr.models
     LABELS unit property negative integration
 )
 
+cxxgpr_add_test(gpr.distance
+    SOURCES gpr/distance_gpr_test.cpp
+    LABELS unit property negative integration
+)
+
 cxxgpr_add_test(persist.models
     SOURCES persist/persist_test.cpp
     LABELS unit property negative integration

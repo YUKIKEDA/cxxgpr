@@ -142,4 +142,4 @@ max relative error of FastApprox on [-100, 0]: double 7.02e-09, float 1.19e-07
 
 ## 距離だけでは足りないとき
 
-定常な葉に必要なのは二乗距離だけなので、自分で計算した距離（測地距離、グラフ距離、編集距離）を与え、その上でカーネルを評価できる。{doc}`../how-to/use-supplied-distances` を参照。二乗距離の関数として自分で書いた葉は、同じ合成と最適化の仕組みに載る。{doc}`../how-to/write-custom-kernel` を参照。どちらの場合も、カーネルがその距離尺度で半正定値であり続ける必要がある。cxxgpr にはこれを検査できない。
+定常な葉に必要なのは二乗距離だけなので、自分で計算した距離（測地距離、グラフ距離、編集距離）を与え、その上でカーネルを評価したりモデルを学習したりできる。{doc}`../how-to/use-supplied-distances` と {doc}`../how-to/fit-on-supplied-distances` を参照。二乗距離の関数として自分で書いた葉は、同じ合成と最適化の仕組みに載る。{doc}`../how-to/write-custom-kernel` を参照。どちらの場合も、カーネルがその距離尺度で半正定値であり続ける必要がある。cxxgpr にはこれを検査できない。
