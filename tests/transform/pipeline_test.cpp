@@ -17,6 +17,7 @@
 #include <span>
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 
 namespace
 {
@@ -285,6 +286,56 @@ namespace
 
         EXPECT_EQ(TargetPipeline{}.fit_typed({}).error().code(), GprErrorCode::EmptyInput);
         EXPECT_EQ(TargetPipeline{}.fit_typed(std::array<double, 1>{inf}).error().code(), GprErrorCode::NonFiniteInput);
+    }
+
+    /// @brief Verifies depth-128 nested Pipeline and TargetPipeline fit, apply, inverse, and destruction fit in small
+    /// stack.
+    TEST(TransformPipelineTest, DeepNestedPipelinesFitApplyAndDestroyInSmallStack)
+    {
+        // Spec: REQ-04, REQ-12
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(),
+            []()
+        {
+            Pipeline pipe;
+            pipe.then(StandardizeInput{});
+            TargetPipeline tpipe;
+            tpipe.then(StandardizeTarget{});
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                Pipeline outer;
+                outer.then(std::move(pipe));
+                pipe = std::move(outer);
+
+                TargetPipeline t_outer;
+                t_outer.then(std::move(tpipe));
+                tpipe = std::move(t_outer);
+            }
+
+            std::array<double, 6> x{1.0, 2.0, 3.0, -1.0, 0.5, 2.5};
+            const auto fitted_in = pipe.fit_typed(x, 3, 2);
+            ASSERT_TRUE(fitted_in.has_value());
+            std::array<double, 6> x_buf = x;
+            ASSERT_TRUE(fitted_in->apply(x_buf, 3, 2).has_value());
+            ASSERT_TRUE(fitted_in->inverse_apply(x_buf, 3, 2).has_value());
+            for (std::size_t i = 0; i < x.size(); ++i)
+            {
+                EXPECT_NEAR(x_buf[i], x[i], 1e-12);
+            }
+
+            std::array<double, 3> y{2.0, 4.0, 6.0};
+            const auto fitted_tgt = tpipe.fit_typed(y);
+            ASSERT_TRUE(fitted_tgt.has_value());
+            std::array<double, 3> y_buf = y;
+            ASSERT_TRUE(fitted_tgt->transform(y_buf).has_value());
+            ASSERT_TRUE(fitted_tgt->inverse_transform_mean(y_buf).has_value());
+            for (std::size_t i = 0; i < y.size(); ++i)
+            {
+                EXPECT_NEAR(y_buf[i], y[i], 1e-12);
+            }
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace

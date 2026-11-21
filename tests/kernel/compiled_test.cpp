@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 
 namespace
 {
@@ -457,6 +458,61 @@ namespace
                 .code(),
             cxxgpr::GprErrorCode::DimensionMismatch
         );
+    }
+
+    /// @brief Verifies depth-128 alternating sum/product CompiledKernel eval, grad, and hess fit within a small stack.
+    TEST(CompiledKernelTest, DeepAlternatingTreeEvalGradHessFitInSmallStack)
+    {
+        // Spec: REQ-02, REQ-12
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(),
+            []()
+        {
+            cxxgpr::KernelSpec tree(cxxgpr::RbfKernel::create(1.1).value());
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                const auto leaf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.9).value());
+                tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
+            }
+            const auto compiled = tree.compile<double>();
+            constexpr std::size_t n = 3U;
+            const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
+            const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
+            std::vector<double> out(n * n, 0.0);
+            std::vector<double> sa(n * n, 0.0);
+            std::vector<double> sb(n * n, 0.0);
+            std::vector<double> sc(n * n, 0.0);
+            auto nested = compiled.make_nested_buffers(n, n);
+
+            ASSERT_TRUE(compiled
+                    .apply_points(
+                        x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .grad_points(
+                        x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), 0U, cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n, n),
+                        nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .hess_points(
+                        x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), 0U, 1U, cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n, n),
+                        cxxgpr::MatrixMut<double>(sc.data(), n, n, n), nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .apply_cross_points(
+                        x, x, cxxgpr::MatrixMut<double>(out.data(), n, n, n),
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), nested
+                    )
+                    .has_value());
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace

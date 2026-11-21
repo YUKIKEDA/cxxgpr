@@ -16,6 +16,7 @@
 #include <utility>
 #include <variant>
 
+#include "core/noinline.hpp"
 #include "kernel/exp_simd.hpp"
 #include "kernel/leaf_eval.hpp"
 
@@ -1024,6 +1025,45 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Verifies that `nested` has enough buffer depth and element capacity without constructing expected.
+        /// @param[in,out] nested Caller-supplied nested buffer pool.
+        /// @param[in] level_idx Required zero-based buffer level index.
+        /// @param[in] rows Required row capacity.
+        /// @param[in] cols Required column capacity.
+        /// @param[out] err Populated with WorkspaceTooSmall on failure.
+        /// @return True when `nested` suffices, false otherwise.
+        [[nodiscard]] bool ensure_nested_ok(
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::size_t rows,
+            std::size_t cols,
+            std::optional<GprError>& err
+        ) const noexcept
+        {
+            if (nested.depth() <= level_idx || nested.rows() < rows || nested.cols() < cols)
+            {
+                err = GprError::workspace_too_small();
+                return false;
+            }
+            return true;
+        }
+
+        /// @brief Assigns an error into `err` from a failed `std::expected` in an out-of-line helper.
+        /// @param[in] res Failed expected result.
+        /// @param[out] err Destination error slot.
+        /// @return True if `res` succeeded, false after writing `err`.
+        [[nodiscard]] static CXXGPR_NOINLINE bool capture_expected(
+            std::expected<void, GprError>&& res, std::optional<GprError>& err
+        ) noexcept
+        {
+            if (res.has_value())
+            {
+                return true;
+            }
+            err = std::move(res).error();
+            return false;
+        }
+
         /// @brief Folds child terms of a sum or product AST node using caller-supplied child evaluation callback.
         /// @details For products containing `ConstantKernel` scalars, skips full-matrix constant fills, evaluates only
         /// spatially varying factors first into `out` and `scratch`/`nested`, and scales `out` once by their product.
@@ -1036,10 +1076,11 @@ namespace cxxgpr
         /// @param[in,out] scratch Reusable matrix view for sibling leaf evaluation.
         /// @param[in,out] nested Pre-allocated intermediate buffer pool for composite siblings.
         /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
         /// @param[in] eval_child Callback evaluating a single child term.
-        /// @return Empty expected on success, or unsupported/workspace/evaluation error.
+        /// @return True on success, false after writing `err`.
         template <typename EvalFn>
-        [[nodiscard]] std::expected<void, GprError> eval_composite_terms(
+        [[nodiscard]] bool eval_composite_terms(
             bool is_sum,
             std::span<const Term> terms,
             MatrixMut<T> out,
@@ -1047,12 +1088,14 @@ namespace cxxgpr
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
+            std::optional<GprError>& err,
             EvalFn&& eval_child
         ) const
         {
             if (terms.empty())
             {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+                err = GprError::unsupported_kernel_operation("composite kernel has no terms");
+                return false;
             }
             if (!is_sum)
             {
@@ -1067,31 +1110,31 @@ namespace cxxgpr
                     }
                     if (!has_varying)
                     {
-                        if (auto res = eval_child(child, out, scratch, level_idx); !res.has_value())
+                        if (!eval_child(child, out, scratch, level_idx, err))
                         {
-                            return res;
+                            return false;
                         }
                         has_varying = true;
                         continue;
                     }
                     if (std::holds_alternative<LeafRef>(child))
                     {
-                        if (auto res = eval_child(child, scratch, out, level_idx); !res.has_value())
+                        if (!eval_child(child, scratch, out, level_idx, err))
                         {
-                            return res;
+                            return false;
                         }
                         mul_into(out, scratch.as_ref(), uplo);
                     }
                     else
                     {
-                        if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
+                        if (!ensure_nested_ok(nested, level_idx, out.rows(), out.cols(), err))
                         {
-                            return ok;
+                            return false;
                         }
                         auto buf = nested.level(level_idx, out.rows(), out.cols());
-                        if (auto res = eval_child(child, buf, scratch, level_idx + 1U); !res.has_value())
+                        if (!eval_child(child, buf, scratch, level_idx + 1U, err))
                         {
-                            return res;
+                            return false;
                         }
                         mul_into(out, buf.as_ref(), uplo);
                     }
@@ -1099,45 +1142,45 @@ namespace cxxgpr
                 if (!has_varying)
                 {
                     fill_region(out, scale, uplo);
-                    return {};
+                    return true;
                 }
                 if (scale != T{1})
                 {
                     scale_region(out, scale, uplo);
                 }
-                return {};
+                return true;
             }
 
             // SumTerm: evaluate first summand directly into `out`, then accumulate remaining summands.
-            if (auto res = eval_child(terms[0], out, scratch, level_idx); !res.has_value())
+            if (!eval_child(terms[0], out, scratch, level_idx, err))
             {
-                return res;
+                return false;
             }
             for (std::size_t k = 1U; k < terms.size(); ++k)
             {
                 if (std::holds_alternative<LeafRef>(terms[k]))
                 {
-                    if (auto res = eval_child(terms[k], scratch, out, level_idx); !res.has_value())
+                    if (!eval_child(terms[k], scratch, out, level_idx, err))
                     {
-                        return res;
+                        return false;
                     }
                     add_into(out, scratch.as_ref(), uplo);
                 }
                 else
                 {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
+                    if (!ensure_nested_ok(nested, level_idx, out.rows(), out.cols(), err))
                     {
-                        return ok;
+                        return false;
                     }
                     auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_child(terms[k], buf, scratch, level_idx + 1U); !res.has_value())
+                    if (!eval_child(terms[k], buf, scratch, level_idx + 1U, err))
                     {
-                        return res;
+                        return false;
                     }
                     add_into(out, buf.as_ref(), uplo);
                 }
             }
-            return {};
+            return true;
         }
 
         /// @brief Recursively evaluates a compiled `Term` into `out` from squared Euclidean distances.
@@ -1150,6 +1193,64 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or evaluation/workspace error.
+        /// @brief Evaluates one distance leaf out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf_idx Leaf index into `leaves`.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_leaf_dist_step(
+            std::size_t leaf_idx, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(detail::leaf_apply_dist(leaves[leaf_idx], dist, out, uplo, exp_mode), err);
+        }
+
+        /// @brief Recursive body of `eval_term_dist` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] out Destination Gram matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_term_dist_rec(
+            const Term& term,
+            MatrixRef<T> dist,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                return eval_leaf_dist_step(leaf->leaf_idx, dist, out, uplo, err);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            return eval_composite_terms(
+                is_sum, terms, out, uplo, scratch, nested, level_idx, err,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth,
+                    std::optional<GprError>& child_err)
+            { return eval_term_dist_rec(child, dist, target, uplo, aux, nested, depth, child_err); }
+            );
+        }
+
+        /// @brief Recursively evaluates a compiled `Term` into `out` from squared Euclidean distances.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] out Destination Gram matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @return Empty expected on success, or evaluation/workspace error.
         [[nodiscard]] std::expected<void, GprError> eval_term_dist(
             const Term& term,
             MatrixRef<T> dist,
@@ -1160,17 +1261,12 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            std::optional<GprError> err;
+            if (!eval_term_dist_rec(term, dist, out, uplo, scratch, nested, level_idx, err))
             {
-                return detail::leaf_apply_dist(leaves[leaf->leaf_idx], dist, out, uplo, exp_mode);
+                return std::unexpected(std::move(*err));
             }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            return eval_composite_terms(
-                is_sum, terms, out, uplo, scratch, nested, level_idx,
-                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
-            { return eval_term_dist(child, dist, target, uplo, aux, nested, depth); }
-            );
+            return {};
         }
 
         /// @brief Evaluates a single compiled leaf at `leaf_idx` using caches when available.
@@ -1344,6 +1440,77 @@ namespace cxxgpr
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or workspace/evaluation error.
+        /// @brief Evaluates one point leaf out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf_idx Leaf index into `leaves`.
+        /// @param[in] x Input point matrix.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_leaf_points_step(
+            std::size_t leaf_idx,
+            MatrixRef<T> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(eval_leaf_at(leaf_idx, x, out, uplo, nested, level_idx, cache), err);
+        }
+
+        /// @brief Recursive body of `eval_term_points` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x Input point matrix.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_term_points_rec(
+            const Term& term,
+            MatrixRef<T> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                return eval_leaf_points_step(leaf->leaf_idx, x, out, uplo, nested, level_idx, cache, err);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            return eval_composite_terms(
+                is_sum, terms, out, uplo, scratch, nested, level_idx, err,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth,
+                    std::optional<GprError>& child_err)
+            { return eval_term_points_rec(child, x, target, uplo, aux, nested, depth, cache, child_err); }
+            );
+        }
+
+        /// @brief Recursively evaluates a compiled `Term` from point coordinates (and optional cache).
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x Input point matrix.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_points(
             const Term& term,
             MatrixRef<T> x,
@@ -1355,17 +1522,12 @@ namespace cxxgpr
             const DistanceCache<T>* cache = nullptr
         ) const
         {
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            std::optional<GprError> err;
+            if (!eval_term_points_rec(term, x, out, uplo, scratch, nested, level_idx, cache, err))
             {
-                return eval_leaf_at(leaf->leaf_idx, x, out, uplo, nested, level_idx, cache);
+                return std::unexpected(std::move(*err));
             }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            return eval_composite_terms(
-                is_sum, terms, out, uplo, scratch, nested, level_idx,
-                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
-            { return eval_term_points(child, x, target, uplo, aux, nested, depth, cache); }
-            );
+            return {};
         }
 
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from rectangular squared distances.
@@ -1377,6 +1539,60 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/evaluation error.
+        /// @brief Evaluates one cross-distance leaf out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf_idx Leaf index into `leaves`.
+        /// @param[in] dist Rectangular squared-distance matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_leaf_cross_dist_step(
+            std::size_t leaf_idx, MatrixRef<T> dist, MatrixMut<T> out, std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(detail::leaf_apply_cross_dist(leaves[leaf_idx], dist, out, exp_mode), err);
+        }
+
+        /// @brief Recursive body of `eval_term_cross_dist` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Rectangular squared-distance matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_term_cross_dist_rec(
+            const Term& term,
+            MatrixRef<T> dist,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                return eval_leaf_cross_dist_step(leaf->leaf_idx, dist, out, err);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            return eval_composite_terms(
+                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx, err,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth,
+                    std::optional<GprError>& child_err)
+            { return eval_term_cross_dist_rec(child, dist, target, aux, nested, depth, child_err); }
+            );
+        }
+
+        /// @brief Recursively evaluates a compiled `Term` cross-covariance from rectangular squared distances.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] dist Rectangular squared-distance matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross_dist(
             const Term& term,
             MatrixRef<T> dist,
@@ -1386,17 +1602,12 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            std::optional<GprError> err;
+            if (!eval_term_cross_dist_rec(term, dist, out, scratch, nested, level_idx, err))
             {
-                return detail::leaf_apply_cross_dist(leaves[leaf->leaf_idx], dist, out, exp_mode);
+                return std::unexpected(std::move(*err));
             }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            return eval_composite_terms(
-                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx,
-                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
-            { return eval_term_cross_dist(child, dist, target, aux, nested, depth); }
-            );
+            return {};
         }
 
         /// @brief Recursively evaluates a compiled `Term` cross-covariance from two point coordinate matrices.
@@ -1410,6 +1621,85 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees and custom distances.
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or workspace/evaluation error.
+        /// @brief Evaluates one cross-points leaf out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf_idx Leaf index into `leaves`.
+        /// @param[in] x1 First point matrix.
+        /// @param[in] x2 Second point matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_leaf_cross_points_step(
+            std::size_t leaf_idx,
+            MatrixRef<T> x1,
+            MatrixRef<T> x2,
+            MatrixMut<T> out,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf_idx];
+            if (const auto* custom = std::get_if<CustomKernel>(&kl))
+            {
+                if (!ensure_nested_ok(nested, level_idx, x1.rows(), x2.rows(), err))
+                {
+                    return false;
+                }
+                auto dist_buf = nested.level(level_idx, x1.rows(), x2.rows());
+                fill_cross_sq_dist(x1, x2, dist_buf);
+                return capture_expected(custom->template term<T>().apply_cross(dist_buf.as_ref(), out), err);
+            }
+            return capture_expected(
+                detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode, cached_ls[leaf_idx], true), err
+            );
+        }
+
+        /// @brief Recursive body of `eval_term_cross_points` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x1 First point matrix.
+        /// @param[in] x2 Second point matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_term_cross_points_rec(
+            const Term& term,
+            MatrixRef<T> x1,
+            MatrixRef<T> x2,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                return eval_leaf_cross_points_step(leaf->leaf_idx, x1, x2, out, nested, level_idx, err);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            return eval_composite_terms(
+                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx, err,
+                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth,
+                    std::optional<GprError>& child_err)
+            { return eval_term_cross_points_rec(child, x1, x2, target, aux, nested, depth, child_err); }
+            );
+        }
+
+        /// @brief Recursively evaluates a compiled `Term` cross-covariance from two point coordinate matrices.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] x1 First point matrix.
+        /// @param[in] x2 Second point matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Reusable scratch matrix.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross_points(
             const Term& term,
             MatrixRef<T> x1,
@@ -1420,28 +1710,12 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            std::optional<GprError> err;
+            if (!eval_term_cross_points_rec(term, x1, x2, out, scratch, nested, level_idx, err))
             {
-                const KernelLeaf& kl = leaves[leaf->leaf_idx];
-                if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, x1.rows(), x2.rows()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto dist_buf = nested.level(level_idx, x1.rows(), x2.rows());
-                    fill_cross_sq_dist(x1, x2, dist_buf);
-                    return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
-                }
-                return detail::leaf_apply_cross_points(kl, x1, x2, out, exp_mode, cached_ls[leaf->leaf_idx], true);
+                return std::unexpected(std::move(*err));
             }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            return eval_composite_terms(
-                is_sum, terms, out, Triangle::Full, scratch, nested, level_idx,
-                [&](const Term& child, MatrixMut<T> target, MatrixMut<T> aux, std::size_t depth)
-            { return eval_term_cross_points(child, x1, x2, target, aux, nested, depth); }
-            );
+            return {};
         }
 
         /// @brief Recursively evaluates the self-covariance diagonal $k(x_i, x_i)$ of a compiled `Term`.
@@ -1519,7 +1793,42 @@ namespace cxxgpr
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
-        [[nodiscard]] std::expected<void, GprError> eval_grad_dist(
+        /// @brief Evaluates one distance-leaf gradient out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf Leaf AST reference.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d_k Destination derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool grad_leaf_dist_step(
+            const LeafRef& leaf,
+            MatrixRef<T> dist,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(
+                detail::leaf_grad_dist(leaves[leaf.leaf_idx], dist, d_k, param_idx - leaf.param_begin, uplo, exp_mode),
+                err
+            );
+        }
+
+        /// @brief Recursive body of `eval_grad_dist` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_grad_dist_rec(
             const Term& term,
             MatrixRef<T> dist,
             MatrixMut<T> d_k,
@@ -1528,14 +1837,13 @@ namespace cxxgpr
             MatrixMut<T> scratch_a,
             MatrixMut<T> scratch_b,
             NestedBuffers<T>& nested,
-            std::size_t level_idx
+            std::size_t level_idx,
+            std::optional<GprError>& err
         ) const
         {
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                return detail::leaf_grad_dist(
-                    leaves[leaf->leaf_idx], dist, d_k, param_idx - leaf->param_begin, uplo, exp_mode
-                );
+                return grad_leaf_dist_step(*leaf, dist, d_k, param_idx, uplo, err);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
@@ -1544,12 +1852,13 @@ namespace cxxgpr
                 {
                     if (contains_param(child, param_idx))
                     {
-                        return eval_grad_dist(
-                            child, dist, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx
+                        return eval_grad_dist_rec(
+                            child, dist, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, err
                         );
                     }
                 }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             const auto& p = std::get<ProductTerm>(term);
             std::size_t owner = p.terms.size();
@@ -1563,14 +1872,15 @@ namespace cxxgpr
             }
             if (owner == p.terms.size())
             {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             // Differentiate the owning factor into d_k, then multiply by all sibling factor Grams.
-            if (auto res =
-                    eval_grad_dist(p.terms[owner], dist, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx);
-                !res.has_value())
+            if (!eval_grad_dist_rec(
+                    p.terms[owner], dist, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, err
+                ))
             {
-                return res;
+                return false;
             }
             for (std::size_t m = 0; m < p.terms.size(); ++m)
             {
@@ -1578,12 +1888,42 @@ namespace cxxgpr
                 {
                     continue;
                 }
-                if (auto res = eval_term_dist(p.terms[m], dist, scratch_a, uplo, scratch_b, nested, level_idx);
-                    !res.has_value())
+                if (!eval_term_dist_rec(p.terms[m], dist, scratch_a, uplo, scratch_b, nested, level_idx, err))
                 {
-                    return res;
+                    return false;
                 }
                 mul_into(d_k, scratch_a.as_ref(), uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively evaluates $\partial K / \partial \theta_p$ from squared Euclidean distances.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @return Empty expected on success, or index/workspace/evaluation error.
+        [[nodiscard]] std::expected<void, GprError> eval_grad_dist(
+            const Term& term,
+            MatrixRef<T> dist,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            MatrixMut<T> scratch_a,
+            MatrixMut<T> scratch_b,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx
+        ) const
+        {
+            std::optional<GprError> err;
+            if (!eval_grad_dist_rec(term, dist, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, err))
+            {
+                return std::unexpected(std::move(*err));
             }
             return {};
         }
@@ -1603,7 +1943,84 @@ namespace cxxgpr
         /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
-        [[nodiscard]] std::expected<void, GprError> eval_grad_points(
+        /// @brief Evaluates one point-leaf gradient out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf Leaf AST reference.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool grad_leaf_points_step(
+            const LeafRef& leaf,
+            MatrixRef<T> x,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf.leaf_idx];
+            if (cache != nullptr)
+            {
+                if (cache->has_dist() && leaf_reads_distances(kl))
+                {
+                    return capture_expected(
+                        detail::leaf_grad_dist(kl, cache->dist_view(), d_k, param_idx - leaf.param_begin, uplo, exp_mode),
+                        err
+                    );
+                }
+                if (cache->has_ard() && leaf_needs_ard(kl))
+                {
+                    return capture_expected(
+                        detail::leaf_grad_ard_packed(
+                            kl, cached_ls[leaf.leaf_idx], cache->ard_packed(), x.rows(), d_k,
+                            param_idx - leaf.param_begin, uplo, exp_mode
+                        ),
+                        err
+                    );
+                }
+            }
+            if (const auto* custom = std::get_if<CustomKernel>(&kl))
+            {
+                if (!ensure_nested_ok(nested, level_idx, x.rows(), x.rows(), err))
+                {
+                    return false;
+                }
+                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+                fill_square_sq_dist(x, dist_buf);
+                return capture_expected(
+                    custom->template term<T>().grad(dist_buf.as_ref(), d_k, param_idx - leaf.param_begin, uplo), err
+                );
+            }
+            return capture_expected(
+                detail::leaf_grad_points(
+                    kl, x, d_k, param_idx - leaf.param_begin, uplo, exp_mode, cached_ls[leaf.leaf_idx]
+                ),
+                err
+            );
+        }
+
+        /// @brief Recursive body of `eval_grad_points` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_grad_points_rec(
             const Term& term,
             MatrixRef<T> x,
             MatrixMut<T> d_k,
@@ -1613,41 +2030,13 @@ namespace cxxgpr
             MatrixMut<T> scratch_b,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
-            const DistanceCache<T>* cache = nullptr
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
         ) const
         {
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                const KernelLeaf& kl = leaves[leaf->leaf_idx];
-                if (cache != nullptr)
-                {
-                    if (cache->has_dist() && leaf_reads_distances(kl))
-                    {
-                        return detail::leaf_grad_dist(
-                            kl, cache->dist_view(), d_k, param_idx - leaf->param_begin, uplo, exp_mode
-                        );
-                    }
-                    if (cache->has_ard() && leaf_needs_ard(kl))
-                    {
-                        return detail::leaf_grad_ard_packed(
-                            kl, cached_ls[leaf->leaf_idx], cache->ard_packed(), x.rows(), d_k,
-                            param_idx - leaf->param_begin, uplo, exp_mode
-                        );
-                    }
-                }
-                if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
-                    fill_square_sq_dist(x, dist_buf);
-                    return custom->template term<T>().grad(dist_buf.as_ref(), d_k, param_idx - leaf->param_begin, uplo);
-                }
-                return detail::leaf_grad_points(
-                    kl, x, d_k, param_idx - leaf->param_begin, uplo, exp_mode, cached_ls[leaf->leaf_idx]
-                );
+                return grad_leaf_points_step(*leaf, x, d_k, param_idx, uplo, nested, level_idx, cache, err);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
@@ -1656,12 +2045,13 @@ namespace cxxgpr
                 {
                     if (contains_param(child, param_idx))
                     {
-                        return eval_grad_points(
-                            child, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, cache
+                        return eval_grad_points_rec(
+                            child, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, cache, err
                         );
                     }
                 }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             const auto& p = std::get<ProductTerm>(term);
             std::size_t owner = p.terms.size();
@@ -1675,15 +2065,15 @@ namespace cxxgpr
             }
             if (owner == p.terms.size())
             {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             // Product rule: evaluate the owning factor's derivative, then scale by sibling factor values.
-            if (auto res = eval_grad_points(
-                    p.terms[owner], x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, cache
-                );
-                !res.has_value())
+            if (!eval_grad_points_rec(
+                    p.terms[owner], x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, cache, err
+                ))
             {
-                return res;
+                return false;
             }
             for (std::size_t m = 0; m < p.terms.size(); ++m)
             {
@@ -1691,12 +2081,46 @@ namespace cxxgpr
                 {
                     continue;
                 }
-                if (auto res = eval_term_points(p.terms[m], x, scratch_a, uplo, scratch_b, nested, level_idx, cache);
-                    !res.has_value())
+                if (!eval_term_points_rec(p.terms[m], x, scratch_a, uplo, scratch_b, nested, level_idx, cache, err))
                 {
-                    return res;
+                    return false;
                 }
                 mul_into(d_k, scratch_a.as_ref(), uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively evaluates $\partial K / \partial \theta_p$ from point coordinates (and optional cache).
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @return Empty expected on success, or index/workspace/evaluation error.
+        [[nodiscard]] std::expected<void, GprError> eval_grad_points(
+            const Term& term,
+            MatrixRef<T> x,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            MatrixMut<T> scratch_a,
+            MatrixMut<T> scratch_b,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache = nullptr
+        ) const
+        {
+            std::optional<GprError> err;
+            if (!eval_grad_points_rec(
+                    term, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx, cache, err
+                ))
+            {
+                return std::unexpected(std::move(*err));
             }
             return {};
         }
@@ -1720,7 +2144,48 @@ namespace cxxgpr
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
-        [[nodiscard]] std::expected<void, GprError> eval_hess_dist(
+        /// @brief Evaluates one distance-leaf Hessian out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf Leaf AST reference.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool hess_leaf_dist_step(
+            const LeafRef& leaf,
+            MatrixRef<T> dist,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(
+                detail::leaf_hess_dist(
+                    leaves[leaf.leaf_idx], dist, d2_k, i - leaf.param_begin, j - leaf.param_begin, uplo, exp_mode
+                ),
+                err
+            );
+        }
+
+        /// @brief Recursive body of `eval_hess_dist` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_hess_dist_rec(
             const Term& term,
             MatrixRef<T> dist,
             MatrixMut<T> d2_k,
@@ -1731,14 +2196,13 @@ namespace cxxgpr
             MatrixMut<T> scratch_b,
             MatrixMut<T> scratch_c,
             NestedBuffers<T>& nested,
-            std::size_t level_idx
+            std::size_t level_idx,
+            std::optional<GprError>& err
         ) const
         {
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                return detail::leaf_hess_dist(
-                    leaves[leaf->leaf_idx], dist, d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo, exp_mode
-                );
+                return hess_leaf_dist_step(*leaf, dist, d2_k, i, j, uplo, err);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
@@ -1748,13 +2212,12 @@ namespace cxxgpr
                     const bool has_j = contains_param(child, j);
                     if (has_i && has_j)
                     {
-                        return eval_hess_dist(
-                            child, dist, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx
+                        return eval_hess_dist_rec(
+                            child, dist, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, err
                         );
                     }
                     if (has_i || has_j)
                     {
-                        // Input shape, finiteness, and CoordMode were already validated at entry.
                         // Cross-derivatives between separate summands vanish identically.
                         for (std::size_t col = 0; col < d2_k.cols(); ++col)
                         {
@@ -1771,10 +2234,11 @@ namespace cxxgpr
                                 d2_k(row, col) = T{0};
                             }
                         }
-                        return {};
+                        return true;
                     }
                 }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             const auto& p = std::get<ProductTerm>(term);
             std::size_t owner_i = p.terms.size();
@@ -1792,17 +2256,18 @@ namespace cxxgpr
             }
             if (owner_i == p.terms.size() || owner_j == p.terms.size())
             {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             // Case 1: both i and j belong to the same factor -> second derivative of owner_i times remaining factors.
             if (owner_i == owner_j)
             {
-                if (auto res = eval_hess_dist(
-                        p.terms[owner_i], dist, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx
-                    );
-                    !res.has_value())
+                if (!eval_hess_dist_rec(
+                        p.terms[owner_i], dist, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx,
+                        err
+                    ))
                 {
-                    return res;
+                    return false;
                 }
                 for (std::size_t m = 0; m < p.terms.size(); ++m)
                 {
@@ -1810,28 +2275,25 @@ namespace cxxgpr
                     {
                         continue;
                     }
-                    if (auto res = eval_term_dist(p.terms[m], dist, scratch_b, uplo, scratch_c, nested, level_idx);
-                        !res.has_value())
+                    if (!eval_term_dist_rec(p.terms[m], dist, scratch_b, uplo, scratch_c, nested, level_idx, err))
                     {
-                        return res;
+                        return false;
                     }
                     mul_into(d2_k, scratch_b.as_ref(), uplo);
                 }
-                return {};
+                return true;
             }
             // Case 2: i and j belong to distinct factors -> product of first derivatives times remaining factors.
             MatrixMut<T> grad_rhs = scratch_a;
             MatrixMut<T> work_a = scratch_b;
             MatrixMut<T> work_b = scratch_c;
-            if (auto res = eval_grad_dist(p.terms[owner_i], dist, d2_k, i, uplo, work_a, work_b, nested, level_idx);
-                !res.has_value())
+            if (!eval_grad_dist_rec(p.terms[owner_i], dist, d2_k, i, uplo, work_a, work_b, nested, level_idx, err))
             {
-                return res;
+                return false;
             }
-            if (auto res = eval_grad_dist(p.terms[owner_j], dist, grad_rhs, j, uplo, work_a, work_b, nested, level_idx);
-                !res.has_value())
+            if (!eval_grad_dist_rec(p.terms[owner_j], dist, grad_rhs, j, uplo, work_a, work_b, nested, level_idx, err))
             {
-                return res;
+                return false;
             }
             mul_into(d2_k, grad_rhs.as_ref(), uplo);
             for (std::size_t m = 0; m < p.terms.size(); ++m)
@@ -1840,12 +2302,48 @@ namespace cxxgpr
                 {
                     continue;
                 }
-                if (auto res = eval_term_dist(p.terms[m], dist, scratch_b, uplo, scratch_c, nested, level_idx);
-                    !res.has_value())
+                if (!eval_term_dist_rec(p.terms[m], dist, scratch_b, uplo, scratch_c, nested, level_idx, err))
                 {
-                    return res;
+                    return false;
                 }
                 mul_into(d2_k, scratch_b.as_ref(), uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively evaluates the second log-hyperparameter derivative from squared Euclidean distances.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] dist Square squared-distance matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @return Empty expected on success, or index/workspace/evaluation error.
+        [[nodiscard]] std::expected<void, GprError> eval_hess_dist(
+            const Term& term,
+            MatrixRef<T> dist,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            MatrixMut<T> scratch_a,
+            MatrixMut<T> scratch_b,
+            MatrixMut<T> scratch_c,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx
+        ) const
+        {
+            std::optional<GprError> err;
+            if (!eval_hess_dist_rec(
+                    term, dist, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, err
+                ))
+            {
+                return std::unexpected(std::move(*err));
             }
             return {};
         }
@@ -1867,7 +2365,93 @@ namespace cxxgpr
         /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @return Empty expected on success, or index/workspace/evaluation error.
         /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
-        [[nodiscard]] std::expected<void, GprError> eval_hess_points(
+        /// @brief Evaluates one point-leaf Hessian out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf Leaf AST reference.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool hess_leaf_points_step(
+            const LeafRef& leaf,
+            MatrixRef<T> x,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf.leaf_idx];
+            if (cache != nullptr)
+            {
+                if (cache->has_dist() && leaf_reads_distances(kl))
+                {
+                    return capture_expected(
+                        detail::leaf_hess_dist(
+                            kl, cache->dist_view(), d2_k, i - leaf.param_begin, j - leaf.param_begin, uplo, exp_mode
+                        ),
+                        err
+                    );
+                }
+                if (cache->has_ard() && leaf_needs_ard(kl))
+                {
+                    return capture_expected(
+                        detail::leaf_hess_ard_packed(
+                            kl, cached_ls[leaf.leaf_idx], cache->ard_packed(), x.rows(), d2_k, i - leaf.param_begin,
+                            j - leaf.param_begin, uplo, exp_mode
+                        ),
+                        err
+                    );
+                }
+            }
+            if (const auto* custom = std::get_if<CustomKernel>(&kl))
+            {
+                if (!ensure_nested_ok(nested, level_idx, x.rows(), x.rows(), err))
+                {
+                    return false;
+                }
+                auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
+                fill_square_sq_dist(x, dist_buf);
+                return capture_expected(
+                    custom->template term<T>().hess(
+                        dist_buf.as_ref(), d2_k, i - leaf.param_begin, j - leaf.param_begin, uplo
+                    ),
+                    err
+                );
+            }
+            return capture_expected(
+                detail::leaf_hess_points(
+                    kl, x, d2_k, i - leaf.param_begin, j - leaf.param_begin, uplo, exp_mode, cached_ls[leaf.leaf_idx]
+                ),
+                err
+            );
+        }
+
+        /// @brief Recursive body of `eval_hess_points` using `bool` + out-of-line error slot.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_hess_points_rec(
             const Term& term,
             MatrixRef<T> x,
             MatrixMut<T> d2_k,
@@ -1879,43 +2463,13 @@ namespace cxxgpr
             MatrixMut<T> scratch_c,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
-            const DistanceCache<T>* cache = nullptr
+            const DistanceCache<T>* cache,
+            std::optional<GprError>& err
         ) const
         {
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                const KernelLeaf& kl = leaves[leaf->leaf_idx];
-                if (cache != nullptr)
-                {
-                    if (cache->has_dist() && leaf_reads_distances(kl))
-                    {
-                        return detail::leaf_hess_dist(
-                            kl, cache->dist_view(), d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo, exp_mode
-                        );
-                    }
-                    if (cache->has_ard() && leaf_needs_ard(kl))
-                    {
-                        return detail::leaf_hess_ard_packed(
-                            kl, cached_ls[leaf->leaf_idx], cache->ard_packed(), x.rows(), d2_k, i - leaf->param_begin,
-                            j - leaf->param_begin, uplo, exp_mode
-                        );
-                    }
-                }
-                if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, x.rows(), x.rows()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto dist_buf = nested.level(level_idx, x.rows(), x.rows());
-                    fill_square_sq_dist(x, dist_buf);
-                    return custom->template term<T>().hess(
-                        dist_buf.as_ref(), d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo
-                    );
-                }
-                return detail::leaf_hess_points(
-                    kl, x, d2_k, i - leaf->param_begin, j - leaf->param_begin, uplo, exp_mode, cached_ls[leaf->leaf_idx]
-                );
+                return hess_leaf_points_step(*leaf, x, d2_k, i, j, uplo, nested, level_idx, cache, err);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
@@ -1925,14 +2479,12 @@ namespace cxxgpr
                     const bool has_j = contains_param(child, j);
                     if (has_i && has_j)
                     {
-                        return eval_hess_points(
-                            child, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, cache
+                        return eval_hess_points_rec(
+                            child, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, cache, err
                         );
                     }
                     if (has_i || has_j)
                     {
-                        // Input shape, finiteness, and all ARD dimensions were already validated at
-                        // entry.
                         // Mixed partial derivatives across separate summands vanish identically.
                         for (std::size_t col = 0; col < d2_k.cols(); ++col)
                         {
@@ -1949,10 +2501,11 @@ namespace cxxgpr
                                 d2_k(row, col) = T{0};
                             }
                         }
-                        return {};
+                        return true;
                     }
                 }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             const auto& p = std::get<ProductTerm>(term);
             std::size_t owner_i = p.terms.size();
@@ -1970,17 +2523,18 @@ namespace cxxgpr
             }
             if (owner_i == p.terms.size() || owner_j == p.terms.size())
             {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+                err = GprError::index_out_of_range("kernel parameter index out of range");
+                return false;
             }
             // Same-factor Hessian times remaining sibling factor Grams.
             if (owner_i == owner_j)
             {
-                if (auto res = eval_hess_points(
-                        p.terms[owner_i], x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, cache
-                    );
-                    !res.has_value())
+                if (!eval_hess_points_rec(
+                        p.terms[owner_i], x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx,
+                        cache, err
+                    ))
                 {
-                    return res;
+                    return false;
                 }
                 for (std::size_t m = 0; m < p.terms.size(); ++m)
                 {
@@ -1988,31 +2542,29 @@ namespace cxxgpr
                     {
                         continue;
                     }
-                    if (auto res =
-                            eval_term_points(p.terms[m], x, scratch_b, uplo, scratch_c, nested, level_idx, cache);
-                        !res.has_value())
+                    if (!eval_term_points_rec(p.terms[m], x, scratch_b, uplo, scratch_c, nested, level_idx, cache, err))
                     {
-                        return res;
+                        return false;
                     }
                     mul_into(d2_k, scratch_b.as_ref(), uplo);
                 }
-                return {};
+                return true;
             }
             // Cross-factor Hessian: multiply gradients of owner_i and owner_j by any remaining factors.
             MatrixMut<T> grad_rhs = scratch_a;
             MatrixMut<T> work_a = scratch_b;
             MatrixMut<T> work_b = scratch_c;
-            if (auto res =
-                    eval_grad_points(p.terms[owner_i], x, d2_k, i, uplo, work_a, work_b, nested, level_idx, cache);
-                !res.has_value())
+            if (!eval_grad_points_rec(
+                    p.terms[owner_i], x, d2_k, i, uplo, work_a, work_b, nested, level_idx, cache, err
+                ))
             {
-                return res;
+                return false;
             }
-            if (auto res =
-                    eval_grad_points(p.terms[owner_j], x, grad_rhs, j, uplo, work_a, work_b, nested, level_idx, cache);
-                !res.has_value())
+            if (!eval_grad_points_rec(
+                    p.terms[owner_j], x, grad_rhs, j, uplo, work_a, work_b, nested, level_idx, cache, err
+                ))
             {
-                return res;
+                return false;
             }
             mul_into(d2_k, grad_rhs.as_ref(), uplo);
             for (std::size_t m = 0; m < p.terms.size(); ++m)
@@ -2021,12 +2573,50 @@ namespace cxxgpr
                 {
                     continue;
                 }
-                if (auto res = eval_term_points(p.terms[m], x, scratch_b, uplo, scratch_c, nested, level_idx, cache);
-                    !res.has_value())
+                if (!eval_term_points_rec(p.terms[m], x, scratch_b, uplo, scratch_c, nested, level_idx, cache, err))
                 {
-                    return res;
+                    return false;
                 }
                 mul_into(d2_k, scratch_b.as_ref(), uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively evaluates the second log-hyperparameter derivative from point coordinates.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] scratch_a First reusable square scratch buffer.
+        /// @param[in,out] scratch_b Second reusable square scratch buffer.
+        /// @param[in,out] scratch_c Third reusable square scratch buffer.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @return Empty expected on success, or index/workspace/evaluation error.
+        [[nodiscard]] std::expected<void, GprError> eval_hess_points(
+            const Term& term,
+            MatrixRef<T> x,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            MatrixMut<T> scratch_a,
+            MatrixMut<T> scratch_b,
+            MatrixMut<T> scratch_c,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            const DistanceCache<T>* cache = nullptr
+        ) const
+        {
+            std::optional<GprError> err;
+            if (!eval_hess_points_rec(
+                    term, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx, cache, err
+                ))
+            {
+                return std::unexpected(std::move(*err));
             }
             return {};
         }

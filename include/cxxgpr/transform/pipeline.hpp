@@ -19,6 +19,9 @@
 namespace cxxgpr::transform
 {
 
+    /// @brief Internal friend accessor for iterative pipeline traversal and teardown.
+    struct PipelineAccess;
+
     /// @brief Fitted sequential composition of input feature transforms.
     /// @details Executes fitted input transforms in forward order during apply/apply_into and in reverse order during
     /// inverse_apply/inverse_apply_into.
@@ -55,8 +58,8 @@ namespace cxxgpr::transform
         FittedPipeline& operator=(FittedPipeline&&) noexcept = default;
 
         /// @brief Destroys the fitted input pipeline and its owned steps.
-        /// @details Overrides FittedInputTransform virtual destructor.
-        ~FittedPipeline() override = default;
+        /// @details Overrides FittedInputTransform virtual destructor and destroys nested pipelines iteratively.
+        ~FittedPipeline() override;
 
         /// @brief Returns the number of transform steps.
         /// @details Zero indicates an identity pipeline.
@@ -145,8 +148,14 @@ namespace cxxgpr::transform
         [[nodiscard]] std::unique_ptr<FittedInputTransform> clone() const override;
 
     private:
+        /// @brief Rebuilds flat_steps_ and has_null_step_ iteratively from steps_.
+        void rebuild_flat_steps();
+
         /// @brief Ordered sequence of fitted input transforms applied forward during apply().
         std::vector<std::unique_ptr<FittedInputTransform>> steps_;
+        /// @brief Flattened non-owning leaf steps in forward application order.
+        std::vector<const FittedInputTransform*> flat_steps_;
+        friend struct PipelineAccess;
     };
 
     /// @brief Unfitted sequential composition of input feature transforms.
@@ -184,8 +193,8 @@ namespace cxxgpr::transform
         Pipeline& operator=(Pipeline&&) noexcept = default;
 
         /// @brief Destroys the unfitted input pipeline and its owned steps.
-        /// @details Overrides UnfittedInputTransform virtual destructor.
-        ~Pipeline() override = default;
+        /// @details Overrides UnfittedInputTransform virtual destructor and destroys nested pipelines iteratively.
+        ~Pipeline() override;
 
         /// @brief Appends a step by cloning it onto the end of this pipeline.
         /// @details Lvalue overload supporting chained calls on a named Pipeline variable.
@@ -268,6 +277,7 @@ namespace cxxgpr::transform
     private:
         /// @brief Ordered sequence of unfitted input transforms fitted stagewise during fit().
         std::vector<std::unique_ptr<UnfittedInputTransform>> steps_;
+        friend struct PipelineAccess;
     };
 
     /// @brief Fitted sequential composition of target transforms.
@@ -306,8 +316,8 @@ namespace cxxgpr::transform
         FittedTargetPipeline& operator=(FittedTargetPipeline&&) noexcept = default;
 
         /// @brief Destroys the fitted target pipeline and its owned steps.
-        /// @details Overrides FittedTargetTransform virtual destructor.
-        ~FittedTargetPipeline() override = default;
+        /// @details Overrides FittedTargetTransform virtual destructor and destroys nested pipelines iteratively.
+        ~FittedTargetPipeline() override;
 
         /// @brief Returns the number of target transform steps.
         /// @details Zero indicates an identity target pipeline.
@@ -418,8 +428,14 @@ namespace cxxgpr::transform
         [[nodiscard]] std::unique_ptr<FittedTargetTransform> clone() const override;
 
     private:
+        /// @brief Rebuilds flat_steps_ and has_null_step_ iteratively from steps_.
+        void rebuild_flat_steps();
+
         /// @brief Ordered sequence of fitted target transforms applied forward during transform().
         std::vector<std::unique_ptr<FittedTargetTransform>> steps_;
+        /// @brief Flattened non-owning leaf steps in forward application order.
+        std::vector<const FittedTargetTransform*> flat_steps_;
+        friend struct PipelineAccess;
     };
 
     /// @brief Unfitted sequential composition of target transforms.
@@ -457,8 +473,8 @@ namespace cxxgpr::transform
         TargetPipeline& operator=(TargetPipeline&&) noexcept = default;
 
         /// @brief Destroys the unfitted target pipeline and its owned steps.
-        /// @details Overrides UnfittedTargetTransform virtual destructor.
-        ~TargetPipeline() override = default;
+        /// @details Overrides UnfittedTargetTransform virtual destructor and destroys nested pipelines iteratively.
+        ~TargetPipeline() override;
 
         /// @brief Appends a step by cloning it onto the end of this target pipeline.
         /// @details Lvalue overload supporting chained calls on a named TargetPipeline variable.
@@ -532,6 +548,7 @@ namespace cxxgpr::transform
     private:
         /// @brief Ordered sequence of unfitted target transforms fitted stagewise during fit().
         std::vector<std::unique_ptr<UnfittedTargetTransform>> steps_;
+        friend struct PipelineAccess;
     };
 
 }  // namespace cxxgpr::transform

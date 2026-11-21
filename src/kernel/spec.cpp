@@ -17,6 +17,59 @@
 namespace cxxgpr
 {
 
+    /// @brief Destroys composite subtrees iteratively using an explicit queue so deep trees do not overflow.
+    KernelSpec::~KernelSpec() noexcept
+    {
+        if (!std::holds_alternative<SumNode>(node_) && !std::holds_alternative<ProductNode>(node_))
+        {
+            return;
+        }
+        try
+        {
+            std::vector<std::shared_ptr<const KernelSpec>> work;
+            auto push_unique = [&work](std::shared_ptr<const KernelSpec>& child)
+            {
+                if (child && child.use_count() == 1L)
+                {
+                    work.push_back(std::move(child));
+                }
+                else
+                {
+                    child.reset();
+                }
+            };
+            if (auto* s = std::get_if<SumNode>(&node_))
+            {
+                push_unique(s->lhs);
+                push_unique(s->rhs);
+            }
+            else if (auto* p = std::get_if<ProductNode>(&node_))
+            {
+                push_unique(p->lhs);
+                push_unique(p->rhs);
+            }
+            while (!work.empty())
+            {
+                auto cur = std::move(work.back());
+                work.pop_back();
+                if (const auto* s = std::get_if<SumNode>(&cur->node_))
+                {
+                    push_unique(s->lhs);
+                    push_unique(s->rhs);
+                }
+                else if (const auto* p = std::get_if<ProductNode>(&cur->node_))
+                {
+                    push_unique(p->lhs);
+                    push_unique(p->rhs);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Best-effort iterative teardown; remaining links fall back to default member destruction.
+        }
+    }
+
     namespace
     {
 

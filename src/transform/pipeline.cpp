@@ -20,6 +20,64 @@
 namespace cxxgpr::transform
 {
 
+    /// @brief Internal friend accessor for iterative pipeline traversal, flattening, and teardown.
+    struct PipelineAccess
+    {
+        /// @brief Returns mutable reference to a pipeline's internal step vector.
+        /// @tparam PipeT Concrete pipeline type.
+        /// @param[in,out] pipe Target pipeline instance.
+        /// @return Reference to `pipe.steps_`.
+        template <typename PipeT> static auto& steps(PipeT& pipe) noexcept { return pipe.steps_; }
+
+        /// @brief Returns read-only reference to a pipeline's internal step vector.
+        /// @tparam PipeT Concrete pipeline type.
+        /// @param[in] pipe Target pipeline instance.
+        /// @return Const reference to `pipe.steps_`.
+        template <typename PipeT> static const auto& steps(const PipeT& pipe) noexcept { return pipe.steps_; }
+
+        /// @brief Iteratively destroys nested pipeline steps without stack recursion.
+        /// @tparam PipeT Concrete pipeline class.
+        /// @tparam BaseT Base transform interface stored in `root_steps`.
+        /// @param[in,out] root_steps Top-level step vector to drain and destroy.
+        template <typename PipeT, typename BaseT>
+        static void destroy_steps(std::vector<std::unique_ptr<BaseT>>& root_steps) noexcept
+        {
+            if (root_steps.empty())
+            {
+                return;
+            }
+            try
+            {
+                std::vector<std::unique_ptr<BaseT>> work;
+                auto drain = [&work](std::vector<std::unique_ptr<BaseT>>& vec)
+                {
+                    for (auto& s : vec)
+                    {
+                        if (s != nullptr)
+                        {
+                            work.push_back(std::move(s));
+                        }
+                    }
+                    vec.clear();
+                };
+                drain(root_steps);
+                while (!work.empty())
+                {
+                    auto cur = std::move(work.back());
+                    work.pop_back();
+                    if (auto* sub = dynamic_cast<PipeT*>(cur.get()))
+                    {
+                        drain(sub->steps_);
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Best-effort iterative teardown; remaining links fall back to default vector destruction.
+            }
+        }
+    };
+
     namespace
     {
 
@@ -42,9 +100,60 @@ namespace cxxgpr::transform
             return out;
         }
 
+        /// @brief Iteratively flattens nested fitted pipelines into non-owning leaf steps in forward order.
+        /// @tparam PipeT Concrete fitted pipeline class (`FittedPipeline` or `FittedTargetPipeline`).
+        /// @tparam BaseT Base fitted transform interface (`FittedInputTransform` or `FittedTargetTransform`).
+        /// @param[in] root_steps Top-level fitted step vector.
+        /// @param[out] out Destination vector receiving flattened leaf pointers (including nullptr if present).
+        template <typename PipeT, typename BaseT>
+        void rebuild_flat_steps_impl(
+            const std::vector<std::unique_ptr<BaseT>>& root_steps, std::vector<const BaseT*>& out
+        ) noexcept
+        {
+            try
+            {
+                out.clear();
+                struct Frame
+                {
+                    const std::vector<std::unique_ptr<BaseT>>* steps;
+                    std::size_t idx;
+                };
+                std::vector<Frame> stack;
+                stack.push_back(Frame{&root_steps, 0U});
+                while (!stack.empty())
+                {
+                    auto& top = stack.back();
+                    if (top.idx >= top.steps->size())
+                    {
+                        stack.pop_back();
+                        continue;
+                    }
+                    const BaseT* step = (*top.steps)[top.idx++].get();
+                    if (const auto* sub = dynamic_cast<const PipeT*>(step))
+                    {
+                        stack.push_back(Frame{&PipelineAccess::steps(*sub), 0U});
+                    }
+                    else
+                    {
+                        out.push_back(step);
+                    }
+                }
+            }
+            catch (...)
+            {
+                out.clear();
+            }
+        }
+
     }  // namespace
 
     // --- FittedPipeline ---
+
+    /// @brief Rebuilds flat_steps_ iteratively from steps_.
+    void FittedPipeline::rebuild_flat_steps()
+    {
+        rebuild_flat_steps_impl<FittedPipeline>(steps_, flat_steps_);
+    }
 
     /// @brief Constructs a fitted input pipeline from an ordered list of fitted steps.
     /// @details Takes ownership of steps in forward application order.
@@ -52,12 +161,16 @@ namespace cxxgpr::transform
     FittedPipeline::FittedPipeline(std::vector<std::unique_ptr<FittedInputTransform>> steps) noexcept :
         steps_(std::move(steps))
     {
+        rebuild_flat_steps();
     }
 
     /// @brief Deep-copies the fitted input pipeline.
     /// @details Clones each non-null step preserving forward order.
     /// @param[in] other Source FittedPipeline to copy.
-    FittedPipeline::FittedPipeline(const FittedPipeline& other) : steps_(clone_ptr_vec(other.steps_)) {}
+    FittedPipeline::FittedPipeline(const FittedPipeline& other) : steps_(clone_ptr_vec(other.steps_))
+    {
+        rebuild_flat_steps();
+    }
 
     /// @brief Deep-copy assigns the fitted input pipeline.
     /// @details Replaces owned steps with deep clones of other's steps when &other != this.
@@ -68,8 +181,15 @@ namespace cxxgpr::transform
         if (this != &other)
         {
             steps_ = clone_ptr_vec(other.steps_);
+            rebuild_flat_steps();
         }
         return *this;
+    }
+
+    /// @brief Destroys nested fitted pipeline steps iteratively without call-stack recursion.
+    FittedPipeline::~FittedPipeline()
+    {
+        PipelineAccess::destroy_steps<FittedPipeline>(steps_);
     }
 
     /// @brief Applies all steps in forward order to x in place.
@@ -89,7 +209,7 @@ namespace cxxgpr::transform
     ) const
     {
         // Delegate empty pipelines to identity so validation semantics remain uniform.
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.apply(x, n_rows, n_cols);
         }
@@ -97,7 +217,7 @@ namespace cxxgpr::transform
         {
             return check;
         }
-        for (const auto& step : steps_)
+        for (const FittedInputTransform* step : flat_steps_)
         {
             if (step == nullptr)
             {
@@ -128,7 +248,7 @@ namespace cxxgpr::transform
         std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.apply_into(x, n_rows, n_cols, out);
         }
@@ -137,21 +257,21 @@ namespace cxxgpr::transform
             return check;
         }
         // Run step 0 out-of-place into `out`, then mutate `out` in place for subsequent steps (zero allocation).
-        if (steps_[0] == nullptr)
+        if (flat_steps_[0] == nullptr)
         {
             return std::unexpected(GprError::invalid_config("pipeline contains null step"));
         }
-        if (auto res = steps_[0]->apply_into(x, n_rows, n_cols, out); !res)
+        if (auto res = flat_steps_[0]->apply_into(x, n_rows, n_cols, out); !res)
         {
             return res;
         }
-        for (std::size_t i = 1; i < steps_.size(); ++i)
+        for (std::size_t i = 1; i < flat_steps_.size(); ++i)
         {
-            if (steps_[i] == nullptr)
+            if (flat_steps_[i] == nullptr)
             {
                 return std::unexpected(GprError::invalid_config("pipeline contains null step"));
             }
-            if (auto res = steps_[i]->apply(out, n_rows, n_cols); !res)
+            if (auto res = flat_steps_[i]->apply(out, n_rows, n_cols); !res)
             {
                 return res;
             }
@@ -175,7 +295,7 @@ namespace cxxgpr::transform
         std::span<double> x, std::size_t n_rows, std::size_t n_cols
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.inverse_apply(x, n_rows, n_cols);
         }
@@ -184,7 +304,7 @@ namespace cxxgpr::transform
             return check;
         }
         // Invert in reverse composition order: (T_k o ... o T_1)^-1 = T_1^-1 o ... o T_k^-1.
-        for (const auto& step : std::ranges::reverse_view(steps_))
+        for (const FittedInputTransform* step : std::ranges::reverse_view(flat_steps_))
         {
             if (step == nullptr)
             {
@@ -216,7 +336,7 @@ namespace cxxgpr::transform
         std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.inverse_apply_into(x, n_rows, n_cols, out);
         }
@@ -225,18 +345,18 @@ namespace cxxgpr::transform
             return check;
         }
         // Start reverse chain out-of-place at the final step, then invert remaining steps in place on `out`.
-        const std::size_t last = steps_.size() - 1U;
-        if (steps_[last] == nullptr)
+        const std::size_t last = flat_steps_.size() - 1U;
+        if (flat_steps_[last] == nullptr)
         {
             return std::unexpected(GprError::invalid_config("pipeline contains null step"));
         }
-        if (auto res = steps_[last]->inverse_apply_into(x, n_rows, n_cols, out); !res)
+        if (auto res = flat_steps_[last]->inverse_apply_into(x, n_rows, n_cols, out); !res)
         {
             return res;
         }
         for (std::size_t idx = last; idx > 0; --idx)
         {
-            const auto& step = steps_[idx - 1U];
+            const FittedInputTransform* step = flat_steps_[idx - 1U];
             if (step == nullptr)
             {
                 return std::unexpected(GprError::invalid_config("pipeline contains null step"));
@@ -282,6 +402,12 @@ namespace cxxgpr::transform
             steps_ = clone_ptr_vec(other.steps_);
         }
         return *this;
+    }
+
+    /// @brief Destroys nested unfitted pipeline steps iteratively without call-stack recursion.
+    Pipeline::~Pipeline()
+    {
+        PipelineAccess::destroy_steps<Pipeline>(steps_);
     }
 
     /// @brief Appends a step by cloning it onto the end of this pipeline.
@@ -355,15 +481,43 @@ namespace cxxgpr::transform
         {
             return FittedPipeline{};
         }
-        // Maintain a single mutable working buffer so each step fits on the transformed output of prior steps.
+        // Maintain a single mutable working buffer and an explicit frame stack so nested pipelines do not recurse.
         std::vector<double> buf(x.begin(), x.end());
-        std::vector<std::unique_ptr<FittedInputTransform>> fitted;
-        fitted.reserve(steps_.size());
-        for (const auto& step : steps_)
+        struct FitFrame
         {
+            const std::vector<std::unique_ptr<UnfittedInputTransform>>* steps;
+            std::size_t idx;
+            std::vector<std::unique_ptr<FittedInputTransform>> fitted;
+        };
+        std::vector<FitFrame> stack;
+        stack.push_back(FitFrame{&steps_, 0U, {}});
+        stack.back().fitted.reserve(steps_.size());
+
+        while (true)
+        {
+            auto& top = stack.back();
+            if (top.idx >= top.steps->size())
+            {
+                auto finished = std::move(top.fitted);
+                stack.pop_back();
+                if (stack.empty())
+                {
+                    return FittedPipeline(std::move(finished));
+                }
+                stack.back().fitted.push_back(std::make_unique<FittedPipeline>(std::move(finished)));
+                continue;
+            }
+            const auto& step = (*top.steps)[top.idx++];
             if (step == nullptr)
             {
                 return std::unexpected(GprError::invalid_config("pipeline contains null step"));
+            }
+            if (const auto* sub_pipe = dynamic_cast<const Pipeline*>(step.get()))
+            {
+                const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
+                stack.push_back(FitFrame{&sub_steps, 0U, {}});
+                stack.back().fitted.reserve(sub_steps.size());
+                continue;
             }
             auto fitted_step = step->fit(buf, n_rows, n_cols);
             if (!fitted_step)
@@ -374,9 +528,8 @@ namespace cxxgpr::transform
             {
                 return std::unexpected(std::move(res).error());
             }
-            fitted.push_back(std::move(*fitted_step));
+            top.fitted.push_back(std::move(*fitted_step));
         }
-        return FittedPipeline(std::move(fitted));
     }
 
     /// @brief Fits each step sequentially and returns a boxed fitted pipeline.
@@ -413,12 +566,19 @@ namespace cxxgpr::transform
 
     // --- FittedTargetPipeline ---
 
+    /// @brief Rebuilds flat_steps_ iteratively from steps_.
+    void FittedTargetPipeline::rebuild_flat_steps()
+    {
+        rebuild_flat_steps_impl<FittedTargetPipeline>(steps_, flat_steps_);
+    }
+
     /// @brief Constructs a fitted target pipeline from an ordered list of fitted steps.
     /// @details Takes ownership of steps in forward application order.
     /// @param[in] steps Ordered vector of fitted target transform steps.
     FittedTargetPipeline::FittedTargetPipeline(std::vector<std::unique_ptr<FittedTargetTransform>> steps) noexcept :
         steps_(std::move(steps))
     {
+        rebuild_flat_steps();
     }
 
     /// @brief Deep-copies the fitted target pipeline.
@@ -426,6 +586,7 @@ namespace cxxgpr::transform
     /// @param[in] other Source FittedTargetPipeline to copy.
     FittedTargetPipeline::FittedTargetPipeline(const FittedTargetPipeline& other) : steps_(clone_ptr_vec(other.steps_))
     {
+        rebuild_flat_steps();
     }
 
     /// @brief Deep-copy assigns the fitted target pipeline.
@@ -437,8 +598,15 @@ namespace cxxgpr::transform
         if (this != &other)
         {
             steps_ = clone_ptr_vec(other.steps_);
+            rebuild_flat_steps();
         }
         return *this;
+    }
+
+    /// @brief Destroys nested fitted target pipeline steps iteratively without call-stack recursion.
+    FittedTargetPipeline::~FittedTargetPipeline()
+    {
+        PipelineAccess::destroy_steps<FittedTargetPipeline>(steps_);
     }
 
     /// @brief Applies all steps in forward order to y in place.
@@ -451,7 +619,7 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::transform(std::span<double> y) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.transform(y);
         }
@@ -459,7 +627,7 @@ namespace cxxgpr::transform
         {
             return check;
         }
-        for (const auto& step : steps_)
+        for (const FittedTargetTransform* step : flat_steps_)
         {
             if (step == nullptr)
             {
@@ -486,7 +654,7 @@ namespace cxxgpr::transform
         std::span<const double> y, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.transform_into(y, out);
         }
@@ -495,21 +663,21 @@ namespace cxxgpr::transform
             return check;
         }
         // Step 0 writes into `out`, and remaining steps mutate `out` in place without extra buffers.
-        if (steps_[0] == nullptr)
+        if (flat_steps_[0] == nullptr)
         {
             return std::unexpected(GprError::invalid_config("target pipeline contains null step"));
         }
-        if (auto res = steps_[0]->transform_into(y, out); !res)
+        if (auto res = flat_steps_[0]->transform_into(y, out); !res)
         {
             return res;
         }
-        for (std::size_t i = 1; i < steps_.size(); ++i)
+        for (std::size_t i = 1; i < flat_steps_.size(); ++i)
         {
-            if (steps_[i] == nullptr)
+            if (flat_steps_[i] == nullptr)
             {
                 return std::unexpected(GprError::invalid_config("target pipeline contains null step"));
             }
-            if (auto res = steps_[i]->transform(out); !res)
+            if (auto res = flat_steps_[i]->transform(out); !res)
             {
                 return res;
             }
@@ -533,7 +701,7 @@ namespace cxxgpr::transform
         /// @retval GprErrorCode::InvalidConfig When any step pointer in steps is null.
         template <typename InPlaceFn>
         std::expected<void, GprError> reverse_target_in_place(
-            const std::vector<std::unique_ptr<FittedTargetTransform>>& steps, std::span<double> values, InPlaceFn&& fn
+            const std::vector<const FittedTargetTransform*>& steps, std::span<double> values, InPlaceFn&& fn
         )
         {
             if (auto check = detail::validate_target_vector(values); !check)
@@ -541,7 +709,7 @@ namespace cxxgpr::transform
                 return check;
             }
             // Apply inverse mean/variance/covariance maps from outer-most step back to raw target space.
-            for (const auto& step : std::ranges::reverse_view(steps))
+            for (const FittedTargetTransform* step : std::ranges::reverse_view(steps))
             {
                 if (step == nullptr)
                 {
@@ -574,7 +742,7 @@ namespace cxxgpr::transform
         /// @retval GprErrorCode::InvalidConfig When any step pointer in steps is null.
         template <typename IntoFn, typename InPlaceFn>
         std::expected<void, GprError> reverse_target_into(
-            const std::vector<std::unique_ptr<FittedTargetTransform>>& steps,
+            const std::vector<const FittedTargetTransform*>& steps,
             std::span<const double> values,
             std::span<double> out,
             IntoFn&& into_fn,
@@ -597,7 +765,7 @@ namespace cxxgpr::transform
             }
             for (std::size_t idx = last; idx > 0; --idx)
             {
-                const auto& step = steps[idx - 1U];
+                const FittedTargetTransform* step = steps[idx - 1U];
                 if (step == nullptr)
                 {
                     return std::unexpected(GprError::invalid_config("target pipeline contains null step"));
@@ -621,11 +789,11 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_mean(std::span<double> mean) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_mean(mean);
         }
-        return reverse_target_in_place(steps_, mean, [](const FittedTargetTransform& step, std::span<double> buf) {
+        return reverse_target_in_place(flat_steps_, mean, [](const FittedTargetTransform& step, std::span<double> buf) {
             return step.inverse_transform_mean(buf);
         });
     }
@@ -643,12 +811,13 @@ namespace cxxgpr::transform
         std::span<const double> mean, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_mean_into(mean, out);
         }
         return reverse_target_into(
-            steps_, mean, out, [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst)
+            flat_steps_, mean, out,
+            [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst)
         { return step.inverse_transform_mean_into(src, dst); },
             [](const FittedTargetTransform& step, std::span<double> buf) { return step.inverse_transform_mean(buf); }
         );
@@ -663,11 +832,11 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_variance(std::span<double> var) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_variance(var);
         }
-        return reverse_target_in_place(steps_, var, [](const FittedTargetTransform& step, std::span<double> buf) {
+        return reverse_target_in_place(flat_steps_, var, [](const FittedTargetTransform& step, std::span<double> buf) {
             return step.inverse_transform_variance(buf);
         });
     }
@@ -685,12 +854,12 @@ namespace cxxgpr::transform
         std::span<const double> var, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_variance_into(var, out);
         }
         return reverse_target_into(
-            steps_, var,
+            flat_steps_, var,
             out, [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst) {
             return step.inverse_transform_variance_into(src, dst);
         }, [](const FittedTargetTransform& step, std::span<double> buf) { return step.inverse_transform_variance(buf); }
@@ -706,11 +875,11 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_covariance(std::span<double> cov) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_covariance(cov);
         }
-        return reverse_target_in_place(steps_, cov, [](const FittedTargetTransform& step, std::span<double> buf) {
+        return reverse_target_in_place(flat_steps_, cov, [](const FittedTargetTransform& step, std::span<double> buf) {
             return step.inverse_transform_covariance(buf);
         });
     }
@@ -728,12 +897,13 @@ namespace cxxgpr::transform
         std::span<const double> cov, std::span<double> out
     ) const
     {
-        if (steps_.empty())
+        if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_covariance_into(cov, out);
         }
         return reverse_target_into(
-            steps_, cov, out, [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst)
+            flat_steps_, cov, out,
+            [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst)
         { return step.inverse_transform_covariance_into(src, dst); },
             [](const FittedTargetTransform& step, std::span<double> buf)
         { return step.inverse_transform_covariance(buf); }
@@ -774,6 +944,12 @@ namespace cxxgpr::transform
             steps_ = clone_ptr_vec(other.steps_);
         }
         return *this;
+    }
+
+    /// @brief Destroys nested unfitted target pipeline steps iteratively without call-stack recursion.
+    TargetPipeline::~TargetPipeline()
+    {
+        PipelineAccess::destroy_steps<TargetPipeline>(steps_);
     }
 
     /// @brief Appends a step by cloning it onto the end of this target pipeline.
@@ -840,15 +1016,43 @@ namespace cxxgpr::transform
         {
             return FittedTargetPipeline{};
         }
-        // Stagewise buffer passes the transformed targets produced by step i as inputs to fit step i + 1.
+        // Maintain a single mutable working buffer and an explicit frame stack so nested pipelines do not recurse.
         std::vector<double> buf(y.begin(), y.end());
-        std::vector<std::unique_ptr<FittedTargetTransform>> fitted;
-        fitted.reserve(steps_.size());
-        for (const auto& step : steps_)
+        struct FitFrame
         {
+            const std::vector<std::unique_ptr<UnfittedTargetTransform>>* steps;
+            std::size_t idx;
+            std::vector<std::unique_ptr<FittedTargetTransform>> fitted;
+        };
+        std::vector<FitFrame> stack;
+        stack.push_back(FitFrame{&steps_, 0U, {}});
+        stack.back().fitted.reserve(steps_.size());
+
+        while (true)
+        {
+            auto& top = stack.back();
+            if (top.idx >= top.steps->size())
+            {
+                auto finished = std::move(top.fitted);
+                stack.pop_back();
+                if (stack.empty())
+                {
+                    return FittedTargetPipeline(std::move(finished));
+                }
+                stack.back().fitted.push_back(std::make_unique<FittedTargetPipeline>(std::move(finished)));
+                continue;
+            }
+            const auto& step = (*top.steps)[top.idx++];
             if (step == nullptr)
             {
                 return std::unexpected(GprError::invalid_config("target pipeline contains null step"));
+            }
+            if (const auto* sub_pipe = dynamic_cast<const TargetPipeline*>(step.get()))
+            {
+                const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
+                stack.push_back(FitFrame{&sub_steps, 0U, {}});
+                stack.back().fitted.reserve(sub_steps.size());
+                continue;
             }
             auto fitted_step = step->fit(buf);
             if (!fitted_step)
@@ -859,9 +1063,8 @@ namespace cxxgpr::transform
             {
                 return std::unexpected(std::move(res).error());
             }
-            fitted.push_back(std::move(*fitted_step));
+            top.fitted.push_back(std::move(*fitted_step));
         }
-        return FittedTargetPipeline(std::move(fitted));
     }
 
     /// @brief Fits each step sequentially and returns a boxed fitted target pipeline.
