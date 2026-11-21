@@ -359,12 +359,10 @@ covariance is 5 x 5, 20 sample values, same seed gives identical draws: 1
 
 | メンバ | 意味 |
 |---|---|
-| `ensure(n, m, d, nested_depth)` | $n$ 個の学習点、$m$ 個のクエリ、$d$ 個の特徴量に対応できるよう、`query_dist` も含めたすべてのバッファを拡張する。縮めることはない |
-| `ensure_prediction(n, m, d, nested_depth)` | 同じ働きだが、`query_dist` には触れない（点ベースの経路では要らない） |
+| `ensure(n, m, d, nested_depth)` | $n$ 個の学習点、$m$ 個のクエリ、$d$ 個の特徴量に対応できるよう、すべてのバッファを広げる。縮めることはない |
 | `query_xs`、`query_x` | 変換後のクエリを `double` と `Storage` で持つ（m × d） |
 | `query_k_star`、`query_scratch` | 交差共分散 $K_*$（のちに $L^{-1}K_*$）とそのスクラッチ（n × m） |
 | `query_nested` | 交差共分散の木のための `NestedBuffers` |
-| `query_dist` | 学習点とクエリ点の二乗距離（n × m） |
 | `query_kss`、`query_diag_scratch` | 事前分散 $k(x_*,x_*)$ と、対角評価のスクラッチ |
 | `train_n`、`query_m`、`dims` | 直近に要求された容量 |
 

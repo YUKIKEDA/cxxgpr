@@ -124,10 +124,10 @@ After `fit`, the model carries the optimized values:
 learned constant 1.1308, lengthscale 1.8844, noise 0.0134, neg-MLL -8.8970
 ```
 
-`FittedGpr::kernel_spec()` and `likelihood()` return the fitted `KernelSpec` and `GaussianLikelihood`. `log_marginal_likelihood()` returns the final **negative** log marginal likelihood: smaller is a better fit. The values here (constant 1.13, lengthscale 1.88, noise variance 0.013) are close to what generated the data (unit signal amplitude, noise variance 0.01).
+`FittedGpr::kernel_spec()` and `likelihood()` return the fitted `KernelSpec` and `GaussianLikelihood`. `neg_log_marginal_likelihood()` returns the final **negative** log marginal likelihood: smaller is a better fit. The values here (constant 1.13, lengthscale 1.88, noise variance 0.013) are close to what generated the data (unit signal amplitude, noise variance 0.01).
 
 :::{note}
-The method is named `log_marginal_likelihood`, but its value is the *negative* log marginal likelihood, the quantity the optimizer minimizes. Negate it to get the log marginal likelihood.
+The value is the quantity the optimizer minimizes. Negate it to get the log marginal likelihood.
 :::
 
 ## Re-tune after new data
@@ -213,7 +213,7 @@ The same computation is available without a `Gpr` as the workspace functions `ml
 | `KernelSpec::num_params`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings` | Kernel hyperparameters (log space). |
 | `ParameterBinding` | Flat index, leaf id, local slot. |
 | `GaussianLikelihood`, `create`, `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`, `bounds_into`, `add_noise_diag`, `noise_grad_diag` | Noise likelihood. |
-| `FittedGpr::kernel_spec`, `likelihood`, `log_marginal_likelihood`, `optimizer_result` | Learned values and objective at the optimum. |
+| `FittedGpr::kernel_spec`, `likelihood`, `neg_log_marginal_likelihood`, `optimizer_result` | Learned values and objective at the optimum. |
 | `refit`, `into_trainer` | Warm start from a fitted model. |
 | `optimizer::TwiceDifferentiable`, `dim`, `value`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` | The objective seen by an optimizer. |
 | `optimizer::OptimizerResult` | Parameters, value, iterations and convergence flag. |
