@@ -3782,18 +3782,21 @@ namespace cxxgpr
     /// @tparam T Scalar evaluation type (@c double or @c float).
     template <KernelScalarConcept T> CompiledDistanceKernel<T>::~CompiledDistanceKernel() = default;
 
-    /// @brief Move-constructs a `CompiledDistanceKernel<T>`, transferring the compiled tree.
-    /// @details Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete.
+    /// @brief Move-constructs a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer without copying leaves or slot descriptors.
+    /// Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete so the defaulted move can
+    /// destroy and relocate the owning pointer.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Kernel to move from.
+    /// @param[in] other Source compiled distance kernel moved from.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>::CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept = default;
 
-    /// @brief Move-assigns a `CompiledDistanceKernel<T>`, transferring the compiled tree.
-    /// @details Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete.
+    /// @brief Move-assigns a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer; defined out-of-line where
+    /// `CompiledDistanceKernel<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Kernel to move from.
-    /// @return Reference to this kernel.
+    /// @param[in] other Source compiled distance kernel moved from.
+    /// @return Reference to `*this`.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>& CompiledDistanceKernel<T>::operator=(CompiledDistanceKernel&& other) noexcept = default;
 
