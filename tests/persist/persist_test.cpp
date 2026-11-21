@@ -567,6 +567,20 @@ namespace
         const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
         ASSERT_TRUE(fit.has_value());
 
+        // A raw query span shorter than n_rows * n_cols is rejected instead of being read out of bounds.
+        {
+            const TempDirGuard dir("short_query_span");
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+            auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_TRUE(loaded.has_value());
+            const std::vector<double> short_query{0.5};
+            auto short_pred = loaded->predict(short_query, 2U, 1U);
+            ASSERT_FALSE(short_pred.has_value());
+            EXPECT_EQ(short_pred.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+            const std::vector<double> ok_query{0.5, 1.5};
+            EXPECT_TRUE(loaded->predict(ok_query, 2U, 1U).has_value());
+        }
+
         // Helper lambda to mutate config.json and expect specific error.
         auto check_bad_config = [&](const std::string& name, const std::string& json_text,
                                     cxxgpr::GprErrorCode expected_code,

@@ -169,6 +169,37 @@ namespace cxxgpr
             return GprError::length_mismatch(std::format("expected {} {}, got {}", expected, what, actual));
         }
 
+        /// @brief Wraps a raw column-major span as a MatrixRef after checking its length against the dimensions.
+        /// @details Passes empty spans and zero dimensions through so callers report EmptyInput; otherwise requires
+        /// data.size() == n_rows * n_cols with overflow-checked multiplication.
+        /// @param[in] data Contiguous column-major matrix data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @return View with leading dimension n_rows, or GprError on overflow or length mismatch.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != n_rows * n_cols.
+        std::expected<MatrixRef<double>, GprError> matrix_view_from_span(
+            std::span<const double> data, std::size_t n_rows, std::size_t n_cols
+        )
+        {
+            // Empty input and zero dimensions are reported as EmptyInput by the callee, not as a length mismatch.
+            if (data.empty() || n_rows == 0 || n_cols == 0)
+            {
+                return MatrixRef<double>(data.data(), n_rows, n_cols, n_rows);
+            }
+            const auto total = checked_mul(n_rows, n_cols);
+            if (!total.has_value())
+            {
+                return std::unexpected(total.error());
+            }
+            if (auto count = require_count(data.size(), *total, "matrix elements (n_rows * n_cols)");
+                !count.has_value())
+            {
+                return std::unexpected(std::move(count).error());
+            }
+            return MatrixRef<double>(data.data(), n_rows, n_cols, n_rows);
+        }
+
     }  // namespace detail
 
     /// @brief Rejects any NaN or Inf entry in a double span with NonFiniteInput.

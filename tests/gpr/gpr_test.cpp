@@ -431,4 +431,60 @@ namespace
         }
     }
 
+    /// @brief Verifies raw-span overloads reject buffers whose length disagrees with n_rows * n_cols.
+    /// @details A short span must never be read past its end. Each span overload (fit, factor, refit, predict,
+    /// predict_into, predict_covariance, sample) returns LengthMismatch for short and long spans, SizeOverflow for
+    /// overflowing dimensions, and leaves the parent objects usable.
+    TEST(GprModelsTest, SpanOverloadsRejectLengthsThatDisagreeWithDimensions)
+    {
+        // Spec: DES-01, DES-02
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
+        const std::vector<double> x{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y{0.0, 1.0, 0.5, 1.2};
+        const std::vector<double> x_short{0.0, 1.0, 2.0};
+        const std::vector<double> x_long{0.0, 1.0, 2.0, 3.0, 4.0};
+        constexpr std::size_t huge = std::numeric_limits<std::size_t>::max();
+
+        for (const auto* bad : {&x_short, &x_long})
+        {
+            auto fit = gpr.fit(*bad, 4U, 1U, y);
+            ASSERT_FALSE(fit.has_value());
+            EXPECT_EQ(fit.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+            auto factor = gpr.factor(*bad, 4U, 1U, y);
+            ASSERT_FALSE(factor.has_value());
+            EXPECT_EQ(factor.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        }
+        auto overflow = gpr.fit(x_short, huge, 2U, y);
+        ASSERT_FALSE(overflow.has_value());
+        EXPECT_EQ(overflow.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
+
+        // The parent trainer is still usable after the failures above.
+        auto model = gpr.factor(x, 4U, 1U, y);
+        ASSERT_TRUE(model.has_value());
+
+        const std::vector<double> q_short{0.5};
+        const std::vector<double> q_ok{0.5, 1.5};
+        auto pred = model->predict(q_short, 2U, 1U);
+        ASSERT_FALSE(pred.has_value());
+        EXPECT_EQ(pred.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        cxxgpr::Prediction<double> out;
+        auto into = model->predict_into(q_short, 2U, 1U, out);
+        ASSERT_FALSE(into.has_value());
+        EXPECT_EQ(into.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        auto cov = model->predict_covariance(q_short, 2U, 1U);
+        ASSERT_FALSE(cov.has_value());
+        EXPECT_EQ(cov.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        auto draws = model->sample(q_short, 2U, 1U, 1U, 5U);
+        ASSERT_FALSE(draws.has_value());
+        EXPECT_EQ(draws.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        auto refit = model->refit(x_short, 4U, 1U, y);
+        ASSERT_FALSE(refit.has_value());
+        EXPECT_EQ(refit.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+
+        // Exact lengths still succeed on the same model after the rejected calls.
+        EXPECT_TRUE(model->predict(q_ok, 2U, 1U).has_value());
+        EXPECT_TRUE(model->predict_covariance(q_ok, 2U, 1U).has_value());
+    }
+
 }  // namespace

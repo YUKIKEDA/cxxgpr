@@ -7,6 +7,7 @@
 #pragma once
 
 #include "cxxgpr/core/error.hpp"
+#include "cxxgpr/core/views.hpp"
 
 #include <cstddef>
 #include <expected>
@@ -64,6 +65,20 @@ namespace cxxgpr
         /// @return GprError with code GprErrorCode::LengthMismatch.
         [[nodiscard]] GprError make_count_mismatch_error(
             std::size_t actual, std::size_t expected, std::string_view what
+        );
+
+        /// @brief Wraps a raw column-major span as a MatrixRef after checking its length against the dimensions.
+        /// @details An empty span or a zero dimension is passed through unchanged so the downstream emptiness check
+        /// reports EmptyInput. Otherwise n_rows * n_cols is computed with overflow checking and compared with
+        /// data.size(), so a span shorter than the declared matrix is rejected instead of being read out of bounds.
+        /// @param[in] data Contiguous column-major matrix data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @return View with leading dimension n_rows, or GprError on overflow or length mismatch.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != n_rows * n_cols.
+        [[nodiscard]] std::expected<MatrixRef<double>, GprError> matrix_view_from_span(
+            std::span<const double> data, std::size_t n_rows, std::size_t n_cols
         );
 
     }  // namespace detail

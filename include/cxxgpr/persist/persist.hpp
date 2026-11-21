@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/core/error.hpp"
 #include "cxxgpr/core/likelihood.hpp"
 #include "cxxgpr/core/views.hpp"
@@ -299,13 +300,19 @@ namespace cxxgpr::persist
         /// @param[in] options Optional prediction controls.
         /// @return Double-precision Prediction on the original target scale, or GprError on failure.
         /// @retval GprErrorCode::EmptyInput When xs has zero elements or null data.
+        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != d().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
         {
-            return predict(MatrixRef<double>(xs.data(), n_rows, n_cols, n_rows), options);
+            auto view = cxxgpr::detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict(*view, options);
         }
 
         /// @brief Computes posterior mean and diagonal variance into out (double-promoted).
