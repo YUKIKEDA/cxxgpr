@@ -35,6 +35,8 @@
 #include <utility>
 #include <vector>
 
+#include "small_stack.hpp"
+
 namespace
 {
 
@@ -1446,6 +1448,111 @@ namespace
                 states.*sites[s] = std::string(k, '[') + std::string(k, ']');
                 expect_outcome(factor_all_custom_model(default_component_ids(), states, y_train), reg, k == 125U);
             }
+        }
+    }
+
+    /// @brief Property: save and load of the deepest accepted models, and save of models refused for nesting, run on
+    /// a thread with a small stack.
+    /// @details The config.json codec recurses once per kernel composite and per transform pipeline level. The
+    /// models are fitted on the main thread; every save, load, and destruction of a loaded model runs on the small
+    /// stack. The deepest accepted chains are the ones of SaveRejectsAConfigNestedDeeperThanLoadAccepts. Of the
+    /// refused models, the kernel chain drives the kernel encoder to its own recursion limit of 128 levels, and the
+    /// pipelines are the shallowest ones the document check refuses. Deeper pipelines are not fitted here, since
+    /// fitting them recurses through the transforms on the main thread.
+    TEST(PersistModelsTest, SaveAndLoadOfTheDeepestAcceptedModelsFitInASmallStack)
+    {
+        // Spec: FMT-02, FMT-08
+        const std::array<double, 3> x_train{0.0, 1.0, 2.0};
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+        const TempDirGuard parent("deep_model_small_stack");
+        const cxxgpr::persist::PersistRegistry no_registry;
+        const auto rbf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto white = cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+        const auto constant = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.1).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> base(rbf);
+
+        // Left-deep chains of m composites reach depth 2m + 4: 62 is accepted, while 129 composites exceed the
+        // kernel encoder's own recursion limit of 128.
+        auto chain = [&](std::size_t m, bool product)
+        {
+            auto spec = rbf;
+            for (std::size_t i = 0; i < m; ++i)
+            {
+                spec = product ? spec * constant : spec + white;
+            }
+            return cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 3U, 1U, y_train);
+        };
+        // m nested pipelines reach depth 3m + 1: 42 is accepted and 43 is refused.
+        auto pipelines = [](std::size_t m)
+        {
+            cxxgpr::transform::Pipeline input;
+            cxxgpr::transform::TargetPipeline target;
+            for (std::size_t i = 1; i < m; ++i)
+            {
+                input = cxxgpr::transform::Pipeline().then(input);
+                target = cxxgpr::transform::TargetPipeline().then(target);
+            }
+            return std::pair{std::move(input), std::move(target)};
+        };
+        const auto [input42, target42] = pipelines(42U);
+        const auto [input43, target43] = pipelines(43U);
+        const auto sum62 = chain(62U, false);
+        const auto product62 = chain(62U, true);
+        const auto sum129 = chain(129U, false);
+        const auto input_deep = base.with_input_transform(input42).factor(x_train, 3U, 1U, y_train);
+        const auto target_deep = base.with_target_transform(target42).factor(x_train, 3U, 1U, y_train);
+        const auto input_refused = base.with_input_transform(input43).factor(x_train, 3U, 1U, y_train);
+        const auto target_refused = base.with_target_transform(target43).factor(x_train, 3U, 1U, y_train);
+        for (const auto* fit :
+            {&sum62, &product62, &sum129, &input_deep, &target_deep, &input_refused, &target_refused})
+        {
+            ASSERT_TRUE(fit->has_value());
+        }
+
+        // Outcomes are recorded on the small stack and checked on the main thread.
+        std::array<bool, 4> saved{};
+        std::array<bool, 4> loaded{};
+        std::array<std::optional<cxxgpr::GprError>, 3> refused;
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), [&]
+        {
+            const std::array accepted{&*sum62, &*product62, &*input_deep, &*target_deep};
+            for (std::size_t i = 0; i < accepted.size(); ++i)
+            {
+                const auto dir = parent.path / ("accepted_" + std::to_string(i));
+                saved.at(i) = cxxgpr::persist::save_with_factor(*accepted.at(i), dir, no_registry).has_value();
+                loaded.at(i) = cxxgpr::persist::LoadedGpr::load(dir, no_registry).has_value();
+            }
+            const std::array too_deep{&*sum129, &*input_refused, &*target_refused};
+            for (std::size_t i = 0; i < too_deep.size(); ++i)
+            {
+                auto result =
+                    cxxgpr::persist::save_with_factor(*too_deep.at(i), parent.path / ("refused_" + std::to_string(i)));
+                if (!result.has_value())
+                {
+                    refused.at(i) = std::move(result).error();
+                }
+            }
+        }
+        );
+        ASSERT_TRUE(ran);
+        for (std::size_t i = 0; i < saved.size(); ++i)
+        {
+            SCOPED_TRACE("accepted model " + std::to_string(i));
+            EXPECT_TRUE(saved.at(i));
+            EXPECT_TRUE(loaded.at(i));
+        }
+        for (std::size_t i = 0; i < refused.size(); ++i)
+        {
+            SCOPED_TRACE("refused model " + std::to_string(i));
+            const auto& error = refused.at(i);
+            if (!error.has_value())
+            {
+                ADD_FAILURE() << "save accepted a model nested deeper than load accepts";
+                continue;
+            }
+            EXPECT_EQ(error->code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(error->persist_error_kind(), cxxgpr::PersistErrorKind::Config);
         }
     }
 

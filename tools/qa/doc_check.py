@@ -41,6 +41,8 @@ DECL_SPECIFIER_SKIP = frozenset(
         "const",
         "volatile",
         "typename",
+        # Attribute-like project macro (src/core/noinline.hpp) that precedes a return type.
+        "CXXGPR_NOINLINE",
     }
 )
 

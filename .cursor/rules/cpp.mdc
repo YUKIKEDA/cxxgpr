@@ -18,3 +18,13 @@ globs: "**/*.hpp,**/*.cpp,CMakeLists.txt,cmake/*.cmake"
   - クラスのスカラメンバにはコンストラクタ初期化子があっても既定メンバ初期化子（`= 0` / `= 0.0` / 既定列挙子）を付ける（`clang-tidy 21` の `[modernize-use-default-member-init]` 回避。BAD：`double inv_two_ell2_;`、GOOD：`double inv_two_ell2_ = 0.0;`）。
   - `std::optional` の検査では `ASSERT_TRUE(opt.has_value())` が `clang-tidy 21` の `[bugprone-unchecked-optional-access]` に早期リターンとして認識されないため、ローカル変数へ受けて `if (!opt.has_value()) { ADD_FAILURE() << ...; return; }` でガードしてから `*opt` を参照する。
 - **GCC `-O3 -Werror=array-bounds` 対策**：ヘッダ内テンプレートや `inline` 関数で固定長 `std::array` の負対照試験を行う場合、`std::expected` 経由の間接検査（`require_count`）だけで後続ループを書くと `-fno-lto` 下の GCC 14 が死コード除去前に `__builtin_memcpy` 等へ展開して誤検知することがある。ヘッダ内では `dst.size() != src.size()` を直接判定し、さらにループ上限を `std::min(src.size(), dst.size())` で抑えて境界内アクセスを構文上明示する（失敗時の文字列整形のみ `detail::make_count_mismatch_error` へ分離する）。
+- **再帰 1 段あたりのスタック**：木をたどる再帰関数（カーネル式、変換、`config.json` の符号化と復号）の各段に、`std::expected<T, GprError>`（`GprError` だけで約 340 B）、JSON の初期化子リスト、エラー文の一時オブジェクトを置かない。MSVC Debug と最適化なしの Clang は一時オブジェクトごとに別のスタック領域を取るので、葉の処理を同じ関数に書くと 1 段が数十 KB になる。再帰する関数には子の結果を受ける局所変数だけを残し、葉の処理・オブジェクトの構築・エラーの生成は `CXXGPR_NOINLINE`（`src/core/noinline.hpp`）を付けた別関数へ出して、エラーは呼び出し元が用意した 1 つの置き場へ書く。最大の受理深さで保存・読込を小さいスタックのスレッド上で実行する試験（`tests/support/small_stack.hpp`）を置く（PR #101：受理される 62 段の合成カーネルを `load` すると Windows Debug で 1 MiB のスタックが溢れた。旧 `decode_kernel` は Clang `-O0` で 1 段 31 KB だった）。
+
+```cpp
+// BAD: every level carries the leaf branches, their std::expected temporaries, and the error strings
+std::expected<KernelSpec, GprError> decode_kernel(const nlohmann::json& j, std::size_t depth);
+
+// GOOD: the recursive frame holds only the children; leaf work runs once, on top, in its own frame
+void decode_kernel_node(const nlohmann::json& j, std::size_t depth, std::optional<KernelSpec>& out, ErrorSlot& err);
+CXXGPR_NOINLINE void produce_into(Out& out, ErrorSlot& err, const Step& step);
+```
