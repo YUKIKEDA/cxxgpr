@@ -27,6 +27,7 @@
 
 #include "config_json.hpp"
 #include "safetensors.hpp"
+#include "workspace/predict_diagonal.hpp"
 
 namespace cxxgpr::persist
 {
@@ -459,8 +460,11 @@ namespace cxxgpr::persist
             // Predict directly into out for double Refine, or promote via tmp_pred for SinglePrecision.
             if constexpr (std::same_as<Refine, double>)
             {
-                if (auto pr = predict_into<P>(
-                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws, out
+                // The factor was validated when the model was loaded (finite, positive diagonal), so skip the
+                // per-call rescan of the whole lower triangle.
+                if (auto pr = cxxgpr::detail::predict_diagonal_into<P>(
+                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws, out,
+                        linalg::detail::FactorValidation::AlreadyValidated
                     );
                     !pr.has_value())
                 {
@@ -469,9 +473,9 @@ namespace cxxgpr::persist
             }
             else
             {
-                if (auto pr = predict_into<P>(
+                if (auto pr = cxxgpr::detail::predict_diagonal_into<P>(
                         *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws,
-                        st.tmp_pred
+                        st.tmp_pred, linalg::detail::FactorValidation::AlreadyValidated
                     );
                     !pr.has_value())
                 {

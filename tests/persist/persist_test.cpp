@@ -20,8 +20,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <span>
@@ -583,6 +585,60 @@ namespace
         const auto after = loaded->predict(query, 2U, 1U);
         ASSERT_TRUE(after.has_value());
         EXPECT_EQ(*after, *before);
+    }
+
+    /// @brief Verifies a corrupt Cholesky factor is rejected at load, because predictions no longer rescan it.
+    /// @details LoadedGpr predictions skip the per-call factor validation and rely on load having checked every
+    /// element for finiteness and the diagonal for positivity. A NaN below the diagonal and a zero diagonal entry
+    /// in the stored `l` tensor must therefore fail `LoadedGpr::load` instead of reaching a prediction.
+    TEST(PersistModelsTest, LoadRejectsCorruptCholeskyFactorBecausePredictionsDoNotRescanIt)
+    {
+        // Spec: FMT-02, DES-16
+        const std::vector<double> x_train{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4, 0.7};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 4U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+
+        // Overwrites element (row, col) of the stored column-major factor tensor with `value`.
+        auto corrupt = [&](const std::string& name, std::size_t row, std::size_t col, double value)
+        {
+            const TempDirGuard dir(name);
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+            const auto file = dir.path / "model.safetensors";
+            std::string bytes;
+            {
+                std::ifstream in(file, std::ios::binary);
+                bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            std::uint64_t header_len = 0;
+            std::memcpy(&header_len, bytes.data(), sizeof(header_len));
+            const std::string header = bytes.substr(8, static_cast<std::size_t>(header_len));
+            const auto key = header.find("\"l\":");
+            ASSERT_NE(key, std::string::npos);
+            const auto offsets = header.find("\"data_offsets\":[", key);
+            ASSERT_NE(offsets, std::string::npos);
+            const auto begin = static_cast<std::size_t>(std::stoull(header.substr(offsets + 16)));
+            const std::size_t position = 8U + static_cast<std::size_t>(header_len) + begin + (((col * 4U) + row) * 8U);
+            ASSERT_LE(position + sizeof(double), bytes.size());
+            std::memcpy(bytes.data() + position, &value, sizeof(double));
+            {
+                std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            }
+            auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            EXPECT_FALSE(loaded.has_value()) << name;
+        };
+        corrupt("corrupt_l_nan_below_diagonal", 2U, 1U, std::numeric_limits<double>::quiet_NaN());
+        corrupt("corrupt_l_zero_diagonal", 1U, 1U, 0.0);
+
+        // The unmodified model still loads and predicts.
+        const TempDirGuard clean("clean_factor_for_rescan_test");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, clean.path).has_value());
+        auto loaded = cxxgpr::persist::LoadedGpr::load(clean.path);
+        ASSERT_TRUE(loaded.has_value());
+        const std::vector<double> query{0.5, 1.5};
+        EXPECT_TRUE(loaded->predict(query, 2U, 1U).has_value());
     }
 
     /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.
