@@ -81,7 +81,7 @@ You should see:
 
 ```{code-block} text
 noise variance = 0.00623201 (standardised scale)
-lengthscale for x1 = 1.38772, for x2 = 9.63727 (standardised units)
+lengthscale for x1 = 1.38772, for x2 = 9.63728 (standardised units)
 query (3, 250): mean = 0.64008, std = 0.0652656, truth = 0.64112
 query (1, 100): mean = 1.06294, std = 0.0732807, truth = 1.04147
 query (12, 250): mean = 0.591749, std = 1.50877, truth = -0.0365729

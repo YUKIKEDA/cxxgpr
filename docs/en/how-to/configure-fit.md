@@ -174,7 +174,7 @@ The precision policy `P` fixes the scalar type used to store the kernel matrix a
 ```
 
 ```{code-block} text
-single neg-MLL 0.7080, mixed neg-MLL 0.7080, refinement iterations 2
+single neg-MLL 0.7079, mixed neg-MLL 0.7079, refinement iterations 2
 ```
 
 For mixed policies, `FittedGpr::refinement_summary()` holds a `RefinementSummary` (`status`, `iterations`, `final_relative_residual`, `used_fallback()`); for the other two it is `std::nullopt`. `FittedGpr::Storage` and `FittedGpr::Refine` expose the policy's types.

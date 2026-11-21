@@ -174,7 +174,7 @@ max_retries 8, multiplier 10.0000, fixed retry 1.0000e-08, fixed has no adaptive
 ```
 
 ```{code-block} text
-single neg-MLL 0.7080, mixed neg-MLL 0.7080, refinement iterations 2
+single neg-MLL 0.7079, mixed neg-MLL 0.7079, refinement iterations 2
 ```
 
 混合精度では、`FittedGpr::refinement_summary()` が `RefinementSummary`（`status`、`iterations`、`final_relative_residual`、`used_fallback()`）を保持する。ほかの 2 つでは `std::nullopt` になる。`FittedGpr::Storage` と `FittedGpr::Refine` は、ポリシーの型をそのまま公開する。
