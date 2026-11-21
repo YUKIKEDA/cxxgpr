@@ -390,9 +390,6 @@ namespace cxxgpr::detail
         /// @brief Multiple of the float epsilon accepted as storage-rounding backward error under PromoteStorage.
         constexpr double promote_storage_accept_factor = 10.0;
 
-        /// @brief Rows per parallel work item when accumulating the blocked residual matrix-vector product.
-        constexpr std::size_t refinement_row_chunk = 256;
-
         /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
         /// blocks of width 32 without materializing the full n x n double matrix.
         /// @details Evaluates cross-kernel slices B_f64(:, col_begin:col_end) in blocks of at most
@@ -445,32 +442,20 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(res).error());
                 }
-                // Accumulate matrix-vector product B_f64 * w and row l1 sums across the block columns. Row chunks are
-                // independent and every row always sums its columns in ascending order, so the result does not
-                // depend on the number of threads.
-                const auto n_chunks =
-                    static_cast<std::ptrdiff_t>((n + refinement_row_chunk - 1U) / refinement_row_chunk);
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (n >= 384U)
-#endif
-                for (std::ptrdiff_t chunk_s = 0; chunk_s < n_chunks; ++chunk_s)
+                // Accumulate matrix-vector product B_f64 * w and row l1 sums across the block columns.
+                for (std::size_t c = 0; c < cols_cur; ++c)
                 {
-                    const std::size_t row_begin = static_cast<std::size_t>(chunk_s) * refinement_row_chunk;
-                    const std::size_t row_end = std::min(n, row_begin + refinement_row_chunk);
-                    for (std::size_t c = 0; c < cols_cur; ++c)
+                    const std::size_t global_col = col_begin + c;
+                    const double w_col = w[global_col];
+                    for (std::size_t row = 0; row < n; ++row)
                     {
-                        const std::size_t global_col = col_begin + c;
-                        const double w_col = w[global_col];
-                        for (std::size_t row = row_begin; row < row_end; ++row)
+                        double entry = k_block[(c * n) + row];
+                        if (row == global_col)
                         {
-                            double entry = k_block[(c * n) + row];
-                            if (row == global_col)
-                            {
-                                entry += diag_offset;
-                            }
-                            matvec[row] += entry * w_col;
-                            row_abs_sum[row] += std::abs(entry);
+                            entry += diag_offset;
                         }
+                        matvec[row] += entry * w_col;
+                        row_abs_sum[row] += std::abs(entry);
                     }
                 }
             }

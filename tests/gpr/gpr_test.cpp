@@ -304,8 +304,9 @@ namespace
     };
 
     /// @brief Verifies mixed-precision refinement weights are bit-identical for any OpenMP thread count.
-    /// @details The blocked double-precision residual accumulates each row over its columns in ascending order, so
-    /// splitting rows across threads must not change a single bit of the refined weights or the summary.
+    /// @details The float factorization and the kernel evaluations run on OpenMP threads, and the blocked
+    /// double-precision residual sums every row over its columns in ascending order. None of them may change a single
+    /// bit of the refined weights or the summary when the thread count changes.
     TEST(GprModelsTest, MixedPrecisionRefinementIsBitwiseIdenticalAcrossThreadCounts)
     {
         // Spec: DES-05, DES-20
