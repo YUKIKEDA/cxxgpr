@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 /// @brief Internal persistence helpers for Exact GPR serialization and loading.
 namespace cxxgpr::persist::detail
@@ -62,6 +63,11 @@ namespace cxxgpr::persist::detail
         /// @brief Reconstructed fitted target transform used for inverse prediction scaling.
         std::unique_ptr<transform::FittedTargetTransform> y_transform;
     };
+
+    /// @brief Reports whether text is valid UTF-8, that is, whether it can be written as a JSON string.
+    /// @param[in] text Bytes to check.
+    /// @return True when the JSON serializer accepts text as a string value.
+    [[nodiscard]] bool is_valid_utf8(std::string_view text);
 
     /// @brief Serializes model metadata, kernel tree, likelihood, jitter, and transforms into config.json text.
     /// @details Encodes bounded parameters with open intervals and delegates custom kernel/transform state
