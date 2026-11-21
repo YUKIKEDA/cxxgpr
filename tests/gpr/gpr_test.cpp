@@ -296,14 +296,20 @@ namespace
         const auto reference = run(1);
         ASSERT_TRUE(reference.has_value());
         const auto reference_summary = reference->refinement_summary();
-        ASSERT_TRUE(reference_summary.has_value());
+        if (!reference_summary.has_value())
+        {
+            FAIL() << "reference refinement summary is missing";
+        }
         EXPECT_FALSE(reference_summary->used_fallback());
         for (const int threads : {2, 4})
         {
             const auto other = run(threads);
             ASSERT_TRUE(other.has_value());
             const auto other_summary = other->refinement_summary();
-            ASSERT_TRUE(other_summary.has_value());
+            if (!other_summary.has_value())
+            {
+                FAIL() << "refinement summary is missing for threads " << threads;
+            }
             ASSERT_EQ(other->alpha().size(), reference->alpha().size());
             for (std::size_t i = 0; i < n; ++i)
             {
