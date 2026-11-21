@@ -52,7 +52,7 @@ There is no `NotFitted`. All failures of numerical computation, input, and persi
 | `IndexOutOfRange` | Parameter index `i >= p`, or a coordinate not designated changed in an incremental update |
 | `InsufficientData` | $n$ is below the minimum number of points of the kernel / model (in principle $n \ge 1$ for Exact GPR, including special requirements such as LOO) |
 | `NonFiniteInput` | `NaN` / `±∞` in `x`, `y`, the parameters $\theta$, or configured floating-point values |
-| `NonFiniteKernelValue` | A kernel evaluation became non-finite |
+| `NonFiniteKernelValue` | A kernel evaluation, or a quantity derived from it (the marginal likelihood, a latent predictive variance before its clamp at $0$, an inverse-scaled moment), became non-finite |
 | `InvalidHyperparameter` | Domain violation of $\ell, \sigma^2, \alpha, p$, etc. (non-positive, non-finite, or outside the interval) |
 | `InvalidNoiseVariance` | $\sigma_n^2 \le 0$ or non-finite in `GaussianLikelihood` |
 | `InvalidInterval` | `Interval` lower bound $\ge$ upper bound, non-positive (for positive intervals), or non-finite |
@@ -258,7 +258,7 @@ Letting $A_i = \partial A / \partial \theta_i$, $S_i = L^{-1} A_i L^{-\top}$, an
 
 A fitted model `FittedGpr<O, P, K>` holds `L`, `factor_alpha`, `alpha`, `X`, the kernel, the likelihood, and the preprocessing, and provides the following operations (the output scalar type is `P::Refine`):
 
-- `predict(xs, n_rows, n_cols)` / `predict_with(xs, n_rows, n_cols, PredictOptions)`: mean $\mu_* = K_*^\top \alpha$ and variance $v_* = \operatorname{diag}(K_{**}) - \|L^{-1} K_*\|_2^2$ (adding $\sigma_n^2$ for `VarianceKind::Observation`, not for `Latent`). Finally the mean and the variance (multiplied by $s^2$) are inverse-transformed by `TargetTransform` and returned.
+- `predict(xs, n_rows, n_cols)` / `predict_with(xs, n_rows, n_cols, PredictOptions)`: mean $\mu_* = K_*^\top \alpha$ and variance $v_* = \max\!\left(0,\; \operatorname{diag}(K_{**}) - \|L^{-1} K_*\|_2^2\right)$ (adding $\sigma_n^2$ for `VarianceKind::Observation`, not for `Latent`). The clamp at $0$ only absorbs rounding: a latent variance that is `NaN` or $\pm\infty$ before the clamp (for example from a factor whose solve overflows) is not clamped and the prediction fails with `NonFiniteKernelValue`. Finally the mean and the variance (multiplied by $s^2$) are inverse-transformed by `TargetTransform` and returned.
 - `predict_into(..., Prediction<Refine>& out)` / `predict_with_into(...)`: once a call has sized them, later calls whose query count $m$ is no larger than the largest earlier $m$ reuse the `QueryWorkspace` and the output `mean`/`variance` capacity, achieving **zero new allocations**. Query batch sizes may change freely between calls: a larger $m$ grows the buffers once, and a smaller $m$ gives the same values as on a model that never saw a larger batch.
 - `predict_covariance` / `predict_covariance_with`: return the full posterior covariance matrix $\Sigma_* = K_{**} - (L^{-1} K_*)^\top (L^{-1} K_*)$ (column-major $m \times m$; $\sigma_n^2$ is added to the diagonal for `Observation`).
 - `sample(xs, n_rows, n_cols, n_draws, seed)` / `sample_with`: compute the Cholesky factor of the symmetrized posterior covariance with a tiny numerical jitter, and generate $n_{\text{draws}}$ posterior samples (length $n_{\text{draws}} \cdot m$) from `Xoshiro256++` + Box–Muller standard normal random numbers.
