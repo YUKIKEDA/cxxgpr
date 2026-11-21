@@ -63,6 +63,8 @@ namespace
             const cxxgpr::test_support::NoAllocationScope audit;
             ASSERT_TRUE(qws.ensure(4U, 3U, 2U, 1U).has_value());
             ASSERT_TRUE(qws.ensure(4U, 2U, 2U, 1U).has_value());
+            // Re-growing to an equal or smaller shape must not touch the heap.
+            EXPECT_EQ(audit.delta_allocations(), 0U);
         }
     }
 
