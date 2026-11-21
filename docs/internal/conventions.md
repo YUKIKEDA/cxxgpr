@@ -62,5 +62,5 @@ M0 builds the repository foundation and the build and QA infrastructure; M1 onwa
 - **Namespaces**: `cxxgpr` (`cxxgpr::kernel`, `cxxgpr::transform`, `cxxgpr::persist`). Internal details live in `cxxgpr::detail`.
 - **C++ identifiers**: types in `PascalCase`; functions, methods, local variables, and constants in `snake_case`; a trailing `_` on private members; the macro prefix `CXXGPR_`.
 - **Doxygen comment convention**: every C++ file uses English `///` Doxygen with `@file`, `@defgroup`/`@ingroup`, `@brief`, `@details`, `@tparam`, `@param[in]`/`@param[out]`/`@param[in,out]`, `@return`, `@retval`, `@pre`, `@post`, `@note`, `@warning`, `@attention`, `@code`/`@endcode`, and `@see` (the canonical source for details is the [dev-docs rule](../../.cursor/rules/dev-docs.mdc); every `@param` must carry `[in]`/`[out]`/`[in,out]`).
-- **Roadmap row IDs**: `M0-1` to `M5-4`, `REL-1` to `REL-7`.
-- **Specification and quality IDs**: requirements `REQ-01` to `REQ-12`, design decisions `DES-01` to `DES-21`, persistence `FMT-01` to `FMT-08`, quality `QA-01` to `QA-10`.
+- **Roadmap row IDs**: `M0-1` to `M5-4`, `REL-1` to `REL-11`.
+- **Specification and quality IDs**: requirements `REQ-01` to `REQ-12`, design decisions `DES-01` to `DES-21`, persistence `FMT-01` to `FMT-09`, quality `QA-01` to `QA-10`.
