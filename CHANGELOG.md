@@ -8,6 +8,7 @@
 
 ### 追加
 
+- GitHub Release のワークフロー（`v*` タグで、Windows・Linux のパッケージと文書サイトを集めて下書きの Release を作る）と、リリース手順（`docs/internal/release.md`）。README（英・日）を読みやすい構成へ書き直した。
 - 利用者向け文書（英語・日本語）：Diataxis の 4 区分、全公開 API の使用方法、Doxygen + Sphinx（Furo）のサイト、コンパイル・実行される例（`docs/examples/`）、API 網羅検査（`just docs-coverage`）。開発者向け文書は `docs/internal/`（英語）へ移動。
 - Exact GPR（`Gpr` / `FittedGpr`）、全 10 種の組込みカーネル葉・合成・`Custom` 葉、`LeafCache` 増分更新、供給二乗距離（`DistanceKernel`）。
 - 5 種の自己完結型最適化器（`Lbfgs` / `NelderMead` / `TrustRegion` / `FastSimulatedAnnealing` / `Fixed`）。
