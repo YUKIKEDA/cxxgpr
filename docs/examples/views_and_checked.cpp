@@ -40,7 +40,14 @@ int main()
             column_major[col * samples.size() + row] = samples[row][col];
         }
     }
-    const cxxgpr::MatrixRef<double> x(std::span<const double>(column_major), samples.size(), 2U);
+    // from_span checks that the buffer holds exactly samples.size() * 2 values before binding it.
+    const auto x_view = cxxgpr::MatrixRef<double>::from_span(column_major, samples.size(), 2U);
+    if (!x_view)
+    {
+        std::cout << "from_span: " << x_view.error().message() << '\n';
+        return 1;
+    }
+    const cxxgpr::MatrixRef<double> x = *x_view;
     std::cout << "x(1, 1) = " << x(1, 1) << ", buffer = " << column_major[0] << ' ' << column_major[1] << ' '
               << column_major[2] << " | " << column_major[3] << ' ' << column_major[4] << ' ' << column_major[5]
               << '\n';
@@ -50,7 +57,13 @@ int main()
     // [views]
     // A 3 x 2 column-major matrix: column 0 is {1, 2, 3}, column 1 is {4, 5, 6}.
     std::array<double, 6> storage{1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
-    const cxxgpr::MatrixRef<double> a(std::span<const double>(storage), 3U, 2U);
+    const auto a_view = cxxgpr::MatrixRef<double>::from_span(storage, 3U, 2U);
+    if (!a_view)
+    {
+        std::cout << "from_span: " << a_view.error().message() << '\n';
+        return 1;
+    }
+    const cxxgpr::MatrixRef<double> a = *a_view;
     std::cout << "a(2, 1) = " << a(2, 1) << ", rows = " << a.rows() << ", cols = " << a.cols()
               << ", col_stride = " << a.col_stride() << ", contiguous = " << std::boolalpha << a.is_contiguous()
               << '\n';
@@ -62,8 +75,20 @@ int main()
               << ", contiguous = " << block.is_contiguous() << '\n';
     ok = ok && a(2, 1) == 6.0 && block(0, 0) == 2.0 && block(1, 1) == 6.0 && !block.is_contiguous();
 
+    // A span shorter than rows * cols is rejected instead of being read past its end.
+    const auto too_short = cxxgpr::MatrixRef<double>::from_span(std::span<const double>(storage).first(5), 3U, 2U);
+    std::cout << "from_span(5 values, 3 x 2): " << (too_short ? "ok" : std::string(too_short.error().message()))
+              << '\n';
+    ok = ok && !too_short && too_short.error().code() == cxxgpr::GprErrorCode::LengthMismatch;
+
     // A mutable view writes through; it converts implicitly to a read-only view.
-    const cxxgpr::MatrixMut<double> m(storage.data(), 3U, 2U);
+    const auto m_view = cxxgpr::MatrixMut<double>::from_span(storage, 3U, 2U);
+    if (!m_view)
+    {
+        std::cout << "from_span: " << m_view.error().message() << '\n';
+        return 1;
+    }
+    const cxxgpr::MatrixMut<double> m = *m_view;
     m(0, 0) = 10.0;
     const cxxgpr::MatrixRef<double> as_read_only = m;
     std::cout << "after write: a(0, 0) = " << a(0, 0) << ", via MatrixMut::as_ref = " << m.as_ref()(0, 0)
