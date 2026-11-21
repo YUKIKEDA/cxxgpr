@@ -211,7 +211,7 @@ When `OptimizerTraits<O>::uses_change_indices` (`true` for `FastSimulatedAnneali
 `KernelExp::{Accurate, FastApprox}` is held in each model as a run-time choice (default `Accurate`).
 
 - `Accurate`: uses `std::exp` (storage type `float`/`double`) as is.
-- `FastApprox`: replaces the $\exp(-x)$ computation during kernel evaluation with range reduction $x = k \ln 2 + f$ and a degree-7 minimax polynomial approximation in the storage type (it is not used for restoring length scales by `exp(θ)` or for operations inside `Custom` leaves).
+- `FastApprox`: replaces the $\exp(-x)$ computation during kernel evaluation with range reduction $x = k \ln 2 + f$ and a degree-7 Taylor polynomial (coefficients $1/j!$) in the reduced argument $f$, evaluated in the storage type (it is not used for restoring length scales by `exp(θ)` or for operations inside `Custom` leaves).
 
 ---
 

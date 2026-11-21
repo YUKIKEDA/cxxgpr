@@ -103,7 +103,7 @@ namespace
                                      .with_jitter(cxxgpr::JitterPolicy::adaptive(1e-6, 10.0, 6U, 1.0).value());
             auto fitted = trainer.fit(x_ref, y_train);
             ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
-            EXPECT_TRUE(std::isfinite(fitted->log_marginal_likelihood()));
+            EXPECT_TRUE(std::isfinite(fitted->neg_log_marginal_likelihood()));
 
             ASSERT_TRUE(fitted->predict_into(xq_ref, pred_out).has_value());
             ASSERT_EQ(pred_out.mean.size(), xq_ref.rows());
@@ -230,7 +230,7 @@ namespace
     /// @brief Verifies composite kernels with every transform mode survive save_with_factor()/load().
     /// @details Sweeps Identity, Standardize, MinMax, and multi-stage Pipeline preprocessing with a
     /// nested Constant * (RbfArd + Matern + Periodic) + Linear + White kernel and checks loaded
-    /// predict(), loo_predict(), and log_marginal_likelihood() parity.
+    /// predict(), loo_predict(), and neg_log_marginal_likelihood() parity.
     TEST(PathMatrixTest, CompositeKernelsTransformsAndPersistIntegration)
     {
         // Spec: REQ-04, REQ-10, DES-18, FMT-05
@@ -336,7 +336,7 @@ namespace
                 }
                 auto restored = loaded->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
                 ASSERT_TRUE(restored.has_value());
-                EXPECT_NEAR(restored->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-10);
+                EXPECT_NEAR(restored->neg_log_marginal_likelihood(), fitted->neg_log_marginal_likelihood(), 1e-10);
             }
         }
         std::filesystem::remove_all(temp_root, ec);

@@ -97,7 +97,7 @@ $$
 
 and with the Cholesky factor the determinant is cheap: $\log \lvert K_\theta + \sigma_n^2 I \rvert = 2 \sum_i \log L_{ii}$. The three terms have a clear meaning. The first measures how well the model explains the data. The second penalises model complexity: a very flexible kernel spreads its probability over many possible datasets and gets a large determinant. The third is a constant. Together they implement Occam's razor without a separate validation set or a regularisation constant that you must tune.
 
-cxxgpr minimises the negative of this quantity with one of its optimizers (see {doc}`optimizers`) using analytic gradients with respect to every hyperparameter. After `Gpr::fit`, the value at the optimum is available as `FittedGpr::log_marginal_likelihood`. It is a useful number for comparing two kernels on the same data: the larger, the better the data are explained after accounting for complexity.
+cxxgpr minimises the negative of this quantity with one of its optimizers (see {doc}`optimizers`) using analytic gradients with respect to every hyperparameter. After `Gpr::fit`, the minimised value is available as `FittedGpr::neg_log_marginal_likelihood`, which returns the *negative* log marginal likelihood. It is a useful number for comparing two kernels on the same data: the smaller, the better the data are explained after accounting for complexity.
 
 :::{note}
 The marginal likelihood surface is generally not convex. A gradient-based optimizer finds a local maximum, and for short lengthscales or small noise, a poor one is easy to reach. Standardising inputs and targets, choosing sensible starting values and, when needed, running several restarts all help. See {doc}`../how-to/tune-hyperparameters`.

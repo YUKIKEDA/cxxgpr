@@ -987,7 +987,7 @@ namespace cxxgpr::detail
             .n_train = n,
             .n_features = d,
             .factor_jitter = buffers->core.factor_jitter,
-            .log_marginal_likelihood = final_mll,
+            .neg_log_marginal_likelihood = final_mll,
             .refinement_summary = ref_summary,
             .optimizer_result = std::move(opt_res),
         };

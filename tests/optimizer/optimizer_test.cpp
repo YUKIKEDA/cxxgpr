@@ -9,6 +9,8 @@
 
 #include "cxxgpr/optimizer/optimizer.hpp"
 
+#include "cxxgpr/workspace/leaf_cache.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -23,11 +25,11 @@
 namespace
 {
 
-    static_assert(!cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::Lbfgs>::uses_change_indices);
-    static_assert(!cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::TrustRegion>::uses_change_indices);
-    static_assert(!cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::NelderMead>::uses_change_indices);
-    static_assert(cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::FastSimulatedAnnealing>::uses_change_indices);
-    static_assert(!cxxgpr::optimizer::OptimizerTraits<cxxgpr::optimizer::Fixed>::uses_change_indices);
+    static_assert(!cxxgpr::optimizer_uses_change_indices_v<cxxgpr::optimizer::Lbfgs>);
+    static_assert(!cxxgpr::optimizer_uses_change_indices_v<cxxgpr::optimizer::TrustRegion>);
+    static_assert(!cxxgpr::optimizer_uses_change_indices_v<cxxgpr::optimizer::NelderMead>);
+    static_assert(cxxgpr::optimizer_uses_change_indices_v<cxxgpr::optimizer::FastSimulatedAnnealing>);
+    static_assert(!cxxgpr::optimizer_uses_change_indices_v<cxxgpr::optimizer::Fixed>);
 
     /// @brief Convex anisotropic quadratic objective in log-theta space for optimizer tests.
     /// @details Evaluates f(theta) = 0.5 * sum_i w_i * (theta_i - target_i)^2 with analytical

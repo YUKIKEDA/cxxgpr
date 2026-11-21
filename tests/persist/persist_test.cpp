@@ -431,7 +431,7 @@ namespace
 
             auto typed = loaded->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
             ASSERT_TRUE(typed.has_value());
-            EXPECT_NEAR(typed->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
+            EXPECT_NEAR(typed->neg_log_marginal_likelihood(), fitted->neg_log_marginal_likelihood(), 1e-12);
             auto typed_pred = typed->predict(xq_ref);
             ASSERT_TRUE(typed_pred.has_value());
             EXPECT_EQ(typed_pred->mean, orig_pred->mean);
@@ -453,7 +453,7 @@ namespace
         }
         auto typed_nf = loaded_nf->into_fitted<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision>();
         ASSERT_TRUE(typed_nf.has_value());
-        EXPECT_NEAR(typed_nf->log_marginal_likelihood(), fitted->log_marginal_likelihood(), 1e-12);
+        EXPECT_NEAR(typed_nf->neg_log_marginal_likelihood(), fitted->neg_log_marginal_likelihood(), 1e-12);
     }
 
     /// @brief Verifies MixedPrecision<ReevaluateKernel> and CustomKernel PersistRegistry persistence.

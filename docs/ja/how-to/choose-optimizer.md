@@ -12,7 +12,7 @@
 
 - **出発点はあなたのカーネルである。** `RbfKernel::create(1.0)` や `with_noise_variance(1e-2)` に渡した値から探索が始まる。妥当なスケールから遠い出発点では、悪い局所解に落ちることがある（後述の警告を参照）。
 - **範囲が到達できる領域を決める。** カーネルの `create` に `Interval` を渡せば、間違いとわかっている領域に長さスケールが入り込むのを防げる。
-- **小さいほど良い。** `FittedGpr::log_marginal_likelihood()` が返すのは、*負の*対数周辺尤度の最終値である。`OptimizerResult::value` も同じ向きだ。
+- **小さいほど良い。** `FittedGpr::neg_log_marginal_likelihood()` が返すのは、*負の*対数周辺尤度の最終値である。`OptimizerResult::value` も同じ向きだ。
 
 ## 最適化器を選ぶ
 
@@ -57,7 +57,7 @@ RandomSearch (custom)     300        yes    -14.4880    1.0560
 - NLML が小さいほど、最適化器がより良いハイパーパラメータを見つけたことになる。比べるのはこの列である。データが易しいので、予測はどれも近い。
 
 :::{warning}
-出発点は結果を左右する。上のプログラムは長さスケールを $0.3$ から始めている。同じデータで $1.0$ から始めると、素の `Lbfgs` は 1 反復で止まる。そのときの NLML は $210.7$ で、最小値よりはるかに悪い。0.35 での予測も、$1.04$ ではなく $0.25$ になる。それでも最適化器は `converged = yes` と報告する。モデルが良いからではなく、最適化器自身の停止判定が働いたからである。結果が怪しいときは、複数の実行で `log_marginal_likelihood()` を比べる。`with_restarts` を加える、`TrustRegion` を試す、という対処も有効である。
+出発点は結果を左右する。上のプログラムは長さスケールを $0.3$ から始めている。同じデータで $1.0$ から始めると、素の `Lbfgs` は 1 反復で止まる。そのときの NLML は $210.7$ で、最小値よりはるかに悪い。0.35 での予測も、$1.04$ ではなく $0.25$ になる。それでも最適化器は `converged = yes` と報告する。モデルが良いからではなく、最適化器自身の停止判定が働いたからである。結果が怪しいときは、複数の実行で `neg_log_marginal_likelihood()` を比べる。`with_restarts` を加える、`TrustRegion` を試す、という対処も有効である。
 :::
 
 ## 最適化器を設定する
@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` は、次を備えたコピー可能な任意の型 `O` を受け付ける。
 
-- `static constexpr bool uses_change_indices`（`OptimizerTraits<O>::uses_change_indices` 経由で読まれる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
+- `static constexpr bool uses_change_indices`（モデルは `cxxgpr/workspace/leaf_cache.hpp` の `cxxgpr::optimizer_uses_change_indices_v<O>` 経由で読む。このメンバーを持たない型では `false` になる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`
 
 モデルは、組込みの最適化器と同じ目的関数を渡す。次の例は、最良点を揺らして改善だけを採る最適化器で、`LogBounds`、`Xoshiro256PlusPlus`、`OptimizerResult` を使っている。
@@ -273,7 +273,7 @@ two evaluations at the same point cost 1 objective call(s)
 | `Objective`、`Differentiable`、`TwiceDifferentiable` | 目的関数のインターフェース。`dim`、`value`、`value_at_changes`、`fill_intervals`、`gradient_into`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
 | `OptimizerResult` | `params`、`value`、`iterations`、`converged`、`operator==` |
 | `RestartConfig` | `count`、`seed`、`operator==` |
-| `OptimizerTraits` | 最適化器の型の `uses_change_indices` |
+| `cxxgpr::OptimizerTraits`、`cxxgpr::optimizer_uses_change_indices_v` | 最適化器の型の `uses_change_indices`。このメンバーを持たない型では `false`。宣言は `cxxgpr/workspace/leaf_cache.hpp` にあり、`optimizer` 名前空間や `cxxgpr/optimizer/optimizer.hpp` には含まれない |
 | `LogBounds` | 対数空間の境界と $\theta \leftrightarrow z$ の変換（メンバーは上の表） |
 | `EvalCache` | 1 エントリのキャッシュ。`eval_unconstrained`、`clear` |
 
