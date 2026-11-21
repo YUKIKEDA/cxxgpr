@@ -142,4 +142,4 @@ The Gram matrix entries change by at most about $10^{-9}$ for kernels with value
 
 ## When distance is not enough
 
-A stationary leaf needs only the squared distance, so you may supply your own distances (geodesic, graph, edit) and evaluate the kernel on those; see {doc}`../how-to/use-supplied-distances`. A leaf that you write yourself as a function of squared distance plugs into the same composition and optimization machinery; see {doc}`../how-to/write-custom-kernel`. In both cases the kernel must remain positive semi-definite for your metric, which cxxgpr cannot check for you.
+A stationary leaf needs only the squared distance, so you may supply your own distances (geodesic, graph, edit) and evaluate the kernel on those, or train a model on them; see {doc}`../how-to/use-supplied-distances` and {doc}`../how-to/fit-on-supplied-distances`. A leaf that you write yourself as a function of squared distance plugs into the same composition and optimization machinery; see {doc}`../how-to/write-custom-kernel`. In both cases the kernel must remain positive semi-definite for your metric, which cxxgpr cannot check for you.

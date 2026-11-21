@@ -336,6 +336,83 @@ namespace
         }
     }
 
+    /// @brief Verifies that prepare_square() and prepare_cross() report every shape error before any value error.
+    /// @details A supply whose first table holds a NaN and whose later table is empty, of another shape, or has the
+    /// wrong number of ARD dimensions must report EmptyInput, LengthMismatch, or DimensionMismatch, not
+    /// InvalidDistance; with every shape valid, the NaN is reported.
+    TEST(DistanceKernelTest, PrepareReportsShapeErrorsBeforeValueErrors)
+    {
+        // Spec: DES-02, DES-10, DES-21
+        const cxxgpr::ScalarDistance s1;
+        const cxxgpr::ScalarDistance s2;
+        const auto ard = cxxgpr::ArdDistance::create(2);
+        const auto rbf = cxxgpr::RbfKernel::create(1.0);
+        const auto rbf_ard = cxxgpr::RbfArdKernel::create(std::array{1.0, 2.0});
+        ASSERT_TRUE(ard.has_value());
+        ASSERT_TRUE(rbf.has_value());
+        ASSERT_TRUE(rbf_ard.has_value());
+        const auto ard_leaf = ard->rbf_ard(*rbf_ard);
+        ASSERT_TRUE(ard_leaf.has_value());
+        const auto compiled = (s1.rbf(*rbf) * s2.rbf(*rbf) * *ard_leaf).compile<double>();
+
+        const std::array<double, 4> nan_2x2{0.0, std::numeric_limits<double>::quiet_NaN(), 1.0, 0.0};
+        const std::array<double, 4> ok_2x2{0.0, 1.0, 1.0, 0.0};
+        const std::array<double, 9> ok_3x3{0.0, 1.0, 2.0, 1.0, 0.0, 1.0, 2.0, 1.0, 0.0};
+        const std::array<cxxgpr::MatrixRef<double>, 2> ard_ok{
+            cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2)
+        };
+        const std::array<cxxgpr::MatrixRef<double>, 1> ard_short{cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2)};
+        const std::array<cxxgpr::MatrixRef<double>, 2> ard_empty{
+            cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2), cxxgpr::MatrixRef<double>()
+        };
+
+        const auto code_square = [&](const cxxgpr::DistanceSource& src)
+        {
+            const auto store = compiled.prepare_square(src);
+            return store.has_value() ? std::optional<cxxgpr::GprErrorCode>{} : store.error().code();
+        };
+        const auto code_cross = [&](const cxxgpr::DistanceSource& src)
+        {
+            const auto store = compiled.prepare_cross(src);
+            return store.has_value() ? std::optional<cxxgpr::GprErrorCode>{} : store.error().code();
+        };
+
+        cxxgpr::DistanceSource empty_later;
+        empty_later.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(nan_2x2.data(), 2, 2))
+            .bind_scalar(s2.slot(), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2))
+            .bind_ard(ard->slot(), ard_empty);
+        EXPECT_EQ(code_square(empty_later), cxxgpr::GprErrorCode::EmptyInput);
+        EXPECT_EQ(code_cross(empty_later), cxxgpr::GprErrorCode::EmptyInput);
+
+        cxxgpr::DistanceSource other_shape;
+        other_shape.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(nan_2x2.data(), 2, 2))
+            .bind_scalar(s2.slot(), cxxgpr::MatrixRef<double>(ok_3x3.data(), 3, 3))
+            .bind_ard(ard->slot(), ard_ok);
+        EXPECT_EQ(code_square(other_shape), cxxgpr::GprErrorCode::LengthMismatch);
+        EXPECT_EQ(code_cross(other_shape), cxxgpr::GprErrorCode::LengthMismatch);
+
+        cxxgpr::DistanceSource wrong_dims;
+        wrong_dims.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(nan_2x2.data(), 2, 2))
+            .bind_scalar(s2.slot(), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2))
+            .bind_ard(ard->slot(), ard_short);
+        EXPECT_EQ(code_square(wrong_dims), cxxgpr::GprErrorCode::DimensionMismatch);
+        EXPECT_EQ(code_cross(wrong_dims), cxxgpr::GprErrorCode::DimensionMismatch);
+
+        cxxgpr::DistanceSource values_only;
+        values_only.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(nan_2x2.data(), 2, 2))
+            .bind_scalar(s2.slot(), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2))
+            .bind_ard(ard->slot(), ard_ok);
+        EXPECT_EQ(code_square(values_only), cxxgpr::GprErrorCode::InvalidDistance);
+        EXPECT_EQ(code_cross(values_only), cxxgpr::GprErrorCode::InvalidDistance);
+
+        cxxgpr::DistanceSource valid;
+        valid.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2))
+            .bind_scalar(s2.slot(), cxxgpr::MatrixRef<double>(ok_2x2.data(), 2, 2))
+            .bind_ard(ard->slot(), ard_ok);
+        EXPECT_FALSE(code_square(valid).has_value());
+        EXPECT_FALSE(code_cross(valid).has_value());
+    }
+
     /// @brief Verifies hybrid DistanceKernel + LinearKernel parity and zero-allocation hot path.
     /// @details Compares square Gram, cross-covariance, all parameter gradients, and all Hessians
     /// between a WithPoints supplied-distance composite and an equivalent coordinate tree, then

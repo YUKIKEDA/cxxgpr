@@ -5,7 +5,7 @@
 先に {doc}`build-kernels` を読むこと。ここで扱うシンボルは `cxxgpr/kernel/distance.hpp` と `cxxgpr/kernel/distance_cache.hpp` にある。シグネチャは [kernel API リファレンス](../reference/api/kernel.md) を参照。
 
 :::{warning}
-与えた距離のカーネルは、**カーネル評価**のための API である。`Gpr` トレーナーが受け取るのは `KernelSpec` だけで、`DistanceKernel` を `Gpr::fit` に渡すことはできない。グラム行列・交差共分散・微分は `CompiledDistanceKernel` で作り、自分のソルバーか {doc}`use-low-level-building-blocks` の部品に渡す。
+この文書は**カーネル評価**の API を扱う。`CompiledDistanceKernel` でグラム行列・交差共分散・微分を作る。`Gpr` トレーナーが受け取るのは `KernelSpec` だけである。`DistanceKernel` で学習・予測するには `DistanceGpr` を使う（{doc}`fit-on-supplied-distances`）。
 :::
 
 ## 与えた距離を使う場面

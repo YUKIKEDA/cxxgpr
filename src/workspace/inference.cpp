@@ -24,20 +24,12 @@
 #include "linalg/packed_blas3.hpp"
 #include "linalg/simd_blas3.hpp"
 #include "workspace/predict_diagonal.hpp"
+#include "workspace/sample_draws.hpp"
 
 namespace cxxgpr
 {
     namespace
     {
-
-        /// @brief Returns the default adaptive jitter policy used when decomposing posterior covariance for sampling.
-        /// @details Configures base jitter 1e-12, scale factor 10.0, 10 retry steps, and cap 1e-2.
-        /// @return Pre-validated JitterPolicy for sample().
-        [[nodiscard]] JitterPolicy default_sample_jitter()
-        {
-            auto policy = JitterPolicy::adaptive(1e-12, 10.0, 10U, 1e-2);
-            return *policy;
-        }
 
         /// @brief Validates training features, Cholesky factor, weight vector alpha, and query features.
         /// @details Enforces non-emptiness, n x n factor shape, alpha length n, feature column parity,
@@ -704,6 +696,106 @@ namespace cxxgpr
         return result;
     }
 
+    /// @brief Returns the default adaptive jitter policy used when factoring a posterior covariance for sampling.
+    /// @details Base jitter 1e-12, scale factor 10, 10 retry steps and cap 1e-2.
+    /// @return Pre-validated adaptive JitterPolicy.
+    JitterPolicy detail::default_sample_jitter()
+    {
+        auto policy = JitterPolicy::adaptive(1e-12, 10.0, 10U, 1e-2);
+        return *policy;
+    }
+
+    /// @brief Draws deterministic posterior samples mu + L z from a predictive mean and covariance.
+    /// @tparam Refine Output scalar type.
+    /// @param[in] cov Predictive mean and column-major covariance; the covariance buffer is overwritten.
+    /// @param[in] n_draws Number of samples.
+    /// @param[in] seed Seed of the generator.
+    /// @param[in] jitter Jitter policy for the covariance factorization.
+    /// @return Column-major m x n_draws samples, or GprError.
+    /// @retval GprErrorCode::SizeOverflow When m * n_draws overflows std::size_t.
+    /// @retval GprErrorCode::CholeskyFailed When the covariance is not positive definite after jitter.
+    template <typename Refine>
+    std::expected<std::vector<Refine>, GprError> detail::draw_samples_from_covariance(
+        PredictiveCovariance<Refine>&& cov, std::size_t n_draws, std::uint64_t seed, const JitterPolicy& jitter
+    )
+    {
+        if (n_draws == 0U)
+        {
+            return std::vector<Refine>{};
+        }
+        const std::size_t m = cov.n_points;
+        auto total_len = checked_mul(n_draws, m);
+        if (!total_len.has_value())
+        {
+            return std::unexpected(std::move(total_len).error());
+        }
+
+        // Factor Sigma_* = L_* * L_*^T using adaptive jitter to handle near-singular query covariances.
+        std::vector<Refine> backup(cov.covariance.size());
+        MatrixMut<Refine> cov_mut(cov.covariance.data(), m, m, m);
+        MatrixMut<Refine> backup_mut(backup.data(), m, m, m);
+        const JitterPolicy eff_jitter = jitter;
+        if (auto chol = linalg::cholesky_lower_with_jitter(cov_mut, backup_mut, eff_jitter, CholeskyStage::Predict);
+            !chol.has_value())
+        {
+            return std::unexpected(std::move(chol).error());
+        }
+
+        // Generate each posterior sample y^(s) = mu_* + L_* * z^(s) from deterministic Box-Muller normals.
+        std::vector<Refine> samples(*total_len);
+        constexpr std::size_t batch_size = 8U;
+        const auto capacity = std::min(n_draws, batch_size);
+        std::vector<Refine> z(capacity * m);
+        Xoshiro256PlusPlus rng(seed);
+        for (std::size_t draw = 0; draw < n_draws;)
+        {
+            const auto count = std::min(capacity, n_draws - draw);
+            for (std::size_t k = 0; k < count * m; ++k)
+            {
+                z[k] = static_cast<Refine>(rng.unit_normal());
+            }
+            for (std::size_t j = 0; j < count; ++j)
+            {
+                std::copy_n(cov.mean.data(), m, samples.data() + ((draw + j) * m));
+            }
+            // Each row tile owns disjoint output rows across all draws in this batch.
+            const std::size_t tile = (count >= 4U && m >= 256U) ? 64U : m;
+            const auto tiles = static_cast<std::ptrdiff_t>(1U + ((m - 1U) / tile));
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (tiles > 1)
+#endif
+            for (std::ptrdiff_t t = 0; t < tiles; ++t)
+            {
+                const auto begin = static_cast<std::size_t>(t) * tile;
+                const auto end = std::min(begin + tile, m);
+                for (std::size_t col = 0; col < end; ++col)
+                {
+                    const auto factor_col = cov_mut.col(col);
+                    const auto first = std::max(begin, col);
+                    for (std::size_t j = 0; j < count; ++j)
+                    {
+                        Refine* out_draw = samples.data() + ((draw + j) * m);
+                        const Refine weight = z[(j * m) + col];
+                        for (std::size_t row = first; row < end; ++row)
+                        {
+                            out_draw[row] += factor_col[row] * weight;
+                        }
+                    }
+                }
+            }
+            draw += count;
+        }
+
+        return samples;
+    }
+
+    template std::expected<std::vector<double>, GprError> detail::draw_samples_from_covariance<double>(
+        PredictiveCovariance<double>&&, std::size_t, std::uint64_t, const JitterPolicy&
+    );
+    template std::expected<std::vector<float>, GprError> detail::draw_samples_from_covariance<float>(
+        PredictiveCovariance<float>&&, std::size_t, std::uint64_t, const JitterPolicy&
+    );
+
     /// @brief Draws n_draws deterministic posterior samples from the predictive distribution.
     /// @details Obtains posterior mean and covariance, decomposes Sigma_* = L_* * L_*^T with jitter
     /// retries, and transforms Box-Muller standard normal draws z ~ N(0, I) via mu_* + L_* * z.
@@ -754,70 +846,10 @@ namespace cxxgpr
             return std::vector<Refine>{};
         }
 
-        const std::size_t m = cov_res->n_points;
-        auto total_len = checked_mul(n_draws, m);
-        if (!total_len.has_value())
-        {
-            return std::unexpected(std::move(total_len).error());
-        }
-
-        // Factor Sigma_* = L_* * L_*^T using adaptive jitter to handle near-singular query covariances.
-        std::vector<Refine> backup(cov_res->covariance.size());
-        MatrixMut<Refine> cov_mut(cov_res->covariance.data(), m, m, m);
-        MatrixMut<Refine> backup_mut(backup.data(), m, m, m);
-        const JitterPolicy eff_jitter = jitter.value_or(default_sample_jitter());
-        if (auto chol = linalg::cholesky_lower_with_jitter(cov_mut, backup_mut, eff_jitter, CholeskyStage::Predict);
-            !chol.has_value())
-        {
-            return std::unexpected(std::move(chol).error());
-        }
-
-        // Generate each posterior sample y^(s) = mu_* + L_* * z^(s) from deterministic Box-Muller normals.
-        std::vector<Refine> samples(*total_len);
-        constexpr std::size_t batch_size = 8U;
-        const auto capacity = std::min(n_draws, batch_size);
-        std::vector<Refine> z(capacity * m);
-        Xoshiro256PlusPlus rng(seed);
-        for (std::size_t draw = 0; draw < n_draws;)
-        {
-            const auto count = std::min(capacity, n_draws - draw);
-            for (std::size_t k = 0; k < count * m; ++k)
-            {
-                z[k] = static_cast<Refine>(rng.unit_normal());
-            }
-            for (std::size_t j = 0; j < count; ++j)
-            {
-                std::copy_n(cov_res->mean.data(), m, samples.data() + ((draw + j) * m));
-            }
-            // Each row tile owns disjoint output rows across all draws in this batch.
-            const std::size_t tile = (count >= 4U && m >= 256U) ? 64U : m;
-            const auto tiles = static_cast<std::ptrdiff_t>(1U + ((m - 1U) / tile));
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (tiles > 1)
-#endif
-            for (std::ptrdiff_t t = 0; t < tiles; ++t)
-            {
-                const auto begin = static_cast<std::size_t>(t) * tile;
-                const auto end = std::min(begin + tile, m);
-                for (std::size_t col = 0; col < end; ++col)
-                {
-                    const auto factor_col = cov_mut.col(col);
-                    const auto first = std::max(begin, col);
-                    for (std::size_t j = 0; j < count; ++j)
-                    {
-                        Refine* out_draw = samples.data() + ((draw + j) * m);
-                        const Refine weight = z[(j * m) + col];
-                        for (std::size_t row = first; row < end; ++row)
-                        {
-                            out_draw[row] += factor_col[row] * weight;
-                        }
-                    }
-                }
-            }
-            draw += count;
-        }
-
-        return samples;
+        // Factor the predictive covariance and draw the samples (shared with the supplied-distance models).
+        return detail::draw_samples_from_covariance<Refine>(
+            std::move(*cov_res), n_draws, seed, jitter.value_or(detail::default_sample_jitter())
+        );
     }
 
     /// @brief Computes closed-form Leave-One-Out predictive mean and variance (GPML §5.4.2) into out.

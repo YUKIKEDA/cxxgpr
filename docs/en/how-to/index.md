@@ -10,6 +10,7 @@ prepare-data
 build-kernels
 write-custom-kernel
 use-supplied-distances
+fit-on-supplied-distances
 transform-data
 configure-fit
 choose-optimizer
