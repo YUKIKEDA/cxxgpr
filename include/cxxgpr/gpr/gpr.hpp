@@ -167,7 +167,7 @@ namespace cxxgpr
         );
 
         /// @brief Validates query matrix xs, runs posterior prediction into out, and applies inverse target scaling.
-        /// @details Reuses workspace buffers to avoid heap allocations once warmed up on matching query sizes.
+        /// @details Reuses workspace buffers to avoid heap allocations once warmed up on a batch at least as large.
         /// @tparam P Precision policy matching payload.
         /// @param[in] payload Fitted model payload containing factor, weights, and transforms.
         /// @param[in] xs Column-major query feature matrix (m x d).
@@ -809,7 +809,7 @@ namespace cxxgpr
     /// @brief Fitted Exact Gaussian Process Regression model providing posterior prediction, zero-allocation
     /// predict_into, full posterior covariance, posterior sampling, and closed-form LOO inference.
     /// @details Holds immutable fitted payload state plus a reusable QueryWorkspace so predict_into()
-    /// performs zero heap allocations once warmed up on matching query shapes.
+    /// performs zero heap allocations once warmed up on a query batch at least as large.
     /// @tparam O Optimizer policy type preserved for into_trainer() and refit().
     /// @tparam P Precision policy determining Storage and Refine scalar types.
     /// @tparam K Kernel specification type (KernelSpec).

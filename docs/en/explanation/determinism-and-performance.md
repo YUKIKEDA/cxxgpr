@@ -88,7 +88,7 @@ The rules behind the diagram:
 - **Training buffers are sized once.** `FitBuffers<P>` knows $n$ at the start of `fit` and allocates the matrices, scratch and (optionally) distance cache in one go. The Hessian scratch is the exception: it is the largest buffer ($p$ matrices of size $n \times n$) and is created on the first Hessian call, so optimizers that do not use second derivatives never pay for it.
 - **Inside the loop nothing is allocated.** Marginal likelihood plus gradient evaluations reuse the buffers; kernel trees evaluate into preallocated `NestedBuffers` whose depth was computed from the tree when it was compiled.
 - **Training memory is released at the end.** A `FittedGpr` keeps only what prediction needs.
-- **Prediction memory grows monotonically.** The first call sizes the `QueryWorkspace`; later calls with a batch of equal size reuse it.
+- **Prediction memory grows monotonically.** The first call sizes the `QueryWorkspace`. Later calls with a batch of equal or smaller size reuse it without allocating; a larger batch grows it once.
 
 The guarantee covers the hot paths: a negative log marginal likelihood evaluation with gradient, and `predict_into` after warm-up. Calls that return a new object (`predict`, `predict_covariance`, `sample`, `loo_predict`) must allocate their result. The test suite enforces the guarantee mechanically: Eigen is built with `EIGEN_RUNTIME_NO_MALLOC` so that any internal allocation inside an audited scope aborts, and a counter on the global `operator new` catches everything else.
 

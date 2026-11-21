@@ -8,7 +8,7 @@ The numbers on this page were measured with the library built in Release mode wi
 
 ## Predict without allocating
 
-A `FittedGpr` owns a `QueryWorkspace` that holds every temporary a prediction needs: the transformed queries, the cross-covariance, the triangular-solve result and the nested kernel scratch. `FittedGpr::predict_into` and `FittedGpr::predict_with_into` write into a `Prediction` that you own. After one warm-up call that sizes the workspace and your output vectors, further calls with the same batch size perform no heap allocation.
+A `FittedGpr` owns a `QueryWorkspace` that holds every temporary a prediction needs: the transformed queries, the cross-covariance, the triangular-solve result and the nested kernel scratch. `FittedGpr::predict_into` and `FittedGpr::predict_with_into` write into a `Prediction` that you own. After one warm-up call that sizes the workspace and your output vectors, further calls with the same or a smaller batch size perform no heap allocation.
 
 The program below installs a counting `operator new` (the library is a static library, so its allocations go through yours), fits a two-feature model, and counts allocations.
 

@@ -27,6 +27,8 @@
 #include <system_error>
 #include <vector>
 
+#include "allocation_audit.hpp"
+
 namespace
 {
 
@@ -658,6 +660,190 @@ namespace
         auto err_st_deep = cxxgpr::persist::LoadedGpr::load(dir_st_deep.path);
         ASSERT_FALSE(err_st_deep.has_value());
         EXPECT_EQ(err_st_deep.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+    }
+
+    /// @brief Checks that query batch sizes may shrink and grow in any order on one LoadedGpr.
+    /// @details Fits a 2-feature model under precision policy P with fitted input and target transforms,
+    /// saves it, and loads it several times. One loaded model sees an 8-point batch first; the following
+    /// 3-point batch must match bitwise a loaded model that never saw the larger batch, for predict,
+    /// predict_covariance, and sample, and returning to 8 points must match a model that never saw the
+    /// smaller batch. Finally audits that predict_into() allocates nothing for a smaller batch after a larger one.
+    /// @tparam P Precision policy of the saved model.
+    /// @param[in] dir_name Unique temporary directory suffix for this policy.
+    /// @param[in] with_factor Whether the factor is stored (save_with_factor) or rebuilt on load (save).
+    template <cxxgpr::PrecisionPolicyConcept P>
+    void verify_loaded_query_batch_may_shrink(const std::string& dir_name, bool with_factor)
+    {
+        const std::size_t n = 20;
+        const std::size_t d = 2;
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            x[i] = 0.3 * static_cast<double>(i);
+            x[n + i] = 0.25 * static_cast<double>((i * 5U) % 7U);
+            y[i] = 4.0 + std::sin(x[i]) + (0.5 * x[n + i]);
+        }
+        const std::vector<double> big{0.1, 0.5, 0.9, 1.3, 1.7, 2.1, 2.5, 2.9, 0.2, 1.4, 0.6, 1.0, 0.3, 1.2, 0.8, 0.4};
+        const std::vector<double> small{0.2, 1.1, 2.3, 0.7, 0.1, 1.3};
+        const auto big_ref = cxxgpr::MatrixRef<double>(big.data(), 8U, d, 8U);
+        const auto small_ref = cxxgpr::MatrixRef<double>(small.data(), 3U, d, 3U);
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array<double, 2>{1.0, 1.5}).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec)
+                                 .with_input_transform(cxxgpr::transform::StandardizeInput())
+                                 .with_target_transform(cxxgpr::transform::StandardizeTarget())
+                                 .with_noise_variance(1e-3);
+        ASSERT_TRUE(trainer.has_value());
+        const auto fitted = trainer->factor(x, n, d, y);
+        ASSERT_TRUE(fitted.has_value());
+
+        const TempDirGuard dir(dir_name);
+        if (with_factor)
+        {
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fitted, dir.path).has_value());
+        }
+        else
+        {
+            ASSERT_TRUE(cxxgpr::persist::save(*fitted, dir.path).has_value());
+        }
+        // Every load() yields an independent model with an empty query workspace.
+        const auto load = [&]
+        {
+            return cxxgpr::persist::LoadedGpr::load(dir.path);
+        };
+
+        // predict: large -> small -> large on one loaded model.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->predict(big_ref).has_value());
+            auto shrunk = used->predict(small_ref);
+            auto shrunk_expected = never_big->predict(small_ref);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(shrunk->mean, shrunk_expected->mean);
+            EXPECT_EQ(shrunk->variance, shrunk_expected->variance);
+
+            auto regrown = used->predict(big_ref);
+            auto regrown_expected = never_small->predict(big_ref);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(regrown->mean, regrown_expected->mean);
+            EXPECT_EQ(regrown->variance, regrown_expected->variance);
+        }
+
+        // predict_covariance: large -> small -> large.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->predict_covariance(big_ref).has_value());
+            auto shrunk = used->predict_covariance(small_ref);
+            auto shrunk_expected = never_big->predict_covariance(small_ref);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(shrunk->mean, shrunk_expected->mean);
+            EXPECT_EQ(shrunk->covariance, shrunk_expected->covariance);
+
+            auto regrown = used->predict_covariance(big_ref);
+            auto regrown_expected = never_small->predict_covariance(big_ref);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(regrown->mean, regrown_expected->mean);
+            EXPECT_EQ(regrown->covariance, regrown_expected->covariance);
+        }
+
+        // sample with a fixed seed: large -> small -> large.
+        {
+            auto used = load();
+            auto never_big = load();
+            auto never_small = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            ASSERT_TRUE(never_small.has_value());
+            ASSERT_TRUE(used->sample(big_ref, 2U, 7U).has_value());
+            auto shrunk = used->sample(small_ref, 2U, 7U);
+            auto shrunk_expected = never_big->sample(small_ref, 2U, 7U);
+            ASSERT_TRUE(shrunk.has_value()) << shrunk.error().message();
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(*shrunk, *shrunk_expected);
+
+            auto regrown = used->sample(big_ref, 2U, 7U);
+            auto regrown_expected = never_small->sample(big_ref, 2U, 7U);
+            ASSERT_TRUE(regrown.has_value()) << regrown.error().message();
+            ASSERT_TRUE(regrown_expected.has_value());
+            EXPECT_EQ(*regrown, *regrown_expected);
+        }
+
+        // predict_into: after the larger batch sized the workspace and the output, a smaller batch and a
+        // return to the larger batch perform no heap allocation.
+        {
+            auto used = load();
+            auto never_big = load();
+            ASSERT_TRUE(used.has_value());
+            ASSERT_TRUE(never_big.has_value());
+            cxxgpr::Prediction<double> out;
+            ASSERT_TRUE(used->predict_into(big_ref, out).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                const auto res = used->predict_into(small_ref, out);
+                const std::size_t allocations = no_alloc.delta_allocations();
+                ASSERT_TRUE(res.has_value());
+                EXPECT_EQ(allocations, 0U);
+            }
+            auto shrunk_expected = never_big->predict(small_ref);
+            ASSERT_TRUE(shrunk_expected.has_value());
+            EXPECT_EQ(out.mean, shrunk_expected->mean);
+            EXPECT_EQ(out.variance, shrunk_expected->variance);
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                const auto res = used->predict_into(big_ref, out);
+                const std::size_t allocations = no_alloc.delta_allocations();
+                ASSERT_TRUE(res.has_value());
+                EXPECT_EQ(allocations, 0U);
+            }
+        }
+    }
+
+    /// @brief Verifies a LoadedGpr accepts a smaller query batch after a larger one.
+    /// @details Covers all four precision policies with a stored factor, plus the rebuild-on-load path,
+    /// for predict, predict_covariance, sample, and allocation-free predict_into.
+    TEST(PersistModelsTest, LoadedQueryBatchSizeMayShrinkAfterLargerBatch)
+    {
+        // Spec: REQ-07, REQ-10, REQ-11, REQ-12, DES-05, DES-16, DES-17, DES-18, FMT-05
+        {
+            SCOPED_TRACE("DoublePrecision, stored factor");
+            verify_loaded_query_batch_may_shrink<cxxgpr::DoublePrecision>("shrink_f64", true);
+        }
+        {
+            SCOPED_TRACE("DoublePrecision, factor rebuilt on load");
+            verify_loaded_query_batch_may_shrink<cxxgpr::DoublePrecision>("shrink_f64_refactor", false);
+        }
+        {
+            SCOPED_TRACE("SinglePrecision");
+            verify_loaded_query_batch_may_shrink<cxxgpr::SinglePrecision>("shrink_f32", true);
+        }
+        {
+            SCOPED_TRACE("MixedPrecision<PromoteStorage>");
+            verify_loaded_query_batch_may_shrink<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(
+                "shrink_mixed_promote", true
+            );
+        }
+        {
+            SCOPED_TRACE("MixedPrecision<ReevaluateKernel>");
+            verify_loaded_query_batch_may_shrink<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
+                "shrink_mixed_reevaluate", true
+            );
+        }
     }
 
 }  // namespace
