@@ -72,6 +72,7 @@ add_library(cxxgpr STATIC
     src/optimizer/trust_region.cpp
     src/persist/config_json.cpp
     src/persist/persist.cpp
+    src/persist/persist_distance.cpp
     src/persist/safetensors.cpp
     src/precision/refine.cpp
     src/transform/columnwise.cpp

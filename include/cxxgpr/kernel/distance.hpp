@@ -548,6 +548,7 @@ namespace cxxgpr
 
         template <KernelScalarConcept U> friend class CompiledDistanceKernel;
         friend struct DistanceStoreBuilder;
+        friend struct DistanceStoreExport;
     };
 
     /// @brief Flattened execution-layer kernel reading validated DistanceSource slots (and optional points).

@@ -1782,6 +1782,291 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown jitter policy"));
         }
 
+        /// @brief Encodes a supplied-distance or coordinate leaf of a described DistanceKernel tree.
+        /// @param[in] node Described leaf node.
+        /// @param[out] out Destination of the JSON of the leaf.
+        /// @param[out] err Error slot that receives the failure when the leaf is missing or not persistable.
+        CXXGPR_NOINLINE void encode_distance_leaf(
+            const cxxgpr::detail::DistanceNodeDesc& node, nlohmann::json& out, ErrorSlot& err
+        )
+        {
+            if (!node.leaf.has_value())
+            {
+                fail_config(err, "distance kernel leaf is missing");
+                return;
+            }
+            auto leaf = encode_leaf(*node.leaf);
+            if (!leaf.has_value())
+            {
+                err.emplace(std::move(leaf).error());
+                return;
+            }
+            if (node.kind == cxxgpr::detail::DistanceNodeDesc::Kind::Coord)
+            {
+                out = std::move(*leaf);
+                return;
+            }
+            out = nlohmann::json{
+                {"distance", {{"slot", node.slot}, {"leaf", std::move(*leaf)}}}
+            };
+        }
+
+        /// @brief Recursively encodes a described DistanceKernel subtree into JSON.
+        /// @details A nesting level keeps only its two encoded children on the stack: leaf encoding, object
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] node Described subtree.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the JSON of the subtree.
+        /// @param[out] err Error slot that receives the first failure: a leaf that is not persistable or nesting
+        /// that is too deep.
+        void encode_distance_node(
+            const cxxgpr::detail::DistanceNodeDesc& node, std::size_t depth, nlohmann::json& out, ErrorSlot& err
+        )
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
+            }
+            if (node.kind == Kind::Supplied || node.kind == Kind::Coord)
+            {
+                encode_distance_leaf(node, out, err);
+                return;
+            }
+            nlohmann::json lhs;
+            encode_distance_node(*node.lhs, depth + 1U, lhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            nlohmann::json rhs;
+            encode_distance_node(*node.rhs, depth + 1U, rhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            make_composite_kernel_json(node.kind == Kind::Sum ? "sum" : "product", std::move(lhs), std::move(rhs), out);
+        }
+
+        /// @brief Decodes the kernel JSON of a distance-tree leaf, which must be a single kernel leaf.
+        /// @param[in] leaf_json Kernel JSON node of the leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @return The kernel leaf, or GprError on schema or registry failure or when the node is a composite.
+        [[nodiscard]] std::expected<KernelLeaf, GprError> decode_distance_leaf_kernel(
+            const nlohmann::json& leaf_json, const PersistRegistry& registry
+        )
+        {
+            std::optional<KernelSpec> spec;
+            ErrorSlot err;
+            decode_kernel_node(leaf_json, registry, 0U, spec, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+            const auto* leaf =
+                spec.has_value() ? std::get_if<KernelLeaf>(&KernelSpecPersistAccess::node(*spec)) : nullptr;
+            if (leaf == nullptr)
+            {
+                return std::unexpected(config_err("a distance leaf must be a single kernel leaf"));
+            }
+            return *leaf;
+        }
+
+        /// @brief Children of a sum or product node found by decode_distance_leaf().
+        struct DistanceChildren
+        {
+            /// @brief Left child node, or null when the node is not a composite.
+            const nlohmann::json* left = nullptr;
+            /// @brief Right child node, or null when the node is not a composite.
+            const nlohmann::json* right = nullptr;
+            /// @brief True for a "sum" node, false for a "product" node.
+            bool sum = false;
+        };
+
+        /// @brief Decodes a distance-tree node other than a composite, or finds the children of a composite.
+        /// @param[in] j JSON node: sum, product, distance leaf, or coordinate leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[out] children Children of j when j is a valid "sum" or "product" node; left null otherwise.
+        /// @return Described leaf node, a null pointer when j is a composite, or GprError on schema or registry
+        /// failure.
+        [[nodiscard]] std::expected<std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>, GprError>
+            decode_distance_leaf(const nlohmann::json& j, const PersistRegistry& registry, DistanceChildren& children)
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            if (!j.is_object() || j.size() != 1U)
+            {
+                return std::unexpected(config_err("kernel node must be a single-key JSON object"));
+            }
+            const auto it = j.begin();
+            const std::string& key = it.key();
+            const nlohmann::json& body = it.value();
+            if (key == "sum" || key == "product")
+            {
+                if (!body.is_object() || !body.contains("left") || !body.contains("right"))
+                {
+                    return std::unexpected(config_err("composite kernel node missing left/right"));
+                }
+                // Hand the children to the caller, which decodes them.
+                children = DistanceChildren{.left = &body["left"], .right = &body["right"], .sum = key == "sum"};
+                return nullptr;
+            }
+            auto node = std::make_shared<cxxgpr::detail::DistanceNodeDesc>();
+            if (key == "distance")
+            {
+                if (!body.is_object() || !body.contains("slot") || !body["slot"].is_number_unsigned()
+                    || !body.contains("leaf"))
+                {
+                    return std::unexpected(config_err("distance node needs an unsigned slot and a leaf"));
+                }
+                auto leaf = decode_distance_leaf_kernel(body["leaf"], registry);
+                if (!leaf.has_value())
+                {
+                    return std::unexpected(std::move(leaf).error());
+                }
+                node->kind = Kind::Supplied;
+                node->slot = body["slot"].get<std::size_t>();
+                node->leaf = std::move(*leaf);
+                return node;
+            }
+            auto leaf = decode_distance_leaf_kernel(j, registry);
+            if (!leaf.has_value())
+            {
+                return std::unexpected(std::move(leaf).error());
+            }
+            node->kind = Kind::Coord;
+            node->leaf = std::move(*leaf);
+            return node;
+        }
+
+        /// @brief Builds a described sum or product node from its decoded children.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in] lhs Decoded left child, moved from.
+        /// @param[in] rhs Decoded right child, moved from.
+        /// @param[out] out Destination of the composite node.
+        CXXGPR_NOINLINE void make_distance_composite(
+            bool sum,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>&& lhs,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>&& rhs,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>& out
+        )
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            auto node = std::make_shared<cxxgpr::detail::DistanceNodeDesc>();
+            node->kind = sum ? Kind::Sum : Kind::Product;
+            node->lhs = std::move(lhs);
+            node->rhs = std::move(rhs);
+            out = std::move(node);
+        }
+
+        /// @brief Recursively decodes one kernel JSON node into a described DistanceKernel subtree.
+        /// @details A nesting level keeps only its two decoded children on the stack: node decoding, composite
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON node: sum, product, distance leaf, or coordinate leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the described subtree.
+        /// @param[out] err Error slot that receives the first schema, depth, or registry error.
+        void decode_distance_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>& out,
+            ErrorSlot& err
+        )
+        {
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
+            }
+            DistanceChildren children;
+            produce_into(out, err, [&] { return decode_distance_leaf(j, registry, children); });
+            if (err.has_value() || children.left == nullptr)
+            {
+                return;
+            }
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc> lhs;
+            decode_distance_node(*children.left, registry, depth + 1U, lhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc> rhs;
+            decode_distance_node(*children.right, registry, depth + 1U, rhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            make_distance_composite(children.sum, std::move(lhs), std::move(rhs), out);
+        }
+
+        /// @brief Parses the distance section and the distance kernel of a supplied-distance checkpoint.
+        /// @param[in] root Parsed config.json root object.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[in,out] cfg Configuration receiving the distance kernel description and the mode.
+        /// @return Empty expected on success, or GprError when the section is malformed or inconsistent.
+        [[nodiscard]] std::expected<void, GprError> parse_distance_section(
+            const nlohmann::json& root, const PersistRegistry& registry, ParsedConfig& cfg
+        )
+        {
+            const auto& dj = root["distance"];
+            if (!dj.is_object() || !dj.contains("points") || !dj["points"].is_string() || !dj.contains("slots")
+                || !dj["slots"].is_array())
+            {
+                return std::unexpected(config_err("distance section needs points and slots"));
+            }
+            const std::string points = dj["points"].get<std::string>();
+            if (points != "distance_only" && points != "with_points")
+            {
+                return std::unexpected(config_err("distance.points must be distance_only or with_points"));
+            }
+            cfg.distance_with_points = points == "with_points";
+            if (cfg.distance_with_points != (cfg.d > 0U))
+            {
+                return std::unexpected(config_err("d must be positive exactly for a with_points model"));
+            }
+            // A distance-only model has no coordinates, so both coordinate transforms must be the identity.
+            if (!cfg.distance_with_points
+                && (!root.contains("x_unfitted") || root["x_unfitted"] != nlohmann::json("identity")
+                    || !root.contains("x_transform") || root["x_transform"] != nlohmann::json("identity")))
+            {
+                return std::unexpected(
+                    config_err("a distance_only model must have identity x_unfitted and x_transform")
+                );
+            }
+            cxxgpr::detail::DistanceKernelDesc desc;
+            for (const auto& s : dj["slots"])
+            {
+                if (!s.is_object() || !s.contains("kind") || !s["kind"].is_string())
+                {
+                    return std::unexpected(config_err("distance slot needs a kind"));
+                }
+                const std::string kind = s["kind"].get<std::string>();
+                if (kind == "scalar")
+                {
+                    desc.slots.push_back(cxxgpr::detail::DistanceSlotDesc{.ard_dims = std::nullopt});
+                }
+                else if (kind == "ard" && s.contains("dims") && s["dims"].is_number_unsigned()
+                    && s["dims"].get<std::size_t>() > 0U)
+                {
+                    desc.slots.push_back(cxxgpr::detail::DistanceSlotDesc{.ard_dims = s["dims"].get<std::size_t>()});
+                }
+                else
+                {
+                    return std::unexpected(config_err("distance slot kind must be scalar or ard with dims >= 1"));
+                }
+            }
+            ErrorSlot err;
+            decode_distance_node(root["kernel"], registry, 0U, desc.root, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+            cfg.distance_kernel = std::move(desc);
+            return {};
+        }
+
     }  // namespace
 
     /// @brief Serializes a SaveInput bundle into pretty-printed config.json text.
@@ -1886,11 +2171,12 @@ namespace cxxgpr::persist::detail
     /// likelihood, jitter, and transforms.
     /// @param[in] path Filesystem path to config.json.
     /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @param[in] distance True to parse a supplied-distance checkpoint, false for a coordinate checkpoint.
     /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
     /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
     /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
-    std::expected<ParsedConfig, GprError> parse_config_json(
-        const std::filesystem::path& path, const PersistRegistry& registry
+    static std::expected<ParsedConfig, GprError> parse_config_impl(
+        const std::filesystem::path& path, const PersistRegistry& registry, bool distance
     )
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -1928,11 +2214,13 @@ namespace cxxgpr::persist::detail
                 GprError::persist_failed(PersistErrorKind::WrongModel, "model is not an Exact GPR checkpoint")
             );
         }
-        if (root.contains("distance"))
+        if (root.contains("distance") != distance)
         {
             return std::unexpected(
                 GprError::persist_failed(
-                    PersistErrorKind::WrongModel, "distance-supplied model requires LoadedDistanceGpr"
+                    PersistErrorKind::WrongModel,
+                    distance ? "checkpoint is not a supplied-distance model"
+                             : "distance-supplied model requires LoadedDistanceGpr"
                 )
             );
         }
@@ -1971,7 +2259,7 @@ namespace cxxgpr::persist::detail
         ParsedConfig cfg;
         cfg.n = root["n"].get<std::size_t>();
         cfg.d = root["d"].get<std::size_t>();
-        if (cfg.n == 0U || cfg.d == 0U)
+        if (cfg.n == 0U || (!distance && cfg.d == 0U))
         {
             return std::unexpected(config_err("n and d must be positive for coordinate Exact GPR"));
         }
@@ -2080,10 +2368,20 @@ namespace cxxgpr::persist::detail
         try
         {
             ErrorSlot err;
-            decode_kernel_node(root["kernel"], registry, 0U, cfg.kernel_spec, err);
-            if (err.has_value())
+            if (distance)
             {
-                return std::unexpected(std::move(*err));
+                if (auto ds = parse_distance_section(root, registry, cfg); !ds.has_value())
+                {
+                    return std::unexpected(std::move(ds).error());
+                }
+            }
+            else
+            {
+                decode_kernel_node(root["kernel"], registry, 0U, cfg.kernel_spec, err);
+                if (err.has_value())
+                {
+                    return std::unexpected(std::move(*err));
+                }
             }
 
             const auto& lj = root["likelihood"];
@@ -2145,6 +2443,155 @@ namespace cxxgpr::persist::detail
         }
 
         return cfg;
+    }
+
+    /// @brief Serializes a supplied-distance model into pretty-printed config.json text.
+    /// @details Writes the same sections as a coordinate model, with the kernel tree carrying distance nodes and an
+    /// extra distance section naming the mode and the slots.
+    /// @param[in] input Borrowed model configuration and transform references to serialize.
+    /// @param[in] kernel Structural description of the kernel of the model.
+    /// @return Formatted JSON text, or GprError when a custom component is not persistable.
+    /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
+    std::expected<std::string, GprError> serialize_distance_config_json(
+        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
+    )
+    {
+        // Encode the kernel and transform trees in order; each pass stops at its first error.
+        ErrorSlot err;
+        nlohmann::json k_json;
+        encode_distance_node(*kernel.root, 0U, k_json, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json x_unf;
+        encode_unfitted_input_node(input.unfitted_input, 0U, x_unf, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json x_fit_json("identity");
+        if (input.fitted_input != nullptr)
+        {
+            encode_fitted_input_node(*input.fitted_input, 0U, x_fit_json, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+        }
+        nlohmann::json y_unf;
+        encode_unfitted_target_node(input.unfitted_target, 0U, y_unf, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json y_fit;
+        encode_fitted_target_node(input.fitted_target, 0U, y_fit, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+
+        std::string prec_str = "double";
+        std::string res_str;
+        switch (input.precision_kind)
+        {
+            case PersistPrecisionKind::Double:
+                break;
+            case PersistPrecisionKind::Single:
+                prec_str = "single";
+                break;
+            case PersistPrecisionKind::MixedPromote:
+                prec_str = "mixed";
+                res_str = "promote_storage";
+                break;
+            case PersistPrecisionKind::MixedReevaluate:
+                prec_str = "mixed";
+                res_str = "reevaluate_kernel";
+                break;
+        }
+
+        nlohmann::json slots = nlohmann::json::array();
+        for (const auto& slot : kernel.slots)
+        {
+            if (slot.ard_dims.has_value())
+            {
+                slots.push_back({
+                    {"kind",          "ard"},
+                    {"dims", *slot.ard_dims}
+                });
+            }
+            else
+            {
+                slots.push_back({
+                    {"kind", "scalar"}
+                });
+            }
+        }
+
+        nlohmann::json root{
+            {"format_version",                                     FORMAT_VERSION                              },
+            {             "n",                                                                    input.n_train},
+            {             "d",                                                                 input.n_features},
+            {    "has_factor",                                                                 input.has_factor},
+            {   "factor_kind",                                                                            "llt"},
+            { "factor_jitter",                                                              input.factor_jitter},
+            {     "precision",                                                                         prec_str},
+            {          "math",           input.kernel_exp == KernelExp::FastApprox ? "fast_approx" : "accurate"},
+            {"distance_cache",                                                                         "always"},
+            {        "kernel",                                                                std::move(k_json)},
+            {    "likelihood",
+             {{"noise_variance", encode_bounded(input.likelihood.noise_variance(), input.likelihood.bounds())}}},
+            {        "jitter",                                                      encode_jitter(input.jitter)},
+            {    "x_unfitted",                                                                 std::move(x_unf)},
+            {   "x_transform",                                                            std::move(x_fit_json)},
+            {    "y_unfitted",                                                                 std::move(y_unf)},
+            {   "y_transform",                                                                 std::move(y_fit)},
+            {      "distance",
+             {{"points",
+             std::holds_alternative<const DistanceKernel<WithPoints>*>(input.kernel) ? "with_points"
+             : "distance_only"},
+             {"slots", std::move(slots)}}                                                                      },
+        };
+        if (!res_str.empty())
+        {
+            root["residual"] = res_str;
+        }
+
+        // Refuse to write a document that the loader would reject for its nesting depth: every composite kernel
+        // node adds two JSON levels, so a tree accepted by the node-depth bound can still exceed the JSON bound.
+        // The check runs before the recursive serializer descends into the document once per level.
+        if (auto depth_ok = check_value_max_depth(root, MAX_JSON_NESTING_DEPTH); !depth_ok.has_value())
+        {
+            return std::unexpected(std::move(depth_ok).error());
+        }
+        return root.dump(2);
+    }
+
+    /// @brief Reads, validates and parses a coordinate checkpoint config.json.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
+    /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
+    /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
+    std::expected<ParsedConfig, GprError> parse_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    )
+    {
+        return parse_config_impl(path, registry, false);
+    }
+
+    /// @brief Reads, validates and parses a supplied-distance checkpoint config.json.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
+    /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
+    /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
+    std::expected<ParsedConfig, GprError> parse_distance_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    )
+    {
+        return parse_config_impl(path, registry, true);
     }
 
 }  // namespace cxxgpr::persist::detail

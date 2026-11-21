@@ -65,11 +65,11 @@ The file conforms to the [safetensors](https://github.com/huggingface/safetensor
 
 | Tensor name | `shape` | `dtype` | Stored when | Contents |
 |---|---|---|---|---|
-| `x` | `[n, d]` | `F64` | always | Training `X` before the input transform |
+| `x` | `[n, d]` | `F64` | always (omitted for a distance-only model, where `d = 0`) | Training `X` before the input transform |
 | `y` | `[n]` | `F64` | always | Training `y` before the target transform |
 | `l` | `[n, n]` | `double`→`F64`, `single`/`mixed`→`F32` | `has_factor == true` | The lower-triangular Cholesky factor $L$ of $A + (\sigma_n^2 + j)I$ (zero-filled above the diagonal) |
 | `alpha` | `[n]` | `single`→`F32`, `double`/`mixed`→`F64` | `has_factor == true` | The solution weights $\alpha$ (values in the transformed `y` space) |
-| `d2.<k>` | scalar `[n(n+1)/2]` / ARD `[dims, n(n+1)/2]` | `single`→`F32`, `double`/`mixed`→`F64` | distance models only | The repaired lower-triangular squared distances of slot `k`. A scalar uses the packed position $p = jn - j(j-1)/2 + (i-j)$; an ARD slot concatenates, for each dimension $m \in [0, \text{dims})$, a packed array of length $\text{packed\_len} = n(n+1)/2$ (flat index `m * packed_len + p`) (`FMT-07`) |
+| `d2.<k>` | scalar `[n(n+1)/2]` / ARD `[dims, n(n+1)/2]` | `single`/`mixed`→`F32`, `double`→`F64` | distance models only | The repaired lower-triangular squared distances of slot `k`. A scalar uses the packed position $p = jn - j(j-1)/2 + (i-j)$; an ARD slot concatenates, for each dimension $m \in [0, \text{dims})$, a packed array of length $\text{packed\_len} = n(n+1)/2$ (flat index `m * packed_len + p`) (`FMT-07`) |
 
 When verifying or using the file directly from NumPy, column-major matrices such as `x` and `l` are restored bit-exactly to their original shape and meaning with `flat.reshape(meta["shape"], order="F")`, and the ARD distance tensor `d2.<k>` with `flat.reshape(meta["shape"], order="C")` (the one-dimensional tensors `y`, `alpha`, and a scalar `d2.<k>` are identical either way).
 
@@ -115,8 +115,8 @@ For `DistanceKernel<C>` models, a `distance` section is added to `config.json`, 
 
 - **Pairing identifier**: distance models carry the `FMT-09` identifier exactly as coordinate models do; it covers the `distance` section and every `d2.<k>` tensor.
 - `points` is `"distance_only"` or `"with_points"`. Loading a `DistanceKernel<WithPoints>` with a `DistanceOnly` loader (or the reverse, or with a coordinate `LoadedGpr`) always returns `PersistFailed(WrongModel)`.
-- `slots` must match the order of `DistanceKernel::slots()` (depth-first, order of first appearance). A `distance_only` kernel that contains a coordinate-dependent leaf (`rbf_ard`, `linear`, etc.) is also rejected with `PersistFailed(Config)`.
-- **`d2.<k>` storage rule**: for a scalar distance slot, the lower-triangular elements `j..n` of column $j$ (diagonal included) are packed in column order (packed position $p = jn - j(j-1)/2 + (i - j)$, length $n(n+1)/2$). For an ARD distance slot (header `shape` is `[dims, n(n+1)/2]`), a lower-triangular packed array of length $\text{packed\_len} = n(n+1)/2$ is concatenated for each dimension $m \in [0, \text{dims})$ in order (flat index `m * packed_len + p`, with the inner axis being `packed_len`). Therefore, when reading with NumPy or similar, interpret the two-dimensional column-major matrices (`x`, `l`) with `flat.reshape(meta["shape"], order="F")` and the distance tensor `d2.<k>` with `flat.reshape(meta["shape"], order="C")` (a one-dimensional scalar `d2.<k>` is identical under either `F` or `C`). For a `MixedPrecision` model, the retained high-precision `double` $d^2$ is written out and re-rounded to `float` on load.
+- `slots` must match the order of `DistanceKernel::slots()` (depth-first, order of first appearance), and the `slot` numbers of the `distance` nodes of the kernel tree must appear in that same order (the first new number met in a depth-first, left-to-right walk is `0`, the next `1`, and so on; a number may repeat when two leaves read the same slot). `d2.<k>` is bound to the slot numbered `k`, so a file whose numbering is permuted is rejected with `PersistFailed(Config)` instead of pairing a table with another leaf. A `distance_only` kernel that contains a coordinate-dependent leaf (`rbf_ard`, `linear`, etc.) is also rejected with `PersistFailed(Config)`.
+- **`d2.<k>` storage rule**: for a scalar distance slot, the lower-triangular elements `j..n` of column $j$ (diagonal included) are packed in column order (packed position $p = jn - j(j-1)/2 + (i - j)$, length $n(n+1)/2$). For an ARD distance slot (header `shape` is `[dims, n(n+1)/2]`), a lower-triangular packed array of length $\text{packed\_len} = n(n+1)/2$ is concatenated for each dimension $m \in [0, \text{dims})$ in order (flat index `m * packed_len + p`, with the inner axis being `packed_len`). Therefore, when reading with NumPy or similar, interpret the two-dimensional column-major matrices (`x`, `l`) with `flat.reshape(meta["shape"], order="F")` and the distance tensor `d2.<k>` with `flat.reshape(meta["shape"], order="C")` (a one-dimensional scalar `d2.<k>` is identical under either `F` or `C`). For a `MixedPrecision` model, the `float` tables that the model predicts with are written (the double tables are not retained after training), so a reload reproduces the stored state exactly.
 
 ```python
 # Minimal Python / NumPy read rule (x, l are column-major; ARD d2.<k> is concatenated per-dimension blocks)
@@ -125,7 +125,11 @@ def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarr
     return flat.reshape(shape, order=order)
 ```
 - **Issuing new slots**: on load, a fresh sequence of slot handles dedicated to the model is generated, so a `ScalarDistance` / `ArdDistance` from before saving cannot be used with the loaded model. Users obtain the new slots from `slots()` / `to_kernel()` to build the prediction supply.
-- On load, the finiteness, non-negativity, zero diagonal, and shape of `d2.<k>` are all verified, and `InvalidDistance` is returned on violation.
+- On load, the tensor reader rejects non-finite `d2.<k>` elements and shape or dtype mismatches with `PersistFailed(Tensor)`; the stored tables then pass the same `prepare_square` validation as supplied tables (non-negativity, zero diagonal, symmetry), and `InvalidDistance` is returned on violation.
+- For a distance-only model `d` is `0`, the `x` tensor is omitted, and both `x_unfitted` and `x_transform` are `"identity"`; any other value is rejected with `PersistFailed(Config)`. A `with_points` model stores `x` and requires `d > 0`. The `distance` section is the only marker of a distance model, and `distance_cache` is written as `"always"` and ignored.
+- `LoadedDistanceGpr<C>` results are `double`. Copies own independent query buffers. With `save` (no factor) the factor is recomputed at load without optimization.
+- `save` applies the loader's JSON nesting bound (FMT-02) to the document it is about to write: a kernel tree accepted by the node bound but deeper than 128 JSON levels (each composite node adds two) is refused with `PersistFailed(Config)` before any file is written.
+- The refinement summary of a `MixedPrecision` model is not stored: after load and after `into_fitted`, `refinement_summary()` is empty, as for `LoadedGpr`. `neg_log_marginal_likelihood()` is recomputed from the stored factor and weights; for `MixedPrecision` it therefore differs from the value reported at training (the objective of the float solve) by $\tfrac{1}{2} \tilde{y}^\top (\alpha_{\text{refined}} - \alpha_{\text{float}})$ and the float rounding of that objective. Predictions do not depend on it and are bit-identical.
 
 ---
 
@@ -141,7 +145,8 @@ def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarr
 | Empty, `"cxxgpr."`-prefixed, or non-UTF-8 `persist_id`, or duplicate registration | `PersistFailed { PersistErrorKind::InvalidPersistId, reason }` |
 | `save` of a custom type that does not support `persist_id`, or whose state text must be stored as a JSON string and is not valid UTF-8 | `PersistFailed { PersistErrorKind::NotPersistable, reason }` |
 | `format_version != 1` | `UnsupportedPersistVersion { found, supported: 1 }` |
-| `d2.<k>` non-finite, negative, or non-zero diagonal | `InvalidDistance` |
+| `d2.<k>` negative or non-zero diagonal | `InvalidDistance` |
+| `d2.<k>` non-finite element, wrong shape or dtype | `PersistFailed { PersistErrorKind::Tensor, reason }` |
 | Invalid saved interval, Jitter, or kernel value | The `GprError` of the respective constructor / factory |
 | `save_id` in `config.json` that is not 32 lowercase hexadecimal digits (`FMT-09`) | `PersistFailed { PersistErrorKind::Config, reason }` |
 | Malformed `__metadata__` or `cxxgpr.save_id` in `model.safetensors`; pairing identifiers that differ, or an identifier in only one of the two files (`FMT-09`) | `PersistFailed { PersistErrorKind::Tensor, reason }` |

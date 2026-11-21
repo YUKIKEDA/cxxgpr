@@ -2,9 +2,9 @@
 
 The canonical source for the order and state of work. A row carries only its ID, kind, title, Issue, and state; detailed completion criteria are written in the Issue. Rows are added or removed only after a Grill, and only the PR that finishes a row rewrites "Now".
 
-**Now**: REL-7 in progress (all rows through REL-6 are done)
+**Now**: REL-11 in progress (all rows through REL-10 are done)
 
-The goal is to provide the **Exact GPR** model as the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), the publication preparation (REL-1, REL-2), and the user documentation (REL-3), the release workflow (REL-4), and the specification, training and inference of the supplied-distance models (REL-5, REL-6). The first release is the owner's decision; see [release.md](release.md).
+The goal is to provide the **Exact GPR** model as the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), the publication preparation (REL-1, REL-2), and the user documentation (REL-3), the release workflow (REL-4), and the specification, training, inference and persistence of the supplied-distance models (REL-5 to REL-7). The first release is the owner's decision; see [release.md](release.md).
 
 The quality-control mechanisms (traceability, baseline results, result-change records, provenance, platform qualification) are in the [quality assurance plan](quality/quality-plan.md); the mapping between IDs and tests is in the [traceability matrix](quality/traceability.md).
 
@@ -99,7 +99,7 @@ flowchart LR
 | REL-4 | Task | Release workflow (draft GitHub Release with per-platform packages and documentation) and README rewrite | #91 | Done |
 | REL-5 | Design | Supplied-distance models: specification of `DistanceGpr` / `FittedDistanceGpr` (DES-21) | #104 | Done |
 | REL-6 | Feat | `DistanceGpr` / `FittedDistanceGpr`: fit, factor, predict, covariance, sampling, LOO for `DistanceOnly` and `WithPoints` | #105 | Done |
-| REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Todo |
+| REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Done |
 | REL-8 | Design | Decide the `MixedPrecision<PromoteStorage>` acceptance rule (DES-05) | #108 | Done |
 | REL-9 | Design | Align the `OptimizationNotConverged` specification with the implementation: built-in optimizers report non-convergence as success with `converged == false`; the code remains for user-defined optimizers | #111 | Done |
 | REL-10 | Design | Checked `from_span` factories for `MatrixRef` / `MatrixMut` and removal of the unchecked `(span, rows, cols)` constructors | #113 | Done |

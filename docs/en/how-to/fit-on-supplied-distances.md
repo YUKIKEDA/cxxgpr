@@ -113,4 +113,4 @@ Because the tables are checked at the API boundary, a bad table is reported inst
 | `DistanceGpr` | trainer for a `DistanceKernel`; `fit`, `factor`, `with_*` configuration |
 | `FittedDistanceGpr` | fitted model; `predict`, `predict_into`, `predict_covariance`, `sample`, `loo_predict`, `into_trainer`, `refit` |
 
-Saving a distance model to disk is not part of this release; see {doc}`persist-models`.
+To save a distance model to disk and load it back, see {doc}`persist-models`.

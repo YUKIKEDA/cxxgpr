@@ -113,4 +113,4 @@
 | `DistanceGpr` | `DistanceKernel` の学習器。`fit`、`factor`、`with_*` の設定 |
 | `FittedDistanceGpr` | 学習済みモデル。`predict`、`predict_into`、`predict_covariance`、`sample`、`loo_predict`、`into_trainer`、`refit` |
 
-距離モデルのディスクへの保存は、このリリースには含まれない。{doc}`persist-models` を参照。
+距離モデルの保存と読み込みは {doc}`persist-models` を参照。
