@@ -155,7 +155,7 @@ namespace cxxgpr::detail
             std::span<const double> ls, T extra_scale, Fn&& fn
         )
         {
-            constexpr std::size_t k_stack_cap = 64U;
+            constexpr std::size_t k_stack_cap = 256U;
             if (ls.size() <= k_stack_cap)
             {
                 std::array<T, k_stack_cap> buf{};

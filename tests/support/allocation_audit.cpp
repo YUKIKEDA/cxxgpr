@@ -7,6 +7,7 @@
 #include "allocation_audit.hpp"
 
 #include <Eigen/Core>
+#include <gtest/gtest.h>
 
 #include <cstddef>
 #include <cstdlib>
@@ -276,10 +277,16 @@ namespace cxxgpr::test_support
     /// @brief Snapshots thread_allocation_count() and optionally disables Eigen runtime malloc.
     /// @details Saves Eigen::internal::is_malloc_allowed() prior to disabling it so nested scopes restore properly.
     /// @param[in] mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
-    NoAllocationScope::NoAllocationScope(AuditMode mode) noexcept :
+    /// @param[in] expectation Whether destruction asserts zero tracked allocations.
+    /// @param[in] loc Caller source location used for scope-exit failure diagnostics.
+    NoAllocationScope::NoAllocationScope(
+        AuditMode mode, AuditExpectation expectation, std::source_location loc
+    ) noexcept :
         start_count_(g_thread_alloc_count),
         mode_(mode),
-        prev_eigen_allowed_(Eigen::internal::is_malloc_allowed())
+        expectation_(expectation),
+        prev_eigen_allowed_(Eigen::internal::is_malloc_allowed()),
+        loc_(loc)
     {
         // Only suppress Eigen runtime malloc when both C++ and Eigen auditing are requested.
         if (mode_ == AuditMode::CppAndEigen)
@@ -288,14 +295,20 @@ namespace cxxgpr::test_support
         }
     }
 
-    /// @brief Restores Eigen runtime malloc state when leaving a CppAndEigen audit scope.
-    /// @details Preserves nesting invariants by restoring prev_eigen_allowed_ rather than hardcoding true.
+    /// @brief Restores Eigen runtime malloc state and asserts zero allocations when configured.
+    /// @details Preserves nesting invariants by restoring prev_eigen_allowed_ before reporting any GoogleTest failure.
     NoAllocationScope::~NoAllocationScope() noexcept
     {
+        const std::size_t delta = g_thread_alloc_count - start_count_;
         // Restore the exact pre-scope Eigen malloc state so outer audit scopes remain intact.
         if (mode_ == AuditMode::CppAndEigen)
         {
             Eigen::internal::set_is_malloc_allowed(prev_eigen_allowed_);
+        }
+        if (expectation_ == AuditExpectation::AssertZeroOnExit && delta != 0U)
+        {
+            ADD_FAILURE_AT(loc_.file_name(), static_cast<int>(loc_.line()))
+                << "Expected zero heap allocations inside NoAllocationScope, but observed " << delta;
         }
     }
 

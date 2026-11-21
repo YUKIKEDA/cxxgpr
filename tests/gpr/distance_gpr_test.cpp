@@ -1520,7 +1520,9 @@ namespace
                 v += 0.1;
             }
             {
-                const cxxgpr::test_support::NoAllocationScope scope;
+                const cxxgpr::test_support::NoAllocationScope scope(
+                    cxxgpr::test_support::AuditMode::CppAndEigen, cxxgpr::test_support::AuditExpectation::Manual
+                );
                 auto value = obj.value_and_gradient_into(theta, grad);
                 *allocations = scope.delta_allocations();
                 if (!value.has_value())
