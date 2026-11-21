@@ -206,7 +206,7 @@ In the table above, the `Double + FastApprox` row shows the price: predictions d
 |---|---|
 | `FittedGpr::predict_into`, `FittedGpr::predict_with_into` | Predict into a caller-owned `Prediction`; allocation-free after warm-up |
 | `Prediction`, `PredictOptions`, `VarianceKind` | Result container and variance selection (`Latent`, `Observation`) |
-| `QueryWorkspace<P>` | Query-time buffers; `ensure`, `ensure_prediction` size them |
+| `QueryWorkspace<P>` | Query-time buffers; `ensure` sizes them |
 | `FitBuffers<P>`, `WorkspaceCore<P>`, `HessianScratch<S>` | Training buffers and their lazily allocated Hessian part |
 | `FitPolicy`, `CholeskyBuffer`, `DistanceCachePolicy` | Memory and speed policy; `prefer_speed`, `prefer_memory` presets |
 | `Retain`, `Reuse` | `CholeskyBuffer` enumerators |

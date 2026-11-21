@@ -282,7 +282,7 @@ flowchart LR
 
 - `WorkspaceCore<P>`: `k_matrix`, `exp_buf`, `kernel_scratch`, `thread_scratch` (per-OpenMP-thread scratch), `rhs`, the `theta` backup, `nested`, `hessian`, and `factor_jitter`.
 - `FitBuffers<P>`: `WorkspaceCore<P>` + `dist` (optional `DistCache`) + `w_matrix` (optional, under `Retain`). Released at the end of `fit` and not kept in `FittedGpr`.
-- `QueryWorkspace<P>`: belongs to `FittedGpr` and holds the query transform, distances, `k_star`, `k_ss`, and nested scratch.
+- `QueryWorkspace<P>`: belongs to `FittedGpr` and holds the query transform, `k_star`, `k_ss`, and nested scratch.
 
 ---
 

@@ -206,7 +206,7 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 |---|---|
 | `FittedGpr::predict_into`、`FittedGpr::predict_with_into` | 利用者が持つ `Prediction` に予測を書く。ウォームアップ後は確保なし |
 | `Prediction`、`PredictOptions`、`VarianceKind` | 結果の入れ物と、分散の選択（`Latent`、`Observation`） |
-| `QueryWorkspace<P>` | 予測時のバッファ。`ensure` と `ensure_prediction` で大きさを決める |
+| `QueryWorkspace<P>` | 予測時のバッファ。`ensure` で大きさを決める |
 | `FitBuffers<P>`、`WorkspaceCore<P>`、`HessianScratch<S>` | 学習用バッファと、遅延確保されるヘッセ行列用の部分 |
 | `FitPolicy`、`CholeskyBuffer`、`DistanceCachePolicy` | メモリと速度のポリシー。プリセットは `prefer_speed` と `prefer_memory` |
 | `Retain`、`Reuse` | `CholeskyBuffer` の列挙子 |
