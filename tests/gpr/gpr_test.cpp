@@ -295,18 +295,21 @@ namespace
 #endif
         const auto reference = run(1);
         ASSERT_TRUE(reference.has_value());
-        ASSERT_TRUE(reference->refinement_summary().has_value());
-        EXPECT_FALSE(reference->refinement_summary()->used_fallback());
+        const auto reference_summary = reference->refinement_summary();
+        ASSERT_TRUE(reference_summary.has_value());
+        EXPECT_FALSE(reference_summary->used_fallback());
         for (const int threads : {2, 4})
         {
             const auto other = run(threads);
             ASSERT_TRUE(other.has_value());
+            const auto other_summary = other->refinement_summary();
+            ASSERT_TRUE(other_summary.has_value());
             ASSERT_EQ(other->alpha().size(), reference->alpha().size());
             for (std::size_t i = 0; i < n; ++i)
             {
                 EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
             }
-            EXPECT_EQ(*other->refinement_summary(), *reference->refinement_summary());
+            EXPECT_EQ(*other_summary, *reference_summary);
         }
 #ifdef _OPENMP
         omp_set_num_threads(saved_threads);
