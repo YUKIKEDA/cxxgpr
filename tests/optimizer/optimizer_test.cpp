@@ -5,7 +5,7 @@
 /// @details Verifies LogBounds unconstrained-to-constrained transformations, chain-rule gradients
 /// and Hessians against finite differences, EvalCache deduplication, convergence of L-BFGS,
 /// TrustRegion, NelderMead, FastSimulatedAnnealing, and Fixed, deterministic multi-start restarts,
-/// and negative validation controls.
+/// non-converged success after an L-BFGS line-search breakdown, and negative validation controls.
 
 #include "cxxgpr/optimizer/optimizer.hpp"
 
@@ -523,6 +523,87 @@ namespace
         std::optional<std::uint64_t> first_;
     };
 
+    /// @brief 1D quadratic objective that fails to evaluate anywhere except at its starting point.
+    /// @details Evaluates 0.5 * (x - 0.5)^2 only within 1e-12 of start and returns NonFiniteKernelValue
+    /// elsewhere, so every line-search trial step is rejected.
+    class StartOnlyObjective final : public cxxgpr::optimizer::Differentiable
+    {
+    public:
+        /// @brief Constructs the objective accepting only start within bound interval iv.
+        /// @param[in] start Only log-space point at which the objective evaluates successfully.
+        /// @param[in] iv Positive hyperparameter Interval bound.
+        StartOnlyObjective(double start, cxxgpr::Interval iv) : start_(start), iv_(iv) {}
+
+        /// @brief Returns problem dimensionality (always 1).
+        /// @return Problem dimension (1).
+        [[nodiscard]] std::size_t dim() const noexcept override { return 1U; }
+
+        /// @brief Evaluates 0.5 * (x - 0.5)^2 at the starting point, or fails elsewhere.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @return Scalar objective value at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value(std::span<const double> p) override
+        {
+            if (std::abs(p[0] - start_) > 1e-12)
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_kernel_value());
+            }
+            return 0.5 * (p[0] - 0.5) * (p[0] - 0.5);
+        }
+
+        /// @brief Copies bound interval iv_ into out[0].
+        /// @param[out] out Destination interval span of length 1.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_intervals(
+            std::span<cxxgpr::Interval> out
+        ) const override
+        {
+            out[0] = iv_;
+            return {};
+        }
+
+        /// @brief Computes the derivative x - 0.5 at the starting point, or fails elsewhere.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Empty expected at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> gradient_into(
+            std::span<const double> p, std::span<double> g
+        ) override
+        {
+            if (std::abs(p[0] - start_) > 1e-12)
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_kernel_value());
+            }
+            g[0] = p[0] - 0.5;
+            return {};
+        }
+
+        /// @brief Evaluates value and derivative together.
+        /// @param[in] p Single-element coordinate vector [x].
+        /// @param[out] g Output gradient span of length 1.
+        /// @return Scalar objective value at start, otherwise NonFiniteKernelValue.
+        [[nodiscard]] std::expected<double, cxxgpr::GprError> value_and_gradient_into(
+            std::span<const double> p, std::span<double> g
+        ) override
+        {
+            auto v = value(p);
+            if (!v.has_value())
+            {
+                return v;
+            }
+            if (auto gr = gradient_into(p, g); !gr.has_value())
+            {
+                return std::unexpected(std::move(gr).error());
+            }
+            return v;
+        }
+
+    private:
+        /// @brief Only log-space point accepted by value() and gradient_into().
+        double start_;
+        /// @brief Coordinate Interval constraint.
+        cxxgpr::Interval iv_;
+    };
+
     /// @brief Verifies LogBounds mappings, chain-rule gradients/Hessians, and EvalCache deduplication.
     /// @details Confirms z = 0 midpoint Jacobian identity, constrained/unconstrained roundtrip,
     /// chain-rule gradient/Hessian match against central finite differences, and EvalCache hit reuse.
@@ -718,6 +799,29 @@ namespace
         EXPECT_LT(r_m1->value, r_single->value);
         EXPECT_EQ(r_m1->params, r_m2->params);
         EXPECT_EQ(std::bit_cast<std::uint64_t>(r_m1->value), std::bit_cast<std::uint64_t>(r_m2->value));
+    }
+
+    /// @brief Verifies that a line search finding no acceptable step ends L-BFGS successfully without converging.
+    /// @details Every trial step of the Moré–Thuente line search fails to evaluate, so Lbfgs stops in its first
+    /// iteration and returns the starting point with converged == false instead of an error.
+    TEST(OptimizerTest, LbfgsLineSearchBreakdownReturnsNonConvergedSuccess)
+    {
+        // Spec: DES-02, DES-19
+        const auto iv = cxxgpr::Interval::positive(1e-2, 1e2).value();
+        constexpr double start = -2.0;
+        StartOnlyObjective obj(start, iv);
+        const std::array<double, 1> init{start};
+
+        const auto r = cxxgpr::optimizer::Lbfgs().optimize(obj, init);
+        if (!r.has_value())
+        {
+            FAIL() << "Lbfgs returned an error: " << r.error().message();
+        }
+        EXPECT_FALSE(r->converged);
+        EXPECT_EQ(r->iterations, 0U);
+        ASSERT_EQ(r->params.size(), 1U);
+        EXPECT_DOUBLE_EQ(r->params[0], start);
+        EXPECT_DOUBLE_EQ(r->value, 0.5 * (start - 0.5) * (start - 0.5));
     }
 
     /// @brief Negative controls verifying optimizer input and configuration validation errors.
