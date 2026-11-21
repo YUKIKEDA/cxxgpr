@@ -201,9 +201,17 @@ namespace
         ASSERT_TRUE(mp_reev->refinement_summary().has_value());
         EXPECT_FALSE(f64->refinement_summary().has_value());
 
+        // ReevaluateKernel reaches the double-precision weights. PromoteStorage solves the float-stored system, so
+        // its weights keep the storage rounding (relative to the largest weight, amplified by the conditioning).
+        double alpha_max = 0.0;
         for (std::size_t i = 0; i < n; ++i)
         {
-            EXPECT_NEAR(mp_prom->alpha()[i], f64->alpha()[i], 1e-6);
+            alpha_max = std::max(alpha_max, std::abs(f64->alpha()[i]));
+        }
+        EXPECT_FALSE(mp_prom->refinement_summary()->used_fallback());
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            EXPECT_NEAR(mp_prom->alpha()[i], f64->alpha()[i], 1e-3 * alpha_max);
             EXPECT_NEAR(mp_reev->alpha()[i], f64->alpha()[i], 1e-6);
         }
 
@@ -320,6 +328,60 @@ namespace
 #ifdef _OPENMP
         omp_set_num_threads(saved_threads);
 #endif
+    }
+
+    /// @brief Verifies PromoteStorage refinement is accepted against the float storage rounding, not the f64 tolerance.
+    /// @details The iterate solves the float-stored system to double accuracy, so its residual against the exact
+    /// kernel is bounded by a few float epsilons. The fit must end Converged without the double-precision fallback,
+    /// and the weights must stay close to the double-precision solution (within the conditioning-amplified storage
+    /// error) and far closer than a plain single-precision solve.
+    TEST(GprModelsTest, PromoteStorageRefinementIsAcceptedAtStorageRoundingAndImprovesOnSingle)
+    {
+        // Spec: DES-05
+        constexpr std::size_t n = 400;
+        constexpr std::size_t d = 3;
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(17);
+        for (double& v : x)
+        {
+            v = rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(3.0 * x[i]) + x[n + i] + (0.05 * rng.unit_normal());
+        }
+        const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value());
+        // Noise variance 1e-3 gives a condition number large enough for float storage to matter.
+        auto double_fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(kernel).with_noise_variance(1e-3)->factor(x, n, d, y);
+        auto single_fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::SinglePrecision>(kernel).with_noise_variance(1e-3)->factor(
+                x, n, d, y
+            );
+        using Promote = cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>;
+        auto promote_fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, Promote>(kernel).with_noise_variance(1e-3)->factor(x, n, d, y);
+        ASSERT_TRUE(double_fit.has_value());
+        ASSERT_TRUE(single_fit.has_value());
+        ASSERT_TRUE(promote_fit.has_value());
+
+        ASSERT_TRUE(promote_fit->refinement_summary().has_value());
+        EXPECT_EQ(promote_fit->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
+        EXPECT_FALSE(promote_fit->refinement_summary()->used_fallback());
+
+        double alpha_max = 0.0;
+        double promote_err = 0.0;
+        double single_err = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double ref = double_fit->alpha()[i];
+            alpha_max = std::max(alpha_max, std::abs(ref));
+            promote_err = std::max(promote_err, std::abs(ref - promote_fit->alpha()[i]));
+            single_err = std::max(single_err, std::abs(ref - static_cast<double>(single_fit->alpha()[i])));
+        }
+        EXPECT_LT(promote_err / alpha_max, 1e-2);
+        EXPECT_LT(promote_err, single_err);
     }
 
 }  // namespace

@@ -387,6 +387,9 @@ namespace cxxgpr::detail
             bool has_valid_factor_{false};
         };
 
+        /// @brief Multiple of the float epsilon accepted as storage-rounding backward error under PromoteStorage.
+        constexpr double promote_storage_accept_factor = 10.0;
+
         /// @brief Rows per parallel work item when accumulating the blocked residual matrix-vector product.
         constexpr std::size_t refinement_row_chunk = 256;
 
@@ -590,7 +593,13 @@ namespace cxxgpr::detail
                     {
                         return std::unexpected(std::move(b_inf).error());
                     }
-                    return meets_relative_residual(*b_inf, w, y_f64_, r_true, tol);
+                    // The iterate solves the float-stored matrix to double accuracy, so against the exact kernel its
+                    // backward error is the storage rounding: every stored entry is within a few float epsilons of
+                    // the true entry, which bounds the relative residual by a few epsilons independent of n. Gating
+                    // on the double-precision tolerance would reject every iterate and always pay for the fallback.
+                    const double storage_tol =
+                        promote_storage_accept_factor * static_cast<double>(std::numeric_limits<float>::epsilon());
+                    return meets_relative_residual(*b_inf, w, y_f64_, r_true, std::max(tol, storage_tol));
                 }
             }
 

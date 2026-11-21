@@ -155,11 +155,12 @@ int main()
                   << max_abs_diff(o->variance, reference.variance) << "  " << o->refinement << '\n';
     }
 
-    // The refined weights are orders of magnitude closer to the double solution than single precision.
+    // ReevaluateKernel weights are orders of magnitude closer to the double solution than single precision.
+    // PromoteStorage solves the float-stored system, so it is only a few times closer: the storage rounding stays.
     const double single_alpha = max_abs_diff(single.alpha, reference.alpha) / max_abs(reference.alpha);
     const double reeval_alpha = max_abs_diff(reeval.alpha, reference.alpha) / max_abs(reference.alpha);
     const double promote_alpha = max_abs_diff(promote.alpha, reference.alpha) / max_abs(reference.alpha);
-    const bool ok = reeval_alpha < 1e-4 && promote_alpha < 1e-4 && single_alpha > 100.0 * reeval_alpha
+    const bool ok = reeval_alpha < 1e-4 && promote_alpha < 0.5 * single_alpha && single_alpha > 100.0 * reeval_alpha
         && max_abs_diff(reeval.mean, reference.mean) < max_abs_diff(single.mean, reference.mean)
         && max_abs_diff(fast.mean, reference.mean) < 1e-4;
     return ok ? 0 : 1;
