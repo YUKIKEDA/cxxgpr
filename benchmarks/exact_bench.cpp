@@ -400,6 +400,41 @@ namespace
         }
     }
 
+    /// @brief Times fixed-parameter training with a chosen precision policy on a four-feature problem.
+    /// @details Uses real time because the factorization and the kernel evaluations run on OpenMP threads.
+    /// The counters report the number of refinement corrections and whether the double-precision fallback ran,
+    /// so that timings of different outcomes are not compared as if they were the same work.
+    /// @tparam P Precision policy type.
+    /// @param[in,out] state Benchmark state with the training size.
+    template <cxxgpr::PrecisionPolicyConcept P> void bm_factor_precision_policy(benchmark::State& state)
+    {
+        const ArdSphereDataset data(static_cast<std::size_t>(state.range(0)), 4U);
+        const cxxgpr::MatrixRef<double> x(data.x_train.data(), data.n, data.d, data.n);
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).with_noise_variance(1e-2).value();
+
+        double corrections = 0.0;
+        double fallback = 0.0;
+        for (auto _ : state)
+        {
+            auto model = trainer.factor(x, data.y_train);
+            if (!model)
+            {
+                state.SkipWithError("factor failed");
+                break;
+            }
+            if (const auto& summary = model->refinement_summary(); summary.has_value())
+            {
+                corrections = static_cast<double>(summary->iterations);
+                fallback = summary->used_fallback() ? 1.0 : 0.0;
+            }
+            benchmark::DoNotOptimize(model);
+        }
+        state.counters["corrections"] = corrections;
+        state.counters["fallback"] = fallback;
+    }
+
     /// @brief Benchmarks coordinate-based RbfArd + Matern-5/2 lower-triangle Gram evaluation.
     /// @param[in,out] state Google Benchmark iteration state.
     void bm_coord_apply_points_double(benchmark::State& state)
@@ -606,6 +641,24 @@ namespace
             {1024, 2048, 4096},
             {8, 64}
     })
+        ->UseRealTime();
+    BENCHMARK_TEMPLATE(bm_factor_precision_policy, cxxgpr::DoublePrecision)
+        ->Arg(2000)
+        ->Arg(4000)
+        ->Arg(6000)
+        ->Unit(benchmark::kMillisecond)
+        ->UseRealTime();
+    BENCHMARK_TEMPLATE(bm_factor_precision_policy, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>)
+        ->Arg(2000)
+        ->Arg(4000)
+        ->Arg(6000)
+        ->Unit(benchmark::kMillisecond)
+        ->UseRealTime();
+    BENCHMARK_TEMPLATE(bm_factor_precision_policy, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>)
+        ->Arg(2000)
+        ->Arg(4000)
+        ->Arg(6000)
+        ->Unit(benchmark::kMillisecond)
         ->UseRealTime();
     BENCHMARK(bm_distance_supply_apply_double);
     BENCHMARK(bm_distance_supply_scalar_only_double);
