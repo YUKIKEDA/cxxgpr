@@ -71,13 +71,14 @@ namespace
     public:
         /// @brief Constructs the double-precision custom kernel with initial scale factor.
         /// @param[in] scale Positive kernel output scale parameter.
-        explicit CustomScaleKernel(double scale) : scale_(scale) {}
+        /// @param[in] quote_state When true, persist_state_json() returns the decimal text wrapped in JSON quotes.
+        explicit CustomScaleKernel(double scale, bool quote_state = false) : scale_(scale), quote_state_(quote_state) {}
 
         /// @brief Clones this custom kernel preserving its scale_ value.
         /// @return Owning unique_ptr copy of this CustomScaleKernel.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<double>> clone() const override
         {
-            return std::make_unique<CustomScaleKernel>(scale_);
+            return std::make_unique<CustomScaleKernel>(scale_, quote_state_);
         }
 
         /// @brief Returns the number of trainable hyperparameters (1 for scale_).
@@ -202,12 +203,14 @@ namespace
         /// @return Decimal string representation of scale_.
         [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
         {
-            return std::to_string(scale_);
+            return quote_state_ ? "\"" + std::to_string(scale_) + "\"" : std::to_string(scale_);
         }
 
     private:
         /// @brief Positive output scale factor in linear space.
         double scale_;
+        /// @brief Whether the persisted state text is a JSON string literal.
+        bool quote_state_;
     };
 
     /// @brief Single-precision companion of CustomScaleKernel required by CustomKernel::create().
@@ -542,6 +545,45 @@ namespace
         auto reg_load = cxxgpr::persist::LoadedGpr::load(dir_custom.path, reg);
         ASSERT_TRUE(reg_load.has_value());
         EXPECT_NEAR(reg_load->predict(xq_ref)->mean[0], c_fit->predict(xq_ref)->mean[0], 1e-12);
+    }
+
+    /// @brief Verifies a custom state that is a JSON string literal round-trips with its quotes intact.
+    /// @details The state text `"2.500000"` (quotes included) used to come back as `2.500000`, because a string
+    /// value in config.json is handed to the loader verbatim. The loader must receive exactly the saved text.
+    TEST(PersistModelsTest, CustomStateThatIsAJsonStringLiteralRoundTripsVerbatim)
+    {
+        // Spec: FMT-06, FMT-03
+        const std::vector<double> x_train{0.0, 1.0, 2.0};
+        const std::vector<double> y_train{0.1, 0.9, 0.4};
+        auto make_custom = [](double scale, bool quoted)
+        {
+            return cxxgpr::CustomKernel::create(
+                std::make_unique<CustomScaleKernel>(scale, quoted),
+                std::make_unique<CustomScaleKernelFloat>(static_cast<float>(scale))
+            )
+                .value();
+        };
+        std::string received_state;
+        cxxgpr::persist::PersistRegistry reg;
+        ASSERT_TRUE(
+            reg.register_kernel(
+                   "user.custom_scale",
+                   [&](std::string_view state) -> std::expected<cxxgpr::CustomKernel, cxxgpr::GprError>
+        {
+            received_state = std::string(state);
+            return make_custom(2.5, true);
+        }
+            ).has_value()
+        );
+
+        const cxxgpr::KernelSpec spec(make_custom(2.5, true));
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 3U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const TempDirGuard dir("quoted_custom_state");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path, reg).has_value());
+        auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path, reg);
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(received_state, "\"2.500000\"");
     }
 
     /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.

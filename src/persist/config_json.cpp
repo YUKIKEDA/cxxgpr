@@ -313,6 +313,12 @@ namespace cxxgpr::persist::detail
                     try
                     {
                         parsed_state = nlohmann::json::parse(*st);
+                        // A state that is itself a JSON string literal must keep its quotes on load, where any string
+                        // value is handed back verbatim, so store the original text instead of the parsed value.
+                        if (parsed_state.is_string())
+                        {
+                            parsed_state = *st;
+                        }
                     }
                     catch (const nlohmann::json::exception&)
                     {
@@ -681,6 +687,11 @@ namespace cxxgpr::persist::detail
             try
             {
                 parsed = nlohmann::json::parse(*st);
+                // Preserve the quotes of a state that is itself a JSON string literal (see the kernel writer).
+                if (parsed.is_string())
+                {
+                    parsed = *st;
+                }
             }
             catch (const nlohmann::json::exception&)
             {

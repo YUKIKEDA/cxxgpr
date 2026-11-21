@@ -18,6 +18,9 @@ The constant `cxxgpr::persist::FORMAT_VERSION = 1` (`std::uint32_t`) is defined.
 ## FMT-02 Atomic writes and the input trust boundary
 
 - **Atomic save**: `save` / `save_with_factor` write temporary files inside the output directory (created if it does not exist) and, after flushing completes, rename-replace them to the final names (`config.json`, `model.safetensors`) in the same directory. Even when re-saving over an existing directory, files that are currently mapped are never destructively rewritten in place.
+- **Platform limits of the atomic save**:
+  - The two files are replaced one after the other (`model.safetensors` first, then `config.json`), so the pair is not replaced atomically: a crash between the two renames leaves a new `model.safetensors` beside the old `config.json`. Loading validates shapes and finiteness against `config.json`, which catches a mismatch of sizes but not of values. Save into a fresh directory and rename the directory when the pair must change atomically.
+  - On Windows, a file that a live `LoadedGpr` has memory-mapped cannot be renamed over. Saving into that directory fails with `PersistFailed(Io)` ("failed to atomically replace model.safetensors") and leaves the existing files intact. On Linux the rename succeeds and the mapping keeps the old contents. Release the `LoadedGpr` before saving over its directory.
 - **Trust boundary and validation**: the directory to load is verified as untrusted external input.
   - If the JSON nesting depth (`sum`/`product`/`pipeline`/`columnwise`) exceeds 128 levels, it is rejected with `PersistFailed(Config)`.
   - On load, the shape, dtype, and 8-byte alignment of every tensor (`x`, `y`, `l`, `alpha`, `d2.*`) are verified, as is that **every element is finite (not `NaN` and not `±∞`)**.
@@ -88,6 +91,7 @@ When verifying or using the file directly from NumPy, column-major matrices such
 
 - **`persist_id` constraints**: the empty string and IDs starting with the reserved prefix `"cxxgpr."` (`RESERVED_PREFIX`) are forbidden. On violation, `PersistFailed(InvalidPersistId)` is returned at `save` time and at registration time. Duplicate registration in the same category is also `InvalidPersistId`.
 - **Registration functions** (4 categories): `register_kernel`, `register_unfitted_input`, `register_fitted_input`, `register_unfitted_target`, `register_fitted_target` (5 registration functions in total: 2 each for input and target before and after fitting, plus 1 for kernels).
+- **Custom state encoding**: the text returned by `persist_state_json()` is stored under `state`. If it parses as JSON, the parsed value is stored, and the factory receives its re-serialized text; if it does not parse, the text is stored as a JSON string and handed back verbatim. A state that is itself a JSON string literal (for example `"abc"`) is stored as its original text, quotes included, so that the loader hands back exactly the saved text rather than the unquoted contents.
 - **Unsupported and unregistered errors**: saving a custom type that does not implement `persist_id()` or does not support persistence gives `PersistFailed(NotPersistable)`; an unregistered ID that appears on load gives `PersistFailed(UnregisteredId)`.
 
 ---
@@ -123,9 +127,9 @@ def reshape_tensor(name: str, flat: "np.ndarray", shape: list[int]) -> "np.ndarr
 | Abnormal condition | `GprError` returned |
 |---|---|
 | File open/close, read, write, or `mmap` failure | `PersistFailed { PersistErrorKind::Io, reason }` |
-| JSON syntax error, missing required key, nesting exceeded, `factor_kind != "llt"` | `PersistFailed { PersistErrorKind::Config, reason }` |
+| JSON syntax error, missing required key, nesting exceeded | `PersistFailed { PersistErrorKind::Config, reason }` |
 | Missing tensor, shape / dtype mismatch, not 8-byte aligned, non-finite tensor | `PersistFailed { PersistErrorKind::Tensor, reason }` |
-| Coordinate / distance / marker mismatch, file specifying a Sparse/Online model | `PersistFailed { PersistErrorKind::WrongModel, reason }` |
+| Coordinate / distance / marker mismatch, `factor_kind != "llt"`, file specifying a Sparse/Online model | `PersistFailed { PersistErrorKind::WrongModel, reason }` |
 | Unregistered custom `persist_id` | `PersistFailed { PersistErrorKind::UnregisteredId, reason }` |
 | Empty or `"cxxgpr."`-prefixed `persist_id`, or duplicate registration | `PersistFailed { PersistErrorKind::InvalidPersistId, reason }` |
 | `save` of a custom type that does not support `persist_id` | `PersistFailed { PersistErrorKind::NotPersistable, reason }` |
