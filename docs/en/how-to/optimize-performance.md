@@ -147,7 +147,7 @@ The program below factors the same badly conditioned system (a smooth signal, no
 policy                    factor bytes   alpha error  mean error   var error  refinement
 DoublePrecision                 320000      0.00e+00    0.00e+00    0.00e+00  none
 SinglePrecision                 160000      5.17e-02    1.11e-03    1.01e-07  none
-Mixed<PromoteStorage>           160000      0.00e+00    4.93e-04    1.13e-07  RejectedByAccept, 4 corrections
+Mixed<PromoteStorage>           160000      1.32e-02    3.83e-04    1.13e-07  Converged, 4 corrections
 Mixed<ReevaluateKernel>         160000      1.72e-06    4.93e-04    1.13e-07  Converged, 4 corrections
 Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  none
 ```
@@ -157,20 +157,28 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 What the numbers show:
 
 - `SinglePrecision` halves the memory of the factor and is the fastest policy in the table below, but its weights are off by 5 percent on this badly conditioned problem.
-- `MixedPrecision` factors in single precision and then refines the weights with double-precision residuals. On this problem the refined weights are correct to about $10^{-6}$ (`ReevaluateKernel`) or exactly the double solution (`PromoteStorage`, see below). The *predictions* still improve only by a factor of about 2, because the cross-covariance $K_*$ is evaluated in single precision.
-- `PromoteStorage` ended with `RejectedByAccept` in every problem we tried. Its refinement converges against the stored single-precision matrix, but the final check against the exact double-precision kernel fails, because rounding the matrix to `float` already perturbs it by about $10^{-7}$. The library then re-solves the system in double precision. The result is correct, but you pay for the single-precision factorization, the refinement steps *and* the double-precision solve. Read `FittedGpr::refinement_summary()` to see which path was taken.
-- `ReevaluateKernel` checks the residual against the exact kernel in double precision, column block by column block, and converged here.
+- `MixedPrecision` factors in single precision and then refines the weights with double-precision residuals. On this problem the refined weights are correct to about $10^{-6}$ (`ReevaluateKernel`); `PromoteStorage` is only about four times closer than single precision, because it solves the `float`-stored system (see below). The *predictions* still improve only by a factor of about 2, because the cross-covariance $K_*$ is evaluated in single precision.
+- `PromoteStorage` refines against the stored single-precision matrix. Its weights solve *that* system to double accuracy but keep the effect of rounding the matrix to `float` (about $10^{-7}$ per entry, amplified by the conditioning). The library accepts the result when the residual against the exact double-precision kernel is within ten times `std::numeric_limits<float>::epsilon()`. It does not require the $10\,n\,\varepsilon_{64}$ tolerance, which a kernel matrix rounded to `float` does not meet unless all of its entries happen to be exactly representable in `float`. Read `FittedGpr::refinement_summary()` to see the outcome.
+- `ReevaluateKernel` checks the residual against the exact kernel in double precision, column block by column block, and converges to the double-precision solution.
 
-Timing for `Gpr<optimizer::Fixed, P>::factor` with `n = 2000` and four features:
+Timing for `Gpr<optimizer::Fixed, P>::factor` (median of three runs, four features, Release build, 16-thread x86-64 desktop, run-to-run variation up to about 10 percent), in milliseconds with 16 threads:
 
-| Policy | 16 threads | 1 thread |
-|---|---|---|
-| `DoublePrecision` | about 32 ms | about 200 ms |
-| `SinglePrecision` | about 19 to 23 ms | about 120 ms |
-| `MixedPrecision<PromoteStorage>` | about 86 to 94 ms | about 400 ms |
-| `MixedPrecision<ReevaluateKernel>` | about 76 to 78 ms | about 200 ms |
+| `n` | `DoublePrecision` | `SinglePrecision` | `MixedPrecision<PromoteStorage>` | `MixedPrecision<ReevaluateKernel>` |
+|---|---|---|---|---|
+| 500 | 1.7 | 1.1 | 4.4 | 6.2 |
+| 1000 | 6.4 | 4.3 | 13 | 18 |
+| 2000 | 28 | 17 | 53 | 70 |
+| 4000 | 163 | 83 | 156 | 135 |
+| 6000 | 473 | 235 | 472 | 408 |
 
-In this release the mixed policies do not make `factor` faster than `DoublePrecision`; their benefit is the single-precision factor storage and, for `ReevaluateKernel`, weights that are checked against the exact double-precision system. Prefer `DoublePrecision` unless memory is the limit, `SinglePrecision` when you can tolerate its error, and `MixedPrecision<ReevaluateKernel>` when you need single-precision storage with verified weights. See {doc}`../explanation/numerical-stability` for the refinement algorithm and {doc}`use-low-level-building-blocks` to drive it yourself.
+With one thread, `n = 2000` takes 91 ms (double), 53 ms (single), 87 ms (`PromoteStorage`) and 99 ms (`ReevaluateKernel`); `n = 4000` takes 656, 323, 524 and 521 ms.
+
+Why the mixed policies behave like this:
+
+- Every refinement step evaluates a residual in double precision, and a converged refinement needs two of them (the starting one and the one that confirms convergence). For `ReevaluateKernel` each residual evaluates the exact kernel again, column block by column block and for the full matrix rather than one triangle, so it costs a few times the kernel evaluation of the double-precision path on top of the single-precision factorization. For `PromoteStorage` the residual reads the stored `float` matrix, and only the final acceptance check evaluates the exact kernel once. The factorization saves $O(n^3)$ work and the refinement costs $O(n^2)$, so both policies overtake `DoublePrecision` as `n` grows. On this machine they are slower below roughly `n = 3000`, and from there on about as fast (`PromoteStorage`) or about 1.2 times faster (`ReevaluateKernel`).
+- Neither mixed policy is faster than `SinglePrecision`; their benefit over it is accuracy of the weights, and over `DoublePrecision` the half-size factor.
+
+Prefer `DoublePrecision` unless memory is the limit, `SinglePrecision` when you can tolerate its error, and `MixedPrecision<ReevaluateKernel>` when you need single-precision factor storage with weights checked against the exact system, or for large `n` where it is also faster than double precision. `MixedPrecision<PromoteStorage>` sits between single precision and `ReevaluateKernel`: it avoids the repeated kernel evaluation, but the weights keep the storage rounding. See {doc}`../explanation/numerical-stability` for the refinement algorithm and {doc}`use-low-level-building-blocks` to drive it yourself.
 
 ## Trade memory for speed while fitting
 

@@ -62,7 +62,7 @@ Build one table of squared distances from every training point to every query po
 :end-before: // [end]
 ```
 
-`predict` returns the mean and the marginal variance on the original target scale. `predict_into` writes into a `Prediction` you own, so repeated calls reuse its storage. For a `WithPoints` model, pass the query coordinates after the table: `predict(cross, xq)`.
+`predict` returns the mean and the marginal variance on the original target scale. `predict_into` writes into a `Prediction` you own and reuses the model's query workspace: after one call with m queries, later calls with the same slots and at most m queries allocate no memory. For a `WithPoints` model, pass the query coordinates after the table: `predict(cross, xq)`.
 
 ## Step 4: Covariance, samples and cross-validation
 
@@ -91,8 +91,12 @@ Every failure is returned as a `GprError`. The ones specific to distances:
 | `GprErrorCode` | Cause |
 |---|---|
 | `InvalidDistance` | a table is non-finite, negative, asymmetric or nonzero on the diagonal |
-| `DistanceSlot` | a slot is missing, bound twice, or the table has the wrong shape |
-| `UnsupportedKernelOperation` | `predict(cross)` was called on a `WithPoints` model (pass the coordinates) |
+| `DistanceSlot` | a slot is missing, bound twice, or bound with the other kind of table (scalar instead of ARD, or the reverse) |
+| `LengthMismatch` | a training table is not square, the tables of one source differ in shape, or the table order does not match the targets, the training set or the query coordinates |
+| `DimensionMismatch` | an ARD slot is bound with a different number of per-dimension tables than it declares |
+| `UnsupportedKernelOperation` | a source binds a slot of another kernel, such as a slot object that belongs to a different model |
+
+All shape errors are reported before any table value is read, so a source with both a wrong shape and a bad entry reports the shape error.
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp

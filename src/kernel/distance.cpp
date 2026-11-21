@@ -20,6 +20,7 @@
 #include <variant>
 
 #include "kernel/distance_desc.hpp"
+#include "kernel/distance_store.hpp"
 #include "kernel/exp_simd.hpp"
 #include "kernel/leaf_eval.hpp"
 
@@ -2701,7 +2702,7 @@ namespace cxxgpr
                         fill_square_sq_dist(*x, dist_buf);
                         return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
                     }
-                    return detail::leaf_apply_points(kl, *x, out, uplo, exp_mode);
+                    return detail::leaf_apply_points(kl, *x, out, uplo, exp_mode, cached_ls[c->leaf_idx]);
                 }
                 // Constant or White only: pass dummy 0-safe shape via Constant/White on square n x n.
                 if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
@@ -2823,7 +2824,7 @@ namespace cxxgpr
                         fill_cross_sq_dist(*x1, *x2, dist_buf);
                         return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
                     }
-                    return detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode);
+                    return detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode, cached_ls[c->leaf_idx]);
                 }
                 // Without point coordinates, only Constant (broadcast constant) and White (zero cross) can appear.
                 const T val = std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx])
@@ -2921,7 +2922,7 @@ namespace cxxgpr
             {
                 if (x.has_value())
                 {
-                    return detail::leaf_fill_diag(leaves[c->leaf_idx], *x, out);
+                    return detail::leaf_fill_diag(leaves[c->leaf_idx], *x, out, cached_ls[c->leaf_idx]);
                 }
                 if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
                 {
@@ -3029,7 +3030,9 @@ namespace cxxgpr
                             dist_buf.as_ref(), d_k, param_idx - c->param_begin, uplo
                         );
                     }
-                    return detail::leaf_grad_points(kl, *x, d_k, param_idx - c->param_begin, uplo, exp_mode);
+                    return detail::leaf_grad_points(
+                        kl, *x, d_k, param_idx - c->param_begin, uplo, exp_mode, cached_ls[c->leaf_idx]
+                    );
                 }
                 if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
                 {
@@ -3160,7 +3163,7 @@ namespace cxxgpr
                         );
                     }
                     return detail::leaf_hess_points(
-                        kl, *x, d2_k, i - c->param_begin, j - c->param_begin, uplo, exp_mode
+                        kl, *x, d2_k, i - c->param_begin, j - c->param_begin, uplo, exp_mode, cached_ls[c->leaf_idx]
                     );
                 }
                 if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
@@ -3610,17 +3613,55 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Validates @p source against @p kernel's slot descriptors and constructs a @c CheckedDistanceStore.
-        /// @details Checks @c tidy_rel_tol_, verifies exact bijective correspondence between provided scalar/ARD
-        /// slots and @p kernel's slot list (catching foreign, scalar/ARD-mismatched, duplicate, and missing slots),
-        /// verifies consistent non-empty shapes (plus squareness when @p is_square is true), and packs every block.
-        /// @tparam T Target storage scalar type (@c double or @c float).
-        /// @param[in] kernel Compiled mixed distance kernel defining expected slot signatures.
-        /// @param[in] source Unchecked builder source supplying pairwise scalar and per-dimension ARD blocks.
-        /// @param[in] is_square @c true for training square distance stores, @c false for rectangular cross stores.
-        /// @return Immutable @c CheckedDistanceStore on success, or a structured @c GprError explaining the failure.
+        /// @brief Returns the slot descriptor of @p kernel carrying @p id, or nullptr for a foreign slot.
+        /// @param[in] kslots Slot descriptors of the compiled kernel.
+        /// @param[in] id Slot identifier supplied by the caller.
+        /// @return Pointer into @p kslots, or nullptr when no slot carries @p id.
+        [[nodiscard]] static const SlotDescriptor* find_desc(const std::vector<SlotDescriptor>& kslots, SlotId id)
+        {
+            for (const auto& d : kslots)
+            {
+                if (d.id == id)
+                {
+                    return &d;
+                }
+            }
+            return nullptr;
+        }
+
+        /// @brief Counts how many supplied scalar and ARD entries of @p source bind slot @p id.
+        /// @param[in] source Unchecked supply.
+        /// @param[in] id Slot identifier.
+        /// @return Number of entries binding @p id (scalar and ARD entries together).
+        [[nodiscard]] static std::size_t count_bindings(const DistanceSource& source, SlotId id) noexcept
+        {
+            std::size_t count = 0;
+            for (const auto& e : source.scalars_)
+            {
+                count += (e.slot == id) ? 1U : 0U;
+            }
+            for (const auto& e : source.ards_)
+            {
+                count += (e.slot == id) ? 1U : 0U;
+            }
+            return count;
+        }
+
+        /// @brief Checks the structure of @p source against @p kernel without reading any table value.
+        /// @details Applies, in this order: the @c tidy tolerance (InvalidConfig); for every scalar entry and then
+        /// every ARD entry, a slot of another kernel (UnsupportedKernelOperation), a slot of the other kind
+        /// (DistanceSlot NotRead) and a duplicate binding (DistanceSlot Duplicate); a missing slot (DistanceSlot
+        /// Missing); a kernel without slots (UnsupportedKernelOperation); an empty table (EmptyInput); a size product
+        /// that overflows (SizeOverflow); and tables of different shapes or a non-square training table
+        /// (LengthMismatch). The number of per-dimension ARD tables is checked separately by check_ard_counts(). The
+        /// check allocates nothing.
+        /// @tparam T Storage scalar type of the compiled kernel.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] source Unchecked supply.
+        /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @return Common table shape, or the first violated GprError.
         template <KernelScalarConcept T>
-        [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build(
+        [[nodiscard]] static std::expected<detail::DistanceTableShape, GprError> check_structure(
             const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
         )
         {
@@ -3634,26 +3675,9 @@ namespace cxxgpr
             }
 
             const auto& kslots = kernel.slots();
-
-            // Check duplicates and unknown/mismatched slots in source.
-            std::vector<SlotId> seen_ids;
-            seen_ids.reserve(source.scalars_.size() + source.ards_.size());
-
-            auto find_desc = [&](SlotId id) -> const SlotDescriptor*
-            {
-                for (const auto& d : kslots)
-                {
-                    if (d.id == id)
-                    {
-                        return &d;
-                    }
-                }
-                return nullptr;
-            };
-
             for (const auto& entry : source.scalars_)
             {
-                const auto* desc = find_desc(entry.slot);
+                const auto* desc = find_desc(kslots, entry.slot);
                 if (desc == nullptr)
                 {
                     return std::unexpected(
@@ -3664,16 +3688,14 @@ namespace cxxgpr
                 {
                     return std::unexpected(GprError::distance_slot(SlotErrorKind::NotRead, desc->at));
                 }
-                if (std::ranges::find(seen_ids, entry.slot) != seen_ids.end())
+                if (count_bindings(source, entry.slot) > 1U)
                 {
                     return std::unexpected(GprError::distance_slot(SlotErrorKind::Duplicate, desc->at));
                 }
-                seen_ids.push_back(entry.slot);
             }
-
             for (const auto& entry : source.ards_)
             {
-                const auto* desc = find_desc(entry.slot);
+                const auto* desc = find_desc(kslots, entry.slot);
                 if (desc == nullptr)
                 {
                     return std::unexpected(
@@ -3684,75 +3706,163 @@ namespace cxxgpr
                 {
                     return std::unexpected(GprError::distance_slot(SlotErrorKind::NotRead, desc->at));
                 }
-                if (std::ranges::find(seen_ids, entry.slot) != seen_ids.end())
+                if (count_bindings(source, entry.slot) > 1U)
                 {
                     return std::unexpected(GprError::distance_slot(SlotErrorKind::Duplicate, desc->at));
                 }
-                seen_ids.push_back(entry.slot);
             }
-
-            // Check every required slot is present.
             for (const auto& desc : kslots)
             {
-                if (std::ranges::find(seen_ids, desc.id) == seen_ids.end())
+                if (count_bindings(source, desc.id) == 0U)
                 {
                     return std::unexpected(GprError::distance_slot(SlotErrorKind::Missing, desc.at));
                 }
             }
-
             if (kslots.empty())
             {
                 return std::unexpected(GprError::unsupported_kernel_operation("kernel has no supplied distance slots"));
             }
 
-            // Determine common matrix shape from the first provided slot and verify consistency across all slots.
-            std::size_t n_rows = 0;
-            std::size_t n_cols = 0;
-            if (!source.scalars_.empty())
+            // Every table must be non-empty before any shape comparison.
+            for (const auto& entry : source.scalars_)
             {
-                n_rows = source.scalars_[0].d2.rows();
-                n_cols = source.scalars_[0].d2.cols();
-            }
-            else
-            {
-                if (source.ards_[0].d2_per_dim.empty())
+                if (entry.d2.rows() == 0U || entry.d2.cols() == 0U)
                 {
                     return std::unexpected(GprError::empty_input());
                 }
-                n_rows = source.ards_[0].d2_per_dim[0].rows();
-                n_cols = source.ards_[0].d2_per_dim[0].cols();
             }
-            if (n_rows == 0 || n_cols == 0)
+            for (const auto& entry : source.ards_)
             {
-                return std::unexpected(GprError::empty_input());
+                if (entry.d2_per_dim.empty())
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                for (const auto& blk : entry.d2_per_dim)
+                {
+                    if (blk.rows() == 0U || blk.cols() == 0U)
+                    {
+                        return std::unexpected(GprError::empty_input());
+                    }
+                }
             }
-            if (is_square && n_rows != n_cols)
+
+            const MatrixRef<double>& first =
+                source.scalars_.empty() ? source.ards_[0].d2_per_dim[0] : source.scalars_[0].d2;
+            const detail::DistanceTableShape shape{.rows = first.rows(), .cols = first.cols()};
+
+            // Size products of the stored blocks, using the dimension counts the kernel expects.
+            const auto block_len = is_square ? packed_len(shape.rows) : column_major_len(shape.rows, shape.cols);
+            if (!block_len.has_value())
+            {
+                return std::unexpected(block_len.error());
+            }
+            if (auto dense = column_major_len(shape.rows, shape.cols); !dense.has_value())
+            {
+                return std::unexpected(std::move(dense).error());
+            }
+            for (const auto& desc : kslots)
+            {
+                if (desc.ard_dims.has_value())
+                {
+                    if (auto total = checked_mul(*block_len, *desc.ard_dims); !total.has_value())
+                    {
+                        return std::unexpected(std::move(total).error());
+                    }
+                }
+            }
+
+            if (is_square && shape.rows != shape.cols)
             {
                 return std::unexpected(
                     GprError::length_mismatch("square distance matrix must have equal rows and cols")
                 );
             }
-
-            auto impl = std::make_unique<typename CheckedDistanceStore<T>::Impl>();
-            impl->kernel_slots = kslots;
-            impl->n_rows = n_rows;
-            impl->n_cols = n_cols;
-            impl->square = is_square;
-            impl->scalar_tables.resize(kernel.impl_->num_scalar_slots);
-            impl->ard_dims.resize(kernel.impl_->num_ard_slots, 0U);
-            impl->ard_data.resize(kernel.impl_->num_ard_slots);
-
             for (const auto& entry : source.scalars_)
             {
-                const auto* desc = find_desc(entry.slot);
-                if (entry.d2.rows() != n_rows || entry.d2.cols() != n_cols)
+                if (entry.d2.rows() != shape.rows || entry.d2.cols() != shape.cols)
                 {
                     return std::unexpected(GprError::length_mismatch("scalar distance block shape mismatch"));
                 }
+            }
+            for (const auto& entry : source.ards_)
+            {
+                for (const auto& blk : entry.d2_per_dim)
+                {
+                    if (blk.rows() != shape.rows || blk.cols() != shape.cols)
+                    {
+                        return std::unexpected(GprError::length_mismatch("ARD distance block shape mismatch"));
+                    }
+                }
+            }
+            return shape;
+        }
+
+        /// @brief Checks that every ARD entry of @p source supplies as many per-dimension tables as its slot declares.
+        /// @tparam T Storage scalar type of the compiled kernel.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] source Supply whose structure check_structure() accepted.
+        /// @return Empty expected, or DimensionMismatch for the first ARD entry with a wrong table count.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> check_ard_counts(
+            const CompiledDistanceKernel<T>& kernel, const DistanceSource& source
+        )
+        {
+            for (const auto& entry : source.ards_)
+            {
+                const auto* desc = find_desc(kernel.slots(), entry.slot);
+                const std::size_t expected_dims = (desc != nullptr) ? desc->ard_dims.value_or(0U) : 0U;
+                if (entry.d2_per_dim.size() != expected_dims)
+                {
+                    return std::unexpected(GprError::dimension_mismatch(entry.d2_per_dim.size(), expected_dims));
+                }
+            }
+            return {};
+        }
+
+        /// @brief Validates the table values of @p source and packs them into @p impl, reusing its capacity.
+        /// @details Requires that check_structure() and check_ard_counts() accepted @p source. Every destination
+        /// vector is cleared and refilled, so a store whose capacity already covers the shape is refilled without
+        /// allocating. On failure @p impl holds partial data and must be refilled before use.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] source Supply to validate and pack.
+        /// @param[in] shape Common table shape returned by check_structure().
+        /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @param[in,out] impl Store state refilled in place.
+        /// @return Empty expected, or InvalidDistance for the first invalid entry.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> pack_values(
+            const CompiledDistanceKernel<T>& kernel,
+            const DistanceSource& source,
+            detail::DistanceTableShape shape,
+            bool is_square,
+            typename CheckedDistanceStore<T>::Impl& impl
+        )
+        {
+            const auto& kslots = kernel.slots();
+            impl.kernel_slots = kslots;
+            impl.n_rows = shape.rows;
+            impl.n_cols = shape.cols;
+            impl.square = is_square;
+            impl.scalar_tables.resize(kernel.impl_->num_scalar_slots);
+            impl.ard_dims.resize(kernel.impl_->num_ard_slots, 0U);
+            impl.ard_data.resize(kernel.impl_->num_ard_slots);
+            for (auto& table : impl.scalar_tables)
+            {
+                table.clear();
+            }
+            for (auto& table : impl.ard_data)
+            {
+                table.clear();
+            }
+
+            for (const auto& entry : source.scalars_)
+            {
+                const auto* desc = find_desc(kslots, entry.slot);
                 if (is_square)
                 {
                     if (auto res = validate_and_pack_square_block<T>(
-                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, false, impl->scalar_tables[desc->at]
+                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, false, impl.scalar_tables[desc->at]
                         );
                         !res.has_value())
                     {
@@ -3762,7 +3872,7 @@ namespace cxxgpr
                 else
                 {
                     if (auto res = validate_and_copy_rect_block<T>(
-                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, impl->scalar_tables[desc->at]
+                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, impl.scalar_tables[desc->at]
                         );
                         !res.has_value())
                     {
@@ -3773,53 +3883,20 @@ namespace cxxgpr
 
             for (const auto& entry : source.ards_)
             {
-                const auto* desc = find_desc(entry.slot);
-                const std::size_t expected_dims = *desc->ard_dims;
-                if (entry.d2_per_dim.size() != expected_dims)
-                {
-                    return std::unexpected(GprError::dimension_mismatch(entry.d2_per_dim.size(), expected_dims));
-                }
-                impl->ard_dims[desc->at] = expected_dims;
-                // Pre-reserve contiguous ARD slabs (packed lower triangle for square, column-major for cross).
-                if (is_square)
-                {
-                    const auto per_dim_exp = packed_len(n_rows);
-                    if (!per_dim_exp.has_value())
-                    {
-                        return std::unexpected(std::move(per_dim_exp).error());
-                    }
-                    const auto total_exp = checked_mul(*per_dim_exp, expected_dims);
-                    if (!total_exp.has_value())
-                    {
-                        return std::unexpected(std::move(total_exp).error());
-                    }
-                    impl->ard_data[desc->at].reserve(*total_exp);
-                }
-                else
-                {
-                    const auto block_exp = column_major_len(n_rows, n_cols);
-                    if (!block_exp.has_value())
-                    {
-                        return std::unexpected(std::move(block_exp).error());
-                    }
-                    const auto total_exp = checked_mul(*block_exp, expected_dims);
-                    if (!total_exp.has_value())
-                    {
-                        return std::unexpected(std::move(total_exp).error());
-                    }
-                    impl->ard_data[desc->at].reserve(*total_exp);
-                }
-                for (std::size_t dim = 0; dim < expected_dims; ++dim)
+                const auto* desc = find_desc(kslots, entry.slot);
+                const std::size_t dims = entry.d2_per_dim.size();
+                impl.ard_dims[desc->at] = dims;
+                // check_structure() verified that these products do not overflow.
+                const std::size_t block = is_square ? packed_len(shape.rows).value_or(0U)
+                                                    : column_major_len(shape.rows, shape.cols).value_or(0U);
+                impl.ard_data[desc->at].reserve(block * dims);
+                for (std::size_t dim = 0; dim < dims; ++dim)
                 {
                     const auto& blk = entry.d2_per_dim[dim];
-                    if (blk.rows() != n_rows || blk.cols() != n_cols)
-                    {
-                        return std::unexpected(GprError::length_mismatch("ARD distance block shape mismatch"));
-                    }
                     if (is_square)
                     {
                         if (auto res = validate_and_pack_square_block<T>(
-                                blk, source.tidy_rel_tol_, desc->at, dim, true, impl->ard_data[desc->at]
+                                blk, source.tidy_rel_tol_, desc->at, dim, true, impl.ard_data[desc->at]
                             );
                             !res.has_value())
                         {
@@ -3829,7 +3906,7 @@ namespace cxxgpr
                     else
                     {
                         if (auto res = validate_and_copy_rect_block<T>(
-                                blk, source.tidy_rel_tol_, desc->at, dim, impl->ard_data[desc->at]
+                                blk, source.tidy_rel_tol_, desc->at, dim, impl.ard_data[desc->at]
                             );
                             !res.has_value())
                         {
@@ -3838,8 +3915,146 @@ namespace cxxgpr
                     }
                 }
             }
+            return {};
+        }
 
+        /// @brief Validates @p source against @p kernel's slot descriptors and constructs a @c CheckedDistanceStore.
+        /// @details Runs check_structure(), check_ard_counts() and pack_values() in this order, so every structural
+        /// and shape error is reported before any table value is read.
+        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @param[in] kernel Compiled mixed distance kernel defining expected slot signatures.
+        /// @param[in] source Unchecked builder source supplying pairwise scalar and per-dimension ARD blocks.
+        /// @param[in] is_square @c true for training square distance stores, @c false for rectangular cross stores.
+        /// @return Immutable @c CheckedDistanceStore on success, or a structured @c GprError explaining the failure.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build(
+            const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
+        )
+        {
+            auto shape = check_structure(kernel, source, is_square);
+            if (!shape.has_value())
+            {
+                return std::unexpected(std::move(shape).error());
+            }
+            if (auto counts = check_ard_counts(kernel, source); !counts.has_value())
+            {
+                return std::unexpected(std::move(counts).error());
+            }
+            return build_shaped(kernel, source, *shape, is_square);
+        }
+
+        /// @brief Validates the values of @p source into @p store, reusing the store's storage when present.
+        /// @details The caller has already run check_structure() and check_ard_counts() on @p source. The first
+        /// call creates the store; later calls refill it in place and allocate only when the shape grows.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] source Supply to validate and pack.
+        /// @param[in] shape Common table shape returned by check_structure().
+        /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @param[in,out] store Reusable store; holds partial data after a failure.
+        /// @return Pointer to the refilled store (never null), or InvalidDistance for the first invalid entry.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<const CheckedDistanceStore<T>*, GprError> build_into(
+            const CompiledDistanceKernel<T>& kernel,
+            const DistanceSource& source,
+            detail::DistanceTableShape shape,
+            bool is_square,
+            std::optional<CheckedDistanceStore<T>>& store
+        )
+        {
+            if (!store.has_value())
+            {
+                store = CheckedDistanceStore<T>(std::make_unique<typename CheckedDistanceStore<T>::Impl>());
+            }
+            auto& filled = *store;
+            if (auto packed = pack_values(kernel, source, shape, is_square, *filled.impl_); !packed.has_value())
+            {
+                return std::unexpected(std::move(packed).error());
+            }
+            return &filled;
+        }
+
+        /// @brief Validates the values of @p source into a new store after the structure checks passed.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] source Supply to validate and pack.
+        /// @param[in] shape Common table shape returned by check_structure().
+        /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @return New store, or InvalidDistance for the first invalid entry.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build_shaped(
+            const CompiledDistanceKernel<T>& kernel,
+            const DistanceSource& source,
+            detail::DistanceTableShape shape,
+            bool is_square
+        )
+        {
+            auto impl = std::make_unique<typename CheckedDistanceStore<T>::Impl>();
+            if (auto packed = pack_values(kernel, source, shape, is_square, *impl); !packed.has_value())
+            {
+                return std::unexpected(std::move(packed).error());
+            }
             return CheckedDistanceStore<T>(std::move(impl));
+        }
+
+        /// @brief Checks the column count of a point matrix against the coordinate leaves of @p kernel.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel.
+        /// @param[in] cols Number of point columns.
+        /// @return Empty expected, or DimensionMismatch when an ARD coordinate leaf needs another dimension.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> check_point_cols(
+            const CompiledDistanceKernel<T>& kernel, std::size_t cols
+        )
+        {
+            if (!kernel.impl_->has_coord_points)
+            {
+                return {};
+            }
+            return kernel.impl_->validate_ard_coord_dims(cols);
+        }
+
+        /// @brief Evaluates the kernel diagonal into @p out using the caller's grow-only scratch vector.
+        /// @details Same contract as CompiledDistanceKernel::fill_diag(); @p scratch grows to the nested size and is
+        /// reused, so repeated calls of the same or a smaller @p n allocate nothing.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel.
+        /// @param[in] n Number of diagonal entries.
+        /// @param[in] x Optional point matrix of @p n rows.
+        /// @param[out] out Destination of length @p n.
+        /// @param[in,out] scratch Grow-only scratch storage.
+        /// @return Empty expected, or GprError.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> fill_diag_into(
+            const CompiledDistanceKernel<T>& kernel,
+            std::size_t n,
+            std::optional<MatrixRef<T>> x,
+            std::span<T> out,
+            std::vector<T>& scratch
+        )
+        {
+            if (n == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (auto cnt = require_count(out.size(), n, "out"); !cnt.has_value())
+            {
+                return cnt;
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, n); !vp.has_value())
+            {
+                return vp;
+            }
+            const auto needed = checked_mul(kernel.impl_->nested_depth + 1U, n);
+            if (!needed.has_value())
+            {
+                return std::unexpected(needed.error());
+            }
+            if (scratch.size() < *needed)
+            {
+                scratch.resize(*needed);
+            }
+            return kernel.impl_->eval_fill_diag(kernel.impl_->root, n, x, out, scratch, 0);
         }
     };
 
@@ -3857,18 +4072,21 @@ namespace cxxgpr
     /// @tparam T Scalar evaluation type (@c double or @c float).
     template <KernelScalarConcept T> CompiledDistanceKernel<T>::~CompiledDistanceKernel() = default;
 
-    /// @brief Move-constructs a `CompiledDistanceKernel<T>`, transferring the compiled tree.
-    /// @details Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete.
+    /// @brief Move-constructs a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer without copying leaves or slot descriptors.
+    /// Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete so the defaulted move can
+    /// destroy and relocate the owning pointer.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Kernel to move from.
+    /// @param[in] other Source compiled distance kernel moved from.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>::CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept = default;
 
-    /// @brief Move-assigns a `CompiledDistanceKernel<T>`, transferring the compiled tree.
-    /// @details Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete.
+    /// @brief Move-assigns a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer; defined out-of-line where
+    /// `CompiledDistanceKernel<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Kernel to move from.
-    /// @return Reference to this kernel.
+    /// @param[in] other Source compiled distance kernel moved from.
+    /// @return Reference to `*this`.
     template <KernelScalarConcept T>
     CompiledDistanceKernel<T>& CompiledDistanceKernel<T>::operator=(CompiledDistanceKernel&& other) noexcept = default;
 
@@ -4239,20 +4457,8 @@ namespace cxxgpr
         std::size_t n, std::optional<MatrixRef<T>> x, std::span<T> out
     ) const
     {
-        if (n == 0U)
-        {
-            return std::unexpected(GprError::empty_input());
-        }
-        if (auto cnt = require_count(out.size(), n, "out"); !cnt.has_value())
-        {
-            return cnt;
-        }
-        if (auto vp = impl_->validate_optional_points(x, n); !vp.has_value())
-        {
-            return vp;
-        }
-        std::vector<T> scratch_vec((impl_->nested_depth + 1U) * out.size());
-        return impl_->eval_fill_diag(impl_->root, n, x, out, scratch_vec, 0);
+        std::vector<T> scratch_vec;
+        return DistanceStoreBuilder::fill_diag_into(*this, n, x, out, scratch_vec);
     }
 
     /// @brief Computes the first log-hyperparameter derivative matrix over @p uplo using caller workspace.
@@ -4696,6 +4902,101 @@ namespace cxxgpr
         return kernel;
     }
 
+    /// @brief Checks the structure of a supply; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] source Unchecked supply.
+    /// @param[in] is_square True for a training supply.
+    /// @return Common table shape, or GprError.
+    template <KernelScalarConcept T>
+    std::expected<detail::DistanceTableShape, GprError> detail::check_distance_structure(
+        const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
+    )
+    {
+        return DistanceStoreBuilder::check_structure(kernel, source, is_square);
+    }
+
+    /// @brief Checks the ARD table counts of a supply; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] source Supply accepted by the structure check.
+    /// @return Empty expected, or DimensionMismatch.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::check_distance_ard_counts(
+        const CompiledDistanceKernel<T>& kernel, const DistanceSource& source
+    )
+    {
+        return DistanceStoreBuilder::check_ard_counts(kernel, source);
+    }
+
+    /// @brief Checks point columns against the coordinate leaves; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] cols Number of point columns.
+    /// @return Empty expected, or DimensionMismatch.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::check_distance_point_cols(
+        const CompiledDistanceKernel<T>& kernel, std::size_t cols
+    )
+    {
+        return DistanceStoreBuilder::check_point_cols(kernel, cols);
+    }
+
+    /// @brief Validates table values into a reusable store; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] source Supply to validate.
+    /// @param[in] shape Shape from the structure check.
+    /// @param[in] is_square True for a square store.
+    /// @param[in,out] store Reusable store.
+    /// @return Pointer to the refilled store, or InvalidDistance.
+    template <KernelScalarConcept T>
+    std::expected<const CheckedDistanceStore<T>*, GprError> detail::fill_distance_store(
+        const CompiledDistanceKernel<T>& kernel,
+        const DistanceSource& source,
+        DistanceTableShape shape,
+        bool is_square,
+        std::optional<CheckedDistanceStore<T>>& store
+    )
+    {
+        return DistanceStoreBuilder::build_into(kernel, source, shape, is_square, store);
+    }
+
+    /// @brief Validates table values into a new store; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] source Supply to validate.
+    /// @param[in] shape Shape from the structure check.
+    /// @param[in] is_square True for a square store.
+    /// @return New store, or InvalidDistance.
+    template <KernelScalarConcept T>
+    std::expected<CheckedDistanceStore<T>, GprError> detail::make_distance_store(
+        const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, DistanceTableShape shape, bool is_square
+    )
+    {
+        return DistanceStoreBuilder::build_shaped(kernel, source, shape, is_square);
+    }
+
+    /// @brief Evaluates the kernel diagonal with reusable scratch; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] n Number of diagonal entries.
+    /// @param[in] x Optional point matrix.
+    /// @param[out] out Destination of length n.
+    /// @param[in,out] scratch Grow-only scratch.
+    /// @return Empty expected, or GprError.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::fill_distance_diag(
+        const CompiledDistanceKernel<T>& kernel,
+        std::size_t n,
+        std::optional<MatrixRef<T>> x,
+        std::span<T> out,
+        std::vector<T>& scratch
+    )
+    {
+        return DistanceStoreBuilder::fill_diag_into(kernel, n, x, out, scratch);
+    }
+
     template class DistanceKernel<DistanceOnly>;
     template class DistanceKernel<WithPoints>;
     template CompiledDistanceKernel<double> DistanceKernel<DistanceOnly>::compile<double>() const;
@@ -4722,5 +5023,57 @@ namespace cxxgpr
     template class CheckedDistanceStore<float>;
     template class CompiledDistanceKernel<double>;
     template class CompiledDistanceKernel<float>;
+    template std::expected<detail::DistanceTableShape, GprError> detail::check_distance_structure<double>(
+        const CompiledDistanceKernel<double>&, const DistanceSource&, bool
+    );
+    template std::expected<detail::DistanceTableShape, GprError> detail::check_distance_structure<float>(
+        const CompiledDistanceKernel<float>&, const DistanceSource&, bool
+    );
+    template std::expected<void, GprError> detail::check_distance_ard_counts<double>(
+        const CompiledDistanceKernel<double>&, const DistanceSource&
+    );
+    template std::expected<void, GprError> detail::check_distance_ard_counts<float>(
+        const CompiledDistanceKernel<float>&, const DistanceSource&
+    );
+    template std::expected<void, GprError> detail::check_distance_point_cols<double>(
+        const CompiledDistanceKernel<double>&, std::size_t
+    );
+    template std::expected<void, GprError> detail::check_distance_point_cols<float>(
+        const CompiledDistanceKernel<float>&, std::size_t
+    );
+    template std::expected<CheckedDistanceStore<double>, GprError> detail::make_distance_store<double>(
+        const CompiledDistanceKernel<double>&, const DistanceSource&, DistanceTableShape, bool
+    );
+    template std::expected<const CheckedDistanceStore<double>*, GprError> detail::fill_distance_store<double>(
+        const CompiledDistanceKernel<double>&,
+        const DistanceSource&,
+        DistanceTableShape,
+        bool,
+        std::optional<CheckedDistanceStore<double>>&
+    );
+    template std::expected<CheckedDistanceStore<float>, GprError> detail::make_distance_store<float>(
+        const CompiledDistanceKernel<float>&, const DistanceSource&, DistanceTableShape, bool
+    );
+    template std::expected<const CheckedDistanceStore<float>*, GprError> detail::fill_distance_store<float>(
+        const CompiledDistanceKernel<float>&,
+        const DistanceSource&,
+        DistanceTableShape,
+        bool,
+        std::optional<CheckedDistanceStore<float>>&
+    );
+    template std::expected<void, GprError> detail::fill_distance_diag<double>(
+        const CompiledDistanceKernel<double>&,
+        std::size_t,
+        std::optional<MatrixRef<double>>,
+        std::span<double>,
+        std::vector<double>&
+    );
+    template std::expected<void, GprError> detail::fill_distance_diag<float>(
+        const CompiledDistanceKernel<float>&,
+        std::size_t,
+        std::optional<MatrixRef<float>>,
+        std::span<float>,
+        std::vector<float>&
+    );
 
 }  // namespace cxxgpr
