@@ -896,6 +896,7 @@ namespace cxxgpr
             .factor_jitter = 0.0,
             .neg_log_marginal_likelihood = 0.0,
             .optimizer_result = {},
+            .refinement_summary = std::nullopt,
         };
 
         if constexpr (with_points)
