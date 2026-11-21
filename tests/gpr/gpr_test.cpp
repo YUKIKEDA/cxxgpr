@@ -208,7 +208,12 @@ namespace
         {
             alpha_max = std::max(alpha_max, std::abs(f64->alpha()[i]));
         }
-        EXPECT_FALSE(mp_prom->refinement_summary()->used_fallback());
+        const auto prom_summary = mp_prom->refinement_summary();
+        if (!prom_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_FALSE(prom_summary->used_fallback());
         for (std::size_t i = 0; i < n; ++i)
         {
             EXPECT_NEAR(mp_prom->alpha()[i], f64->alpha()[i], 1e-3 * alpha_max);
@@ -366,9 +371,13 @@ namespace
         ASSERT_TRUE(single_fit.has_value());
         ASSERT_TRUE(promote_fit.has_value());
 
-        ASSERT_TRUE(promote_fit->refinement_summary().has_value());
-        EXPECT_EQ(promote_fit->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
-        EXPECT_FALSE(promote_fit->refinement_summary()->used_fallback());
+        const auto promote_summary = promote_fit->refinement_summary();
+        if (!promote_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_EQ(promote_summary->status, cxxgpr::RefinementStatus::Converged);
+        EXPECT_FALSE(promote_summary->used_fallback());
 
         double alpha_max = 0.0;
         double promote_err = 0.0;
