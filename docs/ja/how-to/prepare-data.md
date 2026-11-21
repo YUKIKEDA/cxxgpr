@@ -39,7 +39,7 @@ x(1, 1) = 20, buffer = 1 2 3 | 10 20 30
 スパンの形は、列ストライドが `n_rows` に等しい密な行列を前提にする。どちらの形も `std::expected` を返す。たとえば、目的変数の長さが行数と違えば `GprErrorCode::LengthMismatch`、データが空なら `GprErrorCode::EmptyInput`、NaN や無限大があれば `GprErrorCode::NonFiniteInput` になる。
 
 :::{note}
-スパンの形は、`span.size() == n_rows * n_cols` を検査する。長さが違うスパンは、要素を読む前に `GprErrorCode::LengthMismatch` になる。次元の積があふれる場合は `GprErrorCode::SizeOverflow` になる。`MatrixRef` は違う。ポインタしか持たないので、その先のメモリに `n_rows * n_cols` 個の要素が本当にあるかどうかを、ライブラリは確かめられない。`MatrixRef` の寸法を正しく与える責任は、呼び出し側にある。渡す形に対してスパンが合っているかは、`validate_matrix`（後述）で検査できる。
+スパンの形は、要素を読む前に、スパンと形状が合っているかを検査する。スパンが空か、`n_rows` または `n_cols` が 0 なら `GprErrorCode::EmptyInput` になる。次元の積があふれる場合は `GprErrorCode::SizeOverflow`、スパンの大きさが `n_rows * n_cols` と一致しない場合は `GprErrorCode::LengthMismatch` になる。複数が同時に成り立つときは、この順で最初のものを返す。`MatrixRef` の形は検査しない。`MatrixRef` が持つのはポインタと寸法だけで、バッファの長さは持たない。`(span, rows, cols)` のコンストラクタで作っても同じで、`span.data()` だけを保持し、`span.size()` は捨てる。`MatrixRef` の寸法を正しく与える責任は、呼び出し側にある。データがスパンなら、スパンの形を使うのがよい。そうでなければ、ビューを作る前に `validate_matrix(span, n_rows, n_cols)`（後述）で検査する。
 :::
 
 ## `MatrixRef` と `MatrixMut` を使う

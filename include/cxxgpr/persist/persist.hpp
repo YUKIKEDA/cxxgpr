@@ -293,13 +293,15 @@ namespace cxxgpr::persist
         ) const;
 
         /// @brief Computes posterior mean and diagonal variance from a raw column-major span.
-        /// @details Wraps the raw column-major query buffer into a MatrixRef<double> and delegates to predict().
+        /// @details Checks the length of xs against n_rows * n_cols, wraps it as a MatrixRef<double> with leading
+        /// dimension n_rows, and delegates to predict().
         /// @param[in] xs Contiguous column-major query data of length n_rows * n_cols.
         /// @param[in] n_rows Number of query points m.
         /// @param[in] n_cols Number of features per query point (must match d()).
         /// @param[in] options Optional prediction controls.
         /// @return Double-precision Prediction on the original target scale, or GprError on failure.
-        /// @retval GprErrorCode::EmptyInput When xs has zero elements or null data.
+        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
         /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
         /// @retval GprErrorCode::DimensionMismatch When n_cols != d().
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.

@@ -23,11 +23,14 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "span_shape_contract.hpp"
 
 namespace
 {
@@ -546,6 +549,42 @@ namespace
         EXPECT_NEAR(reg_load->predict(xq_ref)->mean[0], c_fit->predict(xq_ref)->mean[0], 1e-12);
     }
 
+    /// @brief Verifies the raw-span overload of LoadedGpr::predict against the span shape contract.
+    /// @details Runs the shared shape cases (short span, long span, overflowing dimensions, empty span with a null
+    /// or non-null pointer, zero dimension) on a loaded model, checks that a wrong length is reported before a
+    /// wrong feature count, and that the loaded model predicts bitwise identically afterwards.
+    TEST(PersistModelsTest, LoadedGprSpanPredictRejectsLengthsThatDisagreeWithDimensions)
+    {
+        // Spec: REQ-03, DES-02
+        using cxxgpr::test_support::error_code_of;
+        const std::vector<double> x_train{0.0, 1.0};
+        const std::vector<double> y_train{0.5, 1.5};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const TempDirGuard dir("span_shape_contract");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+        auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_TRUE(loaded.has_value());
+
+        const std::vector<double> query{0.5, 1.5};
+        const auto before = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(before.has_value());
+
+        cxxgpr::test_support::expect_span_shape_contract(
+            [&](std::span<const double> xs, std::size_t n_rows, std::size_t n_cols)
+        { return error_code_of(loaded->predict(xs, n_rows, n_cols)); }, query, 2U, 1U
+        );
+
+        // Three values declared as 2 x 2: the length is reported before the feature count.
+        const std::vector<double> q3{0.5, 1.5, 2.5};
+        EXPECT_EQ(error_code_of(loaded->predict(q3, 2U, 2U)), std::optional{cxxgpr::GprErrorCode::LengthMismatch});
+
+        const auto after = loaded->predict(query, 2U, 1U);
+        ASSERT_TRUE(after.has_value());
+        EXPECT_EQ(*after, *before);
+    }
+
     /// @brief Negative controls verifying persistence load rejects missing, corrupt, and foreign artifacts.
     /// @details Checks Io errors on missing directories, Config errors on malformed or deeply nested
     /// JSON, UnsupportedPersistVersion, WrongModel rejections for sgpr/ldlt/distance configs, and
@@ -566,20 +605,6 @@ namespace
         const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
         const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
         ASSERT_TRUE(fit.has_value());
-
-        // A raw query span shorter than n_rows * n_cols is rejected instead of being read out of bounds.
-        {
-            const TempDirGuard dir("short_query_span");
-            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
-            auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
-            ASSERT_TRUE(loaded.has_value());
-            const std::vector<double> short_query{0.5};
-            auto short_pred = loaded->predict(short_query, 2U, 1U);
-            ASSERT_FALSE(short_pred.has_value());
-            EXPECT_EQ(short_pred.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-            const std::vector<double> ok_query{0.5, 1.5};
-            EXPECT_TRUE(loaded->predict(ok_query, 2U, 1U).has_value());
-        }
 
         // Helper lambda to mutate config.json and expect specific error.
         auto check_bad_config = [&](const std::string& name, const std::string& json_text,

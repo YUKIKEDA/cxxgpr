@@ -18,10 +18,13 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <optional>
+#include <span>
 #include <type_traits>
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "span_shape_contract.hpp"
 
 namespace
 {
@@ -431,60 +434,156 @@ namespace
         }
     }
 
-    /// @brief Verifies raw-span overloads reject buffers whose length disagrees with n_rows * n_cols.
-    /// @details A short span must never be read past its end. Each span overload (fit, factor, refit, predict,
-    /// predict_into, predict_covariance, sample) returns LengthMismatch for short and long spans, SizeOverflow for
-    /// overflowing dimensions, and leaves the parent objects usable.
+    /// @brief Verifies every raw-span overload of Gpr and FittedGpr against the span shape contract.
+    /// @details Runs fit, factor, refit, predict, predict_into, predict_covariance, and sample through the shared
+    /// shape cases (short span, long span, overflowing dimensions, empty span with a null or non-null pointer, zero
+    /// dimension) and checks that results of the parent objects are bitwise unchanged after the rejected calls.
     TEST(GprModelsTest, SpanOverloadsRejectLengthsThatDisagreeWithDimensions)
     {
-        // Spec: DES-01, DES-02
+        // Spec: REQ-02, REQ-03, DES-01, DES-02
+        using cxxgpr::test_support::error_code_of;
+        using cxxgpr::test_support::expect_span_shape_contract;
+        using Span = std::span<const double>;
+
         const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
         const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
         const std::vector<double> x{0.0, 1.0, 2.0, 3.0};
         const std::vector<double> y{0.0, 1.0, 0.5, 1.2};
-        const std::vector<double> x_short{0.0, 1.0, 2.0};
-        const std::vector<double> x_long{0.0, 1.0, 2.0, 3.0, 4.0};
+        const std::vector<double> query{0.5, 1.5};
+
+        auto model = gpr.factor(x, 4U, 1U, y);
+        ASSERT_TRUE(model.has_value());
+        const auto pred_before = model->predict(query, 2U, 1U);
+        const auto cov_before = model->predict_covariance(query, 2U, 1U);
+        const auto draws_before = model->sample(query, 2U, 1U, 3U, 5U);
+        ASSERT_TRUE(pred_before.has_value());
+        ASSERT_TRUE(cov_before.has_value());
+        ASSERT_TRUE(draws_before.has_value());
+
+        // Training overloads: the trainer and the fitted model are const and stay usable.
+        {
+            SCOPED_TRACE("Gpr::fit");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(gpr.fit(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+        {
+            SCOPED_TRACE("Gpr::factor");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(gpr.factor(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::refit");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->refit(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+
+        // Query overloads.
+        {
+            SCOPED_TRACE("FittedGpr::predict");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->predict(xs, n_rows, n_cols));
+            }, query, 2U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::predict_into");
+            cxxgpr::Prediction<double> out;
+            ASSERT_TRUE(model->predict_into(query, 2U, 1U, out).has_value());
+            const cxxgpr::Prediction<double> out_before = out;
+            expect_span_shape_contract(
+                [&](Span xs, std::size_t n_rows, std::size_t n_cols)
+            {
+                const auto code = error_code_of(model->predict_into(xs, n_rows, n_cols, out));
+                // A rejected call leaves the caller's output untouched.
+                EXPECT_EQ(out, out_before);
+                return code;
+            }, query, 2U, 1U
+            );
+        }
+        {
+            SCOPED_TRACE("FittedGpr::predict_covariance");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->predict_covariance(xs, n_rows, n_cols));
+            }, query, 2U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::sample");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->sample(xs, n_rows, n_cols, 3U, 5U));
+            }, query, 2U, 1U);
+        }
+
+        // The fitted model answers exactly as it did before the rejected calls.
+        const auto pred_after = model->predict(query, 2U, 1U);
+        const auto cov_after = model->predict_covariance(query, 2U, 1U);
+        const auto draws_after = model->sample(query, 2U, 1U, 3U, 5U);
+        ASSERT_TRUE(pred_after.has_value());
+        ASSERT_TRUE(cov_after.has_value());
+        ASSERT_TRUE(draws_after.has_value());
+        EXPECT_EQ(*pred_after, *pred_before);
+        EXPECT_EQ(cov_after->mean, cov_before->mean);
+        EXPECT_EQ(cov_after->covariance, cov_before->covariance);
+        EXPECT_EQ(*draws_after, *draws_before);
+    }
+
+    /// @brief Pins the validation order of the span overloads across arguments and against later checks.
+    /// @details An empty target vector is reported as EmptyInput before any size error of the feature span, a
+    /// feature span of the wrong length is reported before a target of the wrong length is inspected further, and
+    /// a query span of the wrong length is reported as LengthMismatch before the feature count is compared.
+    TEST(GprModelsTest, SpanOverloadsReportViolationsInValidationOrder)
+    {
+        // Spec: REQ-03, DES-02
+        using cxxgpr::GprErrorCode;
+        using cxxgpr::test_support::error_code_of;
+        using Code = std::optional<GprErrorCode>;
+        using Span = std::span<const double>;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
+        const std::vector<double> x{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y{0.0, 1.0, 0.5, 1.2};
+        const Span x_short = Span(x).first(3U);
+        const Span y_short = Span(y).first(3U);
+        const Span y_empty;
         constexpr std::size_t huge = std::numeric_limits<std::size_t>::max();
 
-        for (const auto* bad : {&x_short, &x_long})
-        {
-            auto fit = gpr.fit(*bad, 4U, 1U, y);
-            ASSERT_FALSE(fit.has_value());
-            EXPECT_EQ(fit.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-            auto factor = gpr.factor(*bad, 4U, 1U, y);
-            ASSERT_FALSE(factor.has_value());
-            EXPECT_EQ(factor.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-        }
-        auto overflow = gpr.fit(x_short, huge, 2U, y);
-        ASSERT_FALSE(overflow.has_value());
-        EXPECT_EQ(overflow.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
-
-        // The parent trainer is still usable after the failures above.
         auto model = gpr.factor(x, 4U, 1U, y);
         ASSERT_TRUE(model.has_value());
 
-        const std::vector<double> q_short{0.5};
-        const std::vector<double> q_ok{0.5, 1.5};
-        auto pred = model->predict(q_short, 2U, 1U);
-        ASSERT_FALSE(pred.has_value());
-        EXPECT_EQ(pred.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-        cxxgpr::Prediction<double> out;
-        auto into = model->predict_into(q_short, 2U, 1U, out);
-        ASSERT_FALSE(into.has_value());
-        EXPECT_EQ(into.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-        auto cov = model->predict_covariance(q_short, 2U, 1U);
-        ASSERT_FALSE(cov.has_value());
-        EXPECT_EQ(cov.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-        auto draws = model->sample(q_short, 2U, 1U, 1U, 5U);
-        ASSERT_FALSE(draws.has_value());
-        EXPECT_EQ(draws.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
-        auto refit = model->refit(x_short, 4U, 1U, y);
-        ASSERT_FALSE(refit.has_value());
-        EXPECT_EQ(refit.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        /// @brief Checks the cross-argument order of one training overload.
+        const auto check_training = [&](const char* name, const auto& train)
+        {
+            SCOPED_TRACE(name);
+            EXPECT_EQ(train(x, 4U, 1U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y alone";
+            EXPECT_EQ(train(x_short, 4U, 1U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y before short x";
+            EXPECT_EQ(train(x, huge, 2U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y before overflow";
+            EXPECT_EQ(train(x, huge, 2U, y_short), Code{GprErrorCode::SizeOverflow}) << "overflow before short y";
+            EXPECT_EQ(train(x_short, 4U, 1U, y_short), Code{GprErrorCode::LengthMismatch}) << "short x and y";
+            EXPECT_EQ(train(x, 4U, 1U, y_short), Code{GprErrorCode::LengthMismatch}) << "short y alone";
+            EXPECT_EQ(train(x, 4U, 1U, y), Code{}) << "valid input after the rejected calls";
+        };
+        check_training("Gpr::fit", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(gpr.fit(xs, n_rows, n_cols, ys));
+        });
+        check_training("Gpr::factor", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(gpr.factor(xs, n_rows, n_cols, ys));
+        });
+        check_training("FittedGpr::refit", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(model->refit(xs, n_rows, n_cols, ys));
+        });
 
-        // Exact lengths still succeed on the same model after the rejected calls.
-        EXPECT_TRUE(model->predict(q_ok, 2U, 1U).has_value());
-        EXPECT_TRUE(model->predict_covariance(q_ok, 2U, 1U).has_value());
+        // Three values declared as 2 x 2: both the length and the feature count are wrong; the length comes first.
+        const std::vector<double> q3{0.5, 1.5, 2.5};
+        cxxgpr::Prediction<double> out;
+        EXPECT_EQ(error_code_of(model->predict(q3, 2U, 2U)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->predict_into(q3, 2U, 2U, out)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->predict_covariance(q3, 2U, 2U)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->sample(q3, 2U, 2U, 1U, 5U)), Code{GprErrorCode::LengthMismatch});
+        // With a consistent length the feature count is the remaining violation.
+        const std::vector<double> q4{0.5, 1.5, 2.5, 3.5};
+        EXPECT_EQ(error_code_of(model->predict(q4, 2U, 2U)), Code{GprErrorCode::DimensionMismatch});
     }
 
 }  // namespace
