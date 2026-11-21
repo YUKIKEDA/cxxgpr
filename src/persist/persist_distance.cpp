@@ -49,14 +49,6 @@ namespace cxxgpr::persist
             return std::ranges::all_of(s, [](T v) { return std::isfinite(v); });
         }
 
-        /// @brief Builds a Tensor-kind persistence error.
-        /// @param[in] message Description of the problem.
-        /// @return GprError of kind PersistFailed(Tensor).
-        [[nodiscard]] GprError tensor_error(std::string message)
-        {
-            return GprError::persist_failed(PersistErrorKind::Tensor, std::move(message));
-        }
-
         /// @brief Reads a tensor of the given storage precision and widens it to double.
         /// @param[in] st Mapped safetensors file.
         /// @param[in] name Tensor name.

@@ -748,6 +748,8 @@ namespace cxxgpr::persist
             .x_transform = impl->x_transform->clone(),
             .y_unfitted = impl->y_unfitted->clone(),
             .y_transform = impl->y_transform->clone(),
+            .distance_kernel = std::nullopt,
+            .distance_with_points = false,
         };
 
         // Construct only the precision-typed state matching precision_kind.
