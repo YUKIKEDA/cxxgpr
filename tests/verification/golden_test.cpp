@@ -54,7 +54,7 @@ namespace
             const std::array<double, 1> x_qu{xq};
             auto fitted = trainer.factor(x_tr, 1U, 1U, y_tr);
             ASSERT_TRUE(fitted.has_value());
-            EXPECT_NEAR(fitted->log_marginal_likelihood(), expected_nll, 1e-14);
+            EXPECT_NEAR(fitted->neg_log_marginal_likelihood(), expected_nll, 1e-14);
             EXPECT_NEAR(fitted->alpha()[0], alpha0, 1e-14);
 
             auto pred = fitted->predict(x_qu, 1U, 1U);
@@ -103,7 +103,7 @@ namespace
 
             auto fitted = trainer.factor(x_tr, 2U, 1U, y_tr);
             ASSERT_TRUE(fitted.has_value());
-            EXPECT_NEAR(fitted->log_marginal_likelihood(), expected_nll, 1e-13);
+            EXPECT_NEAR(fitted->neg_log_marginal_likelihood(), expected_nll, 1e-13);
             EXPECT_NEAR(fitted->alpha()[0], alpha0, 1e-13);
             EXPECT_NEAR(fitted->alpha()[1], alpha1, 1e-13);
 
@@ -149,7 +149,7 @@ namespace
         const auto fixed_fit =
             cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(fixed_spec).with_noise_variance(1e-3).value().factor(x_ref, y_train);
         ASSERT_TRUE(fixed_fit.has_value());
-        EXPECT_NEAR(fixed_fit->log_marginal_likelihood(), 20.165875928597817, 1e-11);
+        EXPECT_NEAR(fixed_fit->neg_log_marginal_likelihood(), 20.165875928597817, 1e-11);
 
         auto fixed_pred = fixed_fit->predict(xq_ref);
         ASSERT_TRUE(fixed_pred.has_value());
@@ -199,7 +199,7 @@ namespace
                 .value()
                 .fit(x_ref, y_train);
         ASSERT_TRUE(opt_fit.has_value());
-        EXPECT_NEAR(opt_fit->log_marginal_likelihood(), -12.228652965879842, 1e-6);
+        EXPECT_NEAR(opt_fit->neg_log_marginal_likelihood(), -12.228652965879842, 1e-6);
 
         auto opt_pred = opt_fit->predict(xq_ref);
         ASSERT_TRUE(opt_pred.has_value());
@@ -244,7 +244,7 @@ namespace
         const auto fixed_fit =
             cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(fixed_spec).with_noise_variance(1e-3).value().factor(x_ref, y_train);
         ASSERT_TRUE(fixed_fit.has_value());
-        EXPECT_NEAR(fixed_fit->log_marginal_likelihood(), 5.66595711118728, 1e-12);
+        EXPECT_NEAR(fixed_fit->neg_log_marginal_likelihood(), 5.66595711118728, 1e-12);
 
         auto fixed_pred = fixed_fit->predict(xq_ref);
         ASSERT_TRUE(fixed_pred.has_value());
@@ -281,7 +281,7 @@ namespace
                 .value()
                 .fit(x_ref, y_train);
         ASSERT_TRUE(opt_fit.has_value());
-        EXPECT_NEAR(opt_fit->log_marginal_likelihood(), 3.055176152823967, 1e-6);
+        EXPECT_NEAR(opt_fit->neg_log_marginal_likelihood(), 3.055176152823967, 1e-6);
 
         auto opt_pred = opt_fit->predict(xq_ref);
         ASSERT_TRUE(opt_pred.has_value());

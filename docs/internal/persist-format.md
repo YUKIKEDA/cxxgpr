@@ -77,9 +77,9 @@ When verifying or using the file directly from NumPy, column-major matrices such
 | Method | `has_factor` | `model.safetensors` contents | Load behavior (`LoadedGpr::load` / `LoadedDistanceGpr<C>::load`) |
 |---|---|---|---|
 | `save(dir)` | `false` | `x`, `y` (+ `d2.*`) | Rebuilds the Gram matrix from the saved transforms, $\theta$, `jitter`, and `factor_jitter`, then reconstructs the Cholesky factorization and $\alpha$ in $O(n^3)$ |
-| `save_with_factor(dir)` | `true` | `x`, `y`, `l`, `alpha` (+ `d2.*`) | Skips refactorization. The `F64` factor `l` of `DoublePrecision` is referenced directly through a read-only memory map (`mmap`); an `F32` factor is copied into memory |
+| `save_with_factor(dir)` | `true` | `x`, `y`, `l`, `alpha` (+ `d2.*`) | Skips refactorization. The `F64` factor `l` of `DoublePrecision` is referenced directly through a read-only memory map (`mmap`) by both loaders (`has_mmap_factor()` is `true`); an `F32` factor is copied into memory. Typed extraction (`into_fitted`) copies the factor into the returned fitted model, which does not depend on the file |
 
-- **`mmap` safety requirements**: the `mmap` of the `F64` factor `l` verifies that the data start offset is aligned to an 8-byte boundary before mapping (Windows `CreateFileMapping`/`MapViewOfFile`, Linux `mmap(PROT_READ, MAP_PRIVATE)`). The contract is that no external process rewrites the file in place during the model's lifetime; replacement by `save` is done by atomic rename and therefore does not break a map in progress.
+- **`mmap` safety requirements**: the `mmap` of the `F64` factor `l` verifies that the data start offset is aligned to an 8-byte boundary before mapping (Windows `CreateFileMapping`/`MapViewOfFile`, Linux `mmap(PROT_READ, MAP_PRIVATE)`). The contract is that no external process rewrites the file in place during the model's lifetime; replacement by `save` is done by atomic rename and therefore does not break a map in progress. Predictions trust the validation done by `load` (every element finite, positive diagonal) and do not re-check the factor on each call, so the result of violating this contract is unspecified: a rewritten value can yield a silently wrong prediction, and only a non-finite latent predictive variance is still reported (`NonFiniteKernelValue`, DES-16).
 - **Loader return types**: `LoadedGpr` (a tagged union / `std::variant` wrapper holding the four Exact LLT variants `double`, `single`, `mixed_promote`, and `mixed_reevaluate`) and `LoadedDistanceGpr<C>` (`C = DistanceOnly | WithPoints`). They commonly provide `predict` (widened to `double`), `n()`, and `d()` independent of the model kind, and can be converted to a `FittedGpr` by typed extraction. A `load`ed model uses the `Retain` policy and can `refit` after `with_optimizer`.
 
 ---
@@ -95,6 +95,8 @@ When verifying or using the file directly from NumPy, column-major matrices such
 ---
 
 ## FMT-07 Persistence of supplied squared-distance models (`LoadedDistanceGpr<C>`)
+
+API: `persist::save(const FittedDistanceGpr<O, P, C>&, dir[, registry])`, `persist::save_with_factor(...)` and `persist::LoadedDistanceGpr<C>::load(dir[, registry])` (REL-7, DES-21). The loaded model exposes the queries `predict`, `predict_covariance`, `sample` and `loo_predict` (results widened to `double`, with the query supplies, validation order and errors of DES-21), the getters `n()`, `d()`, `precision_kind()`, `has_factor()`, `has_mmap_factor()`, `factor_jitter()`, `kernel()`, `likelihood()`, `jitter()` and `kernel_exp()`, and the typed extraction `into_fitted<O, P>(O optimizer = O{})` to `FittedDistanceGpr<O, P, C>` (`PersistFailed(WrongModel)` when `P` is not the saved precision). It has no `predict_into`: the allocation-free query path is `FittedDistanceGpr::predict_into` on the extracted model. The `F64` factor of a `DoublePrecision` checkpoint saved with `save_with_factor` is memory-mapped as in FMT-05, under the same `mmap` safety requirements.
 
 For `DistanceKernel<C>` models, a `distance` section is added to `config.json`, and per-slot lower-triangular tensors `d2.<k>` are saved in `model.safetensors`.
 

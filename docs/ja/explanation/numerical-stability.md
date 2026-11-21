@@ -133,7 +133,7 @@ $$
 |---|---|---|
 | 学習・クエリの入力、目的変数 | すべての要素が有限 | `NonFiniteInput` |
 | ハイパーパラメータ、境界、ノイズ | 有限で、許容区間の内側 | `InvalidHyperparameter`、`InvalidNoiseVariance`、`InvalidInterval` |
-| 目的関数、反復改良、逆スケーリング | 周辺尤度の値、反復改良で再評価したカーネル要素、逆スケーリング後の予測モーメントが有限 | `NonFiniteKernelValue` |
+| 目的関数、予測、反復改良、逆スケーリング | 周辺尤度の値、0 で切り上げる前の潜在予測分散、反復改良で再評価したカーネル要素、逆スケーリング後の予測モーメントが有限 | `NonFiniteKernelValue` |
 | 供給された二乗距離 | 有限、非負、対称、対角が 0 | `InvalidDistance` |
 | 因子分解の入力 | 下三角が有限。ピボットが有限で正 | `NonFiniteInput`、`CholeskyFailed` |
 | 三角求解 | 因子が有限で対角が正、右辺が有限 | `NonFiniteInput`、`NonPositiveDefiniteMatrix` |

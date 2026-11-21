@@ -106,7 +106,7 @@ int main()
 ```{code-block} text
 signal variance = 1.91418, lengthscale = 1.71027
 noise variance = 0.00549421 (standardised scale)
-log marginal likelihood = 5.74717
+negative log marginal likelihood = 5.74717
 x = 1.35  mean = 1.0122  std = 0.0652796  sin(x) = 0.975723
 x = 3.15  mean = -0.108219  std = 0.0648688  sin(x) = -0.00840725
 x = 5.85  mean = -0.289365  std = 0.067871  sin(x) = -0.419764

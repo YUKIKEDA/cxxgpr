@@ -503,15 +503,17 @@ namespace cxxgpr
         CheckedDistanceStore& operator=(const CheckedDistanceStore& other);
 
         /// @brief Move-constructs a checked distance store.
-        /// @details Transfers ownership of the internal validated store state.
+        /// @details Transfers ownership of the internal validated store state. Defined out of line, where the
+        /// implementation type is complete, so the store can be moved out of std::expected.
         /// @param[in] other CheckedDistanceStore instance to move from.
-        CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
+        CheckedDistanceStore(CheckedDistanceStore&& other) noexcept;
 
         /// @brief Move-assigns a checked distance store.
-        /// @details Transfers ownership of the internal validated store state.
+        /// @details Transfers ownership of the internal validated store state. Defined out of line, where the
+        /// implementation type is complete.
         /// @param[in] other CheckedDistanceStore instance to move from.
         /// @return Reference to this CheckedDistanceStore.
-        CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept = default;
+        CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept;
 
         /// @brief Destroys the checked distance store.
         /// @details Frees internal distance buffers out of line where Impl is complete.
@@ -567,15 +569,17 @@ namespace cxxgpr
         CompiledDistanceKernel& operator=(const CompiledDistanceKernel& other);
 
         /// @brief Move-constructs a compiled distance kernel.
-        /// @details Transfers ownership of the internal compiled implementation pointer.
+        /// @details Transfers ownership of the internal compiled implementation pointer. Defined out of line,
+        /// where the implementation type is complete, so the kernel can be moved out of compile().
         /// @param[in] other CompiledDistanceKernel instance to move from.
-        CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept = default;
+        CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept;
 
         /// @brief Move-assigns a compiled distance kernel.
-        /// @details Transfers ownership of the internal compiled implementation pointer.
+        /// @details Transfers ownership of the internal compiled implementation pointer. Defined out of line,
+        /// where the implementation type is complete.
         /// @param[in] other CompiledDistanceKernel instance to move from.
         /// @return Reference to this CompiledDistanceKernel.
-        CompiledDistanceKernel& operator=(CompiledDistanceKernel&& other) noexcept = default;
+        CompiledDistanceKernel& operator=(CompiledDistanceKernel&& other) noexcept;
 
         /// @brief Destroys the compiled distance kernel.
         /// @details Releases the internal Pimpl state out of line where Impl is complete.

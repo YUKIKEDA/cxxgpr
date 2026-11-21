@@ -8,7 +8,7 @@
 
 ## 確保なしで予測する
 
-`FittedGpr` は `QueryWorkspace` を 1 つ持つ。予測に必要な一時領域（変換後のクエリ、交差共分散、三角求解の結果、カーネルの入れ子スクラッチ）はすべてここにある。`FittedGpr::predict_into` と `FittedGpr::predict_with_into` は、利用者が持つ `Prediction` に結果を書き込む。ワークスペースと出力ベクトルの大きさを決めるウォームアップを 1 回行えば、同じバッチサイズの呼び出しはヒープを確保しない。
+`FittedGpr` は `QueryWorkspace` を 1 つ持つ。予測に必要な一時領域（変換後のクエリ、交差共分散、三角求解の結果、カーネルの入れ子スクラッチ）はすべてここにある。`FittedGpr::predict_into` と `FittedGpr::predict_with_into` は、利用者が持つ `Prediction` に結果を書き込む。ワークスペースと出力ベクトルの大きさを決めるウォームアップを 1 回行えば、同じか小さいバッチサイズの呼び出しはヒープを確保しない。
 
 次のプログラムは、確保回数を数えるグローバル `operator new` を差し込み（ライブラリは静的ライブラリなので、ライブラリ内の確保もこの `operator new` を通る）、2 特徴量のモデルを学習して確保回数を数える。
 
@@ -50,16 +50,12 @@ larger batch (256 points): first call 8 allocations, second call 0
 ### 確保なし予測の規則
 
 1. **`Prediction` を 1 つ使い回す。** `mean` と `variance` の容量が呼び出し間で残る。
-2. **バッチサイズは固定するか、増やす。** ワークスペースは単調に増える。大きなバッチでは 1 回だけ確保が起き（上の最終行）、以後は確保なしになる。
+2. **バッチサイズは自由に変えてよい。** ワークスペースは増えるだけである。大きなバッチでは 1 回だけ確保が起き（上の最終行）、小さなバッチは既存の領域を再利用し、以後は確保なしになる。
 3. **分散の種類は `PredictOptions` で選ぶ。** `predict_into(xs, out, options)` と `predict_with_into(xs, options, out)` は `PredictOptions` を受け取る。`VarianceKind::Latent` は分散から観測ノイズを除き、`VarianceKind::Observation`（既定）は含める。
 4. **スレッドごとに `FittedGpr` を 1 つ持つ。** 下の警告を参照。
 
 :::{warning}
 `predict_into` は `const` メンバ関数だが、モデル内部の `QueryWorkspace` を書き換える。同じ `FittedGpr` に対して、複数のスレッドが同時に `predict`、`predict_into`、`predict_covariance`、`sample` を呼んではならない。代わりにモデルをコピーする。コピーコンストラクタは、コピー側に空の `QueryWorkspace` を持たせる。ワーカースレッドごとに独立したオブジェクトを渡せる。
-:::
-
-:::{warning}
-現行版では、同じ `FittedGpr` で、先に呼んだ大きなバッチより**小さな**バッチを渡すと `GprErrorCode::LengthMismatch` で失敗する（8 点のバッチの後に 3 点を渡すと `length mismatch: expected 3 values, got 8`）。これまでに渡したどのバッチと比べても、同じか大きいバッチなら受理される。修正されるまでは、`predict_into` を固定のバッチサイズで呼ぶ（最後のバッチは有効な点を繰り返して埋め、余分な結果を捨てる）か、バッチが小さくなる時点でモデルの新しいコピーから予測する。{doc}`use-low-level-building-blocks` で扱う低レベルの `predict_into<P>` は、この問題の影響を受けない。
 :::
 
 :::{note}
@@ -210,7 +206,7 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 |---|---|
 | `FittedGpr::predict_into`、`FittedGpr::predict_with_into` | 利用者が持つ `Prediction` に予測を書く。ウォームアップ後は確保なし |
 | `Prediction`、`PredictOptions`、`VarianceKind` | 結果の入れ物と、分散の選択（`Latent`、`Observation`） |
-| `QueryWorkspace<P>` | 予測時のバッファ。`ensure` と `ensure_prediction` で大きさを決める |
+| `QueryWorkspace<P>` | 予測時のバッファ。`ensure` で大きさを決める |
 | `FitBuffers<P>`、`WorkspaceCore<P>`、`HessianScratch<S>` | 学習用バッファと、遅延確保されるヘッセ行列用の部分 |
 | `FitPolicy`、`CholeskyBuffer`、`DistanceCachePolicy` | メモリと速度のポリシー。プリセットは `prefer_speed` と `prefer_memory` |
 | `Retain`、`Reuse` | `CholeskyBuffer` の列挙子 |

@@ -20,7 +20,7 @@
 
 ## スコープの基本原則
 
-- 対象は **Exact GPR**（`Gpr` / `FittedGpr`、全 10 種の組込みカーネル葉・合成・`Custom`、供給二乗距離 `DistanceKernel`、前処理変換、`Double`/`Single`/`MixedPrecision`、`KernelExp`、5 種最適化器、`persist`）に限る。
+- 対象は **Exact GPR**（`Gpr` / `FittedGpr`、供給二乗距離で学習する `DistanceGpr` / `FittedDistanceGpr`（[ADR 0003](docs/internal/adr/0003-supplied-distance-models.md)）、全 10 種の組込みカーネル葉・合成・`Custom`、供給二乗距離 `DistanceKernel`、前処理変換、`Double`/`Single`/`MixedPrecision`、`KernelExp`、5 種最適化器、`persist`）に限る。
 - `Sgpr` / `Svgp` / `OnlineGpr`（`LdltStore` / `PointId` / `ldlt` persist）と誘導点座標微分は対象外とする。
 - 公開ヘッダ（`include/cxxgpr/`）へ Eigen・nlohmann/json・OpenMP の型やヘッダを露出させない。例外は API 境界へ送出せず、`std::expected<T, GprError>` を返す。入力行列は列優先（column-major）とする。
 

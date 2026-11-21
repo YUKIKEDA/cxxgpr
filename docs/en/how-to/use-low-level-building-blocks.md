@@ -359,12 +359,10 @@ The standard deviation includes the observation noise (`VarianceKind::Observatio
 
 | Member | Meaning |
 |---|---|
-| `ensure(n, m, d, nested_depth)` | Grows every buffer, including `query_dist`, so that the workspace can serve $n$ training points, $m$ queries and $d$ features; never shrinks |
-| `ensure_prediction(n, m, d, nested_depth)` | The same, but leaves `query_dist` untouched (the point-based paths do not need it) |
+| `ensure(n, m, d, nested_depth)` | Grows every buffer so that the workspace can serve $n$ training points, $m$ queries and $d$ features; never shrinks |
 | `query_xs`, `query_x` | The transformed queries in `double` and in `Storage` (m × d) |
 | `query_k_star`, `query_scratch` | Cross-covariance $K_*$ (later $L^{-1}K_*$) and its scratch (n × m) |
 | `query_nested` | `NestedBuffers` for the cross-covariance tree |
-| `query_dist` | Train-test squared distances (n × m) |
 | `query_kss`, `query_diag_scratch` | Prior variances $k(x_*,x_*)$ and the diagonal-evaluation scratch |
 | `train_n`, `query_m`, `dims` | The capacities last requested |
 

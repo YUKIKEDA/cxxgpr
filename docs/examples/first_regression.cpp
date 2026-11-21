@@ -71,7 +71,7 @@ int main()
     std::cout << "signal variance = " << std::exp(log_params[0]) << ", lengthscale = " << std::exp(log_params[1])
               << '\n';
     std::cout << "noise variance = " << fitted->likelihood().noise_variance() << " (standardised scale)\n";
-    std::cout << "log marginal likelihood = " << fitted->log_marginal_likelihood() << '\n';
+    std::cout << "negative log marginal likelihood = " << fitted->neg_log_marginal_likelihood() << '\n';
     // [end]
     bool ok = true;
     for (std::size_t i = 0; i < x_query.size(); ++i)

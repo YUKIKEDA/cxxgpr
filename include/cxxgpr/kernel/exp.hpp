@@ -28,7 +28,7 @@ namespace cxxgpr
     {
         /// @brief Exact standard library std::exp in the storage scalar.
         Accurate,
-        /// @brief Range-reduced degree-7 minimax-style Taylor polynomial approximation in the storage scalar.
+        /// @brief Range-reduced degree-7 Taylor polynomial approximation in the storage scalar.
         FastApprox,
     };
 

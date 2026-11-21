@@ -2,7 +2,7 @@
 
 The canonical source for the order and state of work. A row carries only its ID, kind, title, Issue, and state; detailed completion criteria are written in the Issue. Rows are added or removed only after a Grill, and only the PR that finishes a row rewrites "Now".
 
-**Now**: complete (all rows through REL-4 are done)
+**Now**: REL-6 in progress (all rows through REL-5 are done; REL-7 follows)
 
 The goal is to provide the **Exact GPR** model as the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), the publication preparation (REL-1, REL-2), and the user documentation (REL-3), and the release workflow (REL-4). The first release is the owner's decision; see [release.md](release.md).
 
@@ -97,6 +97,10 @@ flowchart LR
 | REL-2 | Task | Publication review gate (`publish-review`, third-party notices, bilingual README check) | #46 | Done |
 | REL-3 | Task | User documentation: Diataxis-structured user docs (en/ja) covering every public API | #82 | Done |
 | REL-4 | Task | Release workflow (draft GitHub Release with per-platform packages and documentation) and README rewrite | #91 | Done |
+| REL-5 | Design | Supplied-distance models: specification of `DistanceGpr` / `FittedDistanceGpr` (DES-21) | #104 | Done |
+| REL-6 | Feat | `DistanceGpr` / `FittedDistanceGpr`: fit, factor, predict, covariance, sampling, LOO for `DistanceOnly` and `WithPoints` | #105 | Todo |
+| REL-7 | Feat | Persistence of supplied-distance models (FMT-07, `LoadedDistanceGpr<C>`) | #106 | Todo |
+| REL-9 | Design | Align the `OptimizationNotConverged` specification with the implementation: built-in optimizers report non-convergence as success with `converged == false`; the code remains for user-defined optimizers | #111 | Done |
 | REL-11 | Design | Per-save pairing identifier of `config.json` and `model.safetensors` (FMT-09): specification, then implementation for `LoadedGpr` and `LoadedDistanceGpr<C>` after REL-7 and PR #101 merge | #114 | In progress |
 
 ## Out of scope

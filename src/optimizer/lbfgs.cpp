@@ -273,7 +273,9 @@ namespace cxxgpr::optimizer
         /// @brief Runs a single-start L-BFGS trajectory from initial_theta in unconstrained logit space.
         /// @details Maps initial_theta into z, iteratively evaluates two-loop descent directions, performs
         /// Moré–Thuente strong-Wolfe line search with EvalCache reuse and Stage 1 modified function
-        /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap.
+        /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap. The
+        /// first trial step without curvature history is scaled to at most one unit in z; a line-search failure counts
+        /// as converged only at the function-precision gradient floor sqrt(tolerance).
         /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
         /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
         /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
@@ -311,7 +313,12 @@ namespace cxxgpr::optimizer
             }
             double f_cur = *f_res;
 
+            // The stopping tests use the log-space point and gradient of the current iterate and of the best point,
+            // because the unconstrained gradient vanishes wherever the logit transform saturates.
+            std::vector<double> theta_cur(initial_theta.begin(), initial_theta.end());
+            std::vector<double> grad_theta_cur(grad_theta_buf);
             std::vector<double> best_theta(initial_theta.begin(), initial_theta.end());
+            std::vector<double> best_grad_theta(grad_theta_buf);
             double best_val = f_cur;
 
             std::deque<LbfgsPair> history;
@@ -330,15 +337,14 @@ namespace cxxgpr::optimizer
             constexpr std::size_t k_max_ls_fev = 20U;
 
             std::size_t iter = 0;
-            bool converged = false;
+            bool search_failed = false;
 
             for (; iter < max_iterations; ++iter)
             {
-                const double g_norm = detail::norm2_vec(grad_z);
-                const double z_scale = std::max(1.0, detail::norm2_vec(z));
-                if (g_norm <= tolerance * z_scale)
+                // Stop at a first-order stationary point of the bound-constrained problem in log space.
+                if (detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds)
+                    <= detail::stationarity_threshold(theta_cur, tolerance))
                 {
-                    converged = true;
                     break;
                 }
 
@@ -355,14 +361,18 @@ namespace cxxgpr::optimizer
                     dg_init = detail::dot_vec(grad_z, dir);
                     if (dg_init >= 0.0)
                     {
-                        converged = true;
+                        // The unconstrained gradient is exactly zero; the final classification decides convergence.
                         break;
                     }
                 }
 
                 const double f_init = f_cur;
                 const double dg_test = k_c1 * dg_init;
-                double stp = 1.0;
+                const double f_band = detail::value_resolution(f_init);
+                // Without curvature information the direction is the raw negative gradient, whose length is arbitrary.
+                // Scale the first trial step so it moves at most one unit in z (Nocedal & Wright, eq. 7.20); a unit
+                // step along a large gradient otherwise jumps to the saturated, flat region of the bounds.
+                double stp = history.empty() ? std::min(1.0, 1.0 / detail::norm2_vec(dir)) : 1.0;
                 double width = k_stp_max - k_stp_min;
                 double width1 = 2.0 * width;
                 bool stage1 = true;
@@ -397,6 +407,9 @@ namespace cxxgpr::optimizer
                         cache.eval_unconstrained(obj, bounds, z_trial, theta_buf, d1_buf, grad_theta_buf, grad_trial);
                     if (!trial_res.has_value())
                     {
+                        // A failed evaluation leaves the scratch buffers describing the failed point; drop the cached
+                        // entry so a later hit cannot pair the cached value with those buffers.
+                        cache.clear();
                         stp *= 0.5;
                         if (stp < k_stp_min)
                         {
@@ -410,13 +423,22 @@ namespace cxxgpr::optimizer
                     {
                         best_val = f_next;
                         best_theta.assign(theta_buf.begin(), theta_buf.end());
+                        best_grad_theta.assign(grad_theta_buf.begin(), grad_theta_buf.end());
                     }
 
                     const double dg = detail::dot_vec(grad_trial, dir);
                     const double f_test1 = f_init + (stp * dg_test);
 
+                    // When the first-order decrease of this step is below the value resolution of the objective and
+                    // the computed value stays within that band, the value difference is rounding noise. The search
+                    // then works on the value integrated from the directional derivatives (trapezoidal rule), which
+                    // is reliable where the values are not, so steps are still accepted and interpolated near a
+                    // minimizer.
+                    const bool unresolved = -(stp * dg_init) <= f_band && std::abs(f_next - f_init) <= f_band;
+                    const double f_ls = unresolved ? f_init + (0.5 * stp * (dg_init + dg)) : f_next;
+
                     // Accept immediately when both strong-Wolfe sufficient decrease and curvature conditions hold.
-                    if (f_next <= f_test1 && std::abs(dg) <= -k_c2 * dg_init)
+                    if (f_ls <= f_test1 && std::abs(dg) <= -k_c2 * dg_init)
                     {
                         step_accepted = true;
                         break;
@@ -426,7 +448,7 @@ namespace cxxgpr::optimizer
                     if (ls_state.bracketed
                         && (stp <= stpmin_cur || stp >= stpmax_cur || (stpmax_cur - stpmin_cur) <= k_xtol * stpmax_cur))
                     {
-                        if (f_next <= f_init)
+                        if (f_ls <= f_init)
                         {
                             step_accepted = true;
                         }
@@ -434,15 +456,15 @@ namespace cxxgpr::optimizer
                     }
 
                     // Transition from Moré–Thuente Stage 1 (modified psi) to Stage 2 once sufficient decrease holds.
-                    if (stage1 && f_next <= f_test1 && dg >= std::min(k_c1, k_c2) * dg_init)
+                    if (stage1 && f_ls <= f_test1 && dg >= std::min(k_c1, k_c2) * dg_init)
                     {
                         stage1 = false;
                     }
 
-                    if (stage1 && f_next <= ls_state.fx && f_next > f_test1)
+                    if (stage1 && f_ls <= ls_state.fx && f_ls > f_test1)
                     {
                         // In Stage 1, pass shifted auxiliary function psi(alpha) = f(alpha) - alpha * dg_test to cstep.
-                        const double fm = f_next - (stp * dg_test);
+                        const double fm = f_ls - (stp * dg_test);
                         const double fxm = ls_state.fx - (ls_state.stx * dg_test);
                         const double fym = ls_state.fy - (ls_state.sty * dg_test);
                         const double dgm = dg - dg_test;
@@ -469,7 +491,7 @@ namespace cxxgpr::optimizer
                     }
                     else
                     {
-                        stp = cstep(ls_state, stp, f_next, dg, stpmin_cur, std::min(k_stp_max, stpmax_cur));
+                        stp = cstep(ls_state, stp, f_ls, dg, stpmin_cur, std::min(k_stp_max, stpmax_cur));
                     }
 
                     // Force a bisection step whenever two iterations fail to shrink bracket width by at least 0.66.
@@ -505,6 +527,9 @@ namespace cxxgpr::optimizer
                     }
                     if (!step_accepted)
                     {
+                        // No step decreases the objective; the final classification decides whether this is the
+                        // function-precision floor or a failure.
+                        search_failed = true;
                         break;
                     }
                 }
@@ -520,6 +545,8 @@ namespace cxxgpr::optimizer
 
                 z = z_trial;
                 grad_z = grad_trial;
+                theta_cur.assign(theta_buf.begin(), theta_buf.end());
+                grad_theta_cur.assign(grad_theta_buf.begin(), grad_theta_buf.end());
                 const double f_prev = f_cur;
                 f_cur = f_next;
 
@@ -527,6 +554,7 @@ namespace cxxgpr::optimizer
                 {
                     best_val = f_cur;
                     best_theta.assign(theta_buf.begin(), theta_buf.end());
+                    best_grad_theta.assign(grad_theta_buf.begin(), grad_theta_buf.end());
                 }
 
                 // Retain secant pair only when curvature condition s^T y > 1e-12 * ||s|| * ||y|| holds.
@@ -547,19 +575,37 @@ namespace cxxgpr::optimizer
 
                 const double rel_f = std::abs(f_prev - f_cur) / std::max({1.0, std::abs(f_prev), std::abs(f_cur)});
                 if (rel_f <= tolerance * tolerance
-                    && detail::norm2_vec(grad_z) <= tolerance * std::max(1.0, detail::norm2_vec(z)))
+                    && detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds)
+                        <= detail::stationarity_threshold(theta_cur, tolerance))
                 {
-                    converged = true;
                     ++iter;
                     break;
                 }
             }
 
+            // Return the last iterate when it is stationary: it passes the stationarity test, or, after a failed line
+            // search, its projected gradient is at the function-precision floor where no decrease can be resolved.
+            const double chi_cur = detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds);
+            if (chi_cur <= detail::stationarity_threshold(theta_cur, tolerance)
+                || (search_failed && chi_cur <= detail::precision_floor(f_cur)))
+            {
+                return OptimizerResult{
+                    .params = std::move(theta_cur),
+                    .value = f_cur,
+                    .iterations = iter,
+                    .converged = true,
+                };
+            }
+
+            // Otherwise return the lowest-value point evaluated, which can be a line-search trial point; converged
+            // states whether that returned point itself passes the stationarity test.
+            const bool best_converged = detail::projected_gradient_norm(best_theta, best_grad_theta, bounds)
+                <= detail::stationarity_threshold(best_theta, tolerance);
             return OptimizerResult{
                 .params = std::move(best_theta),
                 .value = best_val,
                 .iterations = iter,
-                .converged = converged,
+                .converged = best_converged,
             };
         }
 

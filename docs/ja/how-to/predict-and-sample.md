@@ -35,7 +35,7 @@ x = 5.0000  mean = -1.0728  sd = 0.0999  sin(x) = -0.9589
 two-column query: input dimension mismatch: X.ncols()=2, expected 1 (x_dim 2, expected 1)
 ```
 
-予測分散が負になることはない。内部で潜在分散を 0 で切り上げてからノイズ分散を足すため、丸め誤差で負の値が出ることはない。
+予測分散が負になることはない。内部で潜在分散を 0 で切り上げてからノイズ分散を足すため、丸め誤差で負の値が出ることはない。潜在分散が NaN か無限大のときは切り上げず、予測は `GprErrorCode::NonFiniteKernelValue` で失敗する。
 
 ### 潜在分散と観測分散
 

@@ -937,7 +937,9 @@ namespace cxxgpr
         /// column order for deterministic bitwise-identical parallel reduction.
         /// @param[in] x Column-major n x d training coordinate matrix.
         /// @param[in] cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
-        /// @param[in] weight_lower Lower-triangular symmetric weight matrix W of shape n x n.
+        /// @param[in] weight_lower Lower-triangular symmetric weight matrix W of shape n x n. Only the lower triangle
+        /// is read and it is mirrored: each strictly-lower entry counts twice (once per symmetric position) and each
+        /// diagonal entry once, so out_grads equals the Frobenius product with the full symmetric matrix.
         /// @param[out] out_grads Destination span of length num_params() receiving Frobenius inner products.
         /// @param[in,out] kernel_scratch Non-aliasing n x n scratch matrix buffer.
         /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= nested_depth() and shape >= n x n.
