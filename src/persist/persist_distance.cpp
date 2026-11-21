@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -30,6 +32,19 @@ namespace cxxgpr::persist
 
     namespace
     {
+        /// @brief Computes the length n (n + 1) / 2 of a packed lower triangle without overflowing.
+        /// @param[in] n Order of the symmetric matrix.
+        /// @return Packed length, or GprError when it does not fit in std::size_t.
+        /// @retval GprErrorCode::SizeOverflow When n (n + 1) / 2 exceeds std::size_t.
+        [[nodiscard]] std::expected<std::size_t, GprError> checked_packed_length(std::size_t n)
+        {
+            if (n == std::numeric_limits<std::size_t>::max())
+            {
+                return std::unexpected(GprError::size_overflow());
+            }
+            // Halve the even factor first so that the product is exact whenever the result fits.
+            return (n % 2U == 0U) ? checked_mul(n / 2U, n + 1U) : checked_mul(n, (n + 1U) / 2U);
+        }
 
         /// @brief Views a typed span as raw bytes.
         /// @tparam T Element type.
@@ -206,7 +221,12 @@ namespace cxxgpr::persist
             }
 
             const std::size_t n = input.n_train;
-            const std::size_t packed_len = n * (n + 1U) / 2U;
+            const auto packed_len_or = checked_packed_length(n);
+            if (!packed_len_or.has_value())
+            {
+                return std::unexpected(packed_len_or.error());
+            }
+            const std::size_t packed_len = *packed_len_or;
             std::vector<std::string> names;
             names.reserve(desc.slots.size());
             for (std::size_t k = 0; k < desc.slots.size(); ++k)
@@ -503,7 +523,18 @@ namespace cxxgpr::persist
 
         // Unpack every stored table into full symmetric matrices and bind them to the new slots.
         const bool tables_f64 = cfg->precision_kind == PersistPrecisionKind::Double;
-        const std::size_t packed_len = n * (n + 1U) / 2U;
+        // n comes from config.json, so size arithmetic on it is checked before any allocation.
+        const auto packed_len_or = checked_packed_length(n);
+        if (!packed_len_or.has_value())
+        {
+            return std::unexpected(packed_len_or.error());
+        }
+        const std::size_t packed_len = *packed_len_or;
+        const auto full_len = checked_mul(n, n);
+        if (!full_len.has_value())
+        {
+            return std::unexpected(full_len.error());
+        }
         const auto slots = kernel->slots();
         std::vector<std::vector<double>> matrices;
         std::vector<std::vector<MatrixRef<double>>> ard_refs(slots.size());
@@ -525,7 +556,7 @@ namespace cxxgpr::persist
             const std::size_t first = matrices.size();
             for (std::size_t m = 0; m < dims; ++m)
             {
-                std::vector<double> full(n * n);
+                std::vector<double> full(*full_len);
                 unpack_symmetric(
                     std::span<const double>(packed->data() + (m * packed_len), packed_len), n, full.data()
                 );
