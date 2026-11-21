@@ -1045,8 +1045,10 @@ namespace cxxgpr::detail
                 }
             }
 
-            // Apply fitted input transform in double precision before casting down to Storage.
-            if (auto ap = payload.input_transform->apply(workspace.query_xs, m, d); !ap.has_value())
+            // Apply fitted input transform in double precision before casting down to Storage. The workspace only
+            // grows, so restrict the span to exactly m * d values (a smaller batch may follow a larger one).
+            const std::span<double> query_span(workspace.query_xs.data(), m * d);
+            if (auto ap = payload.input_transform->apply(query_span, m, d); !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
             }

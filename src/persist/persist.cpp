@@ -349,6 +349,73 @@ namespace cxxgpr::persist
             return state;
         }
 
+        /// @brief Validates, stages, transforms, and casts a query matrix into a loaded state's query workspace.
+        /// @details Grows st.query_ws when needed, copies xs column-major into query_xs while checking
+        /// finiteness, applies in_tf to exactly the first m * d staged values, and casts them to Storage in
+        /// query_x. The workspace only grows, so every access is bounded by m * d rather than by the vector
+        /// sizes; a smaller batch may therefore follow a larger one on the same loaded model.
+        /// @tparam P Precision policy active in st.
+        /// @param[in] st Loaded typed precision state owning the mutable query workspace.
+        /// @param[in] in_tf Restored fitted input feature transform.
+        /// @param[in] n Training sample count n.
+        /// @param[in] d Training feature dimension d.
+        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @return Column-major MatrixRef<Storage> (m x d) backed by st.query_ws.query_x, or GprError.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d.
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        template <PrecisionPolicyConcept P>
+        [[nodiscard]] std::expected<MatrixRef<typename P::Storage>, GprError> stage_loaded_query(
+            const LoadedTypedState<P>& st,
+            const transform::FittedInputTransform& in_tf,
+            std::size_t n,
+            std::size_t d,
+            MatrixRef<double> xs
+        )
+        {
+            using Storage = P::Storage;
+
+            if (xs.is_empty() || xs.data() == nullptr)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            const std::size_t m = xs.rows();
+            if (xs.cols() != d)
+            {
+                return std::unexpected(GprError::dimension_mismatch(xs.cols(), d));
+            }
+            // ensure() rejects an overflowing m * d before any buffer is indexed below.
+            if (auto ens = st.query_ws.ensure(n, m, d, st.compiled_kernel->nested_depth()); !ens.has_value())
+            {
+                return std::unexpected(std::move(ens).error());
+            }
+            // Copy query coordinates column-major while checking finiteness before applying input transform.
+            for (std::size_t col = 0; col < d; ++col)
+            {
+                for (std::size_t row = 0; row < m; ++row)
+                {
+                    const double val = xs(row, col);
+                    if (!std::isfinite(val))
+                    {
+                        return std::unexpected(GprError::non_finite_input());
+                    }
+                    st.query_ws.query_xs[(col * m) + row] = val;
+                }
+            }
+            // The transform checks its span length against m * d, so pass exactly the staged prefix.
+            const std::size_t md = m * d;
+            const std::span<double> staged(st.query_ws.query_xs.data(), md);
+            if (auto ap = in_tf.apply(staged, m, d); !ap.has_value())
+            {
+                return std::unexpected(std::move(ap).error());
+            }
+            for (std::size_t i = 0; i < md; ++i)
+            {
+                st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
+            }
+            return MatrixRef<Storage>(st.query_ws.query_x.data(), m, d, m);
+        }
+
         /// @brief Evaluates double-promoted posterior mean and variance on a loaded precision state.
         /// @details Validates xs, applies in_tf, casts to Storage, invokes predict_into<P>(), promotes float
         /// outputs to double when Refine is float, and applies tgt_tf inverse mean and variance transforms.
@@ -379,43 +446,15 @@ namespace cxxgpr::persist
             using Storage = P::Storage;
             using Refine = P::Refine;
 
-            if (xs.is_empty() || xs.data() == nullptr)
+            auto xq = stage_loaded_query(st, in_tf, n, d, xs);
+            if (!xq.has_value())
             {
-                return std::unexpected(GprError::empty_input());
+                return std::unexpected(std::move(xq).error());
             }
-            const std::size_t m = xs.rows();
-            if (xs.cols() != d)
-            {
-                return std::unexpected(GprError::dimension_mismatch(xs.cols(), d));
-            }
-            if (auto ens = st.query_ws.ensure(n, m, d, st.compiled_kernel->nested_depth()); !ens.has_value())
-            {
-                return ens;
-            }
-            // Copy query coordinates column-major while checking finiteness before applying input transform.
-            for (std::size_t col = 0; col < d; ++col)
-            {
-                for (std::size_t row = 0; row < m; ++row)
-                {
-                    const double val = xs(row, col);
-                    if (!std::isfinite(val))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    st.query_ws.query_xs[(col * m) + row] = val;
-                }
-            }
-            if (auto ap = in_tf.apply(st.query_ws.query_xs, m, d); !ap.has_value())
-            {
-                return ap;
-            }
-            for (std::size_t i = 0; i < m * d; ++i)
-            {
-                st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
-            }
+            const MatrixRef<Storage> xq_ref = *xq;
+            const std::size_t m = xq_ref.rows();
             const MatrixRef<Storage> x_train_ref(st.x_train.data(), n, d, n);
             const MatrixRef<Storage> l_ref(st.l_view.data(), n, n, n);
-            const MatrixRef<Storage> xq_ref(st.query_ws.query_x.data(), m, d, m);
 
             // Predict directly into out for double Refine, or promote via tmp_pred for SinglePrecision.
             if constexpr (std::same_as<Refine, double>)
@@ -928,44 +967,15 @@ namespace cxxgpr::persist
                              ) -> std::expected<PredictiveCovariance<double>, GprError>
         {
             using Storage = P::Storage;
-            if (xs.is_empty() || xs.data() == nullptr)
+            auto xq = stage_loaded_query(st, *impl_->x_transform, impl_->n, impl_->d, xs);
+            if (!xq.has_value())
             {
-                return std::unexpected(GprError::empty_input());
+                return std::unexpected(std::move(xq).error());
             }
-            const std::size_t m = xs.rows();
-            if (xs.cols() != impl_->d)
-            {
-                return std::unexpected(GprError::dimension_mismatch(xs.cols(), impl_->d));
-            }
-            if (auto ens = st.query_ws.ensure(impl_->n, m, impl_->d, st.compiled_kernel->nested_depth());
-                !ens.has_value())
-            {
-                return std::unexpected(std::move(ens).error());
-            }
-            // Validate finiteness and stage column-major query coordinates before applying x_transform.
-            for (std::size_t col = 0; col < impl_->d; ++col)
-            {
-                for (std::size_t row = 0; row < m; ++row)
-                {
-                    const double val = xs(row, col);
-                    if (!std::isfinite(val))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    st.query_ws.query_xs[(col * m) + row] = val;
-                }
-            }
-            if (auto ap = impl_->x_transform->apply(st.query_ws.query_xs, m, impl_->d); !ap.has_value())
-            {
-                return std::unexpected(std::move(ap).error());
-            }
-            for (std::size_t i = 0; i < m * impl_->d; ++i)
-            {
-                st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
-            }
+            const MatrixRef<Storage> xq_ref = *xq;
+            const std::size_t m = xq_ref.rows();
             const MatrixRef<Storage> x_train_ref(st.x_train.data(), impl_->n, impl_->d, impl_->n);
             const MatrixRef<Storage> l_ref(st.l_view.data(), impl_->n, impl_->n, impl_->n);
-            const MatrixRef<Storage> xq_ref(st.query_ws.query_x.data(), m, impl_->d, m);
             auto cov_res = cxxgpr::predict_covariance<P>(
                 *st.compiled_kernel, impl_->likelihood, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws
             );
@@ -1013,43 +1023,15 @@ namespace cxxgpr::persist
             [&]<PrecisionPolicyConcept P>(const LoadedTypedState<P>& st) -> std::expected<std::vector<double>, GprError>
         {
             using Storage = P::Storage;
-            if (xs.is_empty() || xs.data() == nullptr)
+            auto xq = stage_loaded_query(st, *impl_->x_transform, impl_->n, impl_->d, xs);
+            if (!xq.has_value())
             {
-                return std::unexpected(GprError::empty_input());
+                return std::unexpected(std::move(xq).error());
             }
-            const std::size_t m = xs.rows();
-            if (xs.cols() != impl_->d)
-            {
-                return std::unexpected(GprError::dimension_mismatch(xs.cols(), impl_->d));
-            }
-            if (auto ens = st.query_ws.ensure(impl_->n, m, impl_->d, st.compiled_kernel->nested_depth());
-                !ens.has_value())
-            {
-                return std::unexpected(std::move(ens).error());
-            }
-            for (std::size_t col = 0; col < impl_->d; ++col)
-            {
-                for (std::size_t row = 0; row < m; ++row)
-                {
-                    const double val = xs(row, col);
-                    if (!std::isfinite(val))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    st.query_ws.query_xs[(col * m) + row] = val;
-                }
-            }
-            if (auto ap = impl_->x_transform->apply(st.query_ws.query_xs, m, impl_->d); !ap.has_value())
-            {
-                return std::unexpected(std::move(ap).error());
-            }
-            for (std::size_t i = 0; i < m * impl_->d; ++i)
-            {
-                st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
-            }
+            const MatrixRef<Storage> xq_ref = *xq;
+            const std::size_t m = xq_ref.rows();
             const MatrixRef<Storage> x_train_ref(st.x_train.data(), impl_->n, impl_->d, impl_->n);
             const MatrixRef<Storage> l_ref(st.l_view.data(), impl_->n, impl_->n, impl_->n);
-            const MatrixRef<Storage> xq_ref(st.query_ws.query_x.data(), m, impl_->d, m);
             auto raw_draws = cxxgpr::sample<P>(
                 *st.compiled_kernel, impl_->likelihood, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed,
                 options, st.query_ws, jitter
