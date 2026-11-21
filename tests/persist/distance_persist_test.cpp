@@ -28,6 +28,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -35,6 +36,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include "small_stack.hpp"
 
 namespace
 {
@@ -846,6 +849,62 @@ namespace
         }
         EXPECT_EQ(slurp(good_dir / "config.json"), config_before);
         EXPECT_EQ(slurp(good_dir / "model.safetensors"), tensors_before);
+    }
+
+    /// @brief Property: save and load of the deepest accepted supplied-distance model, and save of the shallowest
+    /// refused one, run on a thread with a small stack.
+    /// @details The config.json codec and the rebuild of the distance kernel on load recurse once per composite. The
+    /// models are fitted on the main thread; every save, load, and destruction of the loaded model runs on the small
+    /// stack. The chains are the ones of SaveRejectsAConfigNestedDeeperThanLoadAccepts.
+    TEST(DistancePersistTest, SaveAndLoadOfTheDeepestAcceptedModelFitInASmallStack)
+    {
+        // Spec: FMT-02, FMT-07, FMT-08
+        const Fixture f = make_fixture(4, 2);
+        const cxxgpr::ScalarDistance slot;
+        const auto white = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.01).value());
+        auto chain = [&](std::size_t m)
+        {
+            auto k = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(slot.rbf(cxxgpr::RbfKernel::create(1.0).value()));
+            for (std::size_t i = 0; i < m; ++i)
+            {
+                k = k + white;
+            }
+            const Binder train(f, 0, k.slots());
+            return cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(k).factor(train.source(), f.y);
+        };
+        const TempDir parent("distance_small_stack");
+        // Depth 2m + 6: 61 composites are accepted and 62 are refused.
+        const auto deep = chain(61U);
+        const auto too_deep = chain(62U);
+        ASSERT_TRUE(deep.has_value());
+        ASSERT_TRUE(too_deep.has_value());
+
+        // Outcomes are recorded on the small stack and checked on the main thread.
+        bool saved = false;
+        bool loaded = false;
+        std::optional<cxxgpr::GprError> refused;
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), [&]
+        {
+            const auto dir = parent.path / "accepted";
+            saved = cxxgpr::persist::save_with_factor(*deep, dir).has_value();
+            loaded = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(dir).has_value();
+            auto result = cxxgpr::persist::save_with_factor(*too_deep, parent.path / "refused");
+            if (!result.has_value())
+            {
+                refused = std::move(result).error();
+            }
+        }
+        );
+        ASSERT_TRUE(ran);
+        EXPECT_TRUE(saved);
+        EXPECT_TRUE(loaded);
+        if (!refused.has_value())
+        {
+            FAIL() << "save accepted a model nested deeper than load accepts";
+        }
+        EXPECT_EQ(refused->code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(refused->persist_error_kind(), cxxgpr::PersistErrorKind::Config);
     }
 
     /// @brief Slot numbers out of depth-first first-appearance order, and coordinate transforms on a distance-only

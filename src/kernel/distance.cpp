@@ -14,11 +14,13 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
 
+#include "core/noinline.hpp"
 #include "kernel/distance_desc.hpp"
 #include "kernel/distance_store.hpp"
 #include "kernel/exp_simd.hpp"
@@ -520,6 +522,38 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Writes the log-space parameters of one leaf at offset, in a stack frame of its own.
+        /// @details Keeps the std::expected temporary of the leaf query out of the frames of the recursive walk.
+        /// @param[in] leaf Kernel leaf to query.
+        /// @param[out] out Full flattened output parameter span.
+        /// @param[in] offset Index in out of the first parameter of leaf.
+        /// @param[out] status Set to the error of the leaf query when it fails.
+        /// @return Offset immediately following the parameters of leaf.
+        CXXGPR_NOINLINE std::size_t fill_leaf_params(
+            const KernelLeaf& leaf, std::span<double> out, std::size_t offset, std::expected<void, GprError>& status
+        )
+        {
+            const std::size_t count = detail::leaf_num_params(leaf);
+            status = detail::leaf_get_params(leaf, out.subspan(offset, count));
+            return offset + count;
+        }
+
+        /// @brief Writes the open intervals of one leaf at offset, in a stack frame of its own.
+        /// @details Keeps the std::expected temporary of the leaf query out of the frames of the recursive walk.
+        /// @param[in] leaf Kernel leaf to query.
+        /// @param[out] out Full flattened output interval span.
+        /// @param[in] offset Index in out of the first interval of leaf.
+        /// @param[out] status Set to the error of the leaf query when it fails.
+        /// @return Offset immediately following the intervals of leaf.
+        CXXGPR_NOINLINE std::size_t fill_leaf_bounds(
+            const KernelLeaf& leaf, std::span<Interval> out, std::size_t offset, std::expected<void, GprError>& status
+        )
+        {
+            const std::size_t count = detail::leaf_num_params(leaf);
+            status = detail::leaf_bounds_into(leaf, out.subspan(offset, count));
+            return offset + count;
+        }
+
     }  // namespace
 
     // --- Internal tree representation for DistanceKernel ---
@@ -719,9 +753,7 @@ namespace cxxgpr
             }
             if (leaf != nullptr)
             {
-                const std::size_t count = detail::leaf_num_params(*leaf);
-                status = detail::leaf_get_params(*leaf, out.subspan(offset, count));
-                return offset + count;
+                return fill_leaf_params(*leaf, out, offset, status);
             }
             if (const auto* sum = std::get_if<typename Node<Mode>::Sum>(&node.data))
             {
@@ -768,9 +800,7 @@ namespace cxxgpr
             }
             if (leaf != nullptr)
             {
-                const std::size_t count = detail::leaf_num_params(*leaf);
-                status = detail::leaf_bounds_into(*leaf, out.subspan(offset, count));
-                return offset + count;
+                return fill_leaf_bounds(*leaf, out, offset, status);
             }
             if (const auto* sum = std::get_if<typename Node<Mode>::Sum>(&node.data))
             {
@@ -798,13 +828,39 @@ namespace cxxgpr
             const Node<Mode>& node, std::span<const double> params, std::size_t& offset
         )
         {
+            std::expected<void, GprError> status;
+            auto updated = update_params_node<Mode>(node, params, offset, status);
+            if (updated == nullptr)
+            {
+                return std::unexpected(std::move(status).error());
+            }
+            return updated;
+        }
+
+        /// @brief Copies one leaf node with its log-space parameters replaced, in a stack frame of its own.
+        /// @details Clones the leaf before mutating it, so that a rejected slice leaves the source tree untouched.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] node Source leaf node: a supplied scalar, supplied ARD, or coordinate leaf.
+        /// @param[in] params Log-space parameter span for the entire kernel.
+        /// @param[in,out] offset Index in params of the first parameter of the leaf; advanced past them on success.
+        /// @param[out] status Set to the error of the leaf when it rejects its slice.
+        /// @return Newly allocated leaf node, or a null pointer when status holds the error.
+        template <DistanceModeConcept Mode>
+        CXXGPR_NOINLINE static std::shared_ptr<const Node<Mode>> update_leaf_node(
+            const Node<Mode>& node,
+            std::span<const double> params,
+            std::size_t& offset,
+            std::expected<void, GprError>& status
+        )
+        {
             if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
             {
                 KernelLeaf copy = s->leaf;
                 const std::size_t count = detail::leaf_num_params(copy);
                 if (auto res = detail::leaf_set_params(copy, params.subspan(offset, count)); !res.has_value())
                 {
-                    return std::unexpected(std::move(res).error());
+                    status = std::unexpected(std::move(res).error());
+                    return nullptr;
                 }
                 offset += count;
                 return std::make_shared<const Node<Mode>>(Node<Mode>{
@@ -817,54 +873,84 @@ namespace cxxgpr
                 const std::size_t count = detail::leaf_num_params(copy);
                 if (auto res = detail::leaf_set_params(copy, params.subspan(offset, count)); !res.has_value())
                 {
-                    return std::unexpected(std::move(res).error());
+                    status = std::unexpected(std::move(res).error());
+                    return nullptr;
                 }
                 offset += count;
                 return std::make_shared<const Node<Mode>>(Node<Mode>{
                     .data = SuppliedArdNode{.slot = a->slot, .dims = a->dims, .leaf = std::move(copy)}
                 });
             }
-            if (const auto* c = std::get_if<CoordLeafNode>(&node.data))
+            // The caller passes only leaves, so the remaining alternative is a coordinate leaf.
+            KernelLeaf copy = std::get<CoordLeafNode>(node.data).leaf;
+            const std::size_t count = detail::leaf_num_params(copy);
+            if (auto res = detail::leaf_set_params(copy, params.subspan(offset, count)); !res.has_value())
             {
-                KernelLeaf copy = c->leaf;
-                const std::size_t count = detail::leaf_num_params(copy);
-                if (auto res = detail::leaf_set_params(copy, params.subspan(offset, count)); !res.has_value())
-                {
-                    return std::unexpected(std::move(res).error());
-                }
-                offset += count;
-                return std::make_shared<const Node<Mode>>(Node<Mode>{.data = CoordLeafNode{.leaf = std::move(copy)}});
+                status = std::unexpected(std::move(res).error());
+                return nullptr;
             }
-            if (const auto* sum = std::get_if<typename Node<Mode>::Sum>(&node.data))
+            offset += count;
+            return std::make_shared<const Node<Mode>>(Node<Mode>{.data = CoordLeafNode{.leaf = std::move(copy)}});
+        }
+
+        /// @brief Joins two updated subtrees into a sum or product node, in a stack frame of its own.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in] lhs Updated left subtree.
+        /// @param[in] rhs Updated right subtree.
+        /// @return Newly allocated composite node.
+        template <DistanceModeConcept Mode>
+        CXXGPR_NOINLINE static std::shared_ptr<const Node<Mode>> join_updated_nodes(
+            bool sum, std::shared_ptr<const Node<Mode>> lhs, std::shared_ptr<const Node<Mode>> rhs
+        )
+        {
+            if (sum)
             {
-                auto lhs = with_updated_params<Mode>(*sum->lhs, params, offset);
-                if (!lhs.has_value())
-                {
-                    return std::unexpected(std::move(lhs).error());
-                }
-                auto rhs = with_updated_params<Mode>(*sum->rhs, params, offset);
-                if (!rhs.has_value())
-                {
-                    return std::unexpected(std::move(rhs).error());
-                }
                 return std::make_shared<const Node<Mode>>(Node<Mode>{
-                    .data = typename Node<Mode>::Sum{.lhs = *lhs, .rhs = *rhs}
+                    .data = typename Node<Mode>::Sum{.lhs = std::move(lhs), .rhs = std::move(rhs)}
                 });
             }
-            const auto& prod = std::get<typename Node<Mode>::Product>(node.data);
-            auto lhs = with_updated_params<Mode>(*prod.lhs, params, offset);
-            if (!lhs.has_value())
-            {
-                return std::unexpected(std::move(lhs).error());
-            }
-            auto rhs = with_updated_params<Mode>(*prod.rhs, params, offset);
-            if (!rhs.has_value())
-            {
-                return std::unexpected(std::move(rhs).error());
-            }
             return std::make_shared<const Node<Mode>>(Node<Mode>{
-                .data = typename Node<Mode>::Product{.lhs = *lhs, .rhs = *rhs}
+                .data = typename Node<Mode>::Product{.lhs = std::move(lhs), .rhs = std::move(rhs)}
             });
+        }
+
+        /// @brief Recursively constructs a new `Node<Mode>` tree with updated log-space parameters.
+        /// @details A nesting level keeps only its two updated subtrees on the stack: the leaf update, the join, and
+        /// the error run in frames of their own.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] node Source AST node to rebuild.
+        /// @param[in] params Log-space parameter span for the entire kernel.
+        /// @param[in,out] offset Running offset advanced across leaves in depth-first left-to-right order.
+        /// @param[out] status Set to the error of the first leaf that rejects its slice.
+        /// @return Newly allocated subtree, or a null pointer exactly when status holds the error.
+        template <DistanceModeConcept Mode>
+        static std::shared_ptr<const Node<Mode>> update_params_node(
+            const Node<Mode>& node,
+            std::span<const double> params,
+            std::size_t& offset,
+            std::expected<void, GprError>& status
+        )
+        {
+            const auto* sum = std::get_if<typename Node<Mode>::Sum>(&node.data);
+            const auto* prod = std::get_if<typename Node<Mode>::Product>(&node.data);
+            if (sum == nullptr && prod == nullptr)
+            {
+                return update_leaf_node<Mode>(node, params, offset, status);
+            }
+            const Node<Mode>& lhs_node = (sum != nullptr) ? *sum->lhs : *prod->lhs;
+            const Node<Mode>& rhs_node = (sum != nullptr) ? *sum->rhs : *prod->rhs;
+            auto lhs = update_params_node<Mode>(lhs_node, params, offset, status);
+            if (lhs == nullptr)
+            {
+                return nullptr;
+            }
+            auto rhs = update_params_node<Mode>(rhs_node, params, offset, status);
+            if (rhs == nullptr)
+            {
+                return nullptr;
+            }
+            return join_updated_nodes<Mode>(sum != nullptr, std::move(lhs), std::move(rhs));
         }
 
         /// @brief Collects depth-first left-to-right `ParameterBinding` descriptors across `node`.
@@ -4775,13 +4861,13 @@ namespace cxxgpr
             return std::unexpected(distance_config_error("leaf kind does not fit an ARD distance slot"));
         }
 
-        /// @brief Rebuilds one described subtree.
+        /// @brief Rebuilds one described leaf: a supplied leaf or a coordinate leaf.
         /// @tparam C Distance mode.
-        /// @param[in] node Described subtree.
+        /// @param[in] node Described leaf node.
         /// @param[in] slots Issued slot handles.
-        /// @return Rebuilt kernel, or GprError when a leaf does not fit the mode or its slot.
+        /// @return Rebuilt single-leaf kernel, or GprError when the leaf does not fit the mode or its slot.
         template <DistanceModeConcept C>
-        std::expected<DistanceKernel<C>, GprError> build_node(
+        std::expected<DistanceKernel<C>, GprError> build_leaf(
             const detail::DistanceNodeDesc& node, const IssuedSlots& slots
         )
         {
@@ -4802,50 +4888,139 @@ namespace cxxgpr
                     return std::move(*leaf);
                 }
             }
-            if (node.kind == Kind::Coord)
+            // The caller passes only leaves, so the remaining kind is a coordinate leaf.
+            if (!node.leaf.has_value())
             {
-                if (!node.leaf.has_value())
+                return std::unexpected(distance_config_error("coordinate leaf is missing"));
+            }
+            if constexpr (std::same_as<C, WithPoints>)
+            {
+                return DistanceKernel<WithPoints>(KernelSpec(*node.leaf));
+            }
+            else
+            {
+                if (const auto* c = std::get_if<ConstantKernel>(&*node.leaf))
                 {
-                    return std::unexpected(distance_config_error("coordinate leaf is missing"));
+                    return DistanceKernel<DistanceOnly>(*c);
                 }
-                if constexpr (std::same_as<C, WithPoints>)
+                if (const auto* w = std::get_if<WhiteKernel>(&*node.leaf))
                 {
-                    return DistanceKernel<WithPoints>(KernelSpec(*node.leaf));
+                    return DistanceKernel<DistanceOnly>(*w);
                 }
-                else
-                {
-                    if (const auto* c = std::get_if<ConstantKernel>(&*node.leaf))
-                    {
-                        return DistanceKernel<DistanceOnly>(*c);
-                    }
-                    if (const auto* w = std::get_if<WhiteKernel>(&*node.leaf))
-                    {
-                        return DistanceKernel<DistanceOnly>(*w);
-                    }
-                    return std::unexpected(
-                        distance_config_error("a distance-only model cannot contain a coordinate-dependent leaf")
-                    );
-                }
+                return std::unexpected(
+                    distance_config_error("a distance-only model cannot contain a coordinate-dependent leaf")
+                );
+            }
+        }
+
+        /// @brief Rebuilds one described leaf into out, in a stack frame of its own.
+        /// @tparam C Distance mode.
+        /// @param[in] node Described leaf node.
+        /// @param[in] slots Issued slot handles.
+        /// @param[out] out Destination of the rebuilt kernel.
+        /// @param[out] status Set to the error when the leaf does not fit the mode or its slot.
+        template <DistanceModeConcept C>
+        CXXGPR_NOINLINE void build_leaf_into(
+            const detail::DistanceNodeDesc& node,
+            const IssuedSlots& slots,
+            std::optional<DistanceKernel<C>>& out,
+            std::expected<void, GprError>& status
+        )
+        {
+            auto leaf = build_leaf<C>(node, slots);
+            if (!leaf.has_value())
+            {
+                status = std::unexpected(std::move(leaf).error());
+                return;
+            }
+            out.emplace(std::move(*leaf));
+        }
+
+        /// @brief Records that a described composite node lacks an operand, in a stack frame of its own.
+        /// @param[out] status Set to the configuration error.
+        CXXGPR_NOINLINE void fail_missing_operand(std::expected<void, GprError>& status)
+        {
+            status = std::unexpected(distance_config_error("composite node is missing an operand"));
+        }
+
+        /// @brief Replaces the rebuilt left subtree in lhs with its sum or product with rhs, in a stack frame of its
+        /// own.
+        /// @tparam C Distance mode.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in,out] lhs Rebuilt left subtree on entry, the composite kernel on return.
+        /// @param[in] rhs Rebuilt right subtree, moved from.
+        template <DistanceModeConcept C>
+        CXXGPR_NOINLINE void join_built(
+            bool sum, std::optional<DistanceKernel<C>>& lhs, std::optional<DistanceKernel<C>>&& rhs
+        )
+        {
+            // The caller joins only after both subtrees were rebuilt, so both hold a value here.
+            if (lhs.has_value() && rhs.has_value())
+            {
+                lhs = sum ? (std::move(*lhs) + std::move(*rhs)) : (std::move(*lhs) * std::move(*rhs));
+            }
+        }
+
+        /// @brief Recursively rebuilds one described subtree into out.
+        /// @details A nesting level keeps only the rebuilt right subtree on the stack, the left one being rebuilt
+        /// straight into out: leaf binding, joining, and error construction run in frames of their own.
+        /// @tparam C Distance mode.
+        /// @param[in] node Described subtree.
+        /// @param[in] slots Issued slot handles.
+        /// @param[out] out Destination of the rebuilt kernel.
+        /// @param[out] status Set to the first error: a leaf that does not fit the mode or its slot, or a composite
+        /// without an operand.
+        template <DistanceModeConcept C>
+        void build_node_into(
+            const detail::DistanceNodeDesc& node,
+            const IssuedSlots& slots,
+            std::optional<DistanceKernel<C>>& out,
+            std::expected<void, GprError>& status
+        )
+        {
+            using Kind = detail::DistanceNodeDesc::Kind;
+            if (node.kind == Kind::Supplied || node.kind == Kind::Coord)
+            {
+                build_leaf_into<C>(node, slots, out, status);
+                return;
             }
             if (!node.lhs || !node.rhs)
             {
-                return std::unexpected(distance_config_error("composite node is missing an operand"));
+                fail_missing_operand(status);
+                return;
             }
-            auto lhs = build_node<C>(*node.lhs, slots);
-            if (!lhs.has_value())
+            build_node_into<C>(*node.lhs, slots, out, status);
+            if (!status.has_value())
             {
-                return lhs;
+                return;
             }
-            auto rhs = build_node<C>(*node.rhs, slots);
-            if (!rhs.has_value())
+            std::optional<DistanceKernel<C>> rhs;
+            build_node_into<C>(*node.rhs, slots, rhs, status);
+            if (!status.has_value())
             {
-                return rhs;
+                return;
             }
-            if (node.kind == Kind::Sum)
+            join_built<C>(node.kind == Kind::Sum, out, std::move(rhs));
+        }
+
+        /// @brief Rebuilds one described subtree.
+        /// @tparam C Distance mode.
+        /// @param[in] node Described subtree.
+        /// @param[in] slots Issued slot handles.
+        /// @return Rebuilt kernel, or GprError when a leaf does not fit the mode or its slot.
+        template <DistanceModeConcept C>
+        std::expected<DistanceKernel<C>, GprError> build_node(
+            const detail::DistanceNodeDesc& node, const IssuedSlots& slots
+        )
+        {
+            std::optional<DistanceKernel<C>> out;
+            std::expected<void, GprError> status;
+            build_node_into<C>(node, slots, out, status);
+            if (out.has_value())
             {
-                return std::move(*lhs) + std::move(*rhs);
+                return std::move(*out);
             }
-            return std::move(*lhs) * std::move(*rhs);
+            return std::unexpected(std::move(status).error());
         }
 
     }  // namespace
