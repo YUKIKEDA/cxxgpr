@@ -273,7 +273,9 @@ namespace cxxgpr::optimizer
         /// @brief Runs a single-start L-BFGS trajectory from initial_theta in unconstrained logit space.
         /// @details Maps initial_theta into z, iteratively evaluates two-loop descent directions, performs
         /// Moré–Thuente strong-Wolfe line search with EvalCache reuse and Stage 1 modified function
-        /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap.
+        /// shifting, appends secant pairs satisfying curvature safety, and stops on tolerance or iteration cap. The
+        /// first trial step without curvature history is scaled to at most one unit in z; a line-search failure counts
+        /// as converged only at the function-precision gradient floor sqrt(tolerance).
         /// @param[in,out] obj Differentiable objective evaluated in log-theta space.
         /// @param[in] bounds Log-space bounds governing the z <-> theta transform.
         /// @param[in] initial_theta Starting log-space parameter vector strictly inside bounds.
@@ -362,7 +364,10 @@ namespace cxxgpr::optimizer
 
                 const double f_init = f_cur;
                 const double dg_test = k_c1 * dg_init;
-                double stp = 1.0;
+                // Without curvature information the direction is the raw negative gradient, whose length is arbitrary.
+                // Scale the first trial step so it moves at most one unit in z (Nocedal & Wright, eq. 7.20); a unit
+                // step along a large gradient otherwise jumps to the saturated, flat region of the bounds.
+                double stp = history.empty() ? std::min(1.0, 1.0 / detail::norm2_vec(dir)) : 1.0;
                 double width = k_stp_max - k_stp_min;
                 double width1 = 2.0 * width;
                 bool stage1 = true;
@@ -505,6 +510,11 @@ namespace cxxgpr::optimizer
                     }
                     if (!step_accepted)
                     {
+                        // No acceptable step exists. Near a minimum the objective is only known to about
+                        // sqrt(eps) relative accuracy, so a line search must fail once the gradient has been reduced
+                        // to that floor; that is convergence, not a failure. A larger gradient means a real failure.
+                        const double floor_tolerance = std::sqrt(tolerance);
+                        converged = detail::norm2_vec(grad_z) <= floor_tolerance * std::max(1.0, detail::norm2_vec(z));
                         break;
                     }
                 }

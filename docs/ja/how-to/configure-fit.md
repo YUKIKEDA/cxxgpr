@@ -105,10 +105,10 @@ negative noise rejected: 1
 
 ```{code-block} text
 factor: neg-MLL 4.7716, noise 0.0500, iterations 0
-fit:    neg-MLL 0.7080, noise 0.0227, iterations 17, converged 1
+fit:    neg-MLL 0.7080, noise 0.0227, iterations 15, converged 1
 ```
 
-`neg_log_marginal_likelihood()` が返すのは**負の**対数周辺尤度である（小さいほどよい）。最適化により、値は 4.77 から 0.71 に下がり、標準化後の目的変数でノイズ分散は 0.023 になった。データと整合する。加えたノイズは分散 0.01 で、信号の分散は約 0.45 だから、0.01 / 0.45 ≈ 0.022 になる。
+`log_marginal_likelihood()` が返すのは**負の**対数周辺尤度である（小さいほどよい）。最適化により、値は 4.77 から 0.71 に下がり、標準化後の目的変数でノイズ分散は 0.023 になった。データと整合する。加えたノイズは分散 0.01 で、信号の分散は約 0.45 だから、0.01 / 0.45 ≈ 0.022 になる。
 
 :::{note}
 最適化が収束しなくても、**エラーにはならない**。学習済みモデルの `optimizer_result().converged` と `iterations` を確認すること。{doc}`choose-optimizer` を参照。
@@ -174,7 +174,7 @@ max_retries 8, multiplier 10.0000, fixed retry 1.0000e-08, fixed has no adaptive
 ```
 
 ```{code-block} text
-single neg-MLL 0.7079, mixed neg-MLL 0.7079, refinement iterations 2
+single neg-MLL 0.7080, mixed neg-MLL 0.7080, refinement iterations 2
 ```
 
 混合精度では、`FittedGpr::refinement_summary()` が `RefinementSummary`（`status`、`iterations`、`final_relative_residual`、`used_fallback()`）を保持する。ほかの 2 つでは `std::nullopt` になる。`FittedGpr::Storage` と `FittedGpr::Refine` は、ポリシーの型をそのまま公開する。
@@ -282,7 +282,7 @@ trainer still usable: 1, noise still 0.0500
 | `kernel_spec`、`optimizer`、`likelihood`、`jitter`、`kernel_exp`、`fit_policy` | トレーナーのゲッター（`FittedGpr` にもある）。 |
 | `fit`、`factor` | 最適化あり・なしの学習。`const` で、失敗しても状態は変わらない。 |
 | `FittedGpr`、`Storage`、`Refine` | 学習済みモデルとそのスカラー型。 |
-| `n_train`、`n_features`、`factor_jitter`、`neg_log_marginal_likelihood`、`alpha`、`l_factor`、`x_raw`、`y_raw` | 学習済みモデルの参照メソッド。 |
+| `n_train`、`n_features`、`factor_jitter`、`log_marginal_likelihood`、`alpha`、`l_factor`、`x_raw`、`y_raw` | 学習済みモデルの参照メソッド。 |
 | `input_transform`、`target_transform`、`unfitted_input_transform`、`unfitted_target_transform` | 学習済みの変換と未学習の原型。 |
 | `refinement_summary`、`optimizer_result` | 反復改良と最適化の診断。 |
 | `GaussianLikelihood`、`create`、`from_log_noise_variance`、`with_bounds`、`noise_variance`、`bounds` | 観測ノイズ（詳細は {doc}`tune-hyperparameters`）。 |

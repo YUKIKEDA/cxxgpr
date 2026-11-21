@@ -188,9 +188,9 @@ Use it like any built-in transform, here followed by standardization in a `Pipel
 ```
 
 ```{code-block} text
-x = 3: mean = 2.96786, truth = 2.9683, |error| = 0.00043564
+x = 3: mean = 2.96786, truth = 2.9683, |error| = 0.000435641
 x = 30: mean = 1.19237, truth = 1.19253, |error| = 0.000163227
-x = 300: mean = 2.53224, truth = 2.53233, |error| = 9.33199e-05
+x = 300: mean = 2.53224, truth = 2.53233, |error| = 9.33202e-05
 negative query rejected: yes
 ```
 

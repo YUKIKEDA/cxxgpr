@@ -9,6 +9,7 @@
 
 #include "cxxgpr/gpr/gpr.hpp"
 
+#include "cxxgpr/core/rng.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
 #include "cxxgpr/transform/transform.hpp"
 
@@ -584,6 +585,45 @@ namespace
         // With a consistent length the feature count is the remaining violation.
         const std::vector<double> q4{0.5, 1.5, 2.5, 3.5};
         EXPECT_EQ(error_code_of(model->predict(q4, 2U, 2U)), Code{GprErrorCode::DimensionMismatch});
+    }
+
+    /// @brief Verifies L-BFGS reaches the same optimum, and reports convergence, from every starting length scale.
+    /// @details A first step along the raw gradient used to jump to the saturated bounds and stop on a flat plateau
+    /// (negative log marginal likelihood about 210 instead of about -14.56), and line-search failures at the
+    /// function-precision floor were reported as not converged.
+    TEST(GprModelsTest, LbfgsConvergesToTheSameOptimumFromEveryStartingLengthScale)
+    {
+        // Spec: REQ-09, DES-19
+        constexpr std::size_t n = 30;
+        std::vector<double> x(n);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(42);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            x[i] = static_cast<double>(i) / static_cast<double>(n - 1);
+            y[i] = std::sin(6.0 * x[i]) + (0.5 * x[i]) + (0.05 * rng.unit_normal());
+        }
+
+        std::vector<double> optima;
+        for (const double start : {0.05, 0.1, 0.3, 0.6, 1.0, 2.0, 5.0})
+        {
+            const std::array<double, 1> length_scale{start};
+            const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+                * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(length_scale).value());
+            auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(kernel).with_noise_variance(1e-2);
+            ASSERT_TRUE(trainer.has_value());
+            const auto configured = trainer->with_target_transform(cxxgpr::transform::StandardizeTarget{});
+            auto fitted = configured.fit(x, n, 1U, y);
+            ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
+            EXPECT_TRUE(fitted->optimizer_result().converged) << "start " << start;
+            optima.push_back(fitted->optimizer_result().value);
+        }
+        for (const double value : optima)
+        {
+            EXPECT_NEAR(value, optima.front(), 1e-6);
+        }
+        // The shared optimum is the well-fitting one, not the flat plateau.
+        EXPECT_LT(optima.front(), 0.0);
     }
 
 }  // namespace
