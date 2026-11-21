@@ -256,7 +256,12 @@ namespace cxxgpr::optimizer
                 return std::unexpected(std::move(f_res).error());
             }
             double f_cur = *f_res;
+            // The stopping tests use the log-space point and gradient of the iterate and of the best point, because
+            // the unconstrained gradient vanishes wherever the logit transform saturates.
+            std::vector<double> theta_cur(initial_theta.begin(), initial_theta.end());
+            std::vector<double> grad_theta_cur(g_theta_buf);
             std::vector<double> best_theta(initial_theta.begin(), initial_theta.end());
+            std::vector<double> best_grad_theta(g_theta_buf);
             double best_val = f_cur;
 
             std::vector<double> step(d);
@@ -264,14 +269,14 @@ namespace cxxgpr::optimizer
             std::vector<double> z_trial(d);
             double radius = initial_radius;
             std::size_t iter = 0;
-            bool converged = false;
+            bool step_failed = false;
 
             for (; iter < max_iterations; ++iter)
             {
-                const double g_norm = detail::norm2_vec(grad_z);
-                if (g_norm <= tolerance * std::max(1.0, detail::norm2_vec(z)))
+                // Stop at a first-order stationary point of the bound-constrained problem in log space.
+                if (detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds)
+                    <= detail::stationarity_threshold(theta_cur, tolerance))
                 {
-                    converged = true;
                     break;
                 }
 
@@ -280,6 +285,9 @@ namespace cxxgpr::optimizer
                 const double step_norm = detail::norm2_vec(step);
                 if (step_norm == 0.0 || radius < 1e-15)
                 {
+                    // The radius collapsed without an acceptable step; this is the trust-region counterpart of a
+                    // failed line search.
+                    step_failed = true;
                     break;
                 }
 
@@ -300,9 +308,13 @@ namespace cxxgpr::optimizer
                     continue;
                 }
 
-                // Adapt trust-region radius based on actual-to-predicted reduction ratio rho.
+                // Adapt trust-region radius based on actual-to-predicted reduction ratio rho. When the predicted
+                // reduction is below the value resolution of the objective and the actual change stays within it, the
+                // ratio is rounding noise; the model step is then taken as agreeing with the model.
                 const double actual_red = f_cur - *trial_val;
-                const double rho = actual_red / pred_red;
+                const double f_band = detail::value_resolution(f_cur);
+                const bool unresolved = pred_red <= f_band && std::abs(actual_red) <= f_band;
+                const double rho = unresolved ? 1.0 : actual_red / pred_red;
 
                 if (rho < 0.25)
                 {
@@ -326,26 +338,47 @@ namespace cxxgpr::optimizer
                     }
                     z = z_trial;
                     f_cur = *next_res;
+                    theta_cur.assign(theta_buf.begin(), theta_buf.end());
+                    grad_theta_cur.assign(g_theta_buf.begin(), g_theta_buf.end());
                     if (f_cur <= best_val)
                     {
                         best_val = f_cur;
                         best_theta.assign(theta_buf.begin(), theta_buf.end());
+                        best_grad_theta.assign(g_theta_buf.begin(), g_theta_buf.end());
                     }
                     if (std::abs(actual_red) <= tolerance * tolerance * std::max(1.0, std::abs(f_cur))
-                        && detail::norm2_vec(grad_z) <= tolerance * std::max(1.0, detail::norm2_vec(z)))
+                        && detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds)
+                            <= detail::stationarity_threshold(theta_cur, tolerance))
                     {
-                        converged = true;
                         ++iter;
                         break;
                     }
                 }
             }
 
+            // Return the iterate when it is stationary: it passes the stationarity test, or, after the radius
+            // collapsed, its projected gradient is at the function-precision floor where no decrease can be resolved.
+            const double chi_cur = detail::projected_gradient_norm(theta_cur, grad_theta_cur, bounds);
+            if (chi_cur <= detail::stationarity_threshold(theta_cur, tolerance)
+                || (step_failed && chi_cur <= detail::precision_floor(f_cur)))
+            {
+                return OptimizerResult{
+                    .params = std::move(theta_cur),
+                    .value = f_cur,
+                    .iterations = iter,
+                    .converged = true,
+                };
+            }
+
+            // Otherwise return the lowest-value iterate; converged states whether that returned point itself passes
+            // the stationarity test.
+            const bool best_converged = detail::projected_gradient_norm(best_theta, best_grad_theta, bounds)
+                <= detail::stationarity_threshold(best_theta, tolerance);
             return OptimizerResult{
                 .params = std::move(best_theta),
                 .value = best_val,
                 .iterations = iter,
-                .converged = converged,
+                .converged = best_converged,
             };
         }
 

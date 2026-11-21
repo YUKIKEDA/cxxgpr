@@ -45,8 +45,9 @@ namespace cxxgpr::optimizer
             return copy;
         }
 
-        /// @brief Returns a copy with updated gradient norm and step convergence tolerance.
-        /// @details Validated at optimize() time to be finite and non-negative.
+        /// @brief Returns a copy with an updated stationarity tolerance.
+        /// @details A run converges when the projected log-space gradient of the returned point is at most
+        /// tolerance * max(1, ||theta||_2). Validated at optimize() time to be finite and non-negative.
         /// @param[in] tolerance Convergence tolerance threshold (>= 0).
         /// @return Updated TrustRegion configuration copy.
         [[nodiscard]] TrustRegion with_tolerance(double tolerance) const noexcept
@@ -139,7 +140,7 @@ namespace cxxgpr::optimizer
     private:
         /// @brief Maximum number of outer trust-region iterations per start.
         std::size_t max_iterations_{100U};
-        /// @brief Relative gradient norm and reduction convergence tolerance.
+        /// @brief Stationarity tolerance on the projected log-space gradient.
         double tolerance_{std::sqrt(std::numeric_limits<double>::epsilon())};
         /// @brief Initial trust-region radius in unconstrained logit space.
         double initial_radius_{1.0};

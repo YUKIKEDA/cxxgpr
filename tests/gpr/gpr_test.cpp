@@ -18,10 +18,13 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <optional>
+#include <span>
 #include <type_traits>
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "span_shape_contract.hpp"
 
 namespace
 {
@@ -428,6 +431,209 @@ namespace
         {
             SCOPED_TRACE("MixedPrecision<ReevaluateKernel>");
             verify_query_batch_may_shrink_for_policy<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>();
+        }
+    }
+
+    /// @brief Verifies every raw-span overload of Gpr and FittedGpr against the span shape contract.
+    /// @details Runs fit, factor, refit, predict, predict_into, predict_covariance, and sample through the shared
+    /// shape cases (short span, long span, overflowing dimensions, empty span with a null or non-null pointer, zero
+    /// dimension) and checks that results of the parent objects are bitwise unchanged after the rejected calls.
+    TEST(GprModelsTest, SpanOverloadsRejectLengthsThatDisagreeWithDimensions)
+    {
+        // Spec: REQ-02, REQ-03, DES-01, DES-02
+        using cxxgpr::test_support::error_code_of;
+        using cxxgpr::test_support::expect_span_shape_contract;
+        using Span = std::span<const double>;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
+        const std::vector<double> x{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y{0.0, 1.0, 0.5, 1.2};
+        const std::vector<double> query{0.5, 1.5};
+
+        auto model = gpr.factor(x, 4U, 1U, y);
+        ASSERT_TRUE(model.has_value());
+        const auto pred_before = model->predict(query, 2U, 1U);
+        const auto cov_before = model->predict_covariance(query, 2U, 1U);
+        const auto draws_before = model->sample(query, 2U, 1U, 3U, 5U);
+        ASSERT_TRUE(pred_before.has_value());
+        ASSERT_TRUE(cov_before.has_value());
+        ASSERT_TRUE(draws_before.has_value());
+
+        // Training overloads: the trainer and the fitted model are const and stay usable.
+        {
+            SCOPED_TRACE("Gpr::fit");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(gpr.fit(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+        {
+            SCOPED_TRACE("Gpr::factor");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(gpr.factor(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::refit");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->refit(xs, n_rows, n_cols, y));
+            }, x, 4U, 1U);
+        }
+
+        // Query overloads.
+        {
+            SCOPED_TRACE("FittedGpr::predict");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->predict(xs, n_rows, n_cols));
+            }, query, 2U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::predict_into");
+            cxxgpr::Prediction<double> out;
+            ASSERT_TRUE(model->predict_into(query, 2U, 1U, out).has_value());
+            const cxxgpr::Prediction<double> out_before = out;
+            expect_span_shape_contract(
+                [&](Span xs, std::size_t n_rows, std::size_t n_cols)
+            {
+                const auto code = error_code_of(model->predict_into(xs, n_rows, n_cols, out));
+                // A rejected call leaves the caller's output untouched.
+                EXPECT_EQ(out, out_before);
+                return code;
+            }, query, 2U, 1U
+            );
+        }
+        {
+            SCOPED_TRACE("FittedGpr::predict_covariance");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->predict_covariance(xs, n_rows, n_cols));
+            }, query, 2U, 1U);
+        }
+        {
+            SCOPED_TRACE("FittedGpr::sample");
+            expect_span_shape_contract([&](Span xs, std::size_t n_rows, std::size_t n_cols) {
+                return error_code_of(model->sample(xs, n_rows, n_cols, 3U, 5U));
+            }, query, 2U, 1U);
+        }
+
+        // The fitted model answers exactly as it did before the rejected calls.
+        const auto pred_after = model->predict(query, 2U, 1U);
+        const auto cov_after = model->predict_covariance(query, 2U, 1U);
+        const auto draws_after = model->sample(query, 2U, 1U, 3U, 5U);
+        ASSERT_TRUE(pred_after.has_value());
+        ASSERT_TRUE(cov_after.has_value());
+        ASSERT_TRUE(draws_after.has_value());
+        EXPECT_EQ(*pred_after, *pred_before);
+        EXPECT_EQ(cov_after->mean, cov_before->mean);
+        EXPECT_EQ(cov_after->covariance, cov_before->covariance);
+        EXPECT_EQ(*draws_after, *draws_before);
+    }
+
+    /// @brief Pins the validation order of the span overloads across arguments and against later checks.
+    /// @details An empty target vector is reported as EmptyInput before any size error of the feature span, a
+    /// feature span of the wrong length is reported before a target of the wrong length is inspected further, and
+    /// a query span of the wrong length is reported as LengthMismatch before the feature count is compared.
+    TEST(GprModelsTest, SpanOverloadsReportViolationsInValidationOrder)
+    {
+        // Spec: REQ-03, DES-02
+        using cxxgpr::GprErrorCode;
+        using cxxgpr::test_support::error_code_of;
+        using Code = std::optional<GprErrorCode>;
+        using Span = std::span<const double>;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> gpr(spec);
+        const std::vector<double> x{0.0, 1.0, 2.0, 3.0};
+        const std::vector<double> y{0.0, 1.0, 0.5, 1.2};
+        const Span x_short = Span(x).first(3U);
+        const Span y_short = Span(y).first(3U);
+        const Span y_empty;
+        constexpr std::size_t huge = std::numeric_limits<std::size_t>::max();
+
+        auto model = gpr.factor(x, 4U, 1U, y);
+        ASSERT_TRUE(model.has_value());
+
+        /// @brief Checks the cross-argument order of one training overload.
+        const auto check_training = [&](const char* name, const auto& train)
+        {
+            SCOPED_TRACE(name);
+            EXPECT_EQ(train(x, 4U, 1U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y alone";
+            EXPECT_EQ(train(x_short, 4U, 1U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y before short x";
+            EXPECT_EQ(train(x, huge, 2U, y_empty), Code{GprErrorCode::EmptyInput}) << "empty y before overflow";
+            EXPECT_EQ(train(x, huge, 2U, y_short), Code{GprErrorCode::SizeOverflow}) << "overflow before short y";
+            EXPECT_EQ(train(x_short, 4U, 1U, y_short), Code{GprErrorCode::LengthMismatch}) << "short x and y";
+            EXPECT_EQ(train(x, 4U, 1U, y_short), Code{GprErrorCode::LengthMismatch}) << "short y alone";
+            EXPECT_EQ(train(x, 4U, 1U, y), Code{}) << "valid input after the rejected calls";
+        };
+        check_training("Gpr::fit", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(gpr.fit(xs, n_rows, n_cols, ys));
+        });
+        check_training("Gpr::factor", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(gpr.factor(xs, n_rows, n_cols, ys));
+        });
+        check_training("FittedGpr::refit", [&](Span xs, std::size_t n_rows, std::size_t n_cols, Span ys) {
+            return error_code_of(model->refit(xs, n_rows, n_cols, ys));
+        });
+
+        // Three values declared as 2 x 2: both the length and the feature count are wrong; the length comes first.
+        const std::vector<double> q3{0.5, 1.5, 2.5};
+        cxxgpr::Prediction<double> out;
+        EXPECT_EQ(error_code_of(model->predict(q3, 2U, 2U)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->predict_into(q3, 2U, 2U, out)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->predict_covariance(q3, 2U, 2U)), Code{GprErrorCode::LengthMismatch});
+        EXPECT_EQ(error_code_of(model->sample(q3, 2U, 2U, 1U, 5U)), Code{GprErrorCode::LengthMismatch});
+        // With a consistent length the feature count is the remaining violation.
+        const std::vector<double> q4{0.5, 1.5, 2.5, 3.5};
+        EXPECT_EQ(error_code_of(model->predict(q4, 2U, 2U)), Code{GprErrorCode::DimensionMismatch});
+    }
+
+    /// @brief Verifies L-BFGS reaches the independent reference optimum, and reports convergence, from every start.
+    /// @details A first step along the raw gradient used to jump to the saturated bounds and stop on a flat plateau
+    /// that was reported as converged (negative log marginal likelihood about 200 or 210 instead of about -23.9), and
+    /// runs that reached the optimum were reported as not converged. Every start must now converge to the optimum.
+    TEST(GprModelsTest, LbfgsConvergesToTheSameOptimumFromEveryStartingLengthScale)
+    {
+        // Spec: REQ-09, DES-19
+        constexpr std::size_t n = 30;
+        std::vector<double> x(n);
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            x[i] = static_cast<double>(i) / static_cast<double>(n - 1);
+            // Deterministic noise-like term, reproducible outside the library.
+            const double noise = (static_cast<double>((37U * i) % 29U) / 14.0) - 1.0;
+            y[i] = std::sin(6.0 * x[i]) + (0.5 * x[i]) + (0.05 * noise);
+        }
+
+        // Independent reference: scikit-learn 1.9.1 GaussianProcessRegressor (ConstantKernel * RBF + WhiteKernel,
+        // bounds (1e-5, 1e5), normalize_y) with 50 restarts, polished by SciPy L-BFGS-B at gtol 1e-12, generated by
+        // tools/qa/lbfgs_start_reference.py. Parameter order: log constant, log length scale, log noise variance.
+        constexpr double ref_nll = -23.915244185702573;
+        constexpr std::array<double, 3> ref_theta{2.0174208885645295, -0.95025549306360768, -5.8552151580189555};
+        // The reference gradient norm there is 3.5e-6 and the smallest Hessian eigenvalue 0.768, so the reference
+        // parameters are uncertain by 3.5e-6 / 0.768 = 4.6e-6; a converged run adds at most 1.2e-7. Its value is
+        // uncertain by (3.5e-6)^2 / (2 * 0.768) = 8e-12 plus the rounding noise of the two objectives (about 2e-12
+        // each, measured as the spread of values along a line search); 1e-10 leaves a margin of about 8.
+        constexpr double theta_tol = 5e-6;
+        constexpr double nll_tol = 1e-10;
+
+        for (const double start : {0.05, 0.1, 0.3, 0.6, 1.0, 2.0, 5.0})
+        {
+            const std::array<double, 1> length_scale{start};
+            const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+                * cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(length_scale).value());
+            auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(kernel).with_noise_variance(1e-2);
+            ASSERT_TRUE(trainer.has_value());
+            const auto configured = trainer->with_target_transform(cxxgpr::transform::StandardizeTarget{});
+            auto fitted = configured.fit(x, n, 1U, y);
+            ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
+            const auto& result = fitted->optimizer_result();
+            EXPECT_TRUE(result.converged) << "start " << start;
+            EXPECT_NEAR(result.value, ref_nll, nll_tol) << "start " << start;
+            ASSERT_EQ(result.params.size(), ref_theta.size());
+            for (std::size_t k = 0; k < ref_theta.size(); ++k)
+            {
+                EXPECT_NEAR(result.params[k], ref_theta[k], theta_tol) << "start " << start << " parameter " << k;
+            }
         }
     }
 

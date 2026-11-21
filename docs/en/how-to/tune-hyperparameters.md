@@ -141,10 +141,10 @@ The value is the quantity the optimizer minimizes. Negate it to get the log marg
 ```
 
 ```{code-block} text
-refit: 12 iterations, cold fit: 35 iterations
+refit: 12 iterations, cold fit: 14 iterations
 ```
 
-The warm start converges in a third of the iterations and reaches the same optimum (the program checks that the two negative likelihoods agree within 0.05). `refit` has the same `MatrixRef` and raw-span overloads as `fit`, with the same errors.
+The warm start reaches the same optimum as the cold fit (the program checks that the two negative likelihoods agree within 0.05). On this small problem the warm start saves only two iterations (12 against 14). `refit` has the same `MatrixRef` and raw-span overloads as `fit`, with the same errors.
 
 To evaluate a model at *given* hyperparameters without searching, build a trainer with `optimizer::Fixed` (or call `factor`) and the kernel and likelihood you want:
 

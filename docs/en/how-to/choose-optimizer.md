@@ -12,7 +12,7 @@ Three consequences matter in practice:
 
 - **The starting point is your kernel.** The values you passed to `RbfKernel::create(1.0)` or `with_noise_variance(1e-2)` are where the optimizer starts. A start far from a sensible scale can end in a poor local optimum (see the warning below).
 - **Bounds decide what is reachable.** Pass an `Interval` to the kernel `create` overloads to keep a length scale out of regions you know are wrong.
-- **Lower is better.** `FittedGpr::neg_log_marginal_likelihood()` returns the final value of the *negative* log marginal likelihood, and so does `OptimizerResult::value`.
+- **Lower is better.** `FittedGpr::log_marginal_likelihood()` returns the final value of the *negative* log marginal likelihood, and so does `OptimizerResult::value`.
 
 ## Choose an optimizer
 
@@ -40,24 +40,24 @@ This program fits the same noisy one-dimensional data with every optimizer, then
 ```{code-block} text
 truth at 0.35 = 1.0382
 optimizer               iters  converged  neg-log-ML mean@0.35
-Lbfgs                      17        yes    -14.5571    1.0564
+Lbfgs                      19        yes    -14.5571    1.0564
 TrustRegion                16        yes    -14.5571    1.0564
 NelderMead                101        yes    -14.5571    1.0564
 FastSimulatedAnnealing    400        yes    -14.5462    1.0561
-Lbfgs + 3 restarts         17        yes    -14.5571    1.0564
+Lbfgs + 3 restarts         50        yes    -14.5571    1.0564
 Fixed                       0        yes    -10.4670    1.0605
 RandomSearch (custom)     300        yes    -14.4880    1.0560
 ```
 
 Reading the table:
 
-- The three local optimizers find the same minimum to four decimals. `TrustRegion` and `Lbfgs` need 16 to 17 iterations; `NelderMead` needs six times as many because it uses no derivatives.
+- The three local optimizers find the same minimum to four decimals. `TrustRegion` and `Lbfgs` need 16 to 19 iterations; `NelderMead` needs six times as many because it uses no derivatives.
 - `FastSimulatedAnnealing` spends its full iteration budget (400 here) and lands near, not at, the minimum.
 - `Fixed` does not optimize: it evaluates the initial hyperparameters once. Its NLML of $-10.47$ is worse than the optimized $-14.56$, though the prediction at 0.35 is still close to the truth.
 - A lower NLML means the optimizer found better hyperparameters, so that column is the one to compare. All predictions are close here because the data are easy.
 
-:::{warning}
-The start matters. The program above starts the length scale at $0.3$. Starting it at $1.0$ on the same data makes plain `Lbfgs` stop after a single iteration at an NLML of $210.7$, which is far worse than the minimum, and the prediction at 0.35 becomes $0.25$ instead of $1.04$. The optimizer reports `converged = yes` because its own stopping test fired, not because the model is good. Always compare `neg_log_marginal_likelihood()` across candidate runs, add `with_restarts`, or try `TrustRegion` when a fit looks suspicious.
+:::{note}
+On this problem `Lbfgs` reaches the same minimum (NLML $-14.56$) and reports convergence from each of the starting length scales $0.05$, $0.1$, $0.3$, $0.6$, $1$, $2$ and $5$. That is not a guarantee in general: a local optimizer ends in whichever minimum its start leads to, so for multimodal objectives add `with_restarts` or use `FastSimulatedAnnealing`, and compare `log_marginal_likelihood()` across candidate runs.
 :::
 
 ## Configure an optimizer
@@ -69,7 +69,7 @@ Each optimizer is a small value type. Its `with_*` methods return a modified cop
 | Setting | Method | Accessor | Default | Valid |
 |---|---|---|---|---|
 | iterations per start | `with_max_iterations` | `max_iterations` | 100 | any |
-| convergence tolerance | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}\approx 1.5\times 10^{-8}$ | finite, $\ge 0$ |
+| stationarity tolerance (projected log-space gradient) | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}\approx 1.5\times 10^{-8}$ | finite, $\ge 0$ |
 | stored curvature pairs | `with_history_size` | `history_size` | 10 | $\ge 1$ |
 | restarts | `with_restarts` | `restarts` | none | — |
 
@@ -78,7 +78,7 @@ Each optimizer is a small value type. Its `with_*` methods return a modified cop
 | Setting | Method | Accessor | Default | Valid |
 |---|---|---|---|---|
 | iterations per start | `with_max_iterations` | `max_iterations` | 100 | any |
-| convergence tolerance | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}$ | finite, $\ge 0$ |
+| stationarity tolerance (projected log-space gradient) | `with_tolerance` | `tolerance` | $\sqrt{\varepsilon}$ | finite, $\ge 0$ |
 | initial radius | `with_initial_radius` | `initial_radius` | 1.0 | finite, $> 0$, $\le$ max radius |
 | maximum radius | `with_max_radius` | `max_radius` | 100.0 | finite, $\ge$ initial radius |
 | restarts | `with_restarts` | `restarts` | none | — |
@@ -112,7 +112,7 @@ Radii are measured in the unconstrained coordinates described in {doc}`../explan
 
 ### Tolerance and iteration budget
 
-The iteration limit applies per start. When an optimizer stops at the limit without meeting its tolerance, `OptimizerResult::converged` is `false`, the best point found is still returned, and `fit` succeeds. It does not fail with `GprErrorCode::OptimizationNotConverged`. Check `FittedGpr::optimizer_result()` if you care:
+The iteration limit applies per start. When an optimizer stops at the limit without meeting its tolerance, `OptimizerResult::converged` is `false`, the best point found is still returned (`converged` always describes the returned parameters), and `fit` succeeds. It does not fail with `GprErrorCode::OptimizationNotConverged`. Check `FittedGpr::optimizer_result()` if you care:
 
 ```cpp
 const auto& r = model->optimizer_result();   // OptimizerResult
@@ -168,15 +168,15 @@ Run any optimizer with `optimize(objective, initial_params)`; `initial_params` m
 ```
 
 ```{code-block} text
-Lbfgs: converged = true, iterations = 11, value = 8.70e-20
+Lbfgs: converged = true, iterations = 13, value = 1.83e-21
   parameters = 2.0000 0.5000 10.0000 
-TrustRegion value = 2.82e-15 (7 iterations)
+TrustRegion value = 1.11e-29 (8 iterations)
 NelderMead  value = 3.62e-18 (128 iterations)
 FSA         value = 1.60e-03 (3000 iterations)
 Fixed       value = 1.86e+00 (0 iterations)
 ```
 
-On this smooth problem the derivative-based optimizers reach the exact minimum in 7 to 11 iterations, `NelderMead` needs 128, and `FastSimulatedAnnealing` gets close after 3000. Use these as typical orders of magnitude, not as a benchmark: the best choice depends on your problem.
+On this smooth problem the derivative-based optimizers reach the exact minimum in 8 to 13 iterations, `NelderMead` needs 128, and `FastSimulatedAnnealing` gets close after 3000. Use these as typical orders of magnitude, not as a benchmark: the best choice depends on your problem.
 
 `OptimizerResult` holds `params` (the best log-space vector), `value`, `iterations` and `converged`. `Fixed::optimize` returns `initial_params` with `iterations = 0` and `converged = true`.
 
@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` accepts any copyable type `O` that provides
 
-- `static constexpr bool uses_change_indices` (the model reads it through `cxxgpr::optimizer_uses_change_indices_v<O>` from `cxxgpr/workspace/leaf_cache.hpp`, which is `false` for a type without the member); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
+- `static constexpr bool uses_change_indices` (read through `OptimizerTraits<O>::uses_change_indices`); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`.
 
 The model hands you the same objective the built-in optimizers see. The one below perturbs the best point and keeps improvements, using `LogBounds`, `Xoshiro256PlusPlus` and `OptimizerResult`:
@@ -273,7 +273,7 @@ Check the points your optimizer proposes with `LogBounds::validate_log_params` (
 | `Objective`, `Differentiable`, `TwiceDifferentiable` | objective interfaces: `dim`, `value`, `value_at_changes`, `fill_intervals`, `gradient_into`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
 | `OptimizerResult` | `params`, `value`, `iterations`, `converged`, `operator==` |
 | `RestartConfig` | `count`, `seed`, `operator==` |
-| `cxxgpr::OptimizerTraits`, `cxxgpr::optimizer_uses_change_indices_v` | `uses_change_indices` of an optimizer type, `false` when the type has no such member. Declared in `cxxgpr/workspace/leaf_cache.hpp`, not in the `optimizer` namespace or `cxxgpr/optimizer/optimizer.hpp` |
+| `OptimizerTraits` | `uses_change_indices` of an optimizer type |
 | `LogBounds` | log-space bounds and the $\theta \leftrightarrow z$ map (members in the table above) |
 | `EvalCache` | single-entry cache; `eval_unconstrained`, `clear` |
 

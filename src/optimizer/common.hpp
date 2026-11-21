@@ -10,9 +10,11 @@
 #include "cxxgpr/optimizer/bounds.hpp"
 #include "cxxgpr/optimizer/objective.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <expected>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -42,6 +44,72 @@ namespace cxxgpr::optimizer::detail
     [[nodiscard]] inline double norm2_vec(std::span<const double> a) noexcept
     {
         return std::sqrt(dot_vec(a, a));
+    }
+
+    /// @brief Computes the Euclidean norm of the projected gradient of theta on the closed log-space box.
+    /// @details Evaluates chi = || theta - clamp(theta - g_theta, lo_log, hi_log) ||_2, the first-order stationarity
+    /// measure of the bound-constrained problem min f(theta) subject to lo_log <= theta <= hi_log. It is computed
+    /// from the log-space gradient itself, never from the unconstrained gradient divided by the logit Jacobian, so it
+    /// does not shrink when the logit transform saturates. Per component, an interior entry equals g_theta[i]; an entry
+    /// whose descent direction points out of the box is cut to the distance to that bound, so a bound-constrained
+    /// minimizer with an outward gradient has a vanishing measure while an inward gradient at a bound keeps its full
+    /// size.
+    /// @param[in] theta Interior log-space parameters of length bounds.dim().
+    /// @param[in] grad_theta Gradient of the objective with respect to theta, of length bounds.dim().
+    /// @param[in] bounds Log-space bounds whose closure is the feasible box.
+    /// @return Non-negative projected-gradient norm.
+    [[nodiscard]] inline double projected_gradient_norm(
+        std::span<const double> theta, std::span<const double> grad_theta, const LogBounds& bounds
+    ) noexcept
+    {
+        const std::span<const double> lo = bounds.lo_log();
+        const std::span<const double> hi = bounds.hi_log();
+        double acc = 0.0;
+        for (std::size_t i = 0; i < theta.size(); ++i)
+        {
+            const double p = theta[i] - std::clamp(theta[i] - grad_theta[i], lo[i], hi[i]);
+            acc += p * p;
+        }
+        return std::sqrt(acc);
+    }
+
+    /// @brief Returns the stationarity threshold tolerance * max(1, ||theta||_2) of the gradient stopping test.
+    /// @details The scale is the norm of the log-space parameters, which the bounds keep finite; unlike the norm of
+    /// the unconstrained coordinates it does not grow without limit when a parameter approaches a bound.
+    /// @param[in] theta Log-space parameters.
+    /// @param[in] tolerance Non-negative user tolerance.
+    /// @return Threshold that the projected-gradient norm must not exceed.
+    [[nodiscard]] inline double stationarity_threshold(std::span<const double> theta, double tolerance) noexcept
+    {
+        return tolerance * std::max(1.0, norm2_vec(theta));
+    }
+
+    /// @brief Returns the band within which two objective values are treated as indistinguishable.
+    /// @details sqrt(eps) * (1 + |f|). The rounding level of a computed objective is eps * (1 + |f|), and a value
+    /// obtained through a Cholesky factorization carries that error amplified by the conditioning of the matrix
+    /// (about 7e2 * eps * |f| was measured for a Gaussian-process marginal likelihood); the square root of eps keeps a
+    /// margin of several orders above both while still resolving eight significant digits of f. The band only lets a
+    /// step search accept a step on derivative evidence when the decrease the step can produce is itself below the
+    /// band; it never decides convergence.
+    /// @param[in] f Objective value at the start of the step.
+    /// @return Non-negative value band.
+    [[nodiscard]] inline double value_resolution(double f) noexcept
+    {
+        return std::sqrt(std::numeric_limits<double>::epsilon()) * (1.0 + std::abs(f));
+    }
+
+    /// @brief Returns the projected-gradient level below which the objective value cannot resolve further decrease.
+    /// @details sqrt(eps) * (1 + |f|), used only after a step search has failed to find any acceptable step. Along a
+    /// direction with curvature h, a projected gradient chi can buy at most the decrease chi^2 / (2 h). With the
+    /// rounding level eps * (1 + |f|) of the objective and a curvature of the order of the objective scale,
+    /// h = 1 + |f|, that decrease stays below half the rounding level exactly when chi <= sqrt(eps) * (1 + |f|). The
+    /// level depends only on machine epsilon and the scale of f, never on the user tolerance; it is conservative
+    /// because the real evaluation error of f is usually larger than its rounding level.
+    /// @param[in] f Objective value at the point being classified.
+    /// @return Projected-gradient level at which a failed step search counts as convergence.
+    [[nodiscard]] inline double precision_floor(double f) noexcept
+    {
+        return std::sqrt(std::numeric_limits<double>::epsilon()) * (1.0 + std::abs(f));
     }
 
     /// @brief Executes a single-start solver at initial_params plus deterministic log-uniform restarts.
