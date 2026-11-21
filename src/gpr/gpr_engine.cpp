@@ -594,9 +594,12 @@ namespace cxxgpr::detail
                         return std::unexpected(std::move(b_inf).error());
                     }
                     // The iterate solves the float-stored matrix to double accuracy, so against the exact kernel its
-                    // backward error is the storage rounding: every stored entry is within a few float epsilons of
-                    // the true entry, which bounds the relative residual by a few epsilons independent of n. Gating
-                    // on the double-precision tolerance would reject every iterate and always pay for the fallback.
+                    // backward error is the storage error. When every stored entry is within a few float epsilons of
+                    // the true entry, that bounds the relative residual by a few epsilons independent of n, and the
+                    // iterate is accepted. Gating on the double-precision tolerance would reject it, and pay for the
+                    // fallback, unless every entry of the matrix is exactly representable in float. A float
+                    // evaluation that misses the exact kernel by more (for example coordinates far from the origin,
+                    // which lose digits when rounded to float) exceeds the threshold and still falls back.
                     const double storage_tol =
                         promote_storage_accept_factor * static_cast<double>(std::numeric_limits<float>::epsilon());
                     return meets_relative_residual(*b_inf, w, y_f64_, r_true, std::max(tol, storage_tol));
