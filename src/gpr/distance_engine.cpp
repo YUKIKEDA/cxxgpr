@@ -543,6 +543,7 @@ namespace cxxgpr
                         {
                             const Storage val = d_a(row, col);
                             s_i(row, col) = val;
+                            // NOLINTNEXTLINE(readability-suspicious-call-argument)
                             s_i(col, row) = val;
                         }
                     }
@@ -1369,7 +1370,7 @@ namespace cxxgpr
                     {
                         acc += static_cast<double>(v_row[i]) * static_cast<double>(v_col[i]);
                     }
-                    Refine value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
+                    auto value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
                     if (row == col)
                     {
                         value += noise;

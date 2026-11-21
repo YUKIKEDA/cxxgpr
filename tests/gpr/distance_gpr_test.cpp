@@ -537,7 +537,7 @@ namespace
         cxxgpr::DistanceSource cross;
         cross.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
         cxxgpr::DistanceSource wrong_query;
-        const std::vector<double> small_query(2U * 2U, 0.0);
+        const std::vector<double> small_query(4U, 0.0);
         wrong_query.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(small_query.data(), 2U, 2U));
         EXPECT_EQ(model->predict_covariance(cross, wrong_query).error().code(), cxxgpr::GprErrorCode::LengthMismatch);
         // A failed query leaves the model usable.
@@ -560,7 +560,7 @@ namespace
                          .fit(train, data.y);
         ASSERT_TRUE(model.has_value()) << model.error().message();
 
-        const auto copy = *model;
+        auto copy = *model;
         auto p1 = model->predict(cross);
         auto p2 = copy.predict(cross);
         ASSERT_TRUE(p1.has_value());
@@ -620,10 +620,12 @@ namespace
         ASSERT_TRUE(reeval.has_value()) << reeval.error().message();
         ASSERT_TRUE(single.has_value());
         EXPECT_FALSE(reference->refinement_summary().has_value());
-        ASSERT_TRUE(promote->refinement_summary().has_value());
-        ASSERT_TRUE(reeval->refinement_summary().has_value());
-        EXPECT_FALSE(promote->refinement_summary()->used_fallback());
-        EXPECT_EQ(reeval->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
+        const auto promote_summary = promote->refinement_summary();
+        const auto reeval_summary = reeval->refinement_summary();
+        ASSERT_TRUE(promote_summary.has_value());
+        ASSERT_TRUE(reeval_summary.has_value());
+        EXPECT_FALSE(promote_summary->used_fallback());
+        EXPECT_EQ(reeval_summary->status, cxxgpr::RefinementStatus::Converged);
 
         // ReevaluateKernel reaches the double-precision weights; PromoteStorage keeps the storage rounding.
         const double promote_err = rel_diff(promote->alpha(), reference->alpha());
