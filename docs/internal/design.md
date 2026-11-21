@@ -211,7 +211,7 @@ When `OptimizerTraits<O>::uses_change_indices` (`true` for `FastSimulatedAnneali
 `KernelExp::{Accurate, FastApprox}` is held in each model as a run-time choice (default `Accurate`).
 
 - `Accurate`: uses `std::exp` (storage type `float`/`double`) as is.
-- `FastApprox`: replaces the $\exp(-x)$ computation during kernel evaluation with range reduction $x = k \ln 2 + f$ and a degree-7 minimax polynomial approximation in the storage type (it is not used for restoring length scales by `exp(θ)` or for operations inside `Custom` leaves).
+- `FastApprox`: replaces the $\exp(-x)$ computation during kernel evaluation with range reduction $x = k \ln 2 + f$ and a degree-7 Taylor polynomial (coefficients $1/j!$) in the reduced argument $f$, evaluated in the storage type (it is not used for restoring length scales by `exp(θ)` or for operations inside `Custom` leaves).
 
 ---
 
@@ -259,7 +259,7 @@ Letting $A_i = \partial A / \partial \theta_i$, $S_i = L^{-1} A_i L^{-\top}$, an
 A fitted model `FittedGpr<O, P, K>` holds `L`, `factor_alpha`, `alpha`, `X`, the kernel, the likelihood, and the preprocessing, and provides the following operations (the output scalar type is `P::Refine`):
 
 - `predict(xs, n_rows, n_cols)` / `predict_with(xs, n_rows, n_cols, PredictOptions)`: mean $\mu_* = K_*^\top \alpha$ and variance $v_* = \operatorname{diag}(K_{**}) - \|L^{-1} K_*\|_2^2$ (adding $\sigma_n^2$ for `VarianceKind::Observation`, not for `Latent`). Finally the mean and the variance (multiplied by $s^2$) are inverse-transformed by `TargetTransform` and returned.
-- `predict_into(..., Prediction<Refine>& out)` / `predict_with_into(...)`: on the second and later calls with the same query shape $(m, d)$, the `QueryWorkspace` and the output `mean`/`variance` capacity are reused, achieving **zero new allocations**.
+- `predict_into(..., Prediction<Refine>& out)` / `predict_with_into(...)`: once a call has sized them, later calls whose query count $m$ is no larger than the largest earlier $m$ reuse the `QueryWorkspace` and the output `mean`/`variance` capacity, achieving **zero new allocations**. Query batch sizes may change freely between calls: a larger $m$ grows the buffers once, and a smaller $m$ gives the same values as on a model that never saw a larger batch.
 - `predict_covariance` / `predict_covariance_with`: return the full posterior covariance matrix $\Sigma_* = K_{**} - (L^{-1} K_*)^\top (L^{-1} K_*)$ (column-major $m \times m$; $\sigma_n^2$ is added to the diagonal for `Observation`).
 - `sample(xs, n_rows, n_cols, n_draws, seed)` / `sample_with`: compute the Cholesky factor of the symmetrized posterior covariance with a tiny numerical jitter, and generate $n_{\text{draws}}$ posterior samples (length $n_{\text{draws}} \cdot m$) from `Xoshiro256++` + Box–Muller standard normal random numbers.
 - `loo_predict()` / `loo_predict_with()` (the closed form of GPML §5.4.2): using $Q_{ii} = (A^{-1})_{ii} = \|L^{-1} e_i\|_2^2$ and the training targets $\tilde{y}_i$ after applying `TargetTransform`, compute $\tilde{\mu}_{\text{LOO}, i}$ and $\tilde{\sigma}_{\text{LOO}, i}^2$ in the transformed space, and **then** apply the closed-form affine inverse transform of `TargetTransform` (inverse transform of the mean and multiplication of the variance by $s^2$) to return a `Prediction<T>` on the original scale:
@@ -282,7 +282,7 @@ flowchart LR
 
 - `WorkspaceCore<P>`: `k_matrix`, `exp_buf`, `kernel_scratch`, `thread_scratch` (per-OpenMP-thread scratch), `rhs`, the `theta` backup, `nested`, `hessian`, and `factor_jitter`.
 - `FitBuffers<P>`: `WorkspaceCore<P>` + `dist` (optional `DistCache`) + `w_matrix` (optional, under `Retain`). Released at the end of `fit` and not kept in `FittedGpr`.
-- `QueryWorkspace<P>`: belongs to `FittedGpr` and holds the query transform, distances, `k_star`, `k_ss`, and nested scratch.
+- `QueryWorkspace<P>`: belongs to `FittedGpr` and holds the query transform, `k_star`, `k_ss`, and nested scratch.
 
 ---
 

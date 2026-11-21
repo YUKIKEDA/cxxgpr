@@ -296,16 +296,6 @@ namespace cxxgpr
             std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
         );
 
-        /// @brief Grows the buffers used by point-based prediction, leaving query_dist untouched.
-        /// @param[in] n Training point count.
-        /// @param[in] m Query point count.
-        /// @param[in] d Feature count.
-        /// @param[in] nested_depth Kernel nesting depth.
-        /// @return Success or a dimension error.
-        [[nodiscard]] std::expected<void, GprError> ensure_prediction(
-            std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
-        );
-
         /// @brief Transformed query features in double precision (m x d, column-major).
         std::vector<double> query_xs;
         /// @brief Query features cast to Storage scalar (m x d, column-major).
@@ -316,8 +306,6 @@ namespace cxxgpr
         std::vector<Storage> query_scratch;
         /// @brief Nested intermediate buffers for cross-covariance evaluation.
         NestedBuffers<Storage> query_nested;
-        /// @brief Train-test squared Euclidean distances (n x m, column-major).
-        std::vector<Storage> query_dist;
         /// @brief Prior diagonal k(x*_j, x*_j) for each query point (length m).
         std::vector<Storage> query_kss;
         /// @brief Scratch for zero-allocation diagonal tree evaluation (length >= (nested_depth + 1) * m).

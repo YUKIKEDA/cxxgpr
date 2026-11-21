@@ -12,7 +12,7 @@ Three consequences matter in practice:
 
 - **The starting point is your kernel.** The values you passed to `RbfKernel::create(1.0)` or `with_noise_variance(1e-2)` are where the optimizer starts. A start far from a sensible scale can end in a poor local optimum (see the warning below).
 - **Bounds decide what is reachable.** Pass an `Interval` to the kernel `create` overloads to keep a length scale out of regions you know are wrong.
-- **Lower is better.** `FittedGpr::log_marginal_likelihood()` returns the final value of the *negative* log marginal likelihood, and so does `OptimizerResult::value`.
+- **Lower is better.** `FittedGpr::neg_log_marginal_likelihood()` returns the final value of the *negative* log marginal likelihood, and so does `OptimizerResult::value`.
 
 ## Choose an optimizer
 
@@ -57,7 +57,7 @@ Reading the table:
 - A lower NLML means the optimizer found better hyperparameters, so that column is the one to compare. All predictions are close here because the data are easy.
 
 :::{warning}
-The start matters. The program above starts the length scale at $0.3$. Starting it at $1.0$ on the same data makes plain `Lbfgs` stop after a single iteration at an NLML of $210.7$, which is far worse than the minimum, and the prediction at 0.35 becomes $0.25$ instead of $1.04$. The optimizer reports `converged = yes` because its own stopping test fired, not because the model is good. Always compare `log_marginal_likelihood()` across candidate runs, add `with_restarts`, or try `TrustRegion` when a fit looks suspicious.
+The start matters. The program above starts the length scale at $0.3$. Starting it at $1.0$ on the same data makes plain `Lbfgs` stop after a single iteration at an NLML of $210.7$, which is far worse than the minimum, and the prediction at 0.35 becomes $0.25$ instead of $1.04$. The optimizer reports `converged = yes` because its own stopping test fired, not because the model is good. Always compare `neg_log_marginal_likelihood()` across candidate runs, add `with_restarts`, or try `TrustRegion` when a fit looks suspicious.
 :::
 
 ## Configure an optimizer
@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` accepts any copyable type `O` that provides
 
-- `static constexpr bool uses_change_indices` (read through `OptimizerTraits<O>::uses_change_indices`); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
+- `static constexpr bool uses_change_indices` (the model reads it through `cxxgpr::optimizer_uses_change_indices_v<O>` from `cxxgpr/workspace/leaf_cache.hpp`, which is `false` for a type without the member); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`.
 
 The model hands you the same objective the built-in optimizers see. The one below perturbs the best point and keeps improvements, using `LogBounds`, `Xoshiro256PlusPlus` and `OptimizerResult`:
@@ -273,7 +273,7 @@ Check the points your optimizer proposes with `LogBounds::validate_log_params` (
 | `Objective`, `Differentiable`, `TwiceDifferentiable` | objective interfaces: `dim`, `value`, `value_at_changes`, `fill_intervals`, `gradient_into`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
 | `OptimizerResult` | `params`, `value`, `iterations`, `converged`, `operator==` |
 | `RestartConfig` | `count`, `seed`, `operator==` |
-| `OptimizerTraits` | `uses_change_indices` of an optimizer type |
+| `cxxgpr::OptimizerTraits`, `cxxgpr::optimizer_uses_change_indices_v` | `uses_change_indices` of an optimizer type, `false` when the type has no such member. Declared in `cxxgpr/workspace/leaf_cache.hpp`, not in the `optimizer` namespace or `cxxgpr/optimizer/optimizer.hpp` |
 | `LogBounds` | log-space bounds and the $\theta \leftrightarrow z$ map (members in the table above) |
 | `EvalCache` | single-entry cache; `eval_unconstrained`, `clear` |
 

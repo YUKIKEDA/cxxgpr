@@ -176,7 +176,7 @@ int main()
     std::vector<double> learned(fitted->kernel_spec().num_params());
     (void)fitted->kernel_spec().get_params(learned);
     std::cout << "learned constant " << std::exp(learned[0]) << ", lengthscale " << std::exp(learned[1]) << ", noise "
-              << fitted->likelihood().noise_variance() << ", neg-MLL " << fitted->log_marginal_likelihood() << '\n';
+              << fitted->likelihood().noise_variance() << ", neg-MLL " << fitted->neg_log_marginal_likelihood() << '\n';
     // [end]
     ok = ok && std::exp(learned[1]) > 0.1 && std::exp(learned[1]) < 10.0;
     ok = ok && fitted->likelihood().noise_variance() > 0.003 && fitted->likelihood().noise_variance() < 0.03;
@@ -197,16 +197,16 @@ int main()
               << cold->optimizer_result().iterations << " iterations\n";
     // [end]
     ok = ok && refitted.has_value() && cold.has_value() && fitted->n_train() == 30U && refitted->n_train() == 40U;
-    ok = ok && std::abs(refitted->log_marginal_likelihood() - cold->log_marginal_likelihood()) < 0.05;
+    ok = ok && std::abs(refitted->neg_log_marginal_likelihood() - cold->neg_log_marginal_likelihood()) < 0.05;
 
     // [into-trainer]
     const auto warm = fitted->into_trainer();  // Gpr starting at the learned hyperparameters
     const auto frozen = Gpr<optimizer::Fixed>(fitted->kernel_spec()).with_likelihood(fitted->likelihood());
     const auto same = frozen.factor(x, x.size(), 1U, y);
-    std::cout << "factor at learned values reproduces neg-MLL: " << same->log_marginal_likelihood() << " vs "
-              << fitted->log_marginal_likelihood() << '\n';
+    std::cout << "factor at learned values reproduces neg-MLL: " << same->neg_log_marginal_likelihood() << " vs "
+              << fitted->neg_log_marginal_likelihood() << '\n';
     // [end]
-    ok = ok && std::abs(same->log_marginal_likelihood() - fitted->log_marginal_likelihood()) < 1e-6;
+    ok = ok && std::abs(same->neg_log_marginal_likelihood() - fitted->neg_log_marginal_likelihood()) < 1e-6;
     ok = ok && warm.likelihood() == fitted->likelihood();
 
     // [objective]

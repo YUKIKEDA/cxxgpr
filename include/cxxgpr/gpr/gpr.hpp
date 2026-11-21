@@ -102,7 +102,7 @@ namespace cxxgpr
             /// @brief Accepted diagonal jitter offset added during final Cholesky factorization.
             double factor_jitter{0.0};
             /// @brief Negative log marginal likelihood evaluated at the final fitted parameters.
-            double log_marginal_likelihood{0.0};
+            double neg_log_marginal_likelihood{0.0};
             /// @brief Mixed-precision iterative refinement summary, or std::nullopt when P does not refine in f64.
             std::optional<RefinementSummary> refinement_summary;
             /// @brief Optimizer convergence trajectory and final parameter diagnostics.
@@ -167,7 +167,7 @@ namespace cxxgpr
         );
 
         /// @brief Validates query matrix xs, runs posterior prediction into out, and applies inverse target scaling.
-        /// @details Reuses workspace buffers to avoid heap allocations once warmed up on matching query sizes.
+        /// @details Reuses workspace buffers to avoid heap allocations once warmed up on a batch at least as large.
         /// @tparam P Precision policy matching payload.
         /// @param[in] payload Fitted model payload containing factor, weights, and transforms.
         /// @param[in] xs Column-major query feature matrix (m x d).
@@ -252,7 +252,8 @@ namespace cxxgpr
         /// @param[in,out] obj Twice-differentiable negative marginal log-likelihood objective.
         /// @param[in] initial_params Starting unconstrained log-space hyperparameter vector.
         /// @return OptimizerResult with final parameters and convergence flags, or GprError on failure.
-        /// @retval GprErrorCode::OptimizationNotConverged When optimizer exhausts iteration budget without converging.
+        /// @note Failing to converge is not an error: the result is returned with converged == false. The built-in
+        /// optimizers report only invalid configuration or objective failures through GprError.
         template <typename O>
         [[nodiscard]] std::expected<optimizer::OptimizerResult, GprError> invoke_optimizer(
             const O& opt, optimizer::TwiceDifferentiable& obj, std::span<const double> initial_params
@@ -439,8 +440,9 @@ namespace cxxgpr
 
     public:
         /// @brief Constructs an unfitted GPR trainer from a kernel specification and optional optimizer.
-        /// @details Initializes noise variance to 1e-2, identity input/target transforms, adaptive jitter,
-        /// accurate exponential math, and FitPolicy::prefer_speed().
+        /// @details Initializes noise variance to 1e-2, identity input/target transforms, a fixed zero
+        /// jitter offset (JitterPolicy default; use with_jitter() for an adaptive schedule), accurate exponential math,
+        /// and FitPolicy::prefer_speed().
         /// @param[in] kernel_spec Initial kernel expression and parameter bounds.
         /// @param[in] optimizer Optional hyperparameter optimizer configuration.
         explicit Gpr(KernelSpec kernel_spec, O optimizer = O{}) :
@@ -809,7 +811,7 @@ namespace cxxgpr
     /// @brief Fitted Exact Gaussian Process Regression model providing posterior prediction, zero-allocation
     /// predict_into, full posterior covariance, posterior sampling, and closed-form LOO inference.
     /// @details Holds immutable fitted payload state plus a reusable QueryWorkspace so predict_into()
-    /// performs zero heap allocations once warmed up on matching query shapes.
+    /// performs zero heap allocations once warmed up on a query batch at least as large.
     /// @tparam O Optimizer policy type preserved for into_trainer() and refit().
     /// @tparam P Precision policy determining Storage and Refine scalar types.
     /// @tparam K Kernel specification type (KernelSpec).
@@ -842,7 +844,7 @@ namespace cxxgpr
                 .n_train = other.payload_.n_train,
                 .n_features = other.payload_.n_features,
                 .factor_jitter = other.payload_.factor_jitter,
-                .log_marginal_likelihood = other.payload_.log_marginal_likelihood,
+                .neg_log_marginal_likelihood = other.payload_.neg_log_marginal_likelihood,
                 .refinement_summary = other.payload_.refinement_summary,
                 .optimizer_result = other.payload_.optimizer_result,
             },
@@ -945,7 +947,8 @@ namespace cxxgpr
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         /// @pre `xs.cols() == n_features()` and all query coordinates are finite.
         /// @note Calling repeatedly with `xs.rows()` at most the warmed query capacity performs zero heap allocations.
-        /// @see predict(), predict_covariance_into()
+        /// @see predict(), predict_with_into()
+        /// @see cxxgpr::predict_covariance_into()
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
@@ -1203,9 +1206,13 @@ namespace cxxgpr
         /// @return Accepted diagonal jitter value.
         [[nodiscard]] double factor_jitter() const noexcept { return payload_.factor_jitter; }
 
-        /// @brief Returns the negative marginal log-likelihood at the final fitted parameters.
+        /// @brief Returns the negative log marginal likelihood (the minimized objective, lower is better) at the final
+        /// parameters.
         /// @return Final negative marginal log-likelihood scalar.
-        [[nodiscard]] double log_marginal_likelihood() const noexcept { return payload_.log_marginal_likelihood; }
+        [[nodiscard]] double neg_log_marginal_likelihood() const noexcept
+        {
+            return payload_.neg_log_marginal_likelihood;
+        }
 
         /// @brief Returns the refined prediction weight vector alpha = A^-1 y_transformed.
         /// @return Read-only span over weight vector alpha of length n_train().

@@ -1491,6 +1491,22 @@ namespace cxxgpr
     /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> CheckedDistanceStore<T>::~CheckedDistanceStore() = default;
 
+    /// @brief Move-constructs a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete so the defaulted move can
+    /// destroy and relocate the owning pointer.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to move from.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>::CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
+
+    /// @brief Move-assigns a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to move from.
+    /// @return Reference to this store.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(CheckedDistanceStore&& other) noexcept = default;
+
     /// @brief Copy-constructs a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
     /// @details Duplicates `Impl` vectors including scalar and ARD tables.
     /// @tparam T Storage floating-point scalar type.
@@ -3765,6 +3781,24 @@ namespace cxxgpr
     /// @brief Destroys the @c CompiledDistanceKernel instance.
     /// @tparam T Scalar evaluation type (@c double or @c float).
     template <KernelScalarConcept T> CompiledDistanceKernel<T>::~CompiledDistanceKernel() = default;
+
+    /// @brief Move-constructs a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer without copying leaves or slot descriptors.
+    /// Defined out-of-line where `CompiledDistanceKernel<T>::Impl` is complete so the defaulted move can
+    /// destroy and relocate the owning pointer.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Source compiled distance kernel moved from.
+    template <KernelScalarConcept T>
+    CompiledDistanceKernel<T>::CompiledDistanceKernel(CompiledDistanceKernel&& other) noexcept = default;
+
+    /// @brief Move-assigns a `CompiledDistanceKernel<T>`.
+    /// @details Transfers ownership of the internal `Impl` pointer; defined out-of-line where
+    /// `CompiledDistanceKernel<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Source compiled distance kernel moved from.
+    /// @return Reference to `*this`.
+    template <KernelScalarConcept T>
+    CompiledDistanceKernel<T>& CompiledDistanceKernel<T>::operator=(CompiledDistanceKernel&& other) noexcept = default;
 
     /// @brief Deep-copies a @c CompiledDistanceKernel by cloning its compiled PIMPL state.
     /// @tparam T Scalar evaluation type (@c double or @c float).
