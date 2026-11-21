@@ -44,8 +44,9 @@ namespace cxxgpr::optimizer
             return copy;
         }
 
-        /// @brief Returns a copy with updated relative gradient and function convergence tolerance.
-        /// @details Validated at optimize() time to be finite and non-negative.
+        /// @brief Returns a copy with an updated stationarity tolerance.
+        /// @details A run converges when the projected log-space gradient of the returned point is at most
+        /// tolerance * max(1, ||theta||_2). Validated at optimize() time to be finite and non-negative.
         /// @param[in] tolerance Convergence tolerance threshold (>= 0).
         /// @return Updated Lbfgs configuration copy.
         [[nodiscard]] Lbfgs with_tolerance(double tolerance) const noexcept
@@ -122,7 +123,7 @@ namespace cxxgpr::optimizer
     private:
         /// @brief Maximum number of outer L-BFGS iterations per start.
         std::size_t max_iterations_{100U};
-        /// @brief Relative gradient and function-change convergence tolerance.
+        /// @brief Stationarity tolerance on the projected log-space gradient.
         double tolerance_{std::sqrt(std::numeric_limits<double>::epsilon())};
         /// @brief Maximum number of (s, y) secant pairs kept for two-loop recursion.
         std::size_t history_size_{10U};
