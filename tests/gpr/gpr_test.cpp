@@ -26,6 +26,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
+
 #include "allocation_audit.hpp"
 #include "span_shape_contract.hpp"
 
@@ -284,9 +288,22 @@ namespace
         ASSERT_TRUE(mp_reev->refinement_summary().has_value());
         EXPECT_FALSE(f64->refinement_summary().has_value());
 
+        // ReevaluateKernel reaches the double-precision weights. PromoteStorage solves the float-stored system, so
+        // its weights keep the storage rounding (relative to the largest weight, amplified by the conditioning).
+        double alpha_max = 0.0;
         for (std::size_t i = 0; i < n; ++i)
         {
-            EXPECT_NEAR(mp_prom->alpha()[i], f64->alpha()[i], 1e-6);
+            alpha_max = std::max(alpha_max, std::abs(f64->alpha()[i]));
+        }
+        const auto prom_summary = mp_prom->refinement_summary();
+        if (!prom_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_FALSE(prom_summary->used_fallback());
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            EXPECT_NEAR(mp_prom->alpha()[i], f64->alpha()[i], 1e-3 * alpha_max);
             EXPECT_NEAR(mp_reev->alpha()[i], f64->alpha()[i], 1e-6);
         }
 
@@ -339,6 +356,207 @@ namespace
         EXPECT_EQ(err_qdim.error().code(), cxxgpr::GprErrorCode::DimensionMismatch);
     }
 
+    /// @brief Restores the OpenMP thread count of the calling thread when the scope ends.
+    /// @details Fatal GoogleTest assertions return from the test body early, so a test that changes the thread
+    /// count restores it from a destructor instead of from a statement at the end of the body.
+    class OmpThreadCountRestorer
+    {
+    public:
+        /// @brief Records the current OpenMP thread count.
+        OmpThreadCountRestorer() noexcept = default;
+        /// @brief Deleted copy constructor; a copy would restore the thread count twice.
+        OmpThreadCountRestorer(const OmpThreadCountRestorer&) = delete;
+        /// @brief Deleted copy assignment; a copy would restore the thread count twice.
+        /// @return Reference to *this (deleted).
+        OmpThreadCountRestorer& operator=(const OmpThreadCountRestorer&) = delete;
+        /// @brief Deleted move constructor; the guard stays bound to the scope that created it.
+        OmpThreadCountRestorer(OmpThreadCountRestorer&&) = delete;
+        /// @brief Deleted move assignment; the guard stays bound to the scope that created it.
+        /// @return Reference to *this (deleted).
+        OmpThreadCountRestorer& operator=(OmpThreadCountRestorer&&) = delete;
+
+        /// @brief Sets the OpenMP thread count back to the recorded value.
+        ~OmpThreadCountRestorer()
+        {
+#ifdef _OPENMP
+            omp_set_num_threads(saved_threads_);
+#endif
+        }
+
+    private:
+#ifdef _OPENMP
+        /// @brief Thread count in effect when the guard was constructed.
+        int saved_threads_{omp_get_max_threads()};
+#endif
+    };
+
+    /// @brief Verifies mixed-precision refinement weights are bit-identical for any OpenMP thread count.
+    /// @details The float factorization and the kernel evaluations run on OpenMP threads, and the blocked
+    /// double-precision residual sums every row over its columns in ascending order. None of them may change a single
+    /// bit of the refined weights or the summary when the thread count changes.
+    TEST(GprModelsTest, MixedPrecisionRefinementIsBitwiseIdenticalAcrossThreadCounts)
+    {
+        // Spec: DES-05, DES-20
+        constexpr std::size_t n = 520;
+        std::vector<double> x(n * 2U);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(11);
+        for (double& v : x)
+        {
+            v = rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(3.0 * x[i]) + x[n + i] + (0.05 * rng.unit_normal());
+        }
+        const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value());
+
+        using Policy = cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>;
+        const OmpThreadCountRestorer restore_threads;
+        auto run = [&](int threads)
+        {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+            auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, Policy>(kernel).with_noise_variance(1e-2);
+            auto fitted = trainer->factor(x, n, 2U, y);
+            EXPECT_TRUE(fitted.has_value());
+            return fitted;
+        };
+        const auto reference = run(1);
+        ASSERT_TRUE(reference.has_value());
+        const auto reference_summary = reference->refinement_summary();
+        if (!reference_summary.has_value())
+        {
+            FAIL() << "reference refinement summary is missing";
+        }
+        EXPECT_FALSE(reference_summary->used_fallback());
+        for (const int threads : {2, 4})
+        {
+            const auto other = run(threads);
+            ASSERT_TRUE(other.has_value());
+            const auto other_summary = other->refinement_summary();
+            if (!other_summary.has_value())
+            {
+                FAIL() << "refinement summary is missing for threads " << threads;
+            }
+            ASSERT_EQ(other->alpha().size(), reference->alpha().size());
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+            }
+            EXPECT_EQ(*other_summary, *reference_summary);
+        }
+    }
+
+    /// @brief Verifies PromoteStorage refinement is accepted against the float storage rounding, not the f64 tolerance.
+    /// @details The iterate solves the float-stored system to double accuracy, so its residual against the exact
+    /// kernel is bounded by a few float epsilons. The fit must end Converged without the double-precision fallback,
+    /// and the weights must stay close to the double-precision solution (within the conditioning-amplified storage
+    /// error) and closer than a plain single-precision solve.
+    TEST(GprModelsTest, PromoteStorageRefinementIsAcceptedAtStorageRoundingAndImprovesOnSingle)
+    {
+        // Spec: DES-05
+        constexpr std::size_t n = 400;
+        constexpr std::size_t d = 3;
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(17);
+        for (double& v : x)
+        {
+            v = rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(3.0 * x[i]) + x[n + i] + (0.05 * rng.unit_normal());
+        }
+        const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value());
+        // Noise variance 1e-3 gives a condition number large enough for float storage to matter.
+        auto double_fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(kernel).with_noise_variance(1e-3)->factor(x, n, d, y);
+        auto single_fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::SinglePrecision>(kernel).with_noise_variance(1e-3)->factor(
+                x, n, d, y
+            );
+        using Promote = cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>;
+        auto promote_fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, Promote>(kernel).with_noise_variance(1e-3)->factor(x, n, d, y);
+        ASSERT_TRUE(double_fit.has_value());
+        ASSERT_TRUE(single_fit.has_value());
+        ASSERT_TRUE(promote_fit.has_value());
+
+        const auto promote_summary = promote_fit->refinement_summary();
+        if (!promote_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_EQ(promote_summary->status, cxxgpr::RefinementStatus::Converged);
+        EXPECT_FALSE(promote_summary->used_fallback());
+
+        double alpha_max = 0.0;
+        double promote_err = 0.0;
+        double single_err = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double ref = double_fit->alpha()[i];
+            alpha_max = std::max(alpha_max, std::abs(ref));
+            promote_err = std::max(promote_err, std::abs(ref - promote_fit->alpha()[i]));
+            single_err = std::max(single_err, std::abs(ref - static_cast<double>(single_fit->alpha()[i])));
+        }
+        EXPECT_LT(promote_err / alpha_max, 1e-2);
+        EXPECT_LT(promote_err, single_err);
+    }
+
+    /// @brief Verifies PromoteStorage still falls back to double precision when the stored matrix misses the kernel.
+    /// @details The inputs sit near 1000, where rounding a coordinate to float moves it by up to about 3e-5, so the
+    /// float-stored kernel matrix differs from the exact kernel by far more than its storage rounding. Refinement
+    /// converges on the stored system, but the residual against the exact kernel exceeds the storage-rounding
+    /// threshold. The fit must report RejectedByAccept and return the weights of the double-precision solve.
+    TEST(GprModelsTest, PromoteStorageFallsBackWhenStoredMatrixMissesTheExactKernel)
+    {
+        // Spec: DES-05
+        constexpr std::size_t n = 200;
+        constexpr std::size_t d = 2;
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(23);
+        for (double& v : x)
+        {
+            v = 1000.0 + rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(3.0 * (x[i] - 1000.0)) + (x[n + i] - 1000.0) + (0.05 * rng.unit_normal());
+        }
+        const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.05).value());
+        auto double_fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(kernel).with_noise_variance(1e-2)->factor(x, n, d, y);
+        using Promote = cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>;
+        auto promote_fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, Promote>(kernel).with_noise_variance(1e-2)->factor(x, n, d, y);
+        ASSERT_TRUE(double_fit.has_value());
+        ASSERT_TRUE(promote_fit.has_value());
+
+        const auto promote_summary = promote_fit->refinement_summary();
+        if (!promote_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_EQ(promote_summary->status, cxxgpr::RefinementStatus::RejectedByAccept);
+        EXPECT_TRUE(promote_summary->used_fallback());
+
+        double alpha_max = 0.0;
+        double fallback_err = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double ref = double_fit->alpha()[i];
+            alpha_max = std::max(alpha_max, std::abs(ref));
+            fallback_err = std::max(fallback_err, std::abs(ref - promote_fit->alpha()[i]));
+        }
+        EXPECT_LE(fallback_err, 1e-10 * alpha_max);
     /// @brief Checks that query batch sizes may shrink and grow in any order on one fitted model.
     /// @details Builds a 2-feature model from trainer, grows its query workspace with an 8-point batch, and
     /// compares the following 3-point batch bitwise against a separately factored model that never saw the
