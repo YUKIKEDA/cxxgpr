@@ -1025,7 +1025,7 @@ namespace cxxgpr::detail
                 return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
             }
             // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
-            if (auto ens = workspace.ensure_prediction(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
+            if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
                 !ens.has_value())
             {
                 return std::unexpected(std::move(ens).error());
