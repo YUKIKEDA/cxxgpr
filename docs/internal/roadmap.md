@@ -97,6 +97,7 @@ flowchart LR
 | REL-2 | Task | Publication review gate (`publish-review`, third-party notices, bilingual README check) | #46 | Done |
 | REL-3 | Task | User documentation: Diataxis-structured user docs (en/ja) covering every public API | #82 | Done |
 | REL-4 | Task | Release workflow (draft GitHub Release with per-platform packages and documentation) and README rewrite | #91 | Done |
+| REL-10 | Design | Checked `from_span` factories for `MatrixRef` / `MatrixMut` and removal of the unchecked `(span, rows, cols)` constructors | #113 | Done |
 
 ## Out of scope
 
