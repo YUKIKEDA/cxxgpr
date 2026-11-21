@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: read, set, bound and re-tune hyperparameters; evaluate the marginal-likelihood objective.
-#include <array>
-#include <cmath>
-#include <cstddef>
 #include <cxxgpr/core/interval.hpp>
 #include <cxxgpr/core/likelihood.hpp>
 #include <cxxgpr/core/rng.hpp>
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
 #include <cxxgpr/optimizer/optimizer.hpp>
+
+#include <array>
+#include <cmath>
+#include <cstddef>
 #include <expected>
 #include <iomanip>
 #include <iostream>
@@ -66,8 +67,7 @@ namespace
                 {
                     return std::unexpected(f_plus ? f_minus.error() : f_plus.error());
                 }
-                stats->max_gradient_error =
-                    std::max(stats->max_gradient_error, std::abs(((*f_plus - *f_minus) / (2.0 * step)) - grad[i]));
+                stats->max_gradient_error = std::max(stats->max_gradient_error, std::abs(((*f_plus - *f_minus) / (2.0 * step)) - grad[i]));
                 (void)obj.value_and_gradient_into(plus, up_grad);
                 (void)obj.value_and_gradient_into(minus, down_grad);
                 for (std::size_t j = 0; j < p; ++j)
@@ -79,7 +79,6 @@ namespace
             return optimizer::OptimizerResult{.params = theta, .value = *value, .iterations = 0U, .converged = true};
         }
     };
-
     // [end]
 }  // namespace
 
@@ -133,9 +132,8 @@ int main()
     }
     const std::array<double, 2> outside{std::log(3.0), std::log(50.0)};  // lengthscale 50 > 10
     const auto rejected = edited.set_params(outside);
-    std::cout << "out-of-bounds update rejected: "
-              << (!rejected && rejected.error().code() == GprErrorCode::InvalidInterval) << ", spec unchanged: "
-              << (edited.get_params(std::span<double>(theta)).has_value() && std::abs(std::exp(theta[1]) - 0.5) < 1e-12)
+    std::cout << "out-of-bounds update rejected: " << (!rejected && rejected.error().code() == GprErrorCode::InvalidInterval)
+              << ", spec unchanged: " << (edited.get_params(std::span<double>(theta)).has_value() && std::abs(std::exp(theta[1]) - 0.5) < 1e-12)
               << '\n';
     // [end]
     ok = ok && !rejected;
@@ -145,8 +143,8 @@ int main()
     std::array<double, 1> log_noise{};
     (void)noise.get_params(log_noise);
     std::cout << "noise variance " << noise.noise_variance() << " = exp(" << noise.log_noise_variance()
-              << "), num_params " << noise.num_params() << ", default bounds (" << std::scientific
-              << noise.bounds().lo() << ", " << noise.bounds().hi() << std::fixed << ")\n";
+              << "), num_params " << noise.num_params() << ", default bounds (" << std::scientific << noise.bounds().lo() << ", "
+              << noise.bounds().hi() << std::fixed << ")\n";
     std::array<double, 3> diag{1.0, 1.0, 1.0};
     noise.add_noise_diag(diag);  // adds sigma_n^2 to each diagonal entry
     std::array<double, 3> dk{};
@@ -195,8 +193,8 @@ int main()
     }
     const auto refitted = fitted->refit(x2, x2.size(), 1U, y2);
     const auto cold = trainer.fit(x2, x2.size(), 1U, y2);
-    std::cout << "refit: " << refitted->optimizer_result().iterations
-              << " iterations, cold fit: " << cold->optimizer_result().iterations << " iterations\n";
+    std::cout << "refit: " << refitted->optimizer_result().iterations << " iterations, cold fit: "
+              << cold->optimizer_result().iterations << " iterations\n";
     // [end]
     ok = ok && refitted.has_value() && cold.has_value() && fitted->n_train() == 30U && refitted->n_train() == 40U;
     ok = ok && std::abs(refitted->neg_log_marginal_likelihood() - cold->neg_log_marginal_likelihood()) < 0.05;

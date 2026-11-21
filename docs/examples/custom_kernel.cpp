@@ -2,12 +2,13 @@
 // How-to: write a custom kernel leaf. The kernel k(d2) = 1 / (1 + d2 / (2 l^2)) is a rational quadratic with
 // alpha = 1, so the library's own RationalQuadraticKernel serves as an independent reference for the
 // value, the gradient and the Hessian.
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/persist/persist.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/persist/persist.hpp>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -141,9 +142,7 @@ namespace
             {
                 return std::unexpected(cxxgpr::GprError::index_out_of_range("i and j must be 0"));
             }
-            fill(dist, d2_k, uplo, [](T w) {
-                return (T{4} * w * (w - T{1})) / ((T{1} + w) * (T{1} + w) * (T{1} + w));
-            });
+            fill(dist, d2_k, uplo, [](T w) { return (T{4} * w * (w - T{1})) / ((T{1} + w) * (T{1} + w) * (T{1} + w)); });
             return {};
         }
 
@@ -165,8 +164,7 @@ namespace
             {
                 for (std::size_t row = 0; row < dist.rows(); ++row)
                 {
-                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
-                        || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col) || (uplo == cxxgpr::Triangle::Upper && row > col))
                     {
                         continue;
                     }
@@ -178,7 +176,6 @@ namespace
 
         double lengthscale_;
     };
-
     // [end]
 
     bool all_ok = true;
@@ -220,10 +217,7 @@ int main()
     std::array<double, 9> s1{};
     std::array<double, 9> s2{};
     std::array<double, 9> s3{};
-    const auto mat = [](std::array<double, 9>& v)
-    {
-        return MatrixMut<double>(v.data(), 3, 3);
-    };
+    const auto mat = [](std::array<double, 9>& v) { return MatrixMut<double>(v.data(), 3, 3); };
 
     check(mine.apply_points(x, mat(a), Triangle::Full, mat(s1)));
     check(theirs.apply_points(x, mat(b), Triangle::Full, mat(s1)));
@@ -302,23 +296,18 @@ int main()
     const auto mine_f = spec.compile<float>();
     std::array<float, 9> af{};
     std::array<float, 9> sf{};
-    check(mine_f.apply_points(
-        MatrixRef<float>(xf.data(), 3, 2), MatrixMut<float>(af.data(), 3, 3), Triangle::Full,
-        MatrixMut<float>(sf.data(), 3, 3)
-    ));
+    check(mine_f.apply_points(MatrixRef<float>(xf.data(), 3, 2), MatrixMut<float>(af.data(), 3, 3), Triangle::Full,
+                              MatrixMut<float>(sf.data(), 3, 3)));
     expect(std::abs(static_cast<double>(af[1]) - 1.0 / (1.0 + 1.25 / 4.5)) < 1e-6, "float evaluation");
 
     // [persist]
     // Saving a model that contains the kernel needs the factory below to be registered when loading.
     persist::PersistRegistry registry;
-    check(registry.register_kernel(
-        "example.inverse_quadratic", [](std::string_view json)
-    {
+    check(registry.register_kernel("example.inverse_quadratic", [](std::string_view json) {
         const auto colon = json.find(':');
         const double ell = std::strtod(std::string(json.substr(colon + 1)).c_str(), nullptr);
         return make_custom_kernel<InverseQuadraticTerm>(ell);
-    }
-    ));
+    }));
     const std::string state = unwrap(custom.persist_state_json());
     const CustomKernel restored = unwrap(registry.create_kernel(custom.persist_id(), state));
     // [end]

@@ -947,8 +947,8 @@ namespace cxxgpr
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         /// @pre `xs.cols() == n_features()` and all query coordinates are finite.
         /// @note Calling repeatedly with `xs.rows()` at most the warmed query capacity performs zero heap allocations.
-        /// @see predict(), predict_with_into(), the free function cxxgpr::predict_covariance_into() for joint
-        /// covariances
+        /// @see predict(), predict_with_into()
+        /// @see cxxgpr::predict_covariance_into()
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const

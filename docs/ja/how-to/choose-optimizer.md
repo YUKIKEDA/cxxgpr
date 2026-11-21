@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` は、次を備えたコピー可能な任意の型 `O` を受け付ける。
 
-- `static constexpr bool uses_change_indices`（`OptimizerTraits<O>::uses_change_indices` 経由で読まれる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
+- `static constexpr bool uses_change_indices`（モデルは `cxxgpr/workspace/leaf_cache.hpp` の `cxxgpr::optimizer_uses_change_indices_v<O>` 経由で読む。このメンバーを持たない型では `false` になる）。`true` にするのは、変更した座標の添字を付けて `value_at_changes` を呼ぶ最適化器だけである。そうするとモデルは、キャッシュしたカーネル行列を再利用できる。
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`
 
 モデルは、組込みの最適化器と同じ目的関数を渡す。次の例は、最良点を揺らして改善だけを採る最適化器で、`LogBounds`、`Xoshiro256PlusPlus`、`OptimizerResult` を使っている。
@@ -273,7 +273,7 @@ two evaluations at the same point cost 1 objective call(s)
 | `Objective`、`Differentiable`、`TwiceDifferentiable` | 目的関数のインターフェース。`dim`、`value`、`value_at_changes`、`fill_intervals`、`gradient_into`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
 | `OptimizerResult` | `params`、`value`、`iterations`、`converged`、`operator==` |
 | `RestartConfig` | `count`、`seed`、`operator==` |
-| `OptimizerTraits` | 最適化器の型の `uses_change_indices` |
+| `cxxgpr::OptimizerTraits`、`cxxgpr::optimizer_uses_change_indices_v` | 最適化器の型の `uses_change_indices`。このメンバーを持たない型では `false`。宣言は `cxxgpr/workspace/leaf_cache.hpp` にあり、`optimizer` 名前空間や `cxxgpr/optimizer/optimizer.hpp` には含まれない |
 | `LogBounds` | 対数空間の境界と $\theta \leftrightarrow z$ の変換（メンバーは上の表） |
 | `EvalCache` | 1 エントリのキャッシュ。`eval_unconstrained`、`clear` |
 

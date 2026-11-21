@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Low-level linear algebra: in-place Cholesky, triangular solves, jitter retries, dense helpers
 // and the deterministic parallel helpers.
+#include <cxxgpr/linalg/cholesky.hpp>
+#include <cxxgpr/linalg/dense.hpp>
+#include <cxxgpr/linalg/jitter.hpp>
+#include <cxxgpr/linalg/parallel.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cxxgpr/linalg/cholesky.hpp>
-#include <cxxgpr/linalg/dense.hpp>
-#include <cxxgpr/linalg/jitter.hpp>
-#include <cxxgpr/linalg/parallel.hpp>
 #include <iomanip>
 #include <iostream>
 #include <span>
@@ -138,8 +139,9 @@ int main()
     // [diag]
     std::vector<double> inv_diag(n);
     std::vector<double> scratch(n * n);
-    if (auto r =
-            linalg::inv_diag_from_chol_l(l_ref, std::span<double>(inv_diag), MatrixMut<double>(scratch.data(), n, n));
+    if (auto r = linalg::inv_diag_from_chol_l(
+            l_ref, std::span<double>(inv_diag), MatrixMut<double>(scratch.data(), n, n)
+        );
         !r)
     {
         return fail("inv_diag_from_chol_l", r.error());
@@ -232,9 +234,7 @@ int main()
     }
     // Mirror the lower triangle into the upper one so that the matrix is explicitly symmetric.
     std::vector<double> lower_only(n * n, 0.0);
-    if (!linalg::copy_lower_triangle(
-            MatrixRef<double>(shifted.data(), n, n), MatrixMut<double>(lower_only.data(), n, n)
-        )
+    if (!linalg::copy_lower_triangle(MatrixRef<double>(shifted.data(), n, n), MatrixMut<double>(lower_only.data(), n, n))
         || !linalg::symmetrize_lower(MatrixMut<double>(lower_only.data(), n, n)))
     {
         return 1;
@@ -247,9 +247,10 @@ int main()
             asymmetry = std::max(asymmetry, std::abs(lower_only[(col * n) + row] - shifted[(row * n) + col]));
         }
     }
-    const double frob =
-        linalg::frobenius_lower(MatrixRef<double>(shifted.data(), n, n), MatrixRef<double>(shifted.data(), n, n))
-            .value();
+    const double frob = linalg::frobenius_lower(
+                            MatrixRef<double>(shifted.data(), n, n), MatrixRef<double>(shifted.data(), n, n)
+    )
+                            .value();
     double frob_full = 0.0;
     for (const double v : shifted)
     {
@@ -278,13 +279,14 @@ int main()
     // Visit every column exactly once, whatever the thread count. Each column writes only its own slot.
     std::vector<std::uint8_t> visited(order, 0);
     linalg::parallel_for_lower_blocks(
-        order, 0, [&visited](std::size_t col_begin, std::size_t col_end)
-    {
-        for (std::size_t col = col_begin; col < col_end; ++col)
+        order, 0,
+        [&visited](std::size_t col_begin, std::size_t col_end)
         {
-            visited[col] += 1;
+            for (std::size_t col = col_begin; col < col_end; ++col)
+            {
+                visited[col] += 1;
+            }
         }
-    }
     );
     const bool once = std::ranges::all_of(visited, [](std::uint8_t v) { return v == 1; });
     std::cout << "every column visited exactly once: " << once << '\n';
@@ -292,10 +294,7 @@ int main()
     // A deterministic reduction: per-column values are summed in ascending column order, so the
     // result is bit-identical for any thread count.
     std::vector<double> partials(order);
-    auto column_value = [](std::size_t col)
-    {
-        return 1.0 / static_cast<double>((col + 1) * (col + 1));
-    };
+    auto column_value = [](std::size_t col) { return 1.0 / static_cast<double>((col + 1) * (col + 1)); };
     const auto serial = linalg::parallel_lower_reduce_cols(order, 1, std::span<double>(partials), column_value);
     const auto wide = linalg::parallel_lower_reduce_cols(order, 4, std::span<double>(partials), column_value);
     const auto automatic = linalg::parallel_lower_reduce_cols(order, 0, std::span<double>(partials), column_value);

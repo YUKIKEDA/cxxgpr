@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Tutorial: save a fitted model to disk, load it back, and check that the predictions agree.
-#include <array>
-#include <cstddef>
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
 #include <cxxgpr/persist/persist.hpp>
 #include <cxxgpr/transform/transform.hpp>
+
+#include <array>
+#include <cstddef>
 #include <filesystem>
 #include <iostream>
 
@@ -17,8 +18,9 @@ int main()
     const std::array<double, 8> y_train{0.08, 0.83, 1.01, 0.33, -0.52, -1.07, -0.67, 0.12};
     const std::array<double, 3> x_query{1.35, 3.15, 5.85};
 
-    const cxxgpr::KernelSpec spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
-        * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+    const cxxgpr::KernelSpec spec =
+        cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value()) *
+        cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
     auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec).with_noise_variance(0.01);
     if (!trainer)
     {

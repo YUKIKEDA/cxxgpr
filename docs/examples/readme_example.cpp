@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The program shown in README.md and README.ja.md; kept here so it is compiled and run by CTest.
-#include <array>
-#include <cmath>
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
 #include <cxxgpr/transform/transform.hpp>
+
+#include <array>
+#include <cmath>
 #include <iostream>
 
 int main()

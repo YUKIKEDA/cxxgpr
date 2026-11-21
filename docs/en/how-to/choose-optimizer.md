@@ -240,7 +240,7 @@ two evaluations at the same point cost 1 objective call(s)
 
 `Gpr<O>` accepts any copyable type `O` that provides
 
-- `static constexpr bool uses_change_indices` (read through `OptimizerTraits<O>::uses_change_indices`); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
+- `static constexpr bool uses_change_indices` (the model reads it through `cxxgpr::optimizer_uses_change_indices_v<O>` from `cxxgpr/workspace/leaf_cache.hpp`, which is `false` for a type without the member); set it to `true` only if your optimizer calls `value_at_changes` with the indices of the coordinates it changed, which lets the model reuse cached kernel matrices, and
 - `std::expected<OptimizerResult, GprError> optimize(TwiceDifferentiable& obj, std::span<const double> initial_params) const`.
 
 The model hands you the same objective the built-in optimizers see. The one below perturbs the best point and keeps improvements, using `LogBounds`, `Xoshiro256PlusPlus` and `OptimizerResult`:
@@ -273,7 +273,7 @@ Check the points your optimizer proposes with `LogBounds::validate_log_params` (
 | `Objective`, `Differentiable`, `TwiceDifferentiable` | objective interfaces: `dim`, `value`, `value_at_changes`, `fill_intervals`, `gradient_into`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
 | `OptimizerResult` | `params`, `value`, `iterations`, `converged`, `operator==` |
 | `RestartConfig` | `count`, `seed`, `operator==` |
-| `OptimizerTraits` | `uses_change_indices` of an optimizer type |
+| `cxxgpr::OptimizerTraits`, `cxxgpr::optimizer_uses_change_indices_v` | `uses_change_indices` of an optimizer type, `false` when the type has no such member. Declared in `cxxgpr/workspace/leaf_cache.hpp`, not in the `optimizer` namespace or `cxxgpr/optimizer/optimizer.hpp` |
 | `LogBounds` | log-space bounds and the $\theta \leftrightarrow z$ map (members in the table above) |
 | `EvalCache` | single-entry cache; `eval_unconstrained`, `clear` |
 

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Tutorial: Gaussian process regression with two inputs on very different scales,
 // an ARD kernel, standardising transforms, and a leave-one-out check.
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
+
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/transform/transform.hpp>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -15,10 +16,7 @@
 namespace
 {
     // The function we pretend not to know: oscillates in x1, grows slowly and linearly in x2.
-    double truth(double x1, double x2)
-    {
-        return std::sin(x1) + x2 / 500.0;
-    }
+    double truth(double x1, double x2) { return std::sin(x1) + x2 / 500.0; }
 }  // namespace
 
 int main()
@@ -29,10 +27,7 @@ int main()
     std::vector<double> x(n * 2);
     std::vector<double> y(n);
     std::mt19937 gen(7U);  // mt19937 output is specified by the standard, so the data is portable.
-    const auto unit = [&gen]
-    {
-        return static_cast<double>(gen()) / 4294967296.0;
-    };
+    const auto unit = [&gen] { return static_cast<double>(gen()) / 4294967296.0; };
     for (std::size_t i = 0; i < n; ++i)
     {
         x[i] = 6.0 * unit();
@@ -84,10 +79,8 @@ int main()
 
     // [predict]
     // Three queries (column-major 3 x 2): inside the data, inside the data, and far outside it.
-    const std::array<double, 6> xq{
-        3.0, 1.0, 12.0,  // x1
-        250.0, 100.0, 250.0
-    };  // x2
+    const std::array<double, 6> xq{3.0, 1.0, 12.0,    // x1
+                                   250.0, 100.0, 250.0};  // x2
     auto pred = fitted->predict(xq, 3U, 2U);
     if (!pred)
     {
