@@ -21,6 +21,10 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef _OPENMP
+#    include <omp.h>
+#endif
+
 #include "allocation_audit.hpp"
 
 namespace
@@ -250,6 +254,63 @@ namespace
         auto err_qdim = ok_fit->predict(bad_query, 1U, 2U);
         ASSERT_FALSE(err_qdim.has_value());
         EXPECT_EQ(err_qdim.error().code(), cxxgpr::GprErrorCode::DimensionMismatch);
+    }
+
+    /// @brief Verifies mixed-precision refinement weights are bit-identical for any OpenMP thread count.
+    /// @details The blocked double-precision residual accumulates each row over its columns in ascending order, so
+    /// splitting rows across threads must not change a single bit of the refined weights or the summary.
+    TEST(GprModelsTest, MixedPrecisionRefinementIsBitwiseIdenticalAcrossThreadCounts)
+    {
+        // Spec: DES-05, DES-20
+        constexpr std::size_t n = 520;
+        std::vector<double> x(n * 2U);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(11);
+        for (double& v : x)
+        {
+            v = rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(3.0 * x[i]) + x[n + i] + (0.05 * rng.unit_normal());
+        }
+        const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value());
+
+        using Policy = cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>;
+        auto run = [&](int threads)
+        {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+            auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, Policy>(kernel).with_noise_variance(1e-2);
+            auto fitted = trainer->factor(x, n, 2U, y);
+            EXPECT_TRUE(fitted.has_value());
+            return fitted;
+        };
+#ifdef _OPENMP
+        const int saved_threads = omp_get_max_threads();
+#endif
+        const auto reference = run(1);
+        ASSERT_TRUE(reference.has_value());
+        ASSERT_TRUE(reference->refinement_summary().has_value());
+        EXPECT_FALSE(reference->refinement_summary()->used_fallback());
+        for (const int threads : {2, 4})
+        {
+            const auto other = run(threads);
+            ASSERT_TRUE(other.has_value());
+            ASSERT_EQ(other->alpha().size(), reference->alpha().size());
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+            }
+            EXPECT_EQ(*other->refinement_summary(), *reference->refinement_summary());
+        }
+#ifdef _OPENMP
+        omp_set_num_threads(saved_threads);
+#endif
     }
 
 }  // namespace

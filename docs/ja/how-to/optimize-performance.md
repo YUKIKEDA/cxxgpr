@@ -161,16 +161,24 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 - `PromoteStorage` は、試したすべての問題で `RejectedByAccept` で終わった。この方式の反復は、保存された単精度行列に対して収束する。しかし、最後の厳密な倍精度カーネルとの照合が失敗する。行列を `float` に丸めただけで、約 $10^{-7}$ の摂動が入るからである。ライブラリはそこで系を倍精度で解き直す。結果は正しいが、単精度の因子分解、反復改良、倍精度の求解の 3 つを払うことになる。どの経路を通ったかは `FittedGpr::refinement_summary()` で確認できる。
 - `ReevaluateKernel` は、残差を倍精度の厳密なカーネルで列ブロックごとに検査し、ここでは収束した。
 
-`n = 2000`、特徴量 4 個で `Gpr<optimizer::Fixed, P>::factor` の時間を測った。
+`Gpr<optimizer::Fixed, P>::factor` の所要時間（3 回の中央値、特徴量 4 つ、Release ビルド、16 スレッドの x86-64 デスクトップ、実行ごとのばらつきは最大で約 10 %）を、16 スレッドでミリ秒で示す。
 
-| ポリシー | 16 スレッド | 1 スレッド |
-|---|---|---|
-| `DoublePrecision` | 約 32 ms | 約 200 ms |
-| `SinglePrecision` | 約 19〜23 ms | 約 120 ms |
-| `MixedPrecision<PromoteStorage>` | 約 86〜94 ms | 約 400 ms |
-| `MixedPrecision<ReevaluateKernel>` | 約 76〜78 ms | 約 200 ms |
+| `n` | `DoublePrecision` | `SinglePrecision` | `MixedPrecision<PromoteStorage>` | `MixedPrecision<ReevaluateKernel>` |
+|---|---|---|---|---|
+| 500 | 1.9 | 1.1 | 5.6 | 5.2 |
+| 1000 | 7.0 | 4.3 | 22 | 19 |
+| 2000 | 30 | 17 | 84 | 73 |
+| 4000 | 167 | 83 | 334 | 139 |
+| 6000 | 457 | 235 | 958 | 371 |
 
-この版では、混合精度のポリシーは `factor` を `DoublePrecision` より速くしない。利点は、単精度の因子で記憶域を節約できること、そして `ReevaluateKernel` では、重みが倍精度の厳密な系に対して検査されることである。メモリが制約でなければ `DoublePrecision`、誤差を許容できるなら `SinglePrecision`、単精度の記憶域と検査済みの重みが両方ほしいなら `MixedPrecision<ReevaluateKernel>` を選ぶ。反復改良のアルゴリズムは {doc}`../explanation/numerical-stability`、自分で動かす方法は {doc}`use-low-level-building-blocks` を参照。
+1 スレッドでは、`n = 2000` が 95 ms（倍精度）、53 ms（単精度）、176 ms（`PromoteStorage`）、93 ms（`ReevaluateKernel`）。`n = 4000` は 587、323、1015、498 ms である。
+
+混合精度のポリシーがこう振る舞う理由は次のとおり。
+
+- 反復改良の各ステップは、倍精度の厳密なカーネルを、列ブロックごとに、三角ではなく行列全体について評価し直す。収束までに、この残差が 2 回（出発点の残差と、収束を確かめる残差）要るので、倍精度の経路のカーネル評価の数倍のコストになる。そこに単精度の分解が加わる。分解は $O(n^3)$ の計算を節約し、反復改良は $O(n^2)$ を要するので、`n` が大きくなるほど `ReevaluateKernel` が `DoublePrecision` を追い越す。この環境では、おおよそ `n = 3000` 未満では遅く、`n = 4000` と `n = 6000` では約 1.2 倍速い。
+- `PromoteStorage` は、前述の理由で、ここでは常に `DoublePrecision` より遅い。反復改良が無駄になり、その後に倍精度の解き直しが走るからである。
+
+メモリが制約でなければ `DoublePrecision`、誤差を許せるなら `SinglePrecision`、単精度の因子の保存と検証済みの重みが要る場合や、`n` が大きく倍精度より速くしたい場合は `MixedPrecision<ReevaluateKernel>` を選ぶ。このリリースでは `MixedPrecision<PromoteStorage>` を避ける。反復改良のアルゴリズムは {doc}`../explanation/numerical-stability`、自分で動かす方法は {doc}`use-low-level-building-blocks` を参照。
 
 ## 学習時にメモリと速度を取引する
 
