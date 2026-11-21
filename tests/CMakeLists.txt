@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 find_package(GTest CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(cxxgpr_test_support STATIC
     support/allocation_audit.cpp
+    support/small_stack.cpp
 )
 cxxgpr_configure_target(cxxgpr_test_support)
 cxxgpr_configure_allocation_audit_target(cxxgpr_test_support)
@@ -13,6 +15,7 @@ target_include_directories(cxxgpr_test_support
 target_link_libraries(cxxgpr_test_support
     PUBLIC
         cxxgpr::eigen
+        Threads::Threads
 )
 
 function(cxxgpr_add_test test_name)
@@ -201,6 +204,11 @@ cxxgpr_add_test(gpr.distance
 
 cxxgpr_add_test(persist.models
     SOURCES persist/persist_test.cpp
+    LABELS unit property negative integration
+)
+
+cxxgpr_add_test(persist.distance
+    SOURCES persist/distance_persist_test.cpp
     LABELS unit property negative integration
 )
 

@@ -35,14 +35,14 @@ model.safetensors: 5440 bytes
 
 - 読み手が書きかけのファイルを見ることはない。各ファイルは、リネームによって丸ごと置き換わる。
 - 書き込みやリネームに失敗すると、`save` は一時ファイルを削除し、`PersistErrorKind::Io` を返す。
-- 保存できない構成要素は、何かを書く前に検出される。有効な `persist_id` を持たない自作の構成要素があると、`PersistErrorKind::NotPersistable` か `PersistErrorKind::InvalidPersistId` を返し、保存先のディレクトリには触れない。
+- 保存できないモデルは、何かを書く前に検出され、保存先のディレクトリには触れない。有効な `persist_id` を持たない自作の構成要素があると `PersistErrorKind::NotPersistable` か `PersistErrorKind::InvalidPersistId`、UTF-8 の JSON に書けない自作の状態があると `PersistErrorKind::NotPersistable`（{ref}`persist-models-custom` を参照）、`load` が拒む 128 段より深い入れ子の `config.json` になると `PersistErrorKind::Config` を返す。
 
 :::{warning}
-2 つのファイルは、1 つのトランザクションではなく、順にリネームされる。2 回のリネームの間にプロセスが強制終了すると、ディレクトリには新しい `model.safetensors` と古い `config.json` が残る。ローダーは読み取った形状とサイズをすべて検証するが、2 つのファイルが対応していることまでは知りえない。正確さが重要なら、新しいディレクトリへ保存し、ディレクトリごと所定の位置へ移す。
+2 つのファイルは、1 つのトランザクションではなく、順にリネームされる。2 回のリネームの間にプロセスが強制終了したとき、または 2 回目のリネームに失敗したとき（`save` は `PersistErrorKind::Io` を返す）、ディレクトリには新しい `model.safetensors` と古い `config.json` が残る。`save` は古い `model.safetensors` を元に戻さない。ローダーは、テンソルの形状や `dtype` が `config.json` と合わない組を拒む。しかし、形の合う 2 つのファイルが別々の保存から来たことまでは知りえず、その場合は新しいデータと古いハイパーパラメータを混ぜたモデルを読み込む。正確さが重要なら、新しいディレクトリへ保存し、ディレクトリごと所定の位置へ移す。
 :::
 
 :::{warning}
-Windows では、メモリマップ中のファイルを置き換えられない。`model.safetensors` を生きている `LoadedGpr`（後述）がマップしているディレクトリへ保存すると、`PersistErrorKind::Io` で失敗する。古いファイルをマップしている `LoadedGpr` をすべて破棄してから保存するか、別のディレクトリへ保存する。Linux では、マップ中のファイルも置き換えられ、古いマップには古いデータが見え続ける。
+Windows では、メモリマップ中のファイルを置き換えられない。`model.safetensors` を生きている `LoadedGpr`（後述）がマップしているディレクトリへ保存すると、`PersistErrorKind::Io` で失敗し、既存のファイルはそのまま残る。古いファイルをマップしている `LoadedGpr` をすべて破棄してから保存するか、別のディレクトリへ保存する。Linux では、マップ中のファイルも置き換えられる。生きている `LoadedGpr` は古いデータで予測を続け、新たに `load` すると新しいファイルを読む。
 :::
 
 ## モデルを読み込む
@@ -188,9 +188,9 @@ predictions after load are bit-identical: true
 
 ### 識別子と状態の規則
 
-- 識別子は空であってはならず、`cxxgpr.`（定数 `RESERVED_PREFIX`）で始まってもならない。`validate_persist_id` がこの規則を適用し、登録と保存の両方で使われる。違反すると `PersistErrorKind::InvalidPersistId` になる。
+- 識別子は空であってはならず、`cxxgpr.`（定数 `RESERVED_PREFIX`）で始まってもならず、有効な UTF-8 でなければならない。`validate_persist_id` がこの規則を適用し、登録と保存の両方で使われる。違反すると `PersistErrorKind::InvalidPersistId` になる。
 - 同じ識別子は、カテゴリごとに 1 回だけ登録できる。2 回目の登録は `PersistErrorKind::InvalidPersistId` で失敗する。5 つの登録カテゴリ（カーネル、未学習と学習済みの入力変換、未学習と学習済みの目的変数変換）は互いに独立している。変換には、未学習と学習済みの登録が 1 つずつ必要である。例では、別々の識別子（`example.log.unfitted`、`example.log.fitted`）を与えている。
-- 状態は、有効な JSON であることが望ましい文字列である。JSON として解析できれば、ライブラリは `config.json` の中に構造化された JSON として保存し、ファクトリには再シリアライズした文字列を渡す。解析できなければ、単なる文字列として保存する。JSON のオブジェクトか数値を使い、JSON の単独の文字列は避ける。状態は、ファクトリが必要とするすべてを含めること。カーネルでは、*学習後*のハイパーパラメータも含める。
+- 状態は、有効な JSON であることが望ましい文字列である。JSON のオブジェクト、配列、数値、`true`、`false`、`null` として解析できれば、ライブラリは `config.json` の中に構造化された JSON として保存し、ファクトリには再シリアライズした文字列を渡す。これは返した文字列と同じとは限らない。数値は書き直され（`2.500000` は `2.5`、`1e2` は `100.0` になる）、空白は除かれ、オブジェクトのキーは整列される。それ以外の状態は、JSON の文字列リテラル（たとえば `"abc"`）であっても単なる文字列として保存し、ファクトリには返した文字列が引用符も含めてそのまま渡る。単なる文字列として保存する状態は、有効な UTF-8 でなければならない。そうでなければ、保存は `PersistErrorKind::NotPersistable` で失敗する。JSON のオブジェクトか数値を使うのがよい。状態は、ファクトリが必要とするすべてを含めること。カーネルでは、*学習後*のハイパーパラメータも含める。
 - ビット単位の一致を保つには、浮動小数点の状態をすべての桁で書く。`std::format("{}", x)` は、読み戻すと正確に元の値になる最短の文字列を作る。6 桁しか残さない `std::to_string` は使わない。
 - `persist_id` がない（既定の）自作の構成要素は保存できず、保存は `PersistErrorKind::NotPersistable` で失敗する。
 
@@ -216,8 +216,8 @@ reserved prefix rejected: true, duplicate rejected: true
 | `Io` | ファイルシステムの失敗 | ディレクトリがない、権限がない、ディスクが満杯、マップに失敗した |
 | `Config` | `config.json` が壊れている | JSON が不正、キーが欠けている、入れ子が 128 段を超える |
 | `Tensor` | `model.safetensors` が不正 | ファイルが切り詰められた、形状や `dtype` が違う、有限でない値、アラインメントが合わない |
-| `InvalidPersistId` | 自作の識別子が許されない | 空、予約された接頭辞、すでに登録済み |
-| `NotPersistable` | 保存できない構成要素がある | `persist_id` のない自作のカーネルや変換 |
+| `InvalidPersistId` | 自作の識別子が許されない | 空、予約された接頭辞、有効な UTF-8 でない、すでに登録済み |
+| `NotPersistable` | 保存できない構成要素がある | `persist_id` のない自作のカーネルや変換、JSON でも有効な UTF-8 でもない状態 |
 | `UnregisteredId` | 登録されていない自作の構成要素がファイルにある | `save` で使ったレジストリなしで `load` した |
 | `WrongModel` | ファイルが呼び出し側の求めるものと違う | `into_fitted` での精度の不一致、または別のモデル族のファイル |
 
@@ -249,9 +249,44 @@ if (!loaded && loaded.error().code() == cxxgpr::GprErrorCode::UnsupportedPersist
 
 自動の移行機能はない。古いモデルを読む必要があるなら、それを書き出した版のライブラリを残しておくか、学習データから再学習する。学習データは、どのファイルにも `x` と `y` として入っている。
 
-:::{note}
-このリリースが保存するのは、座標データから作った厳密な GPR モデルである。供給された二乗距離（`DistanceKernel`）で学習したモデルは、保存も読み込みもできない。`distance` セクションを持つファイルは、`LoadedGpr::load` が `PersistErrorKind::WrongModel` で拒否する。`LoadedDistanceGpr` は、このリリースには含まれない。
-:::
+## 供給された距離のモデルを保存する
+
+`FittedDistanceGpr` は、同じ `save` と `save_with_factor` で保存し、`LoadedDistanceGpr<C>` で読み戻す。`C` は `DistanceOnly` か `WithPoints` で、保存したモデルのモードに合わせる。チェックポイントには、距離スロットごとの `d2.<k>` テンソル（検査済みの学習距離の下三角）と、`config.json` の `distance` セクションが加わる。詳細は {doc}`../reference/file-format` を参照。
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [save]
+:end-before: // [end]
+```
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [load]
+:end-before: // [end]
+```
+
+読み込むと、**新しいスロット**が発行される。保存の前に使った `ScalarDistance` や `ArdDistance` は、読み込んだモデルには使えない。読み込んだモデルの `kernel().slots()` から、カーネルの順にスロットを取り出し、予測点の表を結び付ける。
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [bind]
+:end-before: // [end]
+```
+
+`LoadedDistanceGpr` が持つのは、`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` である。予測系のメソッドは `FittedDistanceGpr` と同じ表（`WithPoints` では予測点の座標も）を受け取り、`double` の結果を返す。`into_fitted` は、保存した精度ポリシーの型付き `FittedDistanceGpr` を返す。
+
+- `save_with_factor` で保存すると、因子と重みは保存した値のまま復元され、予測は保存前のモデルとビット単位で一致する。倍精度の因子は `LoadedGpr` と同じく読み取り専用のメモリマップで読む（`has_mmap_factor()` が `true`）。そのため同じ決まりに従い、モデルやそのコピーが生きている間はファイルをその場で書き換えないこと。`into_fitted` は因子をコピーするので、返すモデルはファイルに依存しない。`save` で保存した場合は、読み込み時に因子を計算し直し、予測は丸めの範囲で一致する。
+- 読み込んだ `MixedPrecision` のモデルは `refinement_summary` を持たない。`neg_log_marginal_likelihood` は保存した因子と改良後の重みから計算し直すので、学習時に報告した値（単精度の解から得た値）とわずかに違うことがある。
+- 表は、読み込み時にもう一度検査される。負の要素や 0 でない対角は `InvalidDistance`、非有限の値は壊れたテンソル（`PersistErrorKind::Tensor`）として拒否する。
+- 別のモードのチェックポイントや座標モデルのチェックポイントは、`PersistErrorKind::WrongModel` で拒否する。
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [wrong-loader]
+:end-before: // [end]
+```
+
+`MixedPrecision` のモデルは、表を単精度で保存する。予測に使う精度と同じである。
 
 ## API 一覧
 
@@ -262,8 +297,9 @@ if (!loaded && loaded.error().code() == cxxgpr::GprErrorCode::UnsupportedPersist
 | `save` | 因子なしでモデルを書き出す。ファイルごとに原子的 |
 | `save_with_factor` | $L$ と $\alpha$ を付けてモデルを書き出す |
 | `LoadedGpr` | 読み込んだ、型を消去したモデル。`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel_spec`、`likelihood`、`jitter`、`kernel_exp`、`distance_cache_policy`、`predict`、`predict_into`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` |
+| `LoadedDistanceGpr` | 読み込んだ供給距離のモデル（モードは `DistanceOnly` か `WithPoints`）。`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` |
 | `PersistRegistry` | 自作の構成要素のファクトリ。`register_kernel`、`register_unfitted_input`、`register_fitted_input`、`register_unfitted_target`、`register_fitted_target`、および `create_kernel`、`create_unfitted_input`、`create_fitted_input`、`create_unfitted_target`、`create_fitted_target` |
-| `validate_persist_id` | 識別子を、空文字列と予約接頭辞の規則に照らして検査する |
+| `validate_persist_id` | 識別子を、空文字列、予約接頭辞、UTF-8 の規則に照らして検査する |
 | `CustomKernelFactory`、`UnfittedInputFactory`、`FittedInputFactory`、`UnfittedTargetFactory`、`FittedTargetFactory` | ファクトリ関数の型 |
 
 生成リファレンスは [persist API リファレンス](../reference/api/persist.md) にある。

@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "checkpoint_io.hpp"
 #include "config_json.hpp"
 #include "safetensors.hpp"
 #include "workspace/predict_diagonal.hpp"
@@ -32,14 +33,15 @@
 namespace cxxgpr::persist
 {
 
-    /// @brief Validates a custom persist_id against empty and reserved prefix rules.
-    /// @details Rejects empty strings and identifiers beginning with RESERVED_PREFIX ("cxxgpr.").
+    /// @brief Validates a custom persist_id against the empty, reserved prefix, and encoding rules.
+    /// @details Rejects empty strings, identifiers beginning with RESERVED_PREFIX ("cxxgpr."), and identifiers
+    /// that are not valid UTF-8.
     /// @param[in] persist_id Candidate custom extension identifier.
     /// @return Empty expected on success, or PersistFailed(InvalidPersistId) on violation.
-    /// @retval GprErrorCode::PersistFailed When persist_id is empty or starts with "cxxgpr.".
+    /// @retval GprErrorCode::PersistFailed When persist_id is empty, starts with "cxxgpr.", or is not valid UTF-8.
     std::expected<void, GprError> validate_persist_id(std::string_view persist_id)
     {
-        // Reject empty identifiers and reserved library prefixes before registration or serialization.
+        // Reject empty, reserved, and unencodable identifiers before registration or serialization.
         if (persist_id.empty())
         {
             return std::unexpected(
@@ -50,6 +52,13 @@ namespace cxxgpr::persist
         {
             return std::unexpected(
                 GprError::persist_failed(PersistErrorKind::InvalidPersistId, "persist_id must not start with 'cxxgpr.'")
+            );
+        }
+        // config.json is UTF-8 JSON, so an identifier that is not valid UTF-8 could never be written into it.
+        if (!detail::is_valid_utf8(persist_id))
+        {
+            return std::unexpected(
+                GprError::persist_failed(PersistErrorKind::InvalidPersistId, "persist_id must be valid UTF-8")
             );
         }
         return {};
@@ -791,6 +800,8 @@ namespace cxxgpr::persist
             .x_transform = impl->x_transform->clone(),
             .y_unfitted = impl->y_unfitted->clone(),
             .y_transform = impl->y_transform->clone(),
+            .distance_kernel = std::nullopt,
+            .distance_with_points = false,
         };
 
         // Construct only the precision-typed state matching precision_kind.
@@ -1173,6 +1184,72 @@ namespace cxxgpr::persist
     namespace detail
     {
 
+        /// @brief Writes config.json and model.safetensors through staged temporary files and renames them into place.
+        /// @param[in] dir Destination directory that already exists.
+        /// @param[in] cfg_str Serialized config.json text.
+        /// @param[in] tensors Tensors of model.safetensors.
+        /// @return Empty expected on success, or GprError when writing or renaming fails (temporary files are removed).
+        /// @retval GprErrorCode::PersistFailed When a file cannot be written or renamed.
+        std::expected<void, GprError> write_checkpoint_files(
+            const std::filesystem::path& dir, const std::string& cfg_str, std::span<const TensorWriteView> tensors
+        )
+        {
+            std::error_code ec;
+            // Write staged temporary files inside dir, then atomically rename into final targets.
+            const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
+            const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
+
+            if (auto wr = write_safetensors_file(tmp_st, tensors); !wr.has_value())
+            {
+                std::filesystem::remove(tmp_st, ec);
+                return wr;
+            }
+
+            {
+                std::ofstream ofs(tmp_cfg, std::ios::binary | std::ios::trunc);
+                if (!ofs)
+                {
+                    std::filesystem::remove(tmp_st, ec);
+                    return std::unexpected(
+                        GprError::persist_failed(
+                            PersistErrorKind::Io, "failed to open temporary config.json for writing"
+                        )
+                    );
+                }
+                ofs.write(cfg_str.data(), static_cast<std::streamsize>(cfg_str.size()));
+                ofs.flush();
+                if (!ofs)
+                {
+                    std::filesystem::remove(tmp_st, ec);
+                    std::filesystem::remove(tmp_cfg, ec);
+                    return std::unexpected(
+                        GprError::persist_failed(PersistErrorKind::Io, "failed while writing temporary config.json")
+                    );
+                }
+            }
+
+            // Replace model.safetensors and config.json atomically and clean up leftover temporary files on error.
+            std::filesystem::rename(tmp_st, dir / "model.safetensors", ec);
+            if (ec)
+            {
+                std::filesystem::remove(tmp_st, ec);
+                std::filesystem::remove(tmp_cfg, ec);
+                return std::unexpected(
+                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace model.safetensors")
+                );
+            }
+            std::filesystem::rename(tmp_cfg, dir / "config.json", ec);
+            if (ec)
+            {
+                std::filesystem::remove(tmp_cfg, ec);
+                return std::unexpected(
+                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace config.json")
+                );
+            }
+
+            return {};
+        }
+
         /// @brief Validates inputs and atomically writes config.json and model.safetensors into dir.
         /// @details Checks dimensions and tensor finiteness, serializes config.json, builds aligned tensor
         /// descriptors, writes temporary staging files model.safetensors.tmp and config.json.tmp inside dir,
@@ -1316,59 +1393,7 @@ namespace cxxgpr::persist
                 }
             }
 
-            // Write staged temporary files inside dir, then atomically rename into final targets.
-            const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
-            const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
-
-            if (auto wr = write_safetensors_file(tmp_st, tensors); !wr.has_value())
-            {
-                std::filesystem::remove(tmp_st, ec);
-                return wr;
-            }
-
-            {
-                std::ofstream ofs(tmp_cfg, std::ios::binary | std::ios::trunc);
-                if (!ofs)
-                {
-                    std::filesystem::remove(tmp_st, ec);
-                    return std::unexpected(
-                        GprError::persist_failed(
-                            PersistErrorKind::Io, "failed to open temporary config.json for writing"
-                        )
-                    );
-                }
-                ofs.write(cfg_str->data(), static_cast<std::streamsize>(cfg_str->size()));
-                ofs.flush();
-                if (!ofs)
-                {
-                    std::filesystem::remove(tmp_st, ec);
-                    std::filesystem::remove(tmp_cfg, ec);
-                    return std::unexpected(
-                        GprError::persist_failed(PersistErrorKind::Io, "failed while writing temporary config.json")
-                    );
-                }
-            }
-
-            // Replace model.safetensors and config.json atomically and clean up leftover temporary files on error.
-            std::filesystem::rename(tmp_st, dir / "model.safetensors", ec);
-            if (ec)
-            {
-                std::filesystem::remove(tmp_st, ec);
-                std::filesystem::remove(tmp_cfg, ec);
-                return std::unexpected(
-                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace model.safetensors")
-                );
-            }
-            std::filesystem::rename(tmp_cfg, dir / "config.json", ec);
-            if (ec)
-            {
-                std::filesystem::remove(tmp_cfg, ec);
-                return std::unexpected(
-                    GprError::persist_failed(PersistErrorKind::Io, "failed to atomically replace config.json")
-                );
-            }
-
-            return {};
+            return write_checkpoint_files(dir, *cfg_str, tensors);
         }
 
     }  // namespace detail

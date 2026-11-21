@@ -35,14 +35,14 @@ Saving does not modify the model. It writes two temporary files, `model.safetens
 
 - A reader never sees a half-written file: each file is replaced as a whole, by a rename.
 - If writing or renaming fails, `save` removes the temporary files and returns `PersistErrorKind::Io`.
-- Components that cannot be saved are detected before anything is written: a custom component without a valid `persist_id` gives `PersistErrorKind::NotPersistable` or `PersistErrorKind::InvalidPersistId` and leaves the target directory untouched.
+- Models that cannot be saved are detected before anything is written, and the target directory is left untouched: a custom component without a valid `persist_id` gives `PersistErrorKind::NotPersistable` or `PersistErrorKind::InvalidPersistId`, custom state that cannot be written into UTF-8 JSON gives `PersistErrorKind::NotPersistable` (see {ref}`persist-models-custom`), and a `config.json` that would be nested deeper than 128 levels, which `load` would reject, gives `PersistErrorKind::Config`.
 
 :::{warning}
-The two files are renamed one after the other, not as one transaction. If the process is killed between the two renames, the directory holds the new `model.safetensors` and the old `config.json`. The loader validates every shape and size it reads, but it cannot know that the two files belong together. When correctness matters, save into a fresh directory and move the whole directory into place.
+The two files are renamed one after the other, not as one transaction. If the process is killed between the two renames, or the second rename fails (`save` then returns `PersistErrorKind::Io`), the directory holds the new `model.safetensors` and the old `config.json`; `save` does not put the old `model.safetensors` back. The loader rejects the pair when a tensor's shape or `dtype` does not match `config.json`, but it cannot know that two matching files come from different saves, and then loads a model that mixes the new data with the old hyperparameters. When correctness matters, save into a fresh directory and move the whole directory into place.
 :::
 
 :::{warning}
-On Windows a file that is memory-mapped cannot be replaced. Saving into a directory whose `model.safetensors` is mapped by a live `LoadedGpr` (see below) fails with `PersistErrorKind::Io`. Destroy every `LoadedGpr` that maps the old file first, or save to a new directory. On Linux, replacing a mapped file works, and the old mapping keeps showing the old data.
+On Windows a file that is memory-mapped cannot be replaced. Saving into a directory whose `model.safetensors` is mapped by a live `LoadedGpr` (see below) fails with `PersistErrorKind::Io` and leaves the existing files as they were. Destroy every `LoadedGpr` that maps the old file first, or save to a new directory. On Linux, replacing a mapped file works: the live `LoadedGpr` keeps predicting from the old data, and a new `load` reads the new files.
 :::
 
 ## Load a model
@@ -188,9 +188,9 @@ predictions after load are bit-identical: true
 
 ### Rules for identifiers and state
 
-- An identifier must be non-empty and must not start with `cxxgpr.` (the constant `RESERVED_PREFIX`). `validate_persist_id` applies this rule, and registration and saving both use it. A violation gives `PersistErrorKind::InvalidPersistId`.
+- An identifier must be non-empty, must not start with `cxxgpr.` (the constant `RESERVED_PREFIX`), and must be valid UTF-8. `validate_persist_id` applies this rule, and registration and saving both use it. A violation gives `PersistErrorKind::InvalidPersistId`.
 - An identifier can be registered once per category. A second registration fails with `PersistErrorKind::InvalidPersistId`. The five registration categories (kernel, unfitted and fitted input transform, unfitted and fitted target transform) are separate. A transform needs an unfitted and a fitted registration, and the example gives them different identifiers (`example.log.unfitted`, `example.log.fitted`).
-- The state is a string that should be valid JSON. If it parses as JSON, the library stores it as structured JSON inside `config.json` and hands your factory the re-serialized text; otherwise it stores it as a plain string. Prefer a JSON object or number, never a bare JSON string, and make it complete: it must contain everything the factory needs, including the *fitted* hyperparameters of a kernel.
+- The state is a string that should be valid JSON. If it parses as a JSON object, array, number, `true`, `false` or `null`, the library stores it as structured JSON inside `config.json` and hands your factory the re-serialized text, which need not equal what you returned: numbers are rewritten (`2.500000` becomes `2.5`, `1e2` becomes `100.0`), whitespace is dropped and object keys are sorted. Any other state, including one that is itself a JSON string literal such as `"abc"`, is stored as a plain string, and your factory receives exactly the text you returned, quotes included. A state stored as a plain string must be valid UTF-8; otherwise saving fails with `PersistErrorKind::NotPersistable`. Prefer a JSON object or number, and make it complete: it must contain everything the factory needs, including the *fitted* hyperparameters of a kernel.
 - To keep results bit-identical, write floating-point state with all digits. `std::format("{}", x)` produces the shortest text that reads back exactly. Do not use `std::to_string`, which keeps six digits.
 - Without a `persist_id` (the default), a custom component is not persistable and saving fails with `PersistErrorKind::NotPersistable`.
 
@@ -216,8 +216,8 @@ Failures are reported through `GprError`. For persistence errors, `GprError::cod
 | `Io` | the file system failed | missing directory, no permission, disk full, mapping failed |
 | `Config` | `config.json` is malformed | invalid JSON, a missing key, nesting deeper than 128 levels |
 | `Tensor` | `model.safetensors` is invalid | truncated file, wrong shape or `dtype`, a non-finite value, misaligned data |
-| `InvalidPersistId` | a custom identifier is not allowed | empty, reserved prefix, or already registered |
-| `NotPersistable` | the model has a component that cannot be saved | a custom kernel or transform without `persist_id` |
+| `InvalidPersistId` | a custom identifier is not allowed | empty, reserved prefix, not valid UTF-8, or already registered |
+| `NotPersistable` | the model has a component that cannot be saved | a custom kernel or transform without `persist_id`, or with state that is not JSON and not valid UTF-8 |
 | `UnregisteredId` | the file names a custom component that is not registered | `load` without the registry that `save` used |
 | `WrongModel` | the file is not what the caller asked for | precision mismatch in `into_fitted`, or a file written for another model family |
 
@@ -249,9 +249,44 @@ if (!loaded && loaded.error().code() == cxxgpr::GprErrorCode::UnsupportedPersist
 
 There is no automatic migration. Keep the library version that wrote an old model if you need to read it, or refit from the training data, which every file contains in `x` and `y`.
 
-:::{note}
-This release persists exact GPR models built from coordinate data. Models trained on supplied squared distances (`DistanceKernel`) cannot be saved or loaded, and `LoadedGpr::load` rejects a file that has a `distance` section with `PersistErrorKind::WrongModel`. `LoadedDistanceGpr` is not part of this release.
-:::
+## Persist a supplied-distance model
+
+A `FittedDistanceGpr` is saved with the same `save` and `save_with_factor` functions, and read back with `LoadedDistanceGpr<C>`, where `C` is `DistanceOnly` or `WithPoints`, the mode of the model that was saved. The checkpoint adds one `d2.<k>` tensor per distance slot (the lower triangle of the validated training distances) and a `distance` section in `config.json`; see {doc}`../reference/file-format`.
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [save]
+:end-before: // [end]
+```
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [load]
+:end-before: // [end]
+```
+
+Loading issues **fresh slots**. A `ScalarDistance` or `ArdDistance` that you used before saving is not valid for the loaded model, so take the slots from `kernel().slots()` of the loaded model, in the order of the kernel, and bind the query tables to them:
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [bind]
+:end-before: // [end]
+```
+
+`LoadedDistanceGpr` offers `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict` and `into_fitted`. The query methods take the same tables as `FittedDistanceGpr` (and the query coordinates for `WithPoints`) and return `double` results. `into_fitted` gives back a typed `FittedDistanceGpr` for the precision policy that was saved.
+
+- With `save_with_factor`, the factor and weights are restored as stored, and every prediction is bit-identical to the model before saving. A double-precision factor is read through a read-only memory map, as for `LoadedGpr` (`has_mmap_factor()` is `true`), so the same rule holds: do not rewrite the file in place while the model or a copy of it is alive. `into_fitted` copies the factor, so the model it returns does not depend on the file. With `save`, the factor is computed again at load, and predictions agree to rounding.
+- A loaded `MixedPrecision` model has no `refinement_summary`, and its `neg_log_marginal_likelihood` is recomputed from the stored factor and the refined weights, so it can differ slightly from the value reported at training, which comes from the single-precision solve.
+- The tables are validated again on load. A negative entry or a nonzero diagonal gives `InvalidDistance`; a non-finite value is rejected as a corrupt tensor (`PersistErrorKind::Tensor`).
+- A checkpoint of the other mode, or of a coordinate model, is refused with `PersistErrorKind::WrongModel`:
+
+```{literalinclude} /../examples/persist_distance_model.cpp
+:language: cpp
+:start-after: // [wrong-loader]
+:end-before: // [end]
+```
+
+A `MixedPrecision` model stores its tables in single precision, which is the precision it predicts with.
 
 ## API summary
 
@@ -262,8 +297,9 @@ This release persists exact GPR models built from coordinate data. Models traine
 | `save` | write a model without the factor; atomic per file |
 | `save_with_factor` | write a model with $L$ and $\alpha$ |
 | `LoadedGpr` | the loaded, type-erased model: `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel_spec`, `likelihood`, `jitter`, `kernel_exp`, `distance_cache_policy`, `predict`, `predict_into`, `predict_covariance`, `sample`, `loo_predict`, `into_fitted` |
+| `LoadedDistanceGpr` | the loaded supplied-distance model of mode `DistanceOnly` or `WithPoints`: `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict`, `into_fitted` |
 | `PersistRegistry` | factories for custom components: `register_kernel`, `register_unfitted_input`, `register_fitted_input`, `register_unfitted_target`, `register_fitted_target`, and `create_kernel`, `create_unfitted_input`, `create_fitted_input`, `create_unfitted_target`, `create_fitted_target` |
-| `validate_persist_id` | checks an identifier against the empty-string and reserved-prefix rules |
+| `validate_persist_id` | checks an identifier against the empty-string, reserved-prefix and UTF-8 rules |
 | `CustomKernelFactory`, `UnfittedInputFactory`, `FittedInputFactory`, `UnfittedTargetFactory`, `FittedTargetFactory` | factory function types |
 
 The generated reference is in [the persist API reference](../reference/api/persist.md).

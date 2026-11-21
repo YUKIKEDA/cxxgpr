@@ -15,23 +15,30 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 #include "span_shape_contract.hpp"
 
 namespace
@@ -78,13 +85,22 @@ namespace
     public:
         /// @brief Constructs the double-precision custom kernel with initial scale factor.
         /// @param[in] scale Positive kernel output scale parameter.
-        explicit CustomScaleKernel(double scale) : scale_(scale) {}
+        /// @param[in] state_text When set, persist_state_json() returns this text instead of the decimal scale.
+        /// @param[in] id Persistence identifier reported by persist_id().
+        explicit CustomScaleKernel(
+            double scale, std::optional<std::string> state_text = std::nullopt, std::string id = "user.custom_scale"
+        ) :
+            scale_(scale),
+            state_text_(std::move(state_text)),
+            id_(std::move(id))
+        {
+        }
 
         /// @brief Clones this custom kernel preserving its scale_ value.
         /// @return Owning unique_ptr copy of this CustomScaleKernel.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<double>> clone() const override
         {
-            return std::make_unique<CustomScaleKernel>(scale_);
+            return std::make_unique<CustomScaleKernel>(scale_, state_text_, id_);
         }
 
         /// @brief Returns the number of trainable hyperparameters (1 for scale_).
@@ -202,19 +218,23 @@ namespace
         }
 
         /// @brief Returns the persistence identifier matching CustomScaleKernelFloat and PersistRegistry.
-        /// @return Static string view `"user.custom_scale"`.
-        [[nodiscard]] std::string_view persist_id() const noexcept override { return "user.custom_scale"; }
+        /// @return View of the identifier given at construction (`"user.custom_scale"` by default).
+        [[nodiscard]] std::string_view persist_id() const noexcept override { return id_; }
 
-        /// @brief Serializes the current scale_ parameter as decimal string state for persistence.
-        /// @return Decimal string representation of scale_.
+        /// @brief Serializes the state for persistence.
+        /// @return The state text given at construction, or else the decimal string representation of scale_.
         [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
         {
-            return std::to_string(scale_);
+            return state_text_.has_value() ? *state_text_ : std::to_string(scale_);
         }
 
     private:
         /// @brief Positive output scale factor in linear space.
         double scale_;
+        /// @brief State text persisted verbatim in place of the decimal scale, when set.
+        std::optional<std::string> state_text_;
+        /// @brief Persistence identifier.
+        std::string id_;
     };
 
     /// @brief Single-precision companion of CustomScaleKernel required by CustomKernel::create().
@@ -225,13 +245,18 @@ namespace
     public:
         /// @brief Constructs the single-precision custom kernel with initial scale factor.
         /// @param[in] scale Positive kernel output scale parameter.
-        explicit CustomScaleKernelFloat(float scale) : scale_(scale) {}
+        /// @param[in] id Persistence identifier reported by persist_id().
+        explicit CustomScaleKernelFloat(float scale, std::string id = "user.custom_scale") :
+            scale_(scale),
+            id_(std::move(id))
+        {
+        }
 
         /// @brief Clones this float custom kernel preserving its scale_ value.
         /// @return Owning unique_ptr copy of this CustomScaleKernelFloat.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<float>> clone() const override
         {
-            return std::make_unique<CustomScaleKernelFloat>(scale_);
+            return std::make_unique<CustomScaleKernelFloat>(scale_, id_);
         }
 
         /// @brief Returns the number of trainable hyperparameters (1 for scale_).
@@ -348,14 +373,401 @@ namespace
             return apply(dist, d2_k, uplo);
         }
 
-        /// @brief Returns the shared persistence identifier `"user.custom_scale"`.
-        /// @return Static string view `"user.custom_scale"`.
-        [[nodiscard]] std::string_view persist_id() const noexcept override { return "user.custom_scale"; }
+        /// @brief Returns the persistence identifier shared with CustomScaleKernel.
+        /// @return View of the identifier given at construction (`"user.custom_scale"` by default).
+        [[nodiscard]] std::string_view persist_id() const noexcept override { return id_; }
 
     private:
         /// @brief Positive output scale factor stored in float precision.
         float scale_;
+        /// @brief Persistence identifier.
+        std::string id_;
     };
+
+    /// @brief Fitted input transform that changes nothing and persists a caller-supplied identifier and state text.
+    class TextFittedInput final : public cxxgpr::transform::FittedInputTransform
+    {
+    public:
+        /// @brief Constructs the transform.
+        /// @param[in] id Persistence identifier reported by persist_id().
+        /// @param[in] state State text returned by persist_state_json().
+        TextFittedInput(std::string id, std::string state) : id_(std::move(id)), state_(std::move(state)) {}
+
+        /// @brief Leaves the inputs unchanged.
+        /// @param[in,out] x Column-major inputs, left as they are.
+        /// @param[in] n_rows Number of rows of x.
+        /// @param[in] n_cols Number of columns of x.
+        /// @return Empty expected.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
+            [[maybe_unused]] std::span<double> x,
+            [[maybe_unused]] std::size_t n_rows,
+            [[maybe_unused]] std::size_t n_cols
+        ) const override
+        {
+            return {};
+        }
+
+        /// @brief Leaves the inputs unchanged.
+        /// @param[in,out] x Column-major inputs, left as they are.
+        /// @param[in] n_rows Number of rows of x.
+        /// @param[in] n_cols Number of columns of x.
+        /// @return Empty expected.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> inverse_apply(
+            [[maybe_unused]] std::span<double> x,
+            [[maybe_unused]] std::size_t n_rows,
+            [[maybe_unused]] std::size_t n_cols
+        ) const override
+        {
+            return {};
+        }
+
+        /// @brief Clones this transform.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::transform::FittedInputTransform> clone() const override
+        {
+            return std::make_unique<TextFittedInput>(id_, state_);
+        }
+
+        /// @brief Returns the identifier given at construction.
+        /// @return View of the identifier.
+        [[nodiscard]] std::string_view persist_id() const override { return id_; }
+
+        /// @brief Returns the state text given at construction.
+        /// @return The state text.
+        [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
+        {
+            return state_;
+        }
+
+    private:
+        /// @brief Persistence identifier.
+        std::string id_;
+        /// @brief Persisted state text.
+        std::string state_;
+    };
+
+    /// @brief Unfitted input transform persisting its own text and fitting to a TextFittedInput.
+    class TextUnfittedInput final : public cxxgpr::transform::UnfittedInputTransform
+    {
+    public:
+        /// @brief Constructs the transform.
+        /// @param[in] id Persistence identifier reported by persist_id().
+        /// @param[in] state State text returned by persist_state_json().
+        /// @param[in] fitted The fitted transform that fit() returns a copy of.
+        TextUnfittedInput(std::string id, std::string state, TextFittedInput fitted) :
+            id_(std::move(id)),
+            state_(std::move(state)),
+            fitted_(std::move(fitted))
+        {
+        }
+
+        /// @brief Returns a copy of the fitted transform given at construction.
+        /// @param[in] x Column-major training inputs, ignored.
+        /// @param[in] n_rows Number of rows of x.
+        /// @param[in] n_cols Number of columns of x.
+        /// @return Owning fitted transform.
+        [[nodiscard]] std::expected<std::unique_ptr<cxxgpr::transform::FittedInputTransform>, cxxgpr::GprError> fit(
+            [[maybe_unused]] std::span<const double> x,
+            [[maybe_unused]] std::size_t n_rows,
+            [[maybe_unused]] std::size_t n_cols
+        ) const override
+        {
+            return fitted_.clone();
+        }
+
+        /// @brief Clones this transform.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::transform::UnfittedInputTransform> clone() const override
+        {
+            return std::make_unique<TextUnfittedInput>(id_, state_, fitted_);
+        }
+
+        /// @brief Returns the identifier given at construction.
+        /// @return View of the identifier.
+        [[nodiscard]] std::string_view persist_id() const override { return id_; }
+
+        /// @brief Returns the state text given at construction.
+        /// @return The state text.
+        [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
+        {
+            return state_;
+        }
+
+    private:
+        /// @brief Persistence identifier.
+        std::string id_;
+        /// @brief Persisted state text.
+        std::string state_;
+        /// @brief Result of fit().
+        TextFittedInput fitted_;
+    };
+
+    /// @brief Fitted target transform that changes nothing and persists a caller-supplied identifier and state text.
+    class TextFittedTarget final : public cxxgpr::transform::FittedTargetTransform
+    {
+    public:
+        /// @brief Constructs the transform.
+        /// @param[in] id Persistence identifier reported by persist_id().
+        /// @param[in] state State text returned by persist_state_json().
+        TextFittedTarget(std::string id, std::string state) : id_(std::move(id)), state_(std::move(state)) {}
+
+        /// @brief Leaves the targets unchanged.
+        /// @param[in,out] y Targets, left as they are.
+        /// @return Empty expected.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> transform(
+            [[maybe_unused]] std::span<double> y
+        ) const override
+        {
+            return {};
+        }
+
+        /// @brief Leaves the means unchanged.
+        /// @param[in,out] mean Predictive means, left as they are.
+        /// @return Empty expected.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> inverse_transform_mean(
+            [[maybe_unused]] std::span<double> mean
+        ) const override
+        {
+            return {};
+        }
+
+        /// @brief Leaves the variances unchanged.
+        /// @param[in,out] var Predictive variances, left as they are.
+        /// @return Empty expected.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> inverse_transform_variance(
+            [[maybe_unused]] std::span<double> var
+        ) const override
+        {
+            return {};
+        }
+
+        /// @brief Clones this transform.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::transform::FittedTargetTransform> clone() const override
+        {
+            return std::make_unique<TextFittedTarget>(id_, state_);
+        }
+
+        /// @brief Returns the identifier given at construction.
+        /// @return View of the identifier.
+        [[nodiscard]] std::string_view persist_id() const override { return id_; }
+
+        /// @brief Returns the state text given at construction.
+        /// @return The state text.
+        [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
+        {
+            return state_;
+        }
+
+    private:
+        /// @brief Persistence identifier.
+        std::string id_;
+        /// @brief Persisted state text.
+        std::string state_;
+    };
+
+    /// @brief Unfitted target transform persisting its own text and fitting to a TextFittedTarget.
+    class TextUnfittedTarget final : public cxxgpr::transform::UnfittedTargetTransform
+    {
+    public:
+        /// @brief Constructs the transform.
+        /// @param[in] id Persistence identifier reported by persist_id().
+        /// @param[in] state State text returned by persist_state_json().
+        /// @param[in] fitted The fitted transform that fit() returns a copy of.
+        TextUnfittedTarget(std::string id, std::string state, TextFittedTarget fitted) :
+            id_(std::move(id)),
+            state_(std::move(state)),
+            fitted_(std::move(fitted))
+        {
+        }
+
+        /// @brief Returns a copy of the fitted transform given at construction.
+        /// @param[in] y Training targets, ignored.
+        /// @return Owning fitted transform.
+        [[nodiscard]] std::expected<std::unique_ptr<cxxgpr::transform::FittedTargetTransform>, cxxgpr::GprError> fit(
+            [[maybe_unused]] std::span<const double> y
+        ) const override
+        {
+            return fitted_.clone();
+        }
+
+        /// @brief Clones this transform.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::transform::UnfittedTargetTransform> clone() const override
+        {
+            return std::make_unique<TextUnfittedTarget>(id_, state_, fitted_);
+        }
+
+        /// @brief Returns the identifier given at construction.
+        /// @return View of the identifier.
+        [[nodiscard]] std::string_view persist_id() const override { return id_; }
+
+        /// @brief Returns the state text given at construction.
+        /// @return The state text.
+        [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
+        {
+            return state_;
+        }
+
+    private:
+        /// @brief Persistence identifier.
+        std::string id_;
+        /// @brief Persisted state text.
+        std::string state_;
+        /// @brief Result of fit().
+        TextFittedTarget fitted_;
+    };
+
+    /// @brief One text per custom component of a model: the kernel and the four transforms.
+    /// @details Used both for the state texts and for the persistence identifiers of the five writer sites.
+    struct ComponentTexts
+    {
+        /// @brief Text of the custom kernel leaf.
+        std::string kernel;
+        /// @brief Text of the unfitted input transform.
+        std::string x_unfitted;
+        /// @brief Text of the fitted input transform.
+        std::string x_fitted;
+        /// @brief Text of the unfitted target transform.
+        std::string y_unfitted;
+        /// @brief Text of the fitted target transform.
+        std::string y_fitted;
+
+        /// @brief Compares all five texts.
+        /// @return True when every text is equal.
+        [[nodiscard]] bool operator==(const ComponentTexts&) const = default;
+    };
+
+    /// @brief Identifiers used by the five custom components unless a test replaces one.
+    /// @return The default identifiers.
+    [[nodiscard]] ComponentTexts default_component_ids()
+    {
+        return ComponentTexts{
+            .kernel = "user.custom_scale",
+            .x_unfitted = "user.text.x_unfitted",
+            .x_fitted = "user.text.x_fitted",
+            .y_unfitted = "user.text.y_unfitted",
+            .y_fitted = "user.text.y_fitted",
+        };
+    }
+
+    /// @brief Factors a three-point model whose kernel and four transforms are all custom components.
+    /// @param[in] ids Persistence identifier of each component.
+    /// @param[in] states State text of each component.
+    /// @param[in] y_train Three training targets.
+    /// @return The factored model.
+    [[nodiscard]] auto factor_all_custom_model(
+        const ComponentTexts& ids, const ComponentTexts& states, const std::array<double, 3>& y_train
+    )
+    {
+        const std::array<double, 3> x_train{0.0, 1.0, 2.0};
+        const cxxgpr::KernelSpec spec(
+            cxxgpr::CustomKernel::create(
+                std::make_unique<CustomScaleKernel>(2.5, states.kernel, ids.kernel),
+                std::make_unique<CustomScaleKernelFloat>(2.5F, ids.kernel)
+            )
+                .value()
+        );
+        return cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec)
+            .with_input_transform(
+                TextUnfittedInput(ids.x_unfitted, states.x_unfitted, TextFittedInput(ids.x_fitted, states.x_fitted))
+            )
+            .with_target_transform(
+                TextUnfittedTarget(ids.y_unfitted, states.y_unfitted, TextFittedTarget(ids.y_fitted, states.y_fitted))
+            )
+            .factor(x_train, 3U, 1U, y_train);
+    }
+
+    /// @brief Registers factories for the five default identifiers that record the state text they receive.
+    /// @param[in,out] reg Registry receiving the factories.
+    /// @param[out] received Destination of the state texts; must outlive reg.
+    void register_recording_factories(cxxgpr::persist::PersistRegistry& reg, ComponentTexts& received)
+    {
+        const ComponentTexts ids = default_component_ids();
+        ASSERT_TRUE(
+            reg.register_kernel(
+                   ids.kernel,
+                   [&received](std::string_view state) -> std::expected<cxxgpr::CustomKernel, cxxgpr::GprError>
+        {
+            received.kernel = std::string(state);
+            return cxxgpr::CustomKernel::create(
+                std::make_unique<CustomScaleKernel>(2.5), std::make_unique<CustomScaleKernelFloat>(2.5F)
+            );
+        }
+            ).has_value()
+        );
+        ASSERT_TRUE(
+            reg.register_unfitted_input(
+                   ids.x_unfitted,
+                   [&received, ids](std::string_view state)
+                       -> std::expected<std::unique_ptr<cxxgpr::transform::UnfittedInputTransform>, cxxgpr::GprError>
+        {
+            received.x_unfitted = std::string(state);
+            return std::make_unique<TextUnfittedInput>(
+                ids.x_unfitted, std::string(state), TextFittedInput(ids.x_fitted, "")
+            );
+        }
+            ).has_value()
+        );
+        ASSERT_TRUE(
+            reg.register_fitted_input(
+                   ids.x_fitted,
+                   [&received, ids](std::string_view state)
+                       -> std::expected<std::unique_ptr<cxxgpr::transform::FittedInputTransform>, cxxgpr::GprError>
+        {
+            received.x_fitted = std::string(state);
+            return std::make_unique<TextFittedInput>(ids.x_fitted, std::string(state));
+        }
+            ).has_value()
+        );
+        ASSERT_TRUE(
+            reg.register_unfitted_target(
+                   ids.y_unfitted,
+                   [&received, ids](std::string_view state)
+                       -> std::expected<std::unique_ptr<cxxgpr::transform::UnfittedTargetTransform>, cxxgpr::GprError>
+        {
+            received.y_unfitted = std::string(state);
+            return std::make_unique<TextUnfittedTarget>(
+                ids.y_unfitted, std::string(state), TextFittedTarget(ids.y_fitted, "")
+            );
+        }
+            ).has_value()
+        );
+        ASSERT_TRUE(
+            reg.register_fitted_target(
+                   ids.y_fitted,
+                   [&received, ids](std::string_view state)
+                       -> std::expected<std::unique_ptr<cxxgpr::transform::FittedTargetTransform>, cxxgpr::GprError>
+        {
+            received.y_fitted = std::string(state);
+            return std::make_unique<TextFittedTarget>(ids.y_fitted, std::string(state));
+        }
+            ).has_value()
+        );
+    }
+
+    /// @brief Reads a whole file as bytes.
+    /// @param[in] path File to read.
+    /// @return The file contents (empty when the file cannot be opened).
+    [[nodiscard]] std::string read_file_bytes(const std::filesystem::path& path)
+    {
+        std::ifstream ifs(path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>()};
+    }
+
+    /// @brief Lists the file names directly under a directory, sorted.
+    /// @param[in] dir Directory to list.
+    /// @return Sorted entry names.
+    [[nodiscard]] std::vector<std::string> list_dir(const std::filesystem::path& dir)
+    {
+        std::vector<std::string> names;
+        for (const auto& entry : std::filesystem::directory_iterator(dir))
+        {
+            names.push_back(entry.path().filename().string());
+        }
+        std::ranges::sort(names);
+        return names;
+    }
 
     /// @brief Verifies save_with_factor() mmap roundtrip and save() refactor-on-load parity.
     /// @details Saves an L-BFGS model fitted with input/target transforms, checks bit-exact
@@ -549,6 +961,603 @@ namespace
         auto reg_load = cxxgpr::persist::LoadedGpr::load(dir_custom.path, reg);
         ASSERT_TRUE(reg_load.has_value());
         EXPECT_NEAR(reg_load->predict(xq_ref)->mean[0], c_fit->predict(xq_ref)->mean[0], 1e-12);
+    }
+
+    /// @brief Verifies custom state text that is stored as a JSON string comes back byte for byte at every site.
+    /// @details Covers the five writer sites (kernel leaf, unfitted and fitted input transform, unfitted and fitted
+    /// target transform) through both save() and save_with_factor(). A state that is itself a JSON string literal
+    /// (`"abc"`, quotes included) used to come back without its quotes, because the loader hands any string value
+    /// back as it is; text that is not JSON takes the same storage path.
+    TEST(PersistModelsTest, CustomStateStoredAsStringRoundTripsVerbatimAtEverySite)
+    {
+        // Spec: FMT-06, FMT-03
+        // Every case derives a different text per site from a tag, so a text handed to the wrong factory fails too.
+        using MakeText = std::string (*)(const std::string&);
+        const std::array<MakeText, 8> cases{
+            // A JSON string literal.
+            [](const std::string& tag) { return "\"" + tag + "\""; },
+            // A JSON string literal surrounded by whitespace, which the JSON grammar allows.
+            [](const std::string& tag) { return "  \"" + tag + "\"\n"; },
+            // A JSON string literal containing escapes: the text is "<tag>\"é\n" with the backslashes kept.
+            [](const std::string& tag) { return "\"" + tag + R"(\"é\n")"; },
+            // Text that is not JSON.
+            [](const std::string& tag) { return tag + " raw"; },
+            // Text that starts like JSON but does not parse.
+            [](const std::string& tag) { return "{" + tag; },
+            // Non-ASCII UTF-8 text that is not JSON (U+72B6 U+614B).
+            [](const std::string& tag) { return tag + " \xE7\x8A\xB6\xE6\x85\x8B"; },
+            // The empty text.
+            []([[maybe_unused]] const std::string& tag) { return std::string(); },
+            // Text that is not JSON and opens more brackets than the nesting limit: as a string it nests nothing.
+            [](const std::string& tag) { return std::string(200, '[') + tag; },
+        };
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+
+        for (std::size_t c = 0; c < cases.size(); ++c)
+        {
+            for (const bool with_factor : {false, true})
+            {
+                SCOPED_TRACE("case " + std::to_string(c) + (with_factor ? " save_with_factor" : " save"));
+                const ComponentTexts sent{
+                    .kernel = cases[c]("kernel"),
+                    .x_unfitted = cases[c]("x_unfitted"),
+                    .x_fitted = cases[c]("x_fitted"),
+                    .y_unfitted = cases[c]("y_unfitted"),
+                    .y_fitted = cases[c]("y_fitted"),
+                };
+                const auto fit = factor_all_custom_model(default_component_ids(), sent, y_train);
+                ASSERT_TRUE(fit.has_value());
+
+                ComponentTexts received{
+                    .kernel = "unset",
+                    .x_unfitted = "unset",
+                    .x_fitted = "unset",
+                    .y_unfitted = "unset",
+                    .y_fitted = "unset"
+                };
+                cxxgpr::persist::PersistRegistry reg;
+                register_recording_factories(reg, received);
+                const TempDirGuard dir("custom_state_verbatim");
+                const auto saved = with_factor ? cxxgpr::persist::save_with_factor(*fit, dir.path, reg)
+                                               : cxxgpr::persist::save(*fit, dir.path, reg);
+                ASSERT_TRUE(saved.has_value());
+                const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path, reg);
+                ASSERT_TRUE(loaded.has_value());
+                EXPECT_EQ(received.kernel, sent.kernel);
+                EXPECT_EQ(received.x_unfitted, sent.x_unfitted);
+                EXPECT_EQ(received.x_fitted, sent.x_fitted);
+                EXPECT_EQ(received.y_unfitted, sent.y_unfitted);
+                EXPECT_EQ(received.y_fitted, sent.y_fitted);
+            }
+        }
+    }
+
+    /// @brief Verifies custom state that is a JSON value other than a string is stored as that value.
+    /// @details Such a state is not handed back verbatim: the factory receives the compact re-serialization of
+    /// the parsed value. The expected texts are what the format specification documents, one per kind of change.
+    TEST(PersistModelsTest, CustomStateThatIsNonStringJsonIsHandedBackReserialized)
+    {
+        // Spec: FMT-06, FMT-03
+        struct Case
+        {
+            /// @brief Text returned by persist_state_json().
+            std::string sent;
+            /// @brief Text the factory must receive.
+            std::string received;
+        };
+
+        const std::array<Case, 12> cases{
+            Case{               .sent = "2.500000",                    .received = "2.5"}, // trailing zeros dropped
+            Case{                    .sent = "1e2",                  .received = "100.0"}, // exponent form normalized
+            Case{                     .sent = "-0",                      .received = "0"}, // sign of integer zero lost
+            Case{                   .sent = "-0.0",                   .received = "-0.0"},
+            Case{                    .sent = "0.1",                    .received = "0.1"}, // shortest round-trip form
+            // An integer beyond 64 bits becomes the nearest double: digits are lost.
+            Case{.sent = "12345678901234567890123", .received = "1.2345678901234568e+22"},
+            Case{      .sent = R"({"b":1, "a":2})",       .received = R"({"a":2,"b":1})"}, // keys sorted, spaces dropped
+            Case{       .sent = R"({"a":1,"a":2})",             .received = R"({"a":2})"}, // last duplicate key wins
+            Case{              .sent = "[1, 2 ,3]",                .received = "[1,2,3]"},
+            Case{                 .sent = " true ",                   .received = "true"},
+            Case{                   .sent = "null",                   .received = "null"},
+            Case{         .sent = R"({"s":"A\/"})",          .received = R"({"s":"A/"})"}, // escapes inside normalized
+        };
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+
+        for (const auto& c : cases)
+        {
+            SCOPED_TRACE(c.sent);
+            const ComponentTexts sent{
+                .kernel = c.sent, .x_unfitted = c.sent, .x_fitted = c.sent, .y_unfitted = c.sent, .y_fitted = c.sent
+            };
+            const auto fit = factor_all_custom_model(default_component_ids(), sent, y_train);
+            ASSERT_TRUE(fit.has_value());
+            ComponentTexts received;
+            cxxgpr::persist::PersistRegistry reg;
+            register_recording_factories(reg, received);
+            const TempDirGuard dir("custom_state_reserialized");
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path, reg).has_value());
+            ASSERT_TRUE(cxxgpr::persist::LoadedGpr::load(dir.path, reg).has_value());
+            EXPECT_EQ(received.kernel, c.received);
+            EXPECT_EQ(received.x_unfitted, c.received);
+            EXPECT_EQ(received.x_fitted, c.received);
+            EXPECT_EQ(received.y_unfitted, c.received);
+            EXPECT_EQ(received.y_fitted, c.received);
+        }
+    }
+
+    /// @brief Negative control: custom text that cannot be written into UTF-8 JSON makes save fail as a value.
+    /// @details config.json is UTF-8, so state text that has to be stored as a string, and every persistence
+    /// identifier, must be valid UTF-8. The JSON serializer throws on anything else; save() and save_with_factor()
+    /// must instead return an error, write nothing, and leave an existing directory byte for byte as it was.
+    TEST(PersistModelsTest, SaveRejectsCustomTextThatIsNotValidUtf8WithoutTouchingFiles)
+    {
+        // Spec: FMT-06, FMT-08, FMT-02
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+        const ComponentTexts good_states{
+            .kernel = "\"k\"",
+            .x_unfitted = "\"xu\"",
+            .x_fitted = "\"xf\"",
+            .y_unfitted = "\"yu\"",
+            .y_fitted = "\"yf\""
+        };
+        const TempDirGuard dir("invalid_utf8_existing");
+        const TempDirGuard fresh_parent("invalid_utf8_fresh");
+        const std::filesystem::path fresh = fresh_parent.path / "model";
+        {
+            const auto base = factor_all_custom_model(default_component_ids(), good_states, y_train);
+            ASSERT_TRUE(base.has_value());
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*base, dir.path).has_value());
+        }
+        const std::string config_before = read_file_bytes(dir.path / "config.json");
+        const std::string tensors_before = read_file_bytes(dir.path / "model.safetensors");
+        ASSERT_FALSE(config_before.empty());
+        ASSERT_FALSE(tensors_before.empty());
+
+        auto expect_rejected =
+            [&](const ComponentTexts& ids, const ComponentTexts& states, cxxgpr::PersistErrorKind expected_kind)
+        {
+            // Different targets, so that the model differs from the one already in dir.
+            const auto fit = factor_all_custom_model(ids, states, std::array<double, 3>{0.7, -0.2, 0.3});
+            ASSERT_TRUE(fit.has_value());
+            for (const bool with_factor : {false, true})
+            {
+                for (const auto& target : {dir.path, fresh})
+                {
+                    const auto saved = with_factor ? cxxgpr::persist::save_with_factor(*fit, target)
+                                                   : cxxgpr::persist::save(*fit, target);
+                    ASSERT_FALSE(saved.has_value());
+                    EXPECT_EQ(saved.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+                    EXPECT_EQ(saved.error().persist_error_kind(), expected_kind);
+                }
+            }
+            EXPECT_EQ(list_dir(dir.path), (std::vector<std::string>{"config.json", "model.safetensors"}));
+            EXPECT_EQ(read_file_bytes(dir.path / "config.json"), config_before);
+            EXPECT_EQ(read_file_bytes(dir.path / "model.safetensors"), tensors_before);
+            EXPECT_FALSE(std::filesystem::exists(fresh));
+        };
+
+        const std::array<std::string ComponentTexts::*, 5> sites{
+            &ComponentTexts::kernel, &ComponentTexts::x_unfitted, &ComponentTexts::x_fitted,
+            &ComponentTexts::y_unfitted, &ComponentTexts::y_fitted
+        };
+        // Bytes that are not UTF-8: a stray 0xFF 0xFE, a truncated three-byte sequence, an overlong encoding,
+        // an encoded surrogate, and an invalid byte inside what looks like a JSON string literal.
+        const std::array<std::string, 5> bad_texts{"\xff\xfe", "abc\xe3\x81", "\xc0\xaf", "\xed\xa0\x80", "\"\xff\""};
+        for (std::size_t s = 0; s < sites.size(); ++s)
+        {
+            for (std::size_t b = 0; b < bad_texts.size(); ++b)
+            {
+                SCOPED_TRACE("state: site " + std::to_string(s) + ", text " + std::to_string(b));
+                ComponentTexts states = good_states;
+                states.*sites[s] = bad_texts[b];
+                expect_rejected(default_component_ids(), states, cxxgpr::PersistErrorKind::NotPersistable);
+            }
+            SCOPED_TRACE("identifier: site " + std::to_string(s));
+            ComponentTexts ids = default_component_ids();
+            ids.*sites[s] = "user.\xff";
+            expect_rejected(ids, good_states, cxxgpr::PersistErrorKind::InvalidPersistId);
+        }
+
+        // The same identifier rule applies at registration time.
+        const auto direct = cxxgpr::persist::validate_persist_id("user.\xff");
+        ASSERT_FALSE(direct.has_value());
+        EXPECT_EQ(direct.error().persist_error_kind(), cxxgpr::PersistErrorKind::InvalidPersistId);
+        EXPECT_TRUE(cxxgpr::persist::validate_persist_id("user.\xE7\x8A\xB6").has_value());
+        cxxgpr::persist::PersistRegistry reg;
+        const std::array<std::expected<void, cxxgpr::GprError>, 5> registrations{
+            reg.register_kernel(
+                "user.\xff", [](std::string_view) -> std::expected<cxxgpr::CustomKernel, cxxgpr::GprError>
+        { return std::unexpected(cxxgpr::GprError::empty_input()); }
+            ),
+            reg.register_unfitted_input(
+                "user.\xff",
+                [](std::string_view)
+                    -> std::expected<std::unique_ptr<cxxgpr::transform::UnfittedInputTransform>, cxxgpr::GprError>
+        { return std::unexpected(cxxgpr::GprError::empty_input()); }
+            ),
+            reg.register_fitted_input(
+                "user.\xff",
+                [](std::string_view)
+                    -> std::expected<std::unique_ptr<cxxgpr::transform::FittedInputTransform>, cxxgpr::GprError>
+        { return std::unexpected(cxxgpr::GprError::empty_input()); }
+            ),
+            reg.register_unfitted_target(
+                "user.\xff",
+                [](std::string_view)
+                    -> std::expected<std::unique_ptr<cxxgpr::transform::UnfittedTargetTransform>, cxxgpr::GprError>
+        { return std::unexpected(cxxgpr::GprError::empty_input()); }
+            ),
+            reg.register_fitted_target(
+                "user.\xff",
+                [](std::string_view)
+                    -> std::expected<std::unique_ptr<cxxgpr::transform::FittedTargetTransform>, cxxgpr::GprError>
+        { return std::unexpected(cxxgpr::GprError::empty_input()); }
+            ),
+        };
+        for (const auto& registration : registrations)
+        {
+            ASSERT_FALSE(registration.has_value());
+            EXPECT_EQ(registration.error().persist_error_kind(), cxxgpr::PersistErrorKind::InvalidPersistId);
+        }
+    }
+
+    /// @brief Negative control: an optional top-level string field of the wrong JSON type is a Config error.
+    /// @details `precision`, `residual`, `math`, and `distance_cache` may be omitted, but when present they must be
+    /// strings. A number, boolean, array, or null there used to raise the JSON library's type error out of load().
+    TEST(PersistModelsTest, LoadRejectsOptionalStringFieldsOfTheWrongTypeWithConfig)
+    {
+        // Spec: FMT-03, FMT-08
+        const std::array<double, 2> x_train{0.0, 1.0};
+        const std::array<double, 2> y_train{0.5, 1.5};
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto fit = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 2U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+        const TempDirGuard dir("optional_field_type");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir.path).has_value());
+        const std::string good = read_file_bytes(dir.path / "config.json");
+
+        struct Case
+        {
+            /// @brief Text present in the saved config.json.
+            std::string from;
+            /// @brief Replacement giving one field a non-string value.
+            std::string to;
+        };
+
+        const std::array<Case, 4> cases{
+            Case{     .from = R"("precision": "double")",                          .to = R"("precision": 1)"},
+            Case{     .from = R"("precision": "double")", .to = R"("precision": "double", "residual": null)"},
+            Case{        .from = R"("math": "accurate")",                            .to = R"("math": true)"},
+            Case{.from = R"("distance_cache": "always")",            .to = R"("distance_cache": ["always"])"},
+        };
+        for (const auto& c : cases)
+        {
+            SCOPED_TRACE(c.to);
+            const auto pos = good.find(c.from);
+            ASSERT_NE(pos, std::string::npos);
+            std::string bad = good;
+            bad.replace(pos, c.from.size(), c.to);
+            {
+                std::ofstream ofs(dir.path / "config.json", std::ios::binary | std::ios::trunc);
+                ofs << bad;
+            }
+            const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_FALSE(loaded.has_value());
+            EXPECT_EQ(loaded.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(loaded.error().persist_error_kind(), cxxgpr::PersistErrorKind::Config);
+        }
+    }
+
+    /// @brief Factors a four-point double-precision RBF model with fixed hyperparameters.
+    /// @param[in] length_scale RBF length scale.
+    /// @param[in] x_train Four training inputs (one feature).
+    /// @param[in] y_train Four training targets.
+    /// @return The factored model.
+    [[nodiscard]] auto factor_rbf_model(
+        double length_scale, const std::array<double, 4>& x_train, const std::array<double, 4>& y_train
+    )
+    {
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(length_scale).value());
+        return cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 4U, 1U, y_train);
+    }
+
+    /// @brief Verifies saving over a directory whose factor a live LoadedGpr has mapped never corrupts that model.
+    /// @details save replaces files by renaming, never by rewriting in place. Where the platform lets a mapped file
+    /// be renamed over, the save succeeds, the live model keeps answering from the old bytes, and a new load sees
+    /// the new model. Windows refuses the rename: the save fails with Io and the directory keeps the old model.
+    TEST(PersistModelsTest, SaveOverAMappedFactorLeavesTheLoadedModelIntact)
+    {
+        // Spec: FMT-02, FMT-05
+        const auto fit_old = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        const auto fit_new = factor_rbf_model(0.4, {0.1, 0.7, 1.1, 1.9}, {-0.3, 0.8, 0.2, 1.4});
+        ASSERT_TRUE(fit_old.has_value());
+        ASSERT_TRUE(fit_new.has_value());
+        const std::array<double, 2> xq{0.75, 1.3};
+        const auto xq_ref = cxxgpr::MatrixRef<double>(xq.data(), 2U, 1U, 2U);
+        const auto pred_old = fit_old->predict(xq_ref);
+        const auto pred_new = fit_new->predict(xq_ref);
+        const auto loo_old = fit_old->loo_predict();
+        ASSERT_TRUE(pred_old.has_value());
+        ASSERT_TRUE(pred_new.has_value());
+        ASSERT_TRUE(loo_old.has_value());
+        ASSERT_NE(pred_old->mean, pred_new->mean);
+        ASSERT_NE(pred_old->variance, pred_new->variance);
+
+        const TempDirGuard dir("save_over_mapped");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_old, dir.path).has_value());
+        {
+            auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_TRUE(loaded.has_value());
+            ASSERT_TRUE(loaded->has_mmap_factor());
+
+            const auto resaved = cxxgpr::persist::save_with_factor(*fit_new, dir.path);
+#ifdef _WIN32
+            ASSERT_FALSE(resaved.has_value());
+            EXPECT_EQ(resaved.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(resaved.error().persist_error_kind(), cxxgpr::PersistErrorKind::Io);
+            const auto& pred_on_disk = pred_old;
+#else
+            ASSERT_TRUE(resaved.has_value());
+            const auto& pred_on_disk = pred_new;
+#endif
+            EXPECT_EQ(list_dir(dir.path), (std::vector<std::string>{"config.json", "model.safetensors"}));
+
+            // The live model still answers from the factor it mapped (the variance and LOO read L).
+            const auto pred_live = loaded->predict(xq_ref);
+            const auto loo_live = loaded->loo_predict();
+            ASSERT_TRUE(pred_live.has_value());
+            ASSERT_TRUE(loo_live.has_value());
+            EXPECT_EQ(pred_live->mean, pred_old->mean);
+            EXPECT_EQ(pred_live->variance, pred_old->variance);
+            EXPECT_EQ(loo_live->mean, loo_old->mean);
+            EXPECT_EQ(loo_live->variance, loo_old->variance);
+
+            // A new load reads what the directory now holds.
+            auto reloaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+            ASSERT_TRUE(reloaded.has_value());
+            const auto pred_reloaded = reloaded->predict(xq_ref);
+            ASSERT_TRUE(pred_reloaded.has_value());
+            EXPECT_EQ(pred_reloaded->mean, pred_on_disk->mean);
+            EXPECT_EQ(pred_reloaded->variance, pred_on_disk->variance);
+        }
+    }
+
+    /// @brief Negative control: when config.json cannot be replaced, save reports Io and leaves no temporary file.
+    /// @details The two files are replaced one after the other, model.safetensors first. This test makes the second
+    /// replacement fail and pins down what the format specification states about that case: the error is Io, the
+    /// temporary files are gone, config.json is untouched, and model.safetensors is already the new one.
+    TEST(PersistModelsTest, SaveReportsIoWhenConfigJsonCannotBeReplaced)
+    {
+        // Spec: FMT-02, FMT-08
+        const auto fit_old = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        const auto fit_new = factor_rbf_model(0.4, {0.1, 0.7, 1.1, 1.9}, {-0.3, 0.8, 0.2, 1.4});
+        ASSERT_TRUE(fit_old.has_value());
+        ASSERT_TRUE(fit_new.has_value());
+        const TempDirGuard dir("config_not_replaceable");
+        const TempDirGuard reference("config_not_replaceable_ref");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_old, dir.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_new, reference.path).has_value());
+        const std::string tensors_old = read_file_bytes(dir.path / "model.safetensors");
+        const std::string tensors_new = read_file_bytes(reference.path / "model.safetensors");
+        ASSERT_NE(tensors_old, tensors_new);
+
+        // A file cannot be renamed over a directory, so a directory named config.json blocks the second rename.
+        std::error_code ec;
+        ASSERT_TRUE(std::filesystem::remove(dir.path / "config.json", ec));
+        ASSERT_TRUE(std::filesystem::create_directory(dir.path / "config.json", ec));
+
+        const auto saved = cxxgpr::persist::save_with_factor(*fit_new, dir.path);
+        ASSERT_FALSE(saved.has_value());
+        EXPECT_EQ(saved.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(saved.error().persist_error_kind(), cxxgpr::PersistErrorKind::Io);
+        EXPECT_EQ(list_dir(dir.path), (std::vector<std::string>{"config.json", "model.safetensors"}));
+        EXPECT_TRUE(std::filesystem::is_directory(dir.path / "config.json"));
+        EXPECT_EQ(read_file_bytes(dir.path / "model.safetensors"), tensors_new);
+    }
+
+    /// @brief Negative control: save refuses a model whose config.json would be nested deeper than load accepts.
+    /// @details The loader rejects a config.json nested more than 128 levels deep. save() must apply the same
+    /// limit to the document it is about to write, so that it never writes a directory that cannot be loaded, and
+    /// must bound the nesting of custom state before handing it to the recursive JSON serializer. Each case checks
+    /// the deepest model that still round-trips and the shallowest one that is refused.
+    TEST(PersistModelsTest, SaveRejectsAConfigNestedDeeperThanLoadAccepts)
+    {
+        // Spec: FMT-02, FMT-08
+        const std::array<double, 3> x_train{0.0, 1.0, 2.0};
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+        const TempDirGuard parent("save_nesting_limit");
+        const std::filesystem::path dir = parent.path / "model";
+
+        // Saves into a fresh directory and checks either a loadable result or a Config error that wrote nothing.
+        auto expect_outcome = [&](const auto& fit, const cxxgpr::persist::PersistRegistry& reg, bool accepted)
+        {
+            ASSERT_TRUE(fit.has_value());
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            const auto saved = cxxgpr::persist::save_with_factor(*fit, dir, reg);
+            if (accepted)
+            {
+                ASSERT_TRUE(saved.has_value());
+                EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(dir, reg).has_value());
+                return;
+            }
+            ASSERT_FALSE(saved.has_value());
+            EXPECT_EQ(saved.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(saved.error().persist_error_kind(), cxxgpr::PersistErrorKind::Config);
+            EXPECT_FALSE(std::filesystem::exists(dir));
+        };
+        const cxxgpr::persist::PersistRegistry no_registry;
+        const auto rbf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto white = cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+        const auto constant = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.1).value());
+
+        // Below the root object, a composite kernel node adds two levels ({"sum": {"left": ...}}) and the leaf adds
+        // three ({"rbf": {"length_scale": {"value": ...}}}): a left-deep chain of m composites reaches depth
+        // 2m + 4, so m = 62 gives 128 and m = 63 gives 130.
+        for (const bool product : {false, true})
+        {
+            for (const std::size_t m : {std::size_t{62}, std::size_t{63}})
+            {
+                SCOPED_TRACE(std::string(product ? "product" : "sum") + " chain of " + std::to_string(m));
+                auto spec = rbf;
+                for (std::size_t i = 0; i < m; ++i)
+                {
+                    spec = product ? spec * constant : spec + white;
+                }
+                expect_outcome(
+                    cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 3U, 1U, y_train), no_registry, m == 62U
+                );
+            }
+        }
+
+        // A pipeline adds three levels ({"pipeline": {"steps": [...]}}) below the root object: m nested pipelines
+        // reach depth 3m + 1, so m = 42 gives 127 and m = 43 gives 130.
+        for (const std::size_t m : {std::size_t{42}, std::size_t{43}})
+        {
+            SCOPED_TRACE("pipelines nested " + std::to_string(m));
+            cxxgpr::transform::Pipeline input_pipeline;
+            cxxgpr::transform::TargetPipeline target_pipeline;
+            for (std::size_t i = 1; i < m; ++i)
+            {
+                input_pipeline = cxxgpr::transform::Pipeline().then(input_pipeline);
+                target_pipeline = cxxgpr::transform::TargetPipeline().then(target_pipeline);
+            }
+            const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> base(rbf);
+            expect_outcome(
+                base.with_input_transform(input_pipeline).factor(x_train, 3U, 1U, y_train), no_registry, m == 42U
+            );
+            expect_outcome(
+                base.with_target_transform(target_pipeline).factor(x_train, 3U, 1U, y_train), no_registry, m == 42U
+            );
+        }
+
+        // Custom state sits three levels below the root ({"kernel": {"custom": {"state": ...}}}, and likewise for
+        // each transform): state nested k levels reaches depth k + 3, so k = 125 gives 128 and k = 126 gives 129.
+        // The last depth would overflow the stack inside the JSON serializer if it were not refused beforehand.
+        const std::array<std::string ComponentTexts::*, 5> sites{
+            &ComponentTexts::kernel, &ComponentTexts::x_unfitted, &ComponentTexts::x_fitted,
+            &ComponentTexts::y_unfitted, &ComponentTexts::y_fitted
+        };
+        ComponentTexts received;
+        cxxgpr::persist::PersistRegistry reg;
+        register_recording_factories(reg, received);
+        for (std::size_t s = 0; s < sites.size(); ++s)
+        {
+            for (const std::size_t k : {std::size_t{125}, std::size_t{126}, std::size_t{1'000'000}})
+            {
+                SCOPED_TRACE("site " + std::to_string(s) + ", state nested " + std::to_string(k));
+                ComponentTexts states{
+                    .kernel = "1", .x_unfitted = "1", .x_fitted = "1", .y_unfitted = "1", .y_fitted = "1"
+                };
+                states.*sites[s] = std::string(k, '[') + std::string(k, ']');
+                expect_outcome(factor_all_custom_model(default_component_ids(), states, y_train), reg, k == 125U);
+            }
+        }
+    }
+
+    /// @brief Property: save and load of the deepest accepted models, and save of models refused for nesting, run on
+    /// a thread with a small stack.
+    /// @details The config.json codec recurses once per kernel composite and per transform pipeline level. The
+    /// models are fitted on the main thread; every save, load, and destruction of a loaded model runs on the small
+    /// stack. The deepest accepted chains are the ones of SaveRejectsAConfigNestedDeeperThanLoadAccepts. Of the
+    /// refused models, the kernel chain drives the kernel encoder to its own recursion limit of 128 levels, and the
+    /// pipelines are the shallowest ones the document check refuses. Deeper pipelines are not fitted here, since
+    /// fitting them recurses through the transforms on the main thread.
+    TEST(PersistModelsTest, SaveAndLoadOfTheDeepestAcceptedModelsFitInASmallStack)
+    {
+        // Spec: FMT-02, FMT-08
+        const std::array<double, 3> x_train{0.0, 1.0, 2.0};
+        const std::array<double, 3> y_train{0.1, 0.9, 0.4};
+        const TempDirGuard parent("deep_model_small_stack");
+        const cxxgpr::persist::PersistRegistry no_registry;
+        const auto rbf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
+        const auto white = cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+        const auto constant = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.1).value());
+        const cxxgpr::Gpr<cxxgpr::optimizer::Fixed> base(rbf);
+
+        // Left-deep chains of m composites reach depth 2m + 4: 62 is accepted, while 129 composites exceed the
+        // kernel encoder's own recursion limit of 128.
+        auto chain = [&](std::size_t m, bool product)
+        {
+            auto spec = rbf;
+            for (std::size_t i = 0; i < m; ++i)
+            {
+                spec = product ? spec * constant : spec + white;
+            }
+            return cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).factor(x_train, 3U, 1U, y_train);
+        };
+        // m nested pipelines reach depth 3m + 1: 42 is accepted and 43 is refused.
+        auto pipelines = [](std::size_t m)
+        {
+            cxxgpr::transform::Pipeline input;
+            cxxgpr::transform::TargetPipeline target;
+            for (std::size_t i = 1; i < m; ++i)
+            {
+                input = cxxgpr::transform::Pipeline().then(input);
+                target = cxxgpr::transform::TargetPipeline().then(target);
+            }
+            return std::pair{std::move(input), std::move(target)};
+        };
+        const auto [input42, target42] = pipelines(42U);
+        const auto [input43, target43] = pipelines(43U);
+        const auto sum62 = chain(62U, false);
+        const auto product62 = chain(62U, true);
+        const auto sum129 = chain(129U, false);
+        const auto input_deep = base.with_input_transform(input42).factor(x_train, 3U, 1U, y_train);
+        const auto target_deep = base.with_target_transform(target42).factor(x_train, 3U, 1U, y_train);
+        const auto input_refused = base.with_input_transform(input43).factor(x_train, 3U, 1U, y_train);
+        const auto target_refused = base.with_target_transform(target43).factor(x_train, 3U, 1U, y_train);
+        for (const auto* fit :
+            {&sum62, &product62, &sum129, &input_deep, &target_deep, &input_refused, &target_refused})
+        {
+            ASSERT_TRUE(fit->has_value());
+        }
+
+        // Outcomes are recorded on the small stack and checked on the main thread.
+        std::array<bool, 4> saved{};
+        std::array<bool, 4> loaded{};
+        std::array<std::optional<cxxgpr::GprError>, 3> refused;
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), [&]
+        {
+            const std::array accepted{&*sum62, &*product62, &*input_deep, &*target_deep};
+            for (std::size_t i = 0; i < accepted.size(); ++i)
+            {
+                const auto dir = parent.path / ("accepted_" + std::to_string(i));
+                saved.at(i) = cxxgpr::persist::save_with_factor(*accepted.at(i), dir, no_registry).has_value();
+                loaded.at(i) = cxxgpr::persist::LoadedGpr::load(dir, no_registry).has_value();
+            }
+            const std::array too_deep{&*sum129, &*input_refused, &*target_refused};
+            for (std::size_t i = 0; i < too_deep.size(); ++i)
+            {
+                auto result =
+                    cxxgpr::persist::save_with_factor(*too_deep.at(i), parent.path / ("refused_" + std::to_string(i)));
+                if (!result.has_value())
+                {
+                    refused.at(i) = std::move(result).error();
+                }
+            }
+        }
+        );
+        ASSERT_TRUE(ran);
+        for (std::size_t i = 0; i < saved.size(); ++i)
+        {
+            SCOPED_TRACE("accepted model " + std::to_string(i));
+            EXPECT_TRUE(saved.at(i));
+            EXPECT_TRUE(loaded.at(i));
+        }
+        for (std::size_t i = 0; i < refused.size(); ++i)
+        {
+            SCOPED_TRACE("refused model " + std::to_string(i));
+            const auto& error = refused.at(i);
+            if (!error.has_value())
+            {
+                ADD_FAILURE() << "save accepted a model nested deeper than load accepts";
+                continue;
+            }
+            EXPECT_EQ(error->code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(error->persist_error_kind(), cxxgpr::PersistErrorKind::Config);
+        }
     }
 
     /// @brief Verifies the raw-span overload of LoadedGpr::predict against the span shape contract.

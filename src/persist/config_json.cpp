@@ -17,12 +17,14 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "core/noinline.hpp"
 #include "json_depth.hpp"
 
 namespace cxxgpr
@@ -71,6 +73,23 @@ namespace cxxgpr
 
 namespace cxxgpr::persist::detail
 {
+    /// @brief Reports whether text is valid UTF-8, that is, whether it can be written as a JSON string.
+    /// @param[in] text Bytes to check.
+    /// @return True when the JSON serializer accepts text as a string value.
+    bool is_valid_utf8(std::string_view text)
+    {
+        // Ask the serializer itself, so that the answer is exactly "dump() will not throw on this string".
+        try
+        {
+            (void)nlohmann::json(std::string(text)).dump();
+            return true;
+        }
+        catch (const nlohmann::json::exception&)
+        {
+            return false;
+        }
+    }
+
     namespace
     {
 
@@ -83,6 +102,132 @@ namespace cxxgpr::persist::detail
         [[nodiscard]] GprError config_err(std::string reason)
         {
             return GprError::persist_failed(PersistErrorKind::Config, std::move(reason));
+        }
+
+        /// @brief Error of one recursive encode or decode pass, recorded by the node that fails first.
+        /// @details The recursive functions return nothing and stop as soon as the slot holds an error, so that no
+        /// nesting level carries a std::expected (whose GprError alone spans a few hundred bytes) on the stack.
+        using ErrorSlot = std::optional<GprError>;
+
+        /// @brief Records PersistFailed(Config) with reason in err, in a stack frame of its own.
+        /// @param[out] err Error slot of the running pass.
+        /// @param[in] reason Diagnostic message describing the configuration error.
+        CXXGPR_NOINLINE void fail_config(ErrorSlot& err, const char* reason)
+        {
+            err.emplace(config_err(reason));
+        }
+
+        /// @brief Runs a non-recursive step in a stack frame of its own and stores its value or its error.
+        /// @details The recursive encoders and decoders hand every step that builds a std::expected, a JSON object,
+        /// or an error message to this function, so that those temporaries occupy the stack once instead of once
+        /// per nesting level.
+        /// @tparam Out Destination type assignable from the value of the step.
+        /// @tparam Step Callable returning a std::expected whose value is assignable to Out.
+        /// @param[out] out Destination of the value of the step on success; left unchanged on failure.
+        /// @param[out] err Error slot that receives the error of the step on failure.
+        /// @param[in] step Non-recursive step to run.
+        template <typename Out, typename Step>
+        CXXGPR_NOINLINE void produce_into(Out& out, ErrorSlot& err, const Step& step)
+        {
+            auto result = step();
+            if (!result.has_value())
+            {
+                err.emplace(std::move(result).error());
+                return;
+            }
+            out = std::move(*result);
+        }
+
+        /// @brief Encodes the state text of a custom kernel or transform as the JSON value stored under "state".
+        /// @details Text that parses as a JSON value other than a string is stored as that value, and the loader
+        /// re-serializes it. Every other text is stored verbatim as a JSON string: text that does not parse, and
+        /// text that is itself a JSON string literal, whose quotes would otherwise be lost because the loader hands
+        /// any string value back as it is. Text stored as a string must be valid UTF-8, since config.json is.
+        /// @param[in] text State text returned by persist_state_json().
+        /// @return JSON value to store, or GprError when the text cannot be written into config.json.
+        /// @retval GprErrorCode::PersistFailed When a stored JSON value is nested deeper than the loader accepts
+        /// (Config) or text that has to be stored as a string is not valid UTF-8 (NotPersistable).
+        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_custom_state(const std::string& text)
+        {
+            // Non-throwing parse: text that is not JSON yields a discarded value. The parser is not recursive.
+            auto parsed = nlohmann::json::parse(text, nullptr, false);
+            if (!parsed.is_discarded() && !parsed.is_string())
+            {
+                // Bound the nesting of a value stored as JSON before dump() recurses into it once per level; the
+                // loader would reject the deeper document anyway.
+                if (auto depth_ok = check_json_max_depth(text, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Config);
+                    !depth_ok.has_value())
+                {
+                    return std::unexpected(std::move(depth_ok).error());
+                }
+                return parsed;
+            }
+            if (!is_valid_utf8(text))
+            {
+                return std::unexpected(
+                    GprError::persist_failed(
+                        PersistErrorKind::NotPersistable,
+                        "custom state is neither JSON nor valid UTF-8 text and cannot be stored in config.json"
+                    )
+                );
+            }
+            return nlohmann::json(text);
+        }
+
+        /// @brief Checks, without recursion, that the object and array nesting of value does not exceed max_depth.
+        /// @details Counts the levels that check_json_max_depth() counts in the serialized text of value, where the
+        /// root container is level 1, so that a document is refused before dump() recurses into it once per level.
+        /// @param[in] value JSON document to inspect.
+        /// @param[in] max_depth Maximum permissible nesting depth of objects and arrays.
+        /// @return Empty expected when the nesting stays within max_depth, or PersistFailed(Config) otherwise.
+        /// @retval GprErrorCode::PersistFailed When objects and arrays are nested deeper than max_depth.
+        [[nodiscard]] std::expected<void, GprError> check_value_max_depth(
+            const nlohmann::json& value, std::size_t max_depth
+        )
+        {
+            // Depth-first walk over an explicit stack of (node, level) pairs.
+            std::vector<std::pair<const nlohmann::json*, std::size_t>> pending{
+                {&value, 1U}
+            };
+            while (!pending.empty())
+            {
+                const auto [node, level] = pending.back();
+                pending.pop_back();
+                if (!node->is_structured())
+                {
+                    continue;
+                }
+                if (level > max_depth)
+                {
+                    return std::unexpected(config_err("JSON nesting depth exceeds limit"));
+                }
+                for (const auto& child : *node)
+                {
+                    pending.emplace_back(&child, level + 1U);
+                }
+            }
+            return {};
+        }
+
+        /// @brief Reads an optional top-level string field of config.json.
+        /// @param[in] root Parsed config.json root object.
+        /// @param[in] key Field name.
+        /// @param[in] fallback Value used when the field is absent.
+        /// @return The field's string, fallback when absent, or PersistFailed(Config) when it is not a string.
+        [[nodiscard]] std::expected<std::string, GprError> optional_string(
+            const nlohmann::json& root, std::string_view key, std::string_view fallback
+        )
+        {
+            const auto it = root.find(key);
+            if (it == root.end())
+            {
+                return std::string(fallback);
+            }
+            if (!it->is_string())
+            {
+                return std::unexpected(config_err("config.json field " + std::string(key) + " must be a string"));
+            }
+            return it->get<std::string>();
         }
 
         /// @brief Serializes a bounded parameter value and its open interval (lo, hi) as JSON.
@@ -308,116 +453,87 @@ namespace cxxgpr::persist::detail
                     {
                         return std::unexpected(std::move(st).error());
                     }
-                    // Store structured JSON directly if parseable, otherwise fall back to raw string payload.
-                    nlohmann::json parsed_state;
-                    try
+                    auto state = encode_custom_state(*st);
+                    if (!state.has_value())
                     {
-                        parsed_state = nlohmann::json::parse(*st);
-                    }
-                    catch (const nlohmann::json::exception&)
-                    {
-                        parsed_state = *st;
+                        return std::unexpected(std::move(state).error());
                     }
                     return nlohmann::json{
-                        {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(parsed_state)}}}
+                        {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(*state)}}}
                     };
                 }
             }, leaf
             );
         }
 
+        /// @brief Builds the JSON object of a sum or product kernel node from its encoded children.
+        /// @param[in] tag Node tag, "sum" or "product".
+        /// @param[in] lhs Encoded left child, moved from.
+        /// @param[in] rhs Encoded right child, moved from.
+        /// @param[out] out Destination of the JSON object of the node.
+        CXXGPR_NOINLINE void make_composite_kernel_json(
+            const char* tag, nlohmann::json&& lhs, nlohmann::json&& rhs, nlohmann::json& out
+        )
+        {
+            out = nlohmann::json{
+                {tag, {{"left", std::move(lhs)}, {"right", std::move(rhs)}}}
+            };
+        }
+
         /// @brief Recursively encodes a KernelSpec tree into JSON while guarding against excessive depth.
+        /// @details A nesting level keeps only its two encoded children on the stack: leaf encoding, object
+        /// construction, and error construction run in frames of their own.
         /// @param[in] spec Kernel specification tree node to encode.
         /// @param[in] depth Current AST recursion depth bounded by k_max_nesting_depth.
-        /// @return JSON representation of spec, or GprError if depth or leaf serialization fails.
-        /// @retval GprErrorCode::PersistFailed When nesting depth exceeds 128 or a leaf fails to serialize.
-        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_kernel(const KernelSpec& spec, std::size_t depth)
+        /// @param[out] out Destination of the JSON representation of spec.
+        /// @param[out] err Error slot that receives the first failure: PersistFailed(Config) when nesting depth
+        /// exceeds 128, or the error of a leaf that fails to serialize.
+        void encode_kernel_node(const KernelSpec& spec, std::size_t depth, nlohmann::json& out, ErrorSlot& err)
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("kernel nesting depth exceeds 128"));
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
             }
             const auto& node = KernelSpecPersistAccess::node(spec);
             if (const auto* leaf = std::get_if<KernelLeaf>(&node))
             {
-                return encode_leaf(*leaf);
+                produce_into(out, err, [leaf] { return encode_leaf(*leaf); });
+                return;
             }
             // Encode binary SumNode and ProductNode subtrees recursively with depth + 1.
-            const auto [s_lhs, s_rhs] = KernelSpecPersistAccess::as_sum(node);
-            if (s_lhs != nullptr)
+            auto children = KernelSpecPersistAccess::as_sum(node);
+            const bool is_sum = children.first != nullptr;
+            if (!is_sum)
             {
-                auto l = encode_kernel(*s_lhs, depth + 1U);
-                if (!l.has_value())
-                {
-                    return l;
-                }
-                auto r = encode_kernel(*s_rhs, depth + 1U);
-                if (!r.has_value())
-                {
-                    return r;
-                }
-                return nlohmann::json{
-                    {"sum", {{"left", std::move(*l)}, {"right", std::move(*r)}}}
-                };
+                children = KernelSpecPersistAccess::as_product(node);
             }
-            const auto [p_lhs, p_rhs] = KernelSpecPersistAccess::as_product(node);
-            auto l = encode_kernel(*p_lhs, depth + 1U);
-            if (!l.has_value())
+            nlohmann::json lhs;
+            encode_kernel_node(*children.first, depth + 1U, lhs, err);
+            if (err.has_value())
             {
-                return l;
+                return;
             }
-            auto r = encode_kernel(*p_rhs, depth + 1U);
-            if (!r.has_value())
+            nlohmann::json rhs;
+            encode_kernel_node(*children.second, depth + 1U, rhs, err);
+            if (err.has_value())
             {
-                return r;
+                return;
             }
-            return nlohmann::json{
-                {"product", {{"left", std::move(*l)}, {"right", std::move(*r)}}}
-            };
+            make_composite_kernel_json(is_sum ? "sum" : "product", std::move(lhs), std::move(rhs), out);
         }
 
-        /// @brief Recursively decodes a kernel JSON node into a KernelSpec tree.
-        /// @param[in] j Single-key JSON object representing a leaf, sum, or product kernel node.
+        /// @brief Decodes a kernel leaf node, that is, a node whose tag is neither "sum" nor "product".
+        /// @param[in] key Tag of the node.
+        /// @param[in] body JSON value stored under key.
         /// @param[in] registry Extension registry used to instantiate "custom" leaves.
-        /// @param[in] depth Current AST recursion depth bounded by k_max_nesting_depth.
-        /// @return Reconstructed KernelSpec on success, or GprError on schema, interval, or registry failure.
-        /// @retval GprErrorCode::PersistFailed When nesting exceeds 128, schema is invalid, or custom ID is missing.
-        [[nodiscard]] std::expected<KernelSpec, GprError> decode_kernel(
-            const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
+        /// @return Reconstructed leaf KernelSpec on success, or GprError on schema, interval, or registry failure.
+        /// @retval GprErrorCode::PersistFailed When the schema is invalid, the tag is unknown, or a custom ID is
+        /// missing.
+        [[nodiscard]] std::expected<KernelSpec, GprError> decode_kernel_leaf(
+            const std::string& key, const nlohmann::json& body, const PersistRegistry& registry
         )
         {
-            if (depth > k_max_nesting_depth)
-            {
-                return std::unexpected(config_err("kernel nesting depth exceeds 128"));
-            }
-            if (!j.is_object() || j.size() != 1U)
-            {
-                return std::unexpected(config_err("kernel node must be a single-key JSON object"));
-            }
-            const auto it = j.begin();
-            const std::string& key = it.key();
-            const nlohmann::json& body = it.value();
-
-            // Reconstruct binary sum and product compositions before leaf variants.
-            if (key == "sum" || key == "product")
-            {
-                if (!body.is_object() || !body.contains("left") || !body.contains("right"))
-                {
-                    return std::unexpected(config_err("composite kernel node missing left/right"));
-                }
-                auto lhs = decode_kernel(body["left"], registry, depth + 1U);
-                if (!lhs.has_value())
-                {
-                    return lhs;
-                }
-                auto rhs = decode_kernel(body["right"], registry, depth + 1U);
-                if (!rhs.has_value())
-                {
-                    return rhs;
-                }
-                return (key == "sum") ? (*lhs + *rhs) : (*lhs * *rhs);
-            }
-
             if (!body.is_object())
             {
                 return std::unexpected(config_err("kernel leaf body must be an object"));
@@ -650,6 +766,94 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown kernel node kind"));
         }
 
+        /// @brief Checks the body of a sum or product node and returns its left and right child nodes.
+        /// @param[in] body JSON value stored under the "sum" or "product" tag.
+        /// @param[out] err Error slot that receives PersistFailed(Config) when a child is missing.
+        /// @return Pointers to the left and right child nodes, or two null pointers when err was filled.
+        [[nodiscard]] CXXGPR_NOINLINE std::pair<const nlohmann::json*, const nlohmann::json*> composite_kernel_children(
+            const nlohmann::json& body, ErrorSlot& err
+        )
+        {
+            if (!body.is_object() || !body.contains("left") || !body.contains("right"))
+            {
+                fail_config(err, "composite kernel node missing left/right");
+                return {nullptr, nullptr};
+            }
+            return {&body["left"], &body["right"]};
+        }
+
+        /// @brief Replaces the decoded left child in lhs with its sum or product with the decoded right child.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in,out] lhs Decoded left child on entry, the composite kernel on return.
+        /// @param[in] rhs Decoded right child, moved from.
+        CXXGPR_NOINLINE void combine_kernel_children(
+            bool sum, std::optional<KernelSpec>& lhs, std::optional<KernelSpec>&& rhs
+        )
+        {
+            // The caller combines only after both children decoded, so both hold a value here.
+            if (lhs.has_value() && rhs.has_value())
+            {
+                lhs = sum ? (std::move(*lhs) + std::move(*rhs)) : (std::move(*lhs) * std::move(*rhs));
+            }
+        }
+
+        /// @brief Recursively decodes a kernel JSON node into a KernelSpec tree.
+        /// @details A nesting level keeps only the decoded right child on the stack, the left child being decoded
+        /// straight into out: leaf decoding, child lookup, composition, and error construction run in frames of
+        /// their own.
+        /// @param[in] j Single-key JSON object representing a leaf, sum, or product kernel node.
+        /// @param[in] registry Extension registry used to instantiate "custom" leaves.
+        /// @param[in] depth Current AST recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the reconstructed KernelSpec.
+        /// @param[out] err Error slot that receives the first failure: PersistFailed when nesting exceeds 128, the
+        /// schema is invalid, or a custom ID is missing, or the interval or registry error of a leaf.
+        void decode_kernel_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::optional<KernelSpec>& out,
+            ErrorSlot& err
+        )
+        {
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
+            }
+            if (!j.is_object() || j.size() != 1U)
+            {
+                fail_config(err, "kernel node must be a single-key JSON object");
+                return;
+            }
+            const auto it = j.begin();
+            const std::string& key = it.key();
+            const nlohmann::json& body = it.value();
+
+            // Reconstruct binary sum and product compositions before leaf variants.
+            if (key != "sum" && key != "product")
+            {
+                produce_into(out, err, [&] { return decode_kernel_leaf(key, body, registry); });
+                return;
+            }
+            const auto [left, right] = composite_kernel_children(body, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            decode_kernel_node(*left, registry, depth + 1U, out, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            std::optional<KernelSpec> rhs;
+            decode_kernel_node(*right, registry, depth + 1U, rhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            combine_kernel_children(key == "sum", out, std::move(rhs));
+        }
+
         /// @brief Serializes a user-defined transform implementing persist_id() and persist_state_json().
         /// @tparam CustomTransformT Input or target transform interface type.
         /// @param[in] t Custom transform instance to serialize.
@@ -676,258 +880,350 @@ namespace cxxgpr::persist::detail
             {
                 return std::unexpected(std::move(st).error());
             }
-            // Embed structured JSON state when valid, falling back to string encoding otherwise.
-            nlohmann::json parsed;
-            try
+            auto state = encode_custom_state(*st);
+            if (!state.has_value())
             {
-                parsed = nlohmann::json::parse(*st);
-            }
-            catch (const nlohmann::json::exception&)
-            {
-                parsed = *st;
+                return std::unexpected(std::move(state).error());
             }
             return nlohmann::json{
-                {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(parsed)}}}
+                {"custom", {{"persist_id", std::string(pid)}, {"state", std::move(*state)}}}
             };
         }
 
-        /// @brief Recursively encodes an UnfittedInputTransform hierarchy into config.json format.
-        /// @param[in] t Unfitted input transform node to serialize.
-        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
-        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_unfitted_input(
-            const transform::UnfittedInputTransform& t, std::size_t depth
+        /// @brief Wraps the encoded children of a composite transform as {tag: {field: items}}.
+        /// @param[in] tag Node tag, "pipeline" or "columnwise".
+        /// @param[in] field Name of the child array, "steps" or "maps".
+        /// @param[in] items Encoded children in order, moved from.
+        /// @param[out] out Destination of the JSON object of the node.
+        CXXGPR_NOINLINE void make_composite_transform_json(
+            const char* tag, const char* field, nlohmann::json&& items, nlohmann::json& out
         )
         {
-            if (depth > k_max_nesting_depth)
-            {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
-            }
+            out = nlohmann::json{
+                {tag, {{field, std::move(items)}}}
+            };
+        }
+
+        /// @brief Encodes a built-in leaf of the UnfittedInputTransform hierarchy.
+        /// @param[in] t Unfitted input transform node to serialize.
+        /// @param[out] out Destination of the JSON representation of t when it is a built-in leaf.
+        /// @return True when t is an identity, standardize, or min-max transform and out holds its JSON.
+        [[nodiscard]] CXXGPR_NOINLINE bool encode_unfitted_input_leaf(
+            const transform::UnfittedInputTransform& t, nlohmann::json& out
+        )
+        {
             if (dynamic_cast<const transform::IdentityInput*>(&t) != nullptr)
             {
-                return nlohmann::json("identity");
+                out = nlohmann::json("identity");
+                return true;
             }
             if (dynamic_cast<const transform::StandardizeInput*>(&t) != nullptr)
             {
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"standardize", nlohmann::json::object()}
                 };
+                return true;
             }
             if (const auto* mm = dynamic_cast<const transform::MinMaxInput*>(&t))
             {
                 const auto [lo, hi] = mm->feature_range();
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"min_max", {{"range_lo", lo}, {"range_hi", hi}}}
                 };
+                return true;
             }
-            if (const auto* pipe = dynamic_cast<const transform::Pipeline*>(&t))
-            {
-                nlohmann::json steps = nlohmann::json::array();
-                for (const auto& s : pipe->steps())
-                {
-                    auto enc = encode_unfitted_input(*s, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    steps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"pipeline", {{"steps", std::move(steps)}}}
-                };
-            }
-            if (const auto* col = dynamic_cast<const transform::ColumnwiseInput*>(&t))
-            {
-                nlohmann::json maps = nlohmann::json::array();
-                for (const auto& m : col->maps())
-                {
-                    auto enc = encode_unfitted_input(*m, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    maps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"columnwise", {{"maps", std::move(maps)}}}
-                };
-            }
-            return encode_custom_transform(t);
+            return false;
         }
 
-        /// @brief Recursively encodes a FittedInputTransform hierarchy and its fitted statistics into JSON.
-        /// @param[in] t Fitted input transform node to serialize.
+        /// @brief Recursively encodes an UnfittedInputTransform hierarchy into config.json format.
+        /// @details A nesting level keeps only the child array and the current child on the stack: leaf and custom
+        /// encoding, object construction, and error construction run in frames of their own.
+        /// @param[in] t Unfitted input transform node to serialize.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
-        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_fitted_input(
-            const transform::FittedInputTransform& t, std::size_t depth
+        /// @param[out] out Destination of the JSON representation of t.
+        /// @param[out] err Error slot that receives the first failure: excessive depth or a non-persistable custom
+        /// step.
+        void encode_unfitted_input_node(
+            const transform::UnfittedInputTransform& t, std::size_t depth, nlohmann::json& out, ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            if (encode_unfitted_input_leaf(t, out))
+            {
+                return;
+            }
+            const auto* pipe = dynamic_cast<const transform::Pipeline*>(&t);
+            const auto* col = (pipe == nullptr) ? dynamic_cast<const transform::ColumnwiseInput*>(&t) : nullptr;
+            if (pipe == nullptr && col == nullptr)
+            {
+                produce_into(out, err, [&t] { return encode_custom_transform(t); });
+                return;
+            }
+            // Encode Pipeline steps and ColumnwiseInput maps in order with depth + 1.
+            nlohmann::json items(nlohmann::json::value_t::array);
+            for (const auto& child : (pipe != nullptr) ? pipe->steps() : col->maps())
+            {
+                nlohmann::json item;
+                encode_unfitted_input_node(*child, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_composite_transform_json(
+                (pipe != nullptr) ? "pipeline" : "columnwise", (pipe != nullptr) ? "steps" : "maps", std::move(items),
+                out
+            );
+        }
+
+        /// @brief Encodes a built-in leaf of the FittedInputTransform hierarchy with its fitted statistics.
+        /// @param[in] t Fitted input transform node to serialize.
+        /// @param[out] out Destination of the JSON representation of t when it is a built-in leaf.
+        /// @return True when t is an identity, standardize, or min-max transform and out holds its JSON.
+        [[nodiscard]] CXXGPR_NOINLINE bool encode_fitted_input_leaf(
+            const transform::FittedInputTransform& t, nlohmann::json& out
+        )
+        {
             if (dynamic_cast<const transform::FittedIdentityInput*>(&t) != nullptr)
             {
-                return nlohmann::json("identity");
+                out = nlohmann::json("identity");
+                return true;
             }
             if (const auto* st = dynamic_cast<const transform::FittedStandardizeInput*>(&t))
             {
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"standardize", {{"mean", st->mean()}, {"std", st->std()}}}
                 };
+                return true;
             }
             if (const auto* mm = dynamic_cast<const transform::FittedMinMaxInput*>(&t))
             {
                 const auto [lo, hi] = mm->feature_range();
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"min_max", {{"data_min", mm->min()}, {"data_max", mm->max()}, {"range_lo", lo}, {"range_hi", hi}}}
                 };
+                return true;
             }
-            if (const auto* pipe = dynamic_cast<const transform::FittedPipeline*>(&t))
-            {
-                nlohmann::json steps = nlohmann::json::array();
-                for (const auto& s : pipe->steps())
-                {
-                    auto enc = encode_fitted_input(*s, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    steps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"pipeline", {{"steps", std::move(steps)}}}
-                };
-            }
-            if (const auto* col = dynamic_cast<const transform::FittedColumnwiseInput*>(&t))
-            {
-                nlohmann::json maps = nlohmann::json::array();
-                for (const auto& m : col->maps())
-                {
-                    auto enc = encode_fitted_input(*m, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    maps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"columnwise", {{"maps", std::move(maps)}}}
-                };
-            }
-            return encode_custom_transform(t);
+            return false;
         }
 
-        /// @brief Recursively encodes an UnfittedTargetTransform hierarchy into config.json format.
-        /// @param[in] t Unfitted target transform node to serialize.
+        /// @brief Recursively encodes a FittedInputTransform hierarchy and its fitted statistics into JSON.
+        /// @details A nesting level keeps only the child array and the current child on the stack: leaf and custom
+        /// encoding, object construction, and error construction run in frames of their own.
+        /// @param[in] t Fitted input transform node to serialize.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
-        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_unfitted_target(
-            const transform::UnfittedTargetTransform& t, std::size_t depth
+        /// @param[out] out Destination of the JSON representation of t.
+        /// @param[out] err Error slot that receives the first failure: excessive depth or a non-persistable custom
+        /// step.
+        void encode_fitted_input_node(
+            const transform::FittedInputTransform& t, std::size_t depth, nlohmann::json& out, ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            if (encode_fitted_input_leaf(t, out))
+            {
+                return;
+            }
+            const auto* pipe = dynamic_cast<const transform::FittedPipeline*>(&t);
+            const auto* col = (pipe == nullptr) ? dynamic_cast<const transform::FittedColumnwiseInput*>(&t) : nullptr;
+            if (pipe == nullptr && col == nullptr)
+            {
+                produce_into(out, err, [&t] { return encode_custom_transform(t); });
+                return;
+            }
+            // Encode FittedPipeline steps and FittedColumnwiseInput maps in order with depth + 1.
+            nlohmann::json items(nlohmann::json::value_t::array);
+            for (const auto& child : (pipe != nullptr) ? pipe->steps() : col->maps())
+            {
+                nlohmann::json item;
+                encode_fitted_input_node(*child, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_composite_transform_json(
+                (pipe != nullptr) ? "pipeline" : "columnwise", (pipe != nullptr) ? "steps" : "maps", std::move(items),
+                out
+            );
+        }
+
+        /// @brief Encodes a built-in leaf of the UnfittedTargetTransform hierarchy.
+        /// @param[in] t Unfitted target transform node to serialize.
+        /// @param[out] out Destination of the JSON representation of t when it is a built-in leaf.
+        /// @return True when t is an identity, standardize, or min-max transform and out holds its JSON.
+        [[nodiscard]] CXXGPR_NOINLINE bool encode_unfitted_target_leaf(
+            const transform::UnfittedTargetTransform& t, nlohmann::json& out
+        )
+        {
             if (dynamic_cast<const transform::IdentityTarget*>(&t) != nullptr)
             {
-                return nlohmann::json("identity");
+                out = nlohmann::json("identity");
+                return true;
             }
             if (dynamic_cast<const transform::StandardizeTarget*>(&t) != nullptr)
             {
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"standardize", nlohmann::json::object()}
                 };
+                return true;
             }
             if (const auto* mm = dynamic_cast<const transform::MinMaxTarget*>(&t))
             {
                 const auto [lo, hi] = mm->feature_range();
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"min_max", {{"range_lo", lo}, {"range_hi", hi}}}
                 };
+                return true;
             }
-            if (const auto* pipe = dynamic_cast<const transform::TargetPipeline*>(&t))
-            {
-                nlohmann::json steps = nlohmann::json::array();
-                for (const auto& s : pipe->steps())
-                {
-                    auto enc = encode_unfitted_target(*s, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    steps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"pipeline", {{"steps", std::move(steps)}}}
-                };
-            }
-            return encode_custom_transform(t);
+            return false;
         }
 
-        /// @brief Recursively encodes a FittedTargetTransform hierarchy and its fitted statistics into JSON.
-        /// @param[in] t Fitted target transform node to serialize.
+        /// @brief Recursively encodes an UnfittedTargetTransform hierarchy into config.json format.
+        /// @details A nesting level keeps only the step array and the current step on the stack: leaf and custom
+        /// encoding, object construction, and error construction run in frames of their own.
+        /// @param[in] t Unfitted target transform node to serialize.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return JSON representation of t, or GprError on excessive depth or non-persistable custom step.
-        [[nodiscard]] std::expected<nlohmann::json, GprError> encode_fitted_target(
-            const transform::FittedTargetTransform& t, std::size_t depth
+        /// @param[out] out Destination of the JSON representation of t.
+        /// @param[out] err Error slot that receives the first failure: excessive depth or a non-persistable custom
+        /// step.
+        void encode_unfitted_target_node(
+            const transform::UnfittedTargetTransform& t, std::size_t depth, nlohmann::json& out, ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            if (encode_unfitted_target_leaf(t, out))
+            {
+                return;
+            }
+            const auto* pipe = dynamic_cast<const transform::TargetPipeline*>(&t);
+            if (pipe == nullptr)
+            {
+                produce_into(out, err, [&t] { return encode_custom_transform(t); });
+                return;
+            }
+            // Encode TargetPipeline steps in order with depth + 1.
+            nlohmann::json items(nlohmann::json::value_t::array);
+            for (const auto& child : pipe->steps())
+            {
+                nlohmann::json item;
+                encode_unfitted_target_node(*child, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_composite_transform_json("pipeline", "steps", std::move(items), out);
+        }
+
+        /// @brief Encodes a built-in leaf of the FittedTargetTransform hierarchy with its fitted statistics.
+        /// @param[in] t Fitted target transform node to serialize.
+        /// @param[out] out Destination of the JSON representation of t when it is a built-in leaf.
+        /// @return True when t is an identity, standardize, or min-max transform and out holds its JSON.
+        [[nodiscard]] CXXGPR_NOINLINE bool encode_fitted_target_leaf(
+            const transform::FittedTargetTransform& t, nlohmann::json& out
+        )
+        {
             if (dynamic_cast<const transform::FittedIdentityTarget*>(&t) != nullptr)
             {
-                return nlohmann::json("identity");
+                out = nlohmann::json("identity");
+                return true;
             }
             if (const auto* st = dynamic_cast<const transform::FittedStandardizeTarget*>(&t))
             {
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"standardize", {{"mean", st->mean()}, {"std", st->std()}}}
                 };
+                return true;
             }
             if (const auto* mm = dynamic_cast<const transform::FittedMinMaxTarget*>(&t))
             {
                 const auto [lo, hi] = mm->feature_range();
-                return nlohmann::json{
+                out = nlohmann::json{
                     {"min_max", {{"data_min", mm->min()}, {"data_max", mm->max()}, {"range_lo", lo}, {"range_hi", hi}}}
                 };
+                return true;
             }
-            if (const auto* pipe = dynamic_cast<const transform::FittedTargetPipeline*>(&t))
-            {
-                nlohmann::json steps = nlohmann::json::array();
-                for (const auto& s : pipe->steps())
-                {
-                    auto enc = encode_fitted_target(*s, depth + 1U);
-                    if (!enc.has_value())
-                    {
-                        return enc;
-                    }
-                    steps.push_back(std::move(*enc));
-                }
-                return nlohmann::json{
-                    {"pipeline", {{"steps", std::move(steps)}}}
-                };
-            }
-            return encode_custom_transform(t);
+            return false;
         }
 
-        /// @brief Recursively decodes an UnfittedInputTransform hierarchy from JSON.
-        /// @param[in] j JSON string ("identity") or single-key transform descriptor object.
-        /// @param[in] registry Registry supplying factories for "custom" transforms.
+        /// @brief Recursively encodes a FittedTargetTransform hierarchy and its fitted statistics into JSON.
+        /// @details A nesting level keeps only the step array and the current step on the stack: leaf and custom
+        /// encoding, object construction, and error construction run in frames of their own.
+        /// @param[in] t Fitted target transform node to serialize.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return Owned UnfittedInputTransform instance, or GprError on schema, range, or registry error.
-        [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedInputTransform>, GprError> decode_unfitted_input(
-            const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
+        /// @param[out] out Destination of the JSON representation of t.
+        /// @param[out] err Error slot that receives the first failure: excessive depth or a non-persistable custom
+        /// step.
+        void encode_fitted_target_node(
+            const transform::FittedTargetTransform& t, std::size_t depth, nlohmann::json& out, ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            if (encode_fitted_target_leaf(t, out))
+            {
+                return;
+            }
+            const auto* pipe = dynamic_cast<const transform::FittedTargetPipeline*>(&t);
+            if (pipe == nullptr)
+            {
+                produce_into(out, err, [&t] { return encode_custom_transform(t); });
+                return;
+            }
+            // Encode FittedTargetPipeline steps in order with depth + 1.
+            nlohmann::json items(nlohmann::json::value_t::array);
+            for (const auto& child : pipe->steps())
+            {
+                nlohmann::json item;
+                encode_fitted_target_node(*child, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_composite_transform_json("pipeline", "steps", std::move(items), out);
+        }
+
+        /// @brief Children of a composite transform node found by a non-recursive node decoder.
+        struct CompositeItems
+        {
+            /// @brief JSON array of the child nodes, or null when the node is not a composite.
+            const nlohmann::json* items = nullptr;
+            /// @brief True for a "pipeline" node, false for a "columnwise" node.
+            bool pipeline = false;
+        };
+
+        /// @brief Decodes an UnfittedInputTransform node other than a composite, or finds the children of a composite.
+        /// @param[in] j JSON string ("identity") or single-key transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" transforms.
+        /// @param[out] composite Children of j when j is a valid "pipeline" or "columnwise" node; left null otherwise.
+        /// @return Owned UnfittedInputTransform instance, a null pointer when j is a composite, or GprError on schema,
+        /// range, or registry error.
+        [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedInputTransform>, GprError>
+            decode_unfitted_input_leaf(
+                const nlohmann::json& j, const PersistRegistry& registry, CompositeItems& composite
+            )
+        {
             if (j.is_string() && j.get<std::string>() == "identity")
             {
                 return std::make_unique<transform::IdentityInput>();
@@ -958,27 +1254,14 @@ namespace cxxgpr::persist::detail
             }
             if (key == "pipeline" || key == "columnwise")
             {
-                // Decode Pipeline ("steps") and ColumnwiseInput ("maps") uniformly with depth + 1.
+                // Check the child array of Pipeline ("steps") or ColumnwiseInput ("maps"); the caller decodes it.
                 const std::string_view arr_key = (key == "pipeline") ? "steps" : "maps";
                 if (!body.is_object() || !body.contains(arr_key) || !body[arr_key].is_array())
                 {
                     return std::unexpected(config_err("composite transform missing array"));
                 }
-                std::vector<std::unique_ptr<transform::UnfittedInputTransform>> items;
-                for (const auto& elem : body[arr_key])
-                {
-                    auto sub = decode_unfitted_input(elem, registry, depth + 1U);
-                    if (!sub.has_value())
-                    {
-                        return std::unexpected(std::move(sub).error());
-                    }
-                    items.push_back(std::move(*sub));
-                }
-                if (key == "pipeline")
-                {
-                    return std::make_unique<transform::Pipeline>(std::move(items));
-                }
-                return std::make_unique<transform::ColumnwiseInput>(std::move(items));
+                composite = CompositeItems{.items = &body[arr_key], .pipeline = key == "pipeline"};
+                return nullptr;
             }
             if (key == "custom")
             {
@@ -995,19 +1278,77 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown unfitted input transform"));
         }
 
-        /// @brief Recursively decodes a FittedInputTransform hierarchy and validates restored statistics.
-        /// @param[in] j JSON string ("identity") or single-key fitted transform descriptor object.
+        /// @brief Builds a Pipeline or ColumnwiseInput from its decoded children.
+        /// @param[in] pipeline True for a Pipeline, false for a ColumnwiseInput.
+        /// @param[in] items Decoded children in order, moved from.
+        /// @param[out] out Destination of the composite transform.
+        CXXGPR_NOINLINE void make_unfitted_input_composite(
+            bool pipeline,
+            std::vector<std::unique_ptr<transform::UnfittedInputTransform>>&& items,
+            std::unique_ptr<transform::UnfittedInputTransform>& out
+        )
+        {
+            if (pipeline)
+            {
+                out = std::make_unique<transform::Pipeline>(std::move(items));
+                return;
+            }
+            out = std::make_unique<transform::ColumnwiseInput>(std::move(items));
+        }
+
+        /// @brief Recursively decodes an UnfittedInputTransform hierarchy from JSON.
+        /// @details A nesting level keeps only the decoded children on the stack: node decoding, composite
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON string ("identity") or single-key transform descriptor object.
         /// @param[in] registry Registry supplying factories for "custom" transforms.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return Owned FittedInputTransform instance, or GprError on schema, parameter, or registry error.
-        [[nodiscard]] std::expected<std::unique_ptr<transform::FittedInputTransform>, GprError> decode_fitted_input(
-            const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
+        /// @param[out] out Destination of the owned UnfittedInputTransform instance.
+        /// @param[out] err Error slot that receives the first schema, range, depth, or registry error.
+        void decode_unfitted_input_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::unique_ptr<transform::UnfittedInputTransform>& out,
+            ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            CompositeItems composite;
+            produce_into(out, err, [&] { return decode_unfitted_input_leaf(j, registry, composite); });
+            if (err.has_value() || composite.items == nullptr)
+            {
+                return;
+            }
+            // Decode Pipeline ("steps") and ColumnwiseInput ("maps") children uniformly with depth + 1.
+            std::vector<std::unique_ptr<transform::UnfittedInputTransform>> items;
+            for (const auto& child : *composite.items)
+            {
+                std::unique_ptr<transform::UnfittedInputTransform> item;
+                decode_unfitted_input_node(child, registry, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_unfitted_input_composite(composite.pipeline, std::move(items), out);
+        }
+
+        /// @brief Decodes a FittedInputTransform node other than a composite, or finds the children of a composite.
+        /// @param[in] j JSON string ("identity") or single-key fitted transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" transforms.
+        /// @param[out] composite Children of j when j is a valid "pipeline" or "columnwise" node; left null otherwise.
+        /// @return Owned FittedInputTransform instance with validated statistics, a null pointer when j is a
+        /// composite, or GprError on schema, parameter, or registry error.
+        [[nodiscard]] std::expected<std::unique_ptr<transform::FittedInputTransform>, GprError>
+            decode_fitted_input_leaf(
+                const nlohmann::json& j, const PersistRegistry& registry, CompositeItems& composite
+            )
+        {
             if (j.is_string() && j.get<std::string>() == "identity")
             {
                 return std::make_unique<transform::FittedIdentityInput>();
@@ -1058,21 +1399,8 @@ namespace cxxgpr::persist::detail
                 {
                     return std::unexpected(config_err("fitted composite transform missing array"));
                 }
-                std::vector<std::unique_ptr<transform::FittedInputTransform>> items;
-                for (const auto& elem : body[arr_key])
-                {
-                    auto sub = decode_fitted_input(elem, registry, depth + 1U);
-                    if (!sub.has_value())
-                    {
-                        return std::unexpected(std::move(sub).error());
-                    }
-                    items.push_back(std::move(*sub));
-                }
-                if (key == "pipeline")
-                {
-                    return std::make_unique<transform::FittedPipeline>(std::move(items));
-                }
-                return std::make_unique<transform::FittedColumnwiseInput>(std::move(items));
+                composite = CompositeItems{.items = &body[arr_key], .pipeline = key == "pipeline"};
+                return nullptr;
             }
             if (key == "custom")
             {
@@ -1089,18 +1417,77 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown fitted input transform"));
         }
 
-        /// @brief Recursively decodes an UnfittedTargetTransform hierarchy from JSON.
-        /// @param[in] j JSON string ("identity") or single-key target transform descriptor object.
-        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @brief Builds a FittedPipeline or FittedColumnwiseInput from its decoded children.
+        /// @param[in] pipeline True for a FittedPipeline, false for a FittedColumnwiseInput.
+        /// @param[in] items Decoded children in order, moved from.
+        /// @param[out] out Destination of the composite transform.
+        CXXGPR_NOINLINE void make_fitted_input_composite(
+            bool pipeline,
+            std::vector<std::unique_ptr<transform::FittedInputTransform>>&& items,
+            std::unique_ptr<transform::FittedInputTransform>& out
+        )
+        {
+            if (pipeline)
+            {
+                out = std::make_unique<transform::FittedPipeline>(std::move(items));
+                return;
+            }
+            out = std::make_unique<transform::FittedColumnwiseInput>(std::move(items));
+        }
+
+        /// @brief Recursively decodes a FittedInputTransform hierarchy and validates restored statistics.
+        /// @details A nesting level keeps only the decoded children on the stack: node decoding, composite
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON string ("identity") or single-key fitted transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" transforms.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return Owned UnfittedTargetTransform instance, or GprError on schema, range, or registry error.
-        [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedTargetTransform>, GprError>
-            decode_unfitted_target(const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth)
+        /// @param[out] out Destination of the owned FittedInputTransform instance.
+        /// @param[out] err Error slot that receives the first schema, parameter, depth, or registry error.
+        void decode_fitted_input_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::unique_ptr<transform::FittedInputTransform>& out,
+            ErrorSlot& err
+        )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            CompositeItems composite;
+            produce_into(out, err, [&] { return decode_fitted_input_leaf(j, registry, composite); });
+            if (err.has_value() || composite.items == nullptr)
+            {
+                return;
+            }
+            // Decode FittedPipeline ("steps") and FittedColumnwiseInput ("maps") children uniformly with depth + 1.
+            std::vector<std::unique_ptr<transform::FittedInputTransform>> items;
+            for (const auto& child : *composite.items)
+            {
+                std::unique_ptr<transform::FittedInputTransform> item;
+                decode_fitted_input_node(child, registry, depth + 1U, item, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                items.push_back(std::move(item));
+            }
+            make_fitted_input_composite(composite.pipeline, std::move(items), out);
+        }
+
+        /// @brief Decodes an UnfittedTargetTransform node other than a pipeline, or finds the steps of a pipeline.
+        /// @param[in] j JSON string ("identity") or single-key target transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @param[out] composite Steps of j when j is a valid "pipeline" node; left null otherwise.
+        /// @return Owned UnfittedTargetTransform instance, a null pointer when j is a pipeline, or GprError on schema,
+        /// range, or registry error.
+        [[nodiscard]] std::expected<std::unique_ptr<transform::UnfittedTargetTransform>, GprError>
+            decode_unfitted_target_leaf(
+                const nlohmann::json& j, const PersistRegistry& registry, CompositeItems& composite
+            )
+        {
             if (j.is_string() && j.get<std::string>() == "identity")
             {
                 return std::make_unique<transform::IdentityTarget>();
@@ -1135,17 +1522,9 @@ namespace cxxgpr::persist::detail
                 {
                     return std::unexpected(config_err("target pipeline missing steps"));
                 }
-                std::vector<std::unique_ptr<transform::UnfittedTargetTransform>> steps;
-                for (const auto& elem : body["steps"])
-                {
-                    auto sub = decode_unfitted_target(elem, registry, depth + 1U);
-                    if (!sub.has_value())
-                    {
-                        return std::unexpected(std::move(sub).error());
-                    }
-                    steps.push_back(std::move(*sub));
-                }
-                return std::make_unique<transform::TargetPipeline>(std::move(steps));
+                // Hand the steps to the caller, which decodes them.
+                composite = CompositeItems{.items = &body["steps"], .pipeline = true};
+                return nullptr;
             }
             if (key == "custom")
             {
@@ -1162,19 +1541,70 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown unfitted target transform"));
         }
 
-        /// @brief Recursively decodes a FittedTargetTransform hierarchy and validates restored statistics.
-        /// @param[in] j JSON string ("identity") or single-key fitted target transform descriptor object.
+        /// @brief Builds a TargetPipeline from its decoded steps.
+        /// @param[in] steps Decoded steps in order, moved from.
+        /// @param[out] out Destination of the pipeline.
+        CXXGPR_NOINLINE void make_unfitted_target_pipeline(
+            std::vector<std::unique_ptr<transform::UnfittedTargetTransform>>&& steps,
+            std::unique_ptr<transform::UnfittedTargetTransform>& out
+        )
+        {
+            out = std::make_unique<transform::TargetPipeline>(std::move(steps));
+        }
+
+        /// @brief Recursively decodes an UnfittedTargetTransform hierarchy from JSON.
+        /// @details A nesting level keeps only the decoded steps on the stack: node decoding, pipeline
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON string ("identity") or single-key target transform descriptor object.
         /// @param[in] registry Registry supplying factories for "custom" target transforms.
         /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
-        /// @return Owned FittedTargetTransform instance, or GprError on schema, parameter, or registry error.
-        [[nodiscard]] std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError> decode_fitted_target(
-            const nlohmann::json& j, const PersistRegistry& registry, std::size_t depth
+        /// @param[out] out Destination of the owned UnfittedTargetTransform instance.
+        /// @param[out] err Error slot that receives the first schema, range, depth, or registry error.
+        void decode_unfitted_target_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::unique_ptr<transform::UnfittedTargetTransform>& out,
+            ErrorSlot& err
         )
         {
             if (depth > k_max_nesting_depth)
             {
-                return std::unexpected(config_err("transform nesting depth exceeds 128"));
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
             }
+            CompositeItems composite;
+            produce_into(out, err, [&] { return decode_unfitted_target_leaf(j, registry, composite); });
+            if (err.has_value() || composite.items == nullptr)
+            {
+                return;
+            }
+            // Decode TargetPipeline steps in order with depth + 1.
+            std::vector<std::unique_ptr<transform::UnfittedTargetTransform>> steps;
+            for (const auto& child : *composite.items)
+            {
+                std::unique_ptr<transform::UnfittedTargetTransform> step;
+                decode_unfitted_target_node(child, registry, depth + 1U, step, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                steps.push_back(std::move(step));
+            }
+            make_unfitted_target_pipeline(std::move(steps), out);
+        }
+
+        /// @brief Decodes a FittedTargetTransform node other than a pipeline, or finds the steps of a pipeline.
+        /// @param[in] j JSON string ("identity") or single-key fitted target transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @param[out] composite Steps of j when j is a valid "pipeline" node; left null otherwise.
+        /// @return Owned FittedTargetTransform instance with validated statistics, a null pointer when j is a
+        /// pipeline, or GprError on schema, parameter, or registry error.
+        [[nodiscard]] std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError>
+            decode_fitted_target_leaf(
+                const nlohmann::json& j, const PersistRegistry& registry, CompositeItems& composite
+            )
+        {
             if (j.is_string() && j.get<std::string>() == "identity")
             {
                 return std::make_unique<transform::FittedIdentityTarget>();
@@ -1223,17 +1653,9 @@ namespace cxxgpr::persist::detail
                 {
                     return std::unexpected(config_err("fitted target pipeline missing steps"));
                 }
-                std::vector<std::unique_ptr<transform::FittedTargetTransform>> steps;
-                for (const auto& elem : body["steps"])
-                {
-                    auto sub = decode_fitted_target(elem, registry, depth + 1U);
-                    if (!sub.has_value())
-                    {
-                        return std::unexpected(std::move(sub).error());
-                    }
-                    steps.push_back(std::move(*sub));
-                }
-                return std::make_unique<transform::FittedTargetPipeline>(std::move(steps));
+                // Hand the steps to the caller, which decodes them.
+                composite = CompositeItems{.items = &body["steps"], .pipeline = true};
+                return nullptr;
             }
             if (key == "custom")
             {
@@ -1248,6 +1670,59 @@ namespace cxxgpr::persist::detail
                 return registry.create_fitted_target(pid, st);
             }
             return std::unexpected(config_err("unknown fitted target transform"));
+        }
+
+        /// @brief Builds a FittedTargetPipeline from its decoded steps.
+        /// @param[in] steps Decoded steps in order, moved from.
+        /// @param[out] out Destination of the pipeline.
+        CXXGPR_NOINLINE void make_fitted_target_pipeline(
+            std::vector<std::unique_ptr<transform::FittedTargetTransform>>&& steps,
+            std::unique_ptr<transform::FittedTargetTransform>& out
+        )
+        {
+            out = std::make_unique<transform::FittedTargetPipeline>(std::move(steps));
+        }
+
+        /// @brief Recursively decodes a FittedTargetTransform hierarchy and validates restored statistics.
+        /// @details A nesting level keeps only the decoded steps on the stack: node decoding, pipeline
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON string ("identity") or single-key fitted target transform descriptor object.
+        /// @param[in] registry Registry supplying factories for "custom" target transforms.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the owned FittedTargetTransform instance.
+        /// @param[out] err Error slot that receives the first schema, parameter, depth, or registry error.
+        void decode_fitted_target_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::unique_ptr<transform::FittedTargetTransform>& out,
+            ErrorSlot& err
+        )
+        {
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "transform nesting depth exceeds 128");
+                return;
+            }
+            CompositeItems composite;
+            produce_into(out, err, [&] { return decode_fitted_target_leaf(j, registry, composite); });
+            if (err.has_value() || composite.items == nullptr)
+            {
+                return;
+            }
+            // Decode FittedTargetPipeline steps in order with depth + 1.
+            std::vector<std::unique_ptr<transform::FittedTargetTransform>> steps;
+            for (const auto& child : *composite.items)
+            {
+                std::unique_ptr<transform::FittedTargetTransform> step;
+                decode_fitted_target_node(child, registry, depth + 1U, step, err);
+                if (err.has_value())
+                {
+                    return;
+                }
+                steps.push_back(std::move(step));
+            }
+            make_fitted_target_pipeline(std::move(steps), out);
         }
 
         /// @brief Serializes a JitterPolicy (FixedJitter or AdaptiveJitter) into a tagged JSON object.
@@ -1307,6 +1782,291 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown jitter policy"));
         }
 
+        /// @brief Encodes a supplied-distance or coordinate leaf of a described DistanceKernel tree.
+        /// @param[in] node Described leaf node.
+        /// @param[out] out Destination of the JSON of the leaf.
+        /// @param[out] err Error slot that receives the failure when the leaf is missing or not persistable.
+        CXXGPR_NOINLINE void encode_distance_leaf(
+            const cxxgpr::detail::DistanceNodeDesc& node, nlohmann::json& out, ErrorSlot& err
+        )
+        {
+            if (!node.leaf.has_value())
+            {
+                fail_config(err, "distance kernel leaf is missing");
+                return;
+            }
+            auto leaf = encode_leaf(*node.leaf);
+            if (!leaf.has_value())
+            {
+                err.emplace(std::move(leaf).error());
+                return;
+            }
+            if (node.kind == cxxgpr::detail::DistanceNodeDesc::Kind::Coord)
+            {
+                out = std::move(*leaf);
+                return;
+            }
+            out = nlohmann::json{
+                {"distance", {{"slot", node.slot}, {"leaf", std::move(*leaf)}}}
+            };
+        }
+
+        /// @brief Recursively encodes a described DistanceKernel subtree into JSON.
+        /// @details A nesting level keeps only its two encoded children on the stack: leaf encoding, object
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] node Described subtree.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the JSON of the subtree.
+        /// @param[out] err Error slot that receives the first failure: a leaf that is not persistable or nesting
+        /// that is too deep.
+        void encode_distance_node(
+            const cxxgpr::detail::DistanceNodeDesc& node, std::size_t depth, nlohmann::json& out, ErrorSlot& err
+        )
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
+            }
+            if (node.kind == Kind::Supplied || node.kind == Kind::Coord)
+            {
+                encode_distance_leaf(node, out, err);
+                return;
+            }
+            nlohmann::json lhs;
+            encode_distance_node(*node.lhs, depth + 1U, lhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            nlohmann::json rhs;
+            encode_distance_node(*node.rhs, depth + 1U, rhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            make_composite_kernel_json(node.kind == Kind::Sum ? "sum" : "product", std::move(lhs), std::move(rhs), out);
+        }
+
+        /// @brief Decodes the kernel JSON of a distance-tree leaf, which must be a single kernel leaf.
+        /// @param[in] leaf_json Kernel JSON node of the leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @return The kernel leaf, or GprError on schema or registry failure or when the node is a composite.
+        [[nodiscard]] std::expected<KernelLeaf, GprError> decode_distance_leaf_kernel(
+            const nlohmann::json& leaf_json, const PersistRegistry& registry
+        )
+        {
+            std::optional<KernelSpec> spec;
+            ErrorSlot err;
+            decode_kernel_node(leaf_json, registry, 0U, spec, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+            const auto* leaf =
+                spec.has_value() ? std::get_if<KernelLeaf>(&KernelSpecPersistAccess::node(*spec)) : nullptr;
+            if (leaf == nullptr)
+            {
+                return std::unexpected(config_err("a distance leaf must be a single kernel leaf"));
+            }
+            return *leaf;
+        }
+
+        /// @brief Children of a sum or product node found by decode_distance_leaf().
+        struct DistanceChildren
+        {
+            /// @brief Left child node, or null when the node is not a composite.
+            const nlohmann::json* left = nullptr;
+            /// @brief Right child node, or null when the node is not a composite.
+            const nlohmann::json* right = nullptr;
+            /// @brief True for a "sum" node, false for a "product" node.
+            bool sum = false;
+        };
+
+        /// @brief Decodes a distance-tree node other than a composite, or finds the children of a composite.
+        /// @param[in] j JSON node: sum, product, distance leaf, or coordinate leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[out] children Children of j when j is a valid "sum" or "product" node; left null otherwise.
+        /// @return Described leaf node, a null pointer when j is a composite, or GprError on schema or registry
+        /// failure.
+        [[nodiscard]] std::expected<std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>, GprError>
+            decode_distance_leaf(const nlohmann::json& j, const PersistRegistry& registry, DistanceChildren& children)
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            if (!j.is_object() || j.size() != 1U)
+            {
+                return std::unexpected(config_err("kernel node must be a single-key JSON object"));
+            }
+            const auto it = j.begin();
+            const std::string& key = it.key();
+            const nlohmann::json& body = it.value();
+            if (key == "sum" || key == "product")
+            {
+                if (!body.is_object() || !body.contains("left") || !body.contains("right"))
+                {
+                    return std::unexpected(config_err("composite kernel node missing left/right"));
+                }
+                // Hand the children to the caller, which decodes them.
+                children = DistanceChildren{.left = &body["left"], .right = &body["right"], .sum = key == "sum"};
+                return nullptr;
+            }
+            auto node = std::make_shared<cxxgpr::detail::DistanceNodeDesc>();
+            if (key == "distance")
+            {
+                if (!body.is_object() || !body.contains("slot") || !body["slot"].is_number_unsigned()
+                    || !body.contains("leaf"))
+                {
+                    return std::unexpected(config_err("distance node needs an unsigned slot and a leaf"));
+                }
+                auto leaf = decode_distance_leaf_kernel(body["leaf"], registry);
+                if (!leaf.has_value())
+                {
+                    return std::unexpected(std::move(leaf).error());
+                }
+                node->kind = Kind::Supplied;
+                node->slot = body["slot"].get<std::size_t>();
+                node->leaf = std::move(*leaf);
+                return node;
+            }
+            auto leaf = decode_distance_leaf_kernel(j, registry);
+            if (!leaf.has_value())
+            {
+                return std::unexpected(std::move(leaf).error());
+            }
+            node->kind = Kind::Coord;
+            node->leaf = std::move(*leaf);
+            return node;
+        }
+
+        /// @brief Builds a described sum or product node from its decoded children.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in] lhs Decoded left child, moved from.
+        /// @param[in] rhs Decoded right child, moved from.
+        /// @param[out] out Destination of the composite node.
+        CXXGPR_NOINLINE void make_distance_composite(
+            bool sum,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>&& lhs,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>&& rhs,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>& out
+        )
+        {
+            using Kind = cxxgpr::detail::DistanceNodeDesc::Kind;
+            auto node = std::make_shared<cxxgpr::detail::DistanceNodeDesc>();
+            node->kind = sum ? Kind::Sum : Kind::Product;
+            node->lhs = std::move(lhs);
+            node->rhs = std::move(rhs);
+            out = std::move(node);
+        }
+
+        /// @brief Recursively decodes one kernel JSON node into a described DistanceKernel subtree.
+        /// @details A nesting level keeps only its two decoded children on the stack: node decoding, composite
+        /// construction, and error construction run in frames of their own.
+        /// @param[in] j JSON node: sum, product, distance leaf, or coordinate leaf.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[in] depth Current recursion depth bounded by k_max_nesting_depth.
+        /// @param[out] out Destination of the described subtree.
+        /// @param[out] err Error slot that receives the first schema, depth, or registry error.
+        void decode_distance_node(
+            const nlohmann::json& j,
+            const PersistRegistry& registry,
+            std::size_t depth,
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc>& out,
+            ErrorSlot& err
+        )
+        {
+            if (depth > k_max_nesting_depth)
+            {
+                fail_config(err, "kernel nesting depth exceeds 128");
+                return;
+            }
+            DistanceChildren children;
+            produce_into(out, err, [&] { return decode_distance_leaf(j, registry, children); });
+            if (err.has_value() || children.left == nullptr)
+            {
+                return;
+            }
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc> lhs;
+            decode_distance_node(*children.left, registry, depth + 1U, lhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            std::shared_ptr<const cxxgpr::detail::DistanceNodeDesc> rhs;
+            decode_distance_node(*children.right, registry, depth + 1U, rhs, err);
+            if (err.has_value())
+            {
+                return;
+            }
+            make_distance_composite(children.sum, std::move(lhs), std::move(rhs), out);
+        }
+
+        /// @brief Parses the distance section and the distance kernel of a supplied-distance checkpoint.
+        /// @param[in] root Parsed config.json root object.
+        /// @param[in] registry Registry used to recreate custom leaves.
+        /// @param[in,out] cfg Configuration receiving the distance kernel description and the mode.
+        /// @return Empty expected on success, or GprError when the section is malformed or inconsistent.
+        [[nodiscard]] std::expected<void, GprError> parse_distance_section(
+            const nlohmann::json& root, const PersistRegistry& registry, ParsedConfig& cfg
+        )
+        {
+            const auto& dj = root["distance"];
+            if (!dj.is_object() || !dj.contains("points") || !dj["points"].is_string() || !dj.contains("slots")
+                || !dj["slots"].is_array())
+            {
+                return std::unexpected(config_err("distance section needs points and slots"));
+            }
+            const std::string points = dj["points"].get<std::string>();
+            if (points != "distance_only" && points != "with_points")
+            {
+                return std::unexpected(config_err("distance.points must be distance_only or with_points"));
+            }
+            cfg.distance_with_points = points == "with_points";
+            if (cfg.distance_with_points != (cfg.d > 0U))
+            {
+                return std::unexpected(config_err("d must be positive exactly for a with_points model"));
+            }
+            // A distance-only model has no coordinates, so both coordinate transforms must be the identity.
+            if (!cfg.distance_with_points
+                && (!root.contains("x_unfitted") || root["x_unfitted"] != nlohmann::json("identity")
+                    || !root.contains("x_transform") || root["x_transform"] != nlohmann::json("identity")))
+            {
+                return std::unexpected(
+                    config_err("a distance_only model must have identity x_unfitted and x_transform")
+                );
+            }
+            cxxgpr::detail::DistanceKernelDesc desc;
+            for (const auto& s : dj["slots"])
+            {
+                if (!s.is_object() || !s.contains("kind") || !s["kind"].is_string())
+                {
+                    return std::unexpected(config_err("distance slot needs a kind"));
+                }
+                const std::string kind = s["kind"].get<std::string>();
+                if (kind == "scalar")
+                {
+                    desc.slots.push_back(cxxgpr::detail::DistanceSlotDesc{.ard_dims = std::nullopt});
+                }
+                else if (kind == "ard" && s.contains("dims") && s["dims"].is_number_unsigned()
+                    && s["dims"].get<std::size_t>() > 0U)
+                {
+                    desc.slots.push_back(cxxgpr::detail::DistanceSlotDesc{.ard_dims = s["dims"].get<std::size_t>()});
+                }
+                else
+                {
+                    return std::unexpected(config_err("distance slot kind must be scalar or ard with dims >= 1"));
+                }
+            }
+            ErrorSlot err;
+            decode_distance_node(root["kernel"], registry, 0U, desc.root, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+            cfg.distance_kernel = std::move(desc);
+            return {};
+        }
+
     }  // namespace
 
     /// @brief Serializes a SaveInput bundle into pretty-printed config.json text.
@@ -1317,30 +2077,37 @@ namespace cxxgpr::persist::detail
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or depth exceeds 128.
     std::expected<std::string, GprError> serialize_config_json(const SaveInput& input)
     {
-        auto k_json = encode_kernel(input.kernel_spec, 0U);
-        if (!k_json.has_value())
+        // Encode the kernel and transform trees in order; each pass stops at its first error.
+        ErrorSlot err;
+        nlohmann::json k_json;
+        encode_kernel_node(input.kernel_spec, 0U, k_json, err);
+        if (err.has_value())
         {
-            return std::unexpected(std::move(k_json).error());
+            return std::unexpected(std::move(*err));
         }
-        auto x_unf = encode_unfitted_input(input.unfitted_input, 0U);
-        if (!x_unf.has_value())
+        nlohmann::json x_unf;
+        encode_unfitted_input_node(input.unfitted_input, 0U, x_unf, err);
+        if (err.has_value())
         {
-            return std::unexpected(std::move(x_unf).error());
+            return std::unexpected(std::move(*err));
         }
-        auto x_fit = encode_fitted_input(input.fitted_input, 0U);
-        if (!x_fit.has_value())
+        nlohmann::json x_fit;
+        encode_fitted_input_node(input.fitted_input, 0U, x_fit, err);
+        if (err.has_value())
         {
-            return std::unexpected(std::move(x_fit).error());
+            return std::unexpected(std::move(*err));
         }
-        auto y_unf = encode_unfitted_target(input.unfitted_target, 0U);
-        if (!y_unf.has_value())
+        nlohmann::json y_unf;
+        encode_unfitted_target_node(input.unfitted_target, 0U, y_unf, err);
+        if (err.has_value())
         {
-            return std::unexpected(std::move(y_unf).error());
+            return std::unexpected(std::move(*err));
         }
-        auto y_fit = encode_fitted_target(input.fitted_target, 0U);
-        if (!y_fit.has_value())
+        nlohmann::json y_fit;
+        encode_fitted_target_node(input.fitted_target, 0U, y_fit, err);
+        if (err.has_value())
         {
-            return std::unexpected(std::move(y_fit).error());
+            return std::unexpected(std::move(*err));
         }
 
         // Map PersistPrecisionKind into config.json "precision" and conditional "residual" strings.
@@ -1374,14 +2141,14 @@ namespace cxxgpr::persist::detail
             {     "precision",                                                                         prec_str},
             {          "math",           input.kernel_exp == KernelExp::FastApprox ? "fast_approx" : "accurate"},
             {"distance_cache",       input.distance_cache == DistanceCachePolicy::Uncached ? "never" : "always"},
-            {        "kernel",                                                               std::move(*k_json)},
+            {        "kernel",                                                                std::move(k_json)},
             {    "likelihood",
              {{"noise_variance", encode_bounded(input.likelihood.noise_variance(), input.likelihood.bounds())}}},
             {        "jitter",                                                      encode_jitter(input.jitter)},
-            {    "x_unfitted",                                                                std::move(*x_unf)},
-            {   "x_transform",                                                                std::move(*x_fit)},
-            {    "y_unfitted",                                                                std::move(*y_unf)},
-            {   "y_transform",                                                                std::move(*y_fit)},
+            {    "x_unfitted",                                                                 std::move(x_unf)},
+            {   "x_transform",                                                                 std::move(x_fit)},
+            {    "y_unfitted",                                                                 std::move(y_unf)},
+            {   "y_transform",                                                                 std::move(y_fit)},
         };
         if (input.precision_kind == PersistPrecisionKind::MixedPromote
             || input.precision_kind == PersistPrecisionKind::MixedReevaluate)
@@ -1389,6 +2156,12 @@ namespace cxxgpr::persist::detail
             root["residual"] = res_str;
         }
 
+        // Refuse to write a document that the loader would reject for its nesting depth, before the recursive
+        // serializer descends into it once per level.
+        if (auto depth_ok = check_value_max_depth(root, MAX_JSON_NESTING_DEPTH); !depth_ok.has_value())
+        {
+            return std::unexpected(std::move(depth_ok).error());
+        }
         return root.dump(2);
     }
 
@@ -1398,11 +2171,12 @@ namespace cxxgpr::persist::detail
     /// likelihood, jitter, and transforms.
     /// @param[in] path Filesystem path to config.json.
     /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @param[in] distance True to parse a supplied-distance checkpoint, false for a coordinate checkpoint.
     /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
     /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
     /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
-    std::expected<ParsedConfig, GprError> parse_config_json(
-        const std::filesystem::path& path, const PersistRegistry& registry
+    static std::expected<ParsedConfig, GprError> parse_config_impl(
+        const std::filesystem::path& path, const PersistRegistry& registry, bool distance
     )
     {
         std::ifstream ifs(path, std::ios::binary);
@@ -1440,11 +2214,13 @@ namespace cxxgpr::persist::detail
                 GprError::persist_failed(PersistErrorKind::WrongModel, "model is not an Exact GPR checkpoint")
             );
         }
-        if (root.contains("distance"))
+        if (root.contains("distance") != distance)
         {
             return std::unexpected(
                 GprError::persist_failed(
-                    PersistErrorKind::WrongModel, "distance-supplied model requires LoadedDistanceGpr"
+                    PersistErrorKind::WrongModel,
+                    distance ? "checkpoint is not a supplied-distance model"
+                             : "distance-supplied model requires LoadedDistanceGpr"
                 )
             );
         }
@@ -1483,7 +2259,7 @@ namespace cxxgpr::persist::detail
         ParsedConfig cfg;
         cfg.n = root["n"].get<std::size_t>();
         cfg.d = root["d"].get<std::size_t>();
-        if (cfg.n == 0U || cfg.d == 0U)
+        if (cfg.n == 0U || (!distance && cfg.d == 0U))
         {
             return std::unexpected(config_err("n and d must be positive for coordinate Exact GPR"));
         }
@@ -1503,8 +2279,18 @@ namespace cxxgpr::persist::detail
         }
 
         // Decode precision and mixed-precision residual formula settings.
-        const std::string prec = root.value("precision", std::string("double"));
-        const std::string res = root.value("residual", std::string("promote_storage"));
+        const auto prec_opt = optional_string(root, "precision", "double");
+        if (!prec_opt.has_value())
+        {
+            return std::unexpected(prec_opt.error());
+        }
+        const std::string& prec = *prec_opt;
+        const auto res_opt = optional_string(root, "residual", "promote_storage");
+        if (!res_opt.has_value())
+        {
+            return std::unexpected(res_opt.error());
+        }
+        const std::string& res = *res_opt;
         if (prec == "double")
         {
             cfg.precision_kind = PersistPrecisionKind::Double;
@@ -1533,7 +2319,12 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown precision kind"));
         }
 
-        const std::string math_s = root.value("math", std::string("accurate"));
+        const auto math_s_opt = optional_string(root, "math", "accurate");
+        if (!math_s_opt.has_value())
+        {
+            return std::unexpected(math_s_opt.error());
+        }
+        const std::string& math_s = *math_s_opt;
         if (math_s == "accurate")
         {
             cfg.kernel_exp = KernelExp::Accurate;
@@ -1547,7 +2338,12 @@ namespace cxxgpr::persist::detail
             return std::unexpected(config_err("unknown math mode"));
         }
 
-        const std::string dc_s = root.value("distance_cache", std::string("always"));
+        const auto dc_s_opt = optional_string(root, "distance_cache", "always");
+        if (!dc_s_opt.has_value())
+        {
+            return std::unexpected(dc_s_opt.error());
+        }
+        const std::string& dc_s = *dc_s_opt;
         if (dc_s == "always")
         {
             cfg.distance_cache = DistanceCachePolicy::Cached;
@@ -1571,12 +2367,22 @@ namespace cxxgpr::persist::detail
         // Parse nested kernel, likelihood, jitter, and transform subsections inside a JSON type-error guard.
         try
         {
-            auto k_spec = decode_kernel(root["kernel"], registry, 0U);
-            if (!k_spec.has_value())
+            ErrorSlot err;
+            if (distance)
             {
-                return std::unexpected(std::move(k_spec).error());
+                if (auto ds = parse_distance_section(root, registry, cfg); !ds.has_value())
+                {
+                    return std::unexpected(std::move(ds).error());
+                }
             }
-            cfg.kernel_spec = std::move(*k_spec);
+            else
+            {
+                decode_kernel_node(root["kernel"], registry, 0U, cfg.kernel_spec, err);
+                if (err.has_value())
+                {
+                    return std::unexpected(std::move(*err));
+                }
+            }
 
             const auto& lj = root["likelihood"];
             if (!lj.is_object() || !lj.contains("noise_variance"))
@@ -1607,33 +2413,29 @@ namespace cxxgpr::persist::detail
             }
             cfg.jitter = *jit;
 
-            auto xu = decode_unfitted_input(root["x_unfitted"], registry, 0U);
-            if (!xu.has_value())
+            decode_unfitted_input_node(root["x_unfitted"], registry, 0U, cfg.x_unfitted, err);
+            if (err.has_value())
             {
-                return std::unexpected(std::move(xu).error());
+                return std::unexpected(std::move(*err));
             }
-            cfg.x_unfitted = std::move(*xu);
 
-            auto xf = decode_fitted_input(root["x_transform"], registry, 0U);
-            if (!xf.has_value())
+            decode_fitted_input_node(root["x_transform"], registry, 0U, cfg.x_transform, err);
+            if (err.has_value())
             {
-                return std::unexpected(std::move(xf).error());
+                return std::unexpected(std::move(*err));
             }
-            cfg.x_transform = std::move(*xf);
 
-            auto yu = decode_unfitted_target(root["y_unfitted"], registry, 0U);
-            if (!yu.has_value())
+            decode_unfitted_target_node(root["y_unfitted"], registry, 0U, cfg.y_unfitted, err);
+            if (err.has_value())
             {
-                return std::unexpected(std::move(yu).error());
+                return std::unexpected(std::move(*err));
             }
-            cfg.y_unfitted = std::move(*yu);
 
-            auto yf = decode_fitted_target(root["y_transform"], registry, 0U);
-            if (!yf.has_value())
+            decode_fitted_target_node(root["y_transform"], registry, 0U, cfg.y_transform, err);
+            if (err.has_value())
             {
-                return std::unexpected(std::move(yf).error());
+                return std::unexpected(std::move(*err));
             }
-            cfg.y_transform = std::move(*yf);
         }
         catch (const nlohmann::json::exception&)
         {
@@ -1641,6 +2443,155 @@ namespace cxxgpr::persist::detail
         }
 
         return cfg;
+    }
+
+    /// @brief Serializes a supplied-distance model into pretty-printed config.json text.
+    /// @details Writes the same sections as a coordinate model, with the kernel tree carrying distance nodes and an
+    /// extra distance section naming the mode and the slots.
+    /// @param[in] input Borrowed model configuration and transform references to serialize.
+    /// @param[in] kernel Structural description of the kernel of the model.
+    /// @return Formatted JSON text, or GprError when a custom component is not persistable.
+    /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
+    std::expected<std::string, GprError> serialize_distance_config_json(
+        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
+    )
+    {
+        // Encode the kernel and transform trees in order; each pass stops at its first error.
+        ErrorSlot err;
+        nlohmann::json k_json;
+        encode_distance_node(*kernel.root, 0U, k_json, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json x_unf;
+        encode_unfitted_input_node(input.unfitted_input, 0U, x_unf, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json x_fit_json("identity");
+        if (input.fitted_input != nullptr)
+        {
+            encode_fitted_input_node(*input.fitted_input, 0U, x_fit_json, err);
+            if (err.has_value())
+            {
+                return std::unexpected(std::move(*err));
+            }
+        }
+        nlohmann::json y_unf;
+        encode_unfitted_target_node(input.unfitted_target, 0U, y_unf, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+        nlohmann::json y_fit;
+        encode_fitted_target_node(input.fitted_target, 0U, y_fit, err);
+        if (err.has_value())
+        {
+            return std::unexpected(std::move(*err));
+        }
+
+        std::string prec_str = "double";
+        std::string res_str;
+        switch (input.precision_kind)
+        {
+            case PersistPrecisionKind::Double:
+                break;
+            case PersistPrecisionKind::Single:
+                prec_str = "single";
+                break;
+            case PersistPrecisionKind::MixedPromote:
+                prec_str = "mixed";
+                res_str = "promote_storage";
+                break;
+            case PersistPrecisionKind::MixedReevaluate:
+                prec_str = "mixed";
+                res_str = "reevaluate_kernel";
+                break;
+        }
+
+        nlohmann::json slots = nlohmann::json::array();
+        for (const auto& slot : kernel.slots)
+        {
+            if (slot.ard_dims.has_value())
+            {
+                slots.push_back({
+                    {"kind",          "ard"},
+                    {"dims", *slot.ard_dims}
+                });
+            }
+            else
+            {
+                slots.push_back({
+                    {"kind", "scalar"}
+                });
+            }
+        }
+
+        nlohmann::json root{
+            {"format_version",                                     FORMAT_VERSION                              },
+            {             "n",                                                                    input.n_train},
+            {             "d",                                                                 input.n_features},
+            {    "has_factor",                                                                 input.has_factor},
+            {   "factor_kind",                                                                            "llt"},
+            { "factor_jitter",                                                              input.factor_jitter},
+            {     "precision",                                                                         prec_str},
+            {          "math",           input.kernel_exp == KernelExp::FastApprox ? "fast_approx" : "accurate"},
+            {"distance_cache",                                                                         "always"},
+            {        "kernel",                                                                std::move(k_json)},
+            {    "likelihood",
+             {{"noise_variance", encode_bounded(input.likelihood.noise_variance(), input.likelihood.bounds())}}},
+            {        "jitter",                                                      encode_jitter(input.jitter)},
+            {    "x_unfitted",                                                                 std::move(x_unf)},
+            {   "x_transform",                                                            std::move(x_fit_json)},
+            {    "y_unfitted",                                                                 std::move(y_unf)},
+            {   "y_transform",                                                                 std::move(y_fit)},
+            {      "distance",
+             {{"points",
+             std::holds_alternative<const DistanceKernel<WithPoints>*>(input.kernel) ? "with_points"
+             : "distance_only"},
+             {"slots", std::move(slots)}}                                                                      },
+        };
+        if (!res_str.empty())
+        {
+            root["residual"] = res_str;
+        }
+
+        // Refuse to write a document that the loader would reject for its nesting depth: every composite kernel
+        // node adds two JSON levels, so a tree accepted by the node-depth bound can still exceed the JSON bound.
+        // The check runs before the recursive serializer descends into the document once per level.
+        if (auto depth_ok = check_value_max_depth(root, MAX_JSON_NESTING_DEPTH); !depth_ok.has_value())
+        {
+            return std::unexpected(std::move(depth_ok).error());
+        }
+        return root.dump(2);
+    }
+
+    /// @brief Reads, validates and parses a coordinate checkpoint config.json.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
+    /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
+    /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
+    std::expected<ParsedConfig, GprError> parse_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    )
+    {
+        return parse_config_impl(path, registry, false);
+    }
+
+    /// @brief Reads, validates and parses a supplied-distance checkpoint config.json.
+    /// @param[in] path Filesystem path to config.json.
+    /// @param[in] registry Registry supplying custom kernel and transform deserialization factories.
+    /// @return Validated ParsedConfig on success, or GprError on I/O, JSON, version, or schema failure.
+    /// @retval GprErrorCode::PersistFailed When file read, JSON depth/syntax, schema, model kind, or registry fails.
+    /// @retval GprErrorCode::UnsupportedPersistVersion When format_version != FORMAT_VERSION.
+    std::expected<ParsedConfig, GprError> parse_distance_config_json(
+        const std::filesystem::path& path, const PersistRegistry& registry
+    )
+    {
+        return parse_config_impl(path, registry, true);
     }
 
 }  // namespace cxxgpr::persist::detail

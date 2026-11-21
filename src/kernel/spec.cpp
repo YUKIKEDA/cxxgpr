@@ -8,8 +8,10 @@
 #include "cxxgpr/core/checked.hpp"
 #include "cxxgpr/kernel/compiled.hpp"
 
+#include <optional>
 #include <utility>
 
+#include "core/noinline.hpp"
 #include "kernel/leaf_eval.hpp"
 
 namespace cxxgpr
@@ -64,6 +66,79 @@ namespace cxxgpr
             return detail::leaf_bounds_into(leaf, out);
         }
 
+        /// @brief Writes the log-space parameters of one leaf at offset, in a stack frame of its own.
+        /// @details Keeps the std::expected temporary of the leaf query out of the frames of the recursive walk.
+        /// @param[in] leaf Kernel leaf variant to query.
+        /// @param[out] out Full flattened output parameter span.
+        /// @param[in] offset Index in out of the first parameter of leaf.
+        /// @param[out] status Set to the error of the leaf query when it fails.
+        /// @return Offset immediately following the parameters of leaf.
+        CXXGPR_NOINLINE std::size_t fill_leaf_params(
+            const KernelLeaf& leaf, std::span<double> out, std::size_t offset, std::expected<void, GprError>& status
+        )
+        {
+            const std::size_t count = detail::leaf_num_params(leaf);
+            status = leaf_get_params(leaf, out.subspan(offset, count));
+            return offset + count;
+        }
+
+        /// @brief Writes the open intervals of one leaf at offset, in a stack frame of its own.
+        /// @details Keeps the std::expected temporary of the leaf query out of the frames of the recursive walk.
+        /// @param[in] leaf Kernel leaf variant to query.
+        /// @param[out] out Full flattened output interval span.
+        /// @param[in] offset Index in out of the first interval of leaf.
+        /// @param[out] status Set to the error of the leaf query when it fails.
+        /// @return Offset immediately following the intervals of leaf.
+        CXXGPR_NOINLINE std::size_t fill_leaf_bounds(
+            const KernelLeaf& leaf, std::span<Interval> out, std::size_t offset, std::expected<void, GprError>& status
+        )
+        {
+            const std::size_t count = detail::leaf_num_params(leaf);
+            status = leaf_bounds_into(leaf, out.subspan(offset, count));
+            return offset + count;
+        }
+
+        /// @brief Copies one leaf with its log-space parameters replaced, in a stack frame of its own.
+        /// @details Clones the leaf before mutating it, so that a rejected slice leaves the shared tree untouched.
+        /// @param[in] leaf Source kernel leaf.
+        /// @param[in] params Full flattened input parameter span.
+        /// @param[in,out] offset Index in params of the first parameter of leaf; advanced past them on success.
+        /// @param[out] status Set to the error of the leaf when it rejects its slice.
+        /// @return Updated leaf specification, or std::nullopt when status holds the error.
+        [[nodiscard]] CXXGPR_NOINLINE std::optional<KernelSpec> update_leaf_params(
+            const KernelLeaf& leaf,
+            std::span<const double> params,
+            std::size_t& offset,
+            std::expected<void, GprError>& status
+        )
+        {
+            KernelLeaf copy = leaf;
+            const std::size_t count = detail::leaf_num_params(copy);
+            auto res = std::visit([sub = params.subspan(offset, count)](auto& typed_leaf) {
+                return typed_leaf.set_params(sub);
+            }, copy);
+            if (!res.has_value())
+            {
+                status = std::unexpected(std::move(res).error());
+                return std::nullopt;
+            }
+            offset += count;
+            return KernelSpec(std::move(copy));
+        }
+
+        /// @brief Joins two updated subtrees into a sum or product, in a stack frame of its own.
+        /// @param[in] sum True for a sum node, false for a product node.
+        /// @param[in] lhs Updated left subtree, moved from.
+        /// @param[in] rhs Updated right subtree, moved from.
+        /// @return The composite specification.
+        [[nodiscard]] CXXGPR_NOINLINE std::optional<KernelSpec> join_updated(
+            bool sum, KernelSpec&& lhs, KernelSpec&& rhs
+        )
+        {
+            return sum ? KernelSpec::sum(std::move(lhs), std::move(rhs))
+                       : KernelSpec::product(std::move(lhs), std::move(rhs));
+        }
+
     }  // namespace
 
     /// @brief Internal friend helper traversing KernelSpec trees for parameter and binding queries.
@@ -89,9 +164,7 @@ namespace cxxgpr
             // Traverse depth-first left-to-right so parameter offsets stay canonical.
             if (const auto* leaf = std::get_if<KernelLeaf>(&spec.node_))
             {
-                const std::size_t count = detail::leaf_num_params(*leaf);
-                status = leaf_get_params(*leaf, out.subspan(offset, count));
-                return offset + count;
+                return fill_leaf_params(*leaf, out, offset, status);
             }
             if (const auto* s = std::get_if<KernelSpec::SumNode>(&spec.node_))
             {
@@ -121,9 +194,7 @@ namespace cxxgpr
             // Traverse depth-first left-to-right to match flattened parameter indices.
             if (const auto* leaf = std::get_if<KernelLeaf>(&spec.node_))
             {
-                const std::size_t count = detail::leaf_num_params(*leaf);
-                status = leaf_bounds_into(*leaf, out.subspan(offset, count));
-                return offset + count;
+                return fill_leaf_bounds(*leaf, out, offset, status);
             }
             if (const auto* s = std::get_if<KernelSpec::SumNode>(&spec.node_))
             {
@@ -148,47 +219,50 @@ namespace cxxgpr
             const KernelSpec& spec, std::span<const double> params, std::size_t& offset
         )
         {
-            // Clone each visited leaf before mutating so failed siblings never leave partial updates.
+            std::expected<void, GprError> status;
+            auto updated = update_params_node(spec, params, offset, status);
+            if (!updated.has_value())
+            {
+                return std::unexpected(std::move(status).error());
+            }
+            return std::move(*updated);
+        }
+
+        /// @brief Recursively constructs a KernelSpec subtree with updated log-space leaf parameters.
+        /// @details A nesting level keeps only its two updated subtrees on the stack: the leaf update, the join,
+        /// and the error run in frames of their own. Each visited leaf is cloned before it is mutated, so that a
+        /// failure leaves the original shared nodes untouched.
+        /// @param[in] spec Source subtree root specification.
+        /// @param[in] params Full flattened input parameter span.
+        /// @param[in,out] offset In-out cursor tracking the current position in params.
+        /// @param[out] status Set to the error of the first leaf that rejects its slice.
+        /// @return Updated subtree, or std::nullopt exactly when status holds the error.
+        static std::optional<KernelSpec> update_params_node(
+            const KernelSpec& spec,
+            std::span<const double> params,
+            std::size_t& offset,
+            std::expected<void, GprError>& status
+        )
+        {
             if (const auto* leaf = std::get_if<KernelLeaf>(&spec.node_))
             {
-                KernelLeaf copy = *leaf;
-                const std::size_t count = detail::leaf_num_params(copy);
-                auto res = std::visit([sub = params.subspan(offset, count)](auto& typed_leaf) {
-                    return typed_leaf.set_params(sub);
-                }, copy);
-                if (!res.has_value())
-                {
-                    return std::unexpected(std::move(res).error());
-                }
-                offset += count;
-                return KernelSpec(std::move(copy));
+                return update_leaf_params(*leaf, params, offset, status);
             }
-            if (const auto* s = std::get_if<KernelSpec::SumNode>(&spec.node_))
-            {
-                auto lhs = with_updated_params(*s->lhs, params, offset);
-                if (!lhs.has_value())
-                {
-                    return std::unexpected(std::move(lhs).error());
-                }
-                auto rhs = with_updated_params(*s->rhs, params, offset);
-                if (!rhs.has_value())
-                {
-                    return std::unexpected(std::move(rhs).error());
-                }
-                return KernelSpec::sum(std::move(*lhs), std::move(*rhs));
-            }
-            const auto& p = std::get<KernelSpec::ProductNode>(spec.node_);
-            auto lhs = with_updated_params(*p.lhs, params, offset);
+            const auto* s = std::get_if<KernelSpec::SumNode>(&spec.node_);
+            const auto* p = (s == nullptr) ? &std::get<KernelSpec::ProductNode>(spec.node_) : nullptr;
+            const KernelSpec& lhs_spec = (s != nullptr) ? *s->lhs : *p->lhs;
+            const KernelSpec& rhs_spec = (s != nullptr) ? *s->rhs : *p->rhs;
+            auto lhs = update_params_node(lhs_spec, params, offset, status);
             if (!lhs.has_value())
             {
-                return std::unexpected(std::move(lhs).error());
+                return std::nullopt;
             }
-            auto rhs = with_updated_params(*p.rhs, params, offset);
+            auto rhs = update_params_node(rhs_spec, params, offset, status);
             if (!rhs.has_value())
             {
-                return std::unexpected(std::move(rhs).error());
+                return std::nullopt;
             }
-            return KernelSpec::product(std::move(*lhs), std::move(*rhs));
+            return join_updated(s != nullptr, std::move(*lhs), std::move(*rhs));
         }
 
         /// @brief Recursively emits ParameterBinding entries in depth-first left-to-right leaf order.

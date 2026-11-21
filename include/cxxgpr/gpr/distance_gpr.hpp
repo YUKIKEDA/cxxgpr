@@ -45,9 +45,45 @@ namespace cxxgpr
     /// @tparam C Distance mode (distance only, or distances with points).
     template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C> class FittedDistanceGpr;
 
+    /// @brief Library-internal part of the persistence layer.
+    namespace persist::detail
+    {
+        /// @brief Library-internal accessor used by the persistence layer.
+        struct DistanceModelAccess;
+    }  // namespace persist::detail
+
     /// @brief Internal training and prediction engine for supplied-distance models.
     namespace detail
     {
+
+        /// @brief Cholesky factor storage that either owns its elements or views a read-only memory map.
+        /// @details A loaded double-precision checkpoint maps the stored factor instead of copying it; the mapping
+        /// is kept alive by keepalive for as long as any copy of this object exists. Every other factor is owned.
+        /// @tparam Storage Storage scalar type.
+        template <typename Storage> struct DistanceFactorStorage
+        {
+            /// @brief Owned elements, column-major n x n (empty when the factor is mapped).
+            std::vector<Storage> owned;
+            /// @brief Mapped elements, column-major n x n (empty when the factor is owned).
+            std::span<const Storage> mapped;
+            /// @brief Owner of the mapping behind mapped (null when the factor is owned).
+            std::shared_ptr<const void> keepalive;
+
+            /// @brief Returns the first element of the factor.
+            /// @return Pointer to the mapped or owned elements.
+            [[nodiscard]] const Storage* data() const noexcept { return mapped.empty() ? owned.data() : mapped.data(); }
+
+            /// @brief Returns the factor elements.
+            /// @return Read-only span over the mapped or owned elements.
+            [[nodiscard]] std::span<const Storage> view() const noexcept
+            {
+                return mapped.empty() ? std::span<const Storage>(owned) : mapped;
+            }
+
+            /// @brief Reports whether the factor views a memory map.
+            /// @return True when the elements are mapped rather than owned.
+            [[nodiscard]] bool is_mapped() const noexcept { return !mapped.empty(); }
+        };
 
         /// @brief Immutable fitted state of a supplied-distance model, shared between copies of the fitted model.
         /// @tparam P Precision policy.
@@ -79,8 +115,8 @@ namespace cxxgpr
             std::vector<Storage> x_train;
             /// @brief Transformed training targets in the refinement scalar.
             std::vector<Refine> y_transformed;
-            /// @brief Lower Cholesky factor of K + (noise + jitter) I, column-major n x n.
-            std::vector<Storage> l_factor;
+            /// @brief Lower Cholesky factor of K + (noise + jitter) I, column-major n x n (owned or mapped).
+            DistanceFactorStorage<Storage> l_factor;
             /// @brief Weights alpha = (K + (noise + jitter) I)^-1 y.
             std::vector<Refine> alpha;
             /// @brief Number of training points.
@@ -175,6 +211,46 @@ namespace cxxgpr
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
             void* optimize_ctx
+        );
+
+        /// @brief Assembles the fitted payload of a supplied-distance model from stored parts, without optimizing.
+        /// @details Used to restore a persisted model. Validates the distance tables once, applies the fitted
+        /// transforms, checks the stored factor and weights, and derives the marginal likelihood from them.
+        /// @tparam P Precision policy.
+        /// @tparam C Distance mode.
+        /// @param[in] kernel Kernel carrying the fitted hyperparameters.
+        /// @param[in] likelihood Likelihood carrying the fitted noise variance.
+        /// @param[in] kernel_exp Exponential mode of the kernel evaluation.
+        /// @param[in] train Square training distance tables bound to the kernel slots.
+        /// @param[in] x_raw Raw training coordinates, column-major n x n_features (WithPoints only).
+        /// @param[in] n_features Coordinate dimension (0 for DistanceOnly).
+        /// @param[in] y_raw Raw training targets.
+        /// @param[in] input_transform Fitted coordinate transform (WithPoints only).
+        /// @param[in] target_transform Fitted target transform.
+        /// @param[in] l_factor Lower Cholesky factor, column-major n x n.
+        /// @param[in] alpha Weights in the transformed target space.
+        /// @param[in] factor_jitter Accepted diagonal jitter.
+        /// @param[in] l_keepalive Owner of a read-only mapping behind l_factor; when non-null and the storage is
+        /// double, the payload views l_factor instead of copying it.
+        /// @return Fitted payload, or GprError describing the first failing check.
+        /// @retval GprErrorCode::PersistFailed When the factor or the weights are not usable.
+        /// @retval GprErrorCode::InvalidDistance When the tables are invalid.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or mismatched.
+        template <PrecisionPolicyConcept P, DistanceModeConcept C>
+        [[nodiscard]] std::expected<DistanceFittedPayload<P, C>, GprError> assemble_distance_payload(
+            const DistanceKernel<C>& kernel,
+            const GaussianLikelihood& likelihood,
+            KernelExp kernel_exp,
+            const DistanceSource& train,
+            std::span<const double> x_raw,
+            std::size_t n_features,
+            std::span<const double> y_raw,
+            const std::shared_ptr<const transform::FittedInputTransform>& input_transform,
+            const std::shared_ptr<const transform::FittedTargetTransform>& target_transform,
+            std::span<const typename P::Storage> l_factor,
+            std::span<const typename P::Refine> alpha,
+            double factor_jitter,
+            std::shared_ptr<const void> l_keepalive
         );
 
         /// @brief Computes the posterior mean and diagonal variance at m query points.
@@ -565,6 +641,7 @@ namespace cxxgpr
 
     private:
         friend class DistanceGpr<O, P, C>;
+        friend struct persist::detail::DistanceModelAccess;
 
         /// @brief Constructs a fitted model from a training payload and the trainer configuration.
         /// @param[in] payload Immutable fitted state shared between copies.
