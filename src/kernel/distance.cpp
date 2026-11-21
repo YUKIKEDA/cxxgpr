@@ -1491,6 +1491,22 @@ namespace cxxgpr
     /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> CheckedDistanceStore<T>::~CheckedDistanceStore() = default;
 
+    /// @brief Move-constructs a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete so the defaulted move can
+    /// destroy and relocate the owning pointer.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to move from.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>::CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
+
+    /// @brief Move-assigns a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to move from.
+    /// @return Reference to this store.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(CheckedDistanceStore&& other) noexcept = default;
+
     /// @brief Copy-constructs a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
     /// @details Duplicates `Impl` vectors including scalar and ARD tables.
     /// @tparam T Storage floating-point scalar type.

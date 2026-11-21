@@ -503,15 +503,17 @@ namespace cxxgpr
         CheckedDistanceStore& operator=(const CheckedDistanceStore& other);
 
         /// @brief Move-constructs a checked distance store.
-        /// @details Transfers ownership of the internal validated store state.
+        /// @details Transfers ownership of the internal validated store state. Defined out of line, where the
+        /// implementation type is complete, so the store can be moved out of std::expected.
         /// @param[in] other CheckedDistanceStore instance to move from.
-        CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
+        CheckedDistanceStore(CheckedDistanceStore&& other) noexcept;
 
         /// @brief Move-assigns a checked distance store.
-        /// @details Transfers ownership of the internal validated store state.
+        /// @details Transfers ownership of the internal validated store state. Defined out of line, where the
+        /// implementation type is complete.
         /// @param[in] other CheckedDistanceStore instance to move from.
         /// @return Reference to this CheckedDistanceStore.
-        CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept = default;
+        CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept;
 
         /// @brief Destroys the checked distance store.
         /// @details Frees internal distance buffers out of line where Impl is complete.

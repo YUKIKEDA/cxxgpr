@@ -14,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <type_traits>
 #include <vector>
 
 #include "allocation_audit.hpp"
@@ -176,6 +177,42 @@ namespace
         cxxgpr::DistanceSource bad_tol_src;
         bad_tol_src.bind_scalar(s1.slot(), cxxgpr::MatrixRef<double>(valid_d2.data(), 2, 2)).tidy(-0.1);
         EXPECT_EQ(compiled.prepare_square(bad_tol_src).error().code(), cxxgpr::GprErrorCode::InvalidConfig);
+    }
+
+    /// @brief Verifies a checked distance store can be moved out of std::expected and move-assigned.
+    /// @details The move operations must transfer the validated tables: the moved-to store reports the same shape
+    /// and the original (moved-from) store is not required to be usable. This compiles only when the move
+    /// constructor and assignment are defined where the implementation type is complete.
+    TEST(DistanceKernelTest, CheckedDistanceStoreIsMovable)
+    {
+        // Spec: DES-10
+        const cxxgpr::ScalarDistance slot;
+        const auto rbf = cxxgpr::RbfKernel::create(1.0);
+        ASSERT_TRUE(rbf.has_value());
+        const auto compiled = slot.rbf(*rbf).compile<double>();
+
+        std::array<double, 9> d2{0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0};
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), 3, 3));
+
+        auto prepared = compiled.prepare_square(src);
+        ASSERT_TRUE(prepared.has_value());
+        static_assert(std::is_nothrow_move_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_nothrow_move_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
+
+        // Move-construct out of the std::expected.
+        cxxgpr::CheckedDistanceStore<double> moved(std::move(*prepared));
+        EXPECT_EQ(moved.rows(), 3U);
+        EXPECT_EQ(moved.cols(), 3U);
+        EXPECT_TRUE(moved.is_square());
+
+        // Move-assign into another store and compare shapes.
+        auto second = compiled.prepare_square(src);
+        ASSERT_TRUE(second.has_value());
+        cxxgpr::CheckedDistanceStore<double> target(std::move(*second));
+        target = std::move(moved);
+        EXPECT_EQ(target.rows(), 3U);
+        EXPECT_TRUE(target.is_square());
     }
 
     /// @brief Verifies hybrid DistanceKernel + LinearKernel parity and zero-allocation hot path.
