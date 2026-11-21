@@ -38,8 +38,8 @@ Every model entry point comes in two forms that differ only in how the matrix is
 
 The span form assumes a tightly packed matrix with column stride equal to `n_rows`. Both forms return `std::expected`; for example a target vector whose length differs from the row count gives `GprErrorCode::LengthMismatch`, empty data gives `GprErrorCode::EmptyInput`, and NaN or infinity gives `GprErrorCode::NonFiniteInput`.
 
-:::{warning}
-The span form passes only the pointer of the span on to the model, together with `n_rows` and `n_cols`. The library cannot check that the buffer really holds `n_rows * n_cols` elements, and neither can it for the pointer inside a `MatrixRef`. Getting the extents right is your responsibility; use `validate_matrix` (below) to check a span against the shape you intend to pass.
+:::{note}
+The span form checks the span against the shape before it reads any element. An empty span, or a zero `n_rows` or `n_cols`, gives `GprErrorCode::EmptyInput`; dimensions whose product overflows give `GprErrorCode::SizeOverflow`; a span whose size is not exactly `n_rows * n_cols` gives `GprErrorCode::LengthMismatch`. When several of these hold, the first one in this order is returned. The `MatrixRef` form is not checked. A `MatrixRef` stores a pointer and the extents but not the length of the buffer, and that is also true when you build it with the `(span, rows, cols)` constructor, which keeps `span.data()` and discards `span.size()`. Getting the extents right for a `MatrixRef` is your responsibility. When your data is a span, prefer the span form; otherwise call `validate_matrix(span, n_rows, n_cols)` (below) before you build the view.
 :::
 
 ## Use `MatrixRef` and `MatrixMut`

@@ -185,7 +185,7 @@ namespace
         const auto& result = model->optimizer_result();
         std::cout << std::left << std::setw(22) << name << std::right << std::setw(7) << result.iterations
                   << std::setw(11) << (result.converged ? "yes" : "no") << std::setw(12)
-                  << model->log_marginal_likelihood() << std::setw(10) << pred->mean[0] << '\n';
+                  << model->neg_log_marginal_likelihood() << std::setw(10) << pred->mean[0] << '\n';
         return std::abs(pred->mean[0] - truth(0.35)) < 0.15;
     }
 }  // namespace

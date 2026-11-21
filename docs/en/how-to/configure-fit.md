@@ -105,10 +105,10 @@ Both exist in two overloads: one taking a `MatrixRef<double>` plus `std::span<co
 
 ```{code-block} text
 factor: neg-MLL 4.7716, noise 0.0500, iterations 0
-fit:    neg-MLL 0.7080, noise 0.0227, iterations 17, converged 1
+fit:    neg-MLL 0.7080, noise 0.0227, iterations 15, converged 1
 ```
 
-`log_marginal_likelihood()` returns the **negative** log marginal likelihood (lower is better). The optimized fit lowers it from 4.77 to 0.71 and finds a noise variance of 0.023 on standardized targets. That matches the data: 0.01 of noise was added to a signal whose variance is about 0.45, and 0.01 / 0.45 is about 0.022.
+`neg_log_marginal_likelihood()` returns the **negative** log marginal likelihood (lower is better). The optimized fit lowers it from 4.77 to 0.71 and finds a noise variance of 0.023 on standardized targets. That matches the data: 0.01 of noise was added to a signal whose variance is about 0.45, and 0.01 / 0.45 is about 0.022.
 
 :::{note}
 A fit that does not converge is **not** an error. Check `optimizer_result().converged` (and `iterations`) on the fitted model. See {doc}`choose-optimizer`.
@@ -282,7 +282,7 @@ Errors and their meaning are in {doc}`handle-errors`.
 | `kernel_spec`, `optimizer`, `likelihood`, `jitter`, `kernel_exp`, `fit_policy` | Trainer getters (also on `FittedGpr`). |
 | `fit`, `factor` | Train with / without optimization; `const`, strong guarantee. |
 | `FittedGpr`, `Storage`, `Refine` | Trained model and its scalar types. |
-| `n_train`, `n_features`, `factor_jitter`, `log_marginal_likelihood`, `alpha`, `l_factor`, `x_raw`, `y_raw` | Fitted-model inspectors. |
+| `n_train`, `n_features`, `factor_jitter`, `neg_log_marginal_likelihood`, `alpha`, `l_factor`, `x_raw`, `y_raw` | Fitted-model inspectors. |
 | `input_transform`, `target_transform`, `unfitted_input_transform`, `unfitted_target_transform` | Fitted and prototype transforms. |
 | `refinement_summary`, `optimizer_result` | Diagnostics of refinement and optimization. |
 | `GaussianLikelihood`, `create`, `from_log_noise_variance`, `with_bounds`, `noise_variance`, `bounds` | Observation noise (more in {doc}`tune-hyperparameters`). |

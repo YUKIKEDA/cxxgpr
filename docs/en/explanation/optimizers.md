@@ -76,9 +76,9 @@ $$
 \lvert\nabla\mathcal{L}(z + \alpha\mathbf{p})^\top\mathbf{p}\rvert \le c_2\,\lvert\nabla\mathcal{L}^\top\mathbf{p}\rvert,
 $$
 
-with $c_1 = 10^{-4}$ and $c_2 = 0.9$. The search bracket-and-interpolates and evaluates the value and gradient together, so the cost of a line search is a few evaluations. The Wolfe conditions guarantee that the curvature pair is usable. The optimizer stops when the gradient is small relative to the size of $z$, or when both the relative change of the value and the gradient are small. The tolerance controls these tests.
+with $c_1 = 10^{-4}$ and $c_2 = 0.9$. The search bracket-and-interpolates and evaluates the value and gradient together, so the cost of a line search is a few evaluations. The Wolfe conditions guarantee that the curvature pair is usable. The stopping test works on the log parameters $\theta$, not on $z$. The optimizer stops when the projected gradient $\lVert\theta - \Pi(\theta - \nabla_\theta\mathcal{L})\rVert$, where $\Pi$ clamps each parameter to its interval, is at most the tolerance times $\max(1, \lVert\theta\rVert)$. Near an interval end the logit map flattens, so the gradient in $z$ becomes tiny even where the likelihood still falls steeply in $\theta$; the test in $\theta$ does not let such a point pass, while a minimum that lies at an interval end with the gradient pointing outward does pass. When a step can change the value by less than its rounding level $\sqrt{\varepsilon}\,(1 + \lvert\mathcal{L}\rvert)$, the line search judges the step by its slopes instead of its values, so it keeps reducing the gradient near a minimum.
 
-What to expect: fast convergence (typically tens of iterations) on smooth, well-scaled problems, with a cost of one value-and-gradient evaluation per iteration plus line-search extras. What can go wrong: on a plateau, where the gradient is almost zero, the stopping test can fire although the point is not a minimum. `converged` then means "the algorithm's own test was satisfied", not "this is the best model".
+What to expect: fast convergence (typically tens of iterations) on smooth, well-scaled problems, with a cost of one value-and-gradient evaluation per iteration plus line-search extras. What can go wrong: the run can end in a local minimum, or use up its iterations when convergence is slow, for example while a length scale drifts toward the upper end of its interval. It then reports `converged = false` and returns the lowest point it found. A line search that finds no acceptable step counts as converged only when the projected gradient is below $\sqrt{\varepsilon}\,(1 + \lvert\mathcal{L}\rvert)$, the level at which the value can no longer show a decrease. `converged` always describes the returned parameters; it means \"first-order stationary within the tolerance\", not \"this is the best model\".
 
 ## Trust-region Newton
 
@@ -95,7 +95,7 @@ $$
 \rho = \frac{\mathcal{L}(z) - \mathcal{L}(z + \mathbf{p})}{-m(\mathbf{p})}.
 $$
 
-A small $\rho$ means the model was poor, so the step is rejected or the radius shrinks. The rules in cxxgpr: a step is accepted if $\rho > 10^{-4}$; the radius is multiplied by $1/4$ if $\rho < 0.25$ and doubled (up to the maximum radius) if $\rho > 0.75$ and the step reached the boundary. Because the radius adapts, the method needs no line search and works even where the Hessian is indefinite.
+A small $\rho$ means the model was poor, so the step is rejected or the radius shrinks. The rules in cxxgpr: a step is accepted if $\rho > 10^{-4}$; the radius is multiplied by $1/4$ if $\rho < 0.25$ and doubled (up to the maximum radius) if $\rho > 0.75$ and the step reached the boundary. Because the radius adapts, the method needs no line search and works even where the Hessian is indefinite. When both the predicted and the actual decrease are below the rounding level $\sqrt{\varepsilon}\,(1 + \lvert\mathcal{L}\rvert)$, $\rho$ is rounding noise and the step is taken as if $\rho = 1$. The stopping test, the treatment of a collapsed radius and the meaning of `converged` are those of `Lbfgs`.
 
 The subproblem is solved approximately by the **Steihaug–Toint** conjugate-gradient method. It runs the usual conjugate-gradient iteration on $H\mathbf{p} = -\nabla\mathcal{L}$ starting from $\mathbf{p} = 0$, and stops early in three cases: the iterate would leave the trust region (the step is cut at the boundary), a direction of non-positive curvature is found (the step follows it to the boundary, which is how the method escapes saddle points), or the residual is small enough. This makes the solver safe on the indefinite Hessians that appear far from a minimum, at the price of a few $d \times d$ matrix-vector products.
 
@@ -103,7 +103,7 @@ What to expect: few iterations (under twenty in the how-to comparison), but each
 
 ## Nelder–Mead
 
-`NelderMead` is derivative-free: it uses only values of $\mathcal{L}$. It maintains a simplex of $d + 1$ points in $z$-space, the vertices of a $d$-dimensional triangle. In each iteration it reflects the worst vertex through the centroid of the others, and depending on how the new point compares it expands further, contracts toward the centroid, or shrinks the whole simplex toward the best vertex. cxxgpr uses the standard coefficients: reflection 1, expansion 2, contraction 0.5 and shrink 0.5. The first simplex is built around the start by moving each coordinate by 5% (or by $0.25$ for a coordinate near zero). It stops when the spread of values across the simplex and the simplex diameter are both below the tolerance.
+`NelderMead` is derivative-free: it uses only values of $\mathcal{L}$. It maintains a simplex of $d + 1$ points in $z$-space, the vertices of a $d$-dimensional triangle. In each iteration it reflects the worst vertex through the centroid of the others, and depending on how the new point compares it expands further, contracts toward the centroid, or shrinks the whole simplex toward the best vertex. cxxgpr uses the standard coefficients: reflection 1, expansion 2, contraction 0.5 and shrink 0.5. The first simplex is built around the start by moving each coordinate by 5% (or by $0.25$ for a coordinate near zero). It stops when the spread of values across the simplex and the simplex diameter are both below the tolerance. Its `converged` therefore means that the simplex has collapsed, not that the gradient is small: in a scan of 3000 starts on a three-parameter problem, 2 converged runs had a projected gradient of about $1.5 \times 10^{-4}$.
 
 What to expect: robust and simple, and indifferent to noise in the gradients, but slow, because each iteration discards information that gradient methods use. In the table of the how-to guide it needs about six times as many iterations as L-BFGS on a three-parameter problem. The cost grows quickly with the number of parameters. It is still a local method: the result depends on the starting simplex.
 
@@ -149,7 +149,7 @@ No single algorithm dominates, because the trade-offs are real:
 
 | | Gradient needed | Handles indefinite curvature | Global exploration | Typical evaluations | Weakness |
 |---|---|---|---|---|---|
-| `Lbfgs` | yes | via fallback | no | tens | can stop early on plateaus |
+| `Lbfgs` | yes | via fallback | no | tens | slow when a parameter drifts toward an interval end |
 | `TrustRegion` | gradient and Hessian | yes | no | tens | needs exact Hessians |
 | `NelderMead` | no | n/a | no | hundreds | slow, scales badly with $d$ |
 | `FastSimulatedAnnealing` | no | n/a | yes | hundreds to thousands | lands near the minimum, not on it |
@@ -171,6 +171,6 @@ The library keeps all five self-contained so that none of them depends on an ext
 ## Limits worth knowing
 
 - **Local minima are real.** The reported optimum is a local one unless restarts or annealing found a better basin. Compare the final negative log marginal likelihood across runs.
-- **`converged` is the algorithm's own opinion.** A stalled L-BFGS run can report success on a plateau; a run that exhausts its budget reports `false` but still returns the best point found.
+- **`converged` is the algorithm's own test.** For `Lbfgs` and `TrustRegion` it means that the returned parameters are first-order stationary within the tolerance (a local, not necessarily global, minimum); for `NelderMead` that the simplex collapsed; `FastSimulatedAnnealing` and `Fixed` always report `true`. A run that exhausts its budget reports `false` but still returns the best point found.
 - **Noise can be driven to its lower bound.** On noise-free data the optimizer may push $\sigma_n^2$ to the lower end of its interval. That is a property of the data, not a failure; widen or fix the interval if you need a floor.
 - **The bounds are a model assumption.** A minimum that lies outside an interval cannot be found. If a fitted parameter sits at an interval end, widen the interval or reconsider the kernel.

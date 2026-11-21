@@ -124,10 +124,10 @@ diagonal after adding noise: 1.0400, gradient diagonal 0.0400
 learned constant 1.1308, lengthscale 1.8844, noise 0.0134, neg-MLL -8.8970
 ```
 
-`FittedGpr::kernel_spec()` と `likelihood()` は、学習後の `KernelSpec` と `GaussianLikelihood` を返す。`log_marginal_likelihood()` は、最終的な**負の**対数周辺尤度を返す。小さいほど当てはまりがよい。ここでの値（定数 1.13、長さスケール 1.88、ノイズ分散 0.013）は、データの生成条件（振幅 1、ノイズ分散 0.01）に近い。
+`FittedGpr::kernel_spec()` と `likelihood()` は、学習後の `KernelSpec` と `GaussianLikelihood` を返す。`neg_log_marginal_likelihood()` は、最終的な**負の**対数周辺尤度を返す。小さいほど当てはまりがよい。ここでの値（定数 1.13、長さスケール 1.88、ノイズ分散 0.013）は、データの生成条件（振幅 1、ノイズ分散 0.01）に近い。
 
 :::{note}
-メソッド名は `log_marginal_likelihood` だが、値は*負の*対数周辺尤度である。最適化器が最小化する量にあたる。対数周辺尤度そのものが欲しいときは、符号を反転する。
+値は、最適化器が最小化する量にあたる。対数周辺尤度そのものが欲しいときは、符号を反転する。
 :::
 
 ## 新しいデータで再調整する
@@ -141,10 +141,10 @@ learned constant 1.1308, lengthscale 1.8844, noise 0.0134, neg-MLL -8.8970
 ```
 
 ```{code-block} text
-refit: 12 iterations, cold fit: 35 iterations
+refit: 12 iterations, cold fit: 14 iterations
 ```
 
-ウォームスタートは約 3 分の 1 の反復で収束し、同じ最適値に達する（プログラムが、2 つの負の尤度が 0.05 以内で一致することを検査している）。`refit` には、`fit` と同じ `MatrixRef` 版と生スパン版があり、エラーも同じである。
+ウォームスタートは、コールドスタートと同じ最適値に達する（プログラムが、2 つの負の尤度が 0.05 以内で一致することを検査している）。この小さな問題では、ウォームスタートで減る反復は 2 回だけである（12 回と 14 回）。`refit` には、`fit` と同じ `MatrixRef` 版と生スパン版があり、エラーも同じである。
 
 探索せずに、**指定した**ハイパーパラメータでモデルを評価したいときは、`optimizer::Fixed` のトレーナーを作る（または `factor` を呼ぶ）。カーネルと尤度は、使いたいものを渡す。
 
@@ -213,7 +213,7 @@ neg-MLL at the start -1.5600, max gradient error 3.6651e-09, max Hessian error 9
 | `KernelSpec::num_params`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings` | カーネルのハイパーパラメータ（対数空間）。 |
 | `ParameterBinding` | 通し番号、葉 ID、葉内のスロット。 |
 | `GaussianLikelihood`、`create`、`from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params`、`bounds_into`、`add_noise_diag`、`noise_grad_diag` | ノイズ尤度。 |
-| `FittedGpr::kernel_spec`、`likelihood`、`log_marginal_likelihood`、`optimizer_result` | 学習された値と、最適点での目的関数。 |
+| `FittedGpr::kernel_spec`、`likelihood`、`neg_log_marginal_likelihood`、`optimizer_result` | 学習された値と、最適点での目的関数。 |
 | `refit`、`into_trainer` | 学習済みモデルからのウォームスタート。 |
 | `optimizer::TwiceDifferentiable`、`dim`、`value`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` | 最適化器から見える目的関数。 |
 | `optimizer::OptimizerResult` | パラメータ、値、反復回数、収束フラグ。 |

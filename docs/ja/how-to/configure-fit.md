@@ -105,7 +105,7 @@ negative noise rejected: 1
 
 ```{code-block} text
 factor: neg-MLL 4.7716, noise 0.0500, iterations 0
-fit:    neg-MLL 0.7080, noise 0.0227, iterations 17, converged 1
+fit:    neg-MLL 0.7080, noise 0.0227, iterations 15, converged 1
 ```
 
 `log_marginal_likelihood()` が返すのは**負の**対数周辺尤度である（小さいほどよい）。最適化により、値は 4.77 から 0.71 に下がり、標準化後の目的変数でノイズ分散は 0.023 になった。データと整合する。加えたノイズは分散 0.01 で、信号の分散は約 0.45 だから、0.01 / 0.45 ≈ 0.022 になる。

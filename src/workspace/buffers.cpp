@@ -331,9 +331,9 @@ namespace cxxgpr
         return core.k_ref();
     }
 
-    /// @brief Ensures buffers can accommodate n training points, m queries, d features, and depth.
-    /// @details Checks overflow bounds on m * d, n * m, and (nested_depth + 1) * m, then grows each
-    /// workspace vector only if its current size is insufficient so warmed queries perform zero allocations.
+    /// @brief Grows the query workspace to accommodate n training points, m queries, d features, and nested depth.
+    /// @details Validates all element counts before growing any buffer, then resizes each vector only when its
+    /// current size is insufficient so warmed queries of equal or smaller size perform zero allocations.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
     /// @param[in] n Training sample count.
     /// @param[in] m Query point count.
@@ -344,29 +344,6 @@ namespace cxxgpr
     /// @retval GprErrorCode::SizeOverflow When m * d, n * m, or (nested_depth + 1) * m overflows std::size_t.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> QueryWorkspace<P>::ensure(
-        std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
-    )
-    {
-        if (auto result = ensure_prediction(n, m, d, nested_depth); !result)
-        {
-            return result;
-        }
-        if (query_dist.size() < n * m)
-        {
-            query_dist.resize(n * m);
-        }
-        return {};
-    }
-
-    /// @brief Grows the buffers used by point-based prediction, leaving query_dist untouched.
-    /// @tparam P Training precision policy.
-    /// @param[in] n Training point count.
-    /// @param[in] m Query point count.
-    /// @param[in] d Feature count.
-    /// @param[in] nested_depth Kernel nesting depth.
-    /// @return Success or a dimension error.
-    template <PrecisionPolicyConcept P>
-    std::expected<void, GprError> QueryWorkspace<P>::ensure_prediction(
         std::size_t n, std::size_t m, std::size_t d, std::size_t nested_depth
     )
     {

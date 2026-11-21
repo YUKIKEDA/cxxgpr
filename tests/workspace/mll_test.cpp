@@ -57,14 +57,14 @@ namespace
         EXPECT_TRUE(reuse->w_matrix.empty());
 
         cxxgpr::QueryWorkspace<cxxgpr::DoublePrecision> qws;
-        ASSERT_TRUE(qws.ensure_prediction(4U, 3U, 2U, 1U).has_value());
-        EXPECT_TRUE(qws.query_dist.empty());
         ASSERT_TRUE(qws.ensure(4U, 3U, 2U, 1U).has_value());
-        EXPECT_EQ(qws.query_dist.size(), 12U);
+        EXPECT_EQ(qws.query_k_star.size(), 12U);
         {
             const cxxgpr::test_support::NoAllocationScope audit;
             ASSERT_TRUE(qws.ensure(4U, 3U, 2U, 1U).has_value());
             ASSERT_TRUE(qws.ensure(4U, 2U, 2U, 1U).has_value());
+            // Re-growing to an equal or smaller shape must not touch the heap.
+            EXPECT_EQ(audit.delta_allocations(), 0U);
         }
     }
 

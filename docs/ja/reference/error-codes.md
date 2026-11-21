@@ -15,7 +15,7 @@
 | `IndexOutOfRange` | パラメータ、距離スロット、葉、要素の添字が範囲外。 | なし | `index_out_of_range(reason)` |
 | `InsufficientData` | 操作や検証ヘルパーが要求する点数より少ない。 | `n_points()`、`min_points()` | `insufficient_data(n_points, min_points)` |
 | `NonFiniteInput` | 入力座標、目的変数、スカラーが NaN か無限大。 | なし | `non_finite_input()` |
-| `NonFiniteKernelValue` | カーネル行列の要素、周辺尤度、逆変換後の値が NaN か無限大。 | なし | `non_finite_kernel_value()` |
+| `NonFiniteKernelValue` | カーネル行列の要素、周辺尤度、潜在予測分散、逆変換後の値が NaN か無限大。 | なし | `non_finite_kernel_value()` |
 | `InvalidHyperparameter` | 構成要素のパラメータが検証に失敗した（たとえば変換のスケールが正でない）。 | なし | `invalid_hyperparameter(reason)` |
 | `InvalidNoiseVariance` | ノイズ分散または対数ノイズ分散が不正（非有限、非正、オーバーフロー）。 | なし | `invalid_noise_variance(reason)` |
 | `InvalidInterval` | 区間の端点が不正、または値が開区間の外にある。 | `interval_error_kind()`、`interval_value()`、`interval_lo()`、`interval_hi()` | `invalid_interval_bounds(lo, hi)`、`invalid_interval_out_of_range(value, lo, hi)` |

@@ -2,7 +2,7 @@
 /// @file objective.hpp
 /// @brief Abstract hyperparameter optimization objective hierarchy, result types, and traits.
 /// @details Defines Objective, Differentiable, and TwiceDifferentiable operating in log-theta space
-/// alongside open user-space Interval bounds, plus OptimizerResult, RestartConfig, and OptimizerTraits.
+/// alongside open user-space Interval bounds, plus OptimizerResult and RestartConfig.
 #pragma once
 
 #include "cxxgpr/core/error.hpp"
@@ -178,15 +178,6 @@ namespace cxxgpr::optimizer
         /// @param[in] other RestartConfig instance to compare against.
         /// @return True if both restart configuration fields match.
         [[nodiscard]] constexpr bool operator==(const RestartConfig& other) const noexcept = default;
-    };
-
-    /// @brief Compile-time traits describing optimizer behavior.
-    /// @details Reads O::uses_change_indices to report whether optimizer O uses single-coordinate updates.
-    /// @tparam O Optimizer type declaring static constexpr bool uses_change_indices.
-    template <typename O> struct OptimizerTraits
-    {
-        /// @brief True when the optimizer evaluates single-coordinate proposals via value_at_changes().
-        static constexpr bool uses_change_indices = O::uses_change_indices;
     };
 
 }  // namespace cxxgpr::optimizer

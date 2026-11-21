@@ -97,14 +97,14 @@ int main()
         std::cerr << "fit or factor failed\n";
         return 1;
     }
-    std::cout << "factor: neg-MLL " << factored->log_marginal_likelihood() << ", noise "
+    std::cout << "factor: neg-MLL " << factored->neg_log_marginal_likelihood() << ", noise "
               << factored->likelihood().noise_variance() << ", iterations " << factored->optimizer_result().iterations
               << '\n';
-    std::cout << "fit:    neg-MLL " << fitted->log_marginal_likelihood() << ", noise "
+    std::cout << "fit:    neg-MLL " << fitted->neg_log_marginal_likelihood() << ", noise "
               << fitted->likelihood().noise_variance() << ", iterations " << fitted->optimizer_result().iterations
               << ", converged " << fitted->optimizer_result().converged << '\n';
     // [end]
-    ok = ok && fitted->log_marginal_likelihood() < factored->log_marginal_likelihood();
+    ok = ok && fitted->neg_log_marginal_likelihood() < factored->neg_log_marginal_likelihood();
     ok = ok && std::abs(factored->likelihood().noise_variance() - 0.05) < 1e-12;
     // The data were generated with noise standard deviation 0.1 (variance 0.01) on a unit-variance
     // signal, so the optimized noise variance on standardized targets must be well below the start.
@@ -135,18 +135,18 @@ int main()
         std::cerr << "precision fit failed\n";
         return 1;
     }
-    std::cout << "single neg-MLL " << single_fit->log_marginal_likelihood() << ", mixed neg-MLL "
-              << mixed_fit->log_marginal_likelihood() << ", refinement iterations "
+    std::cout << "single neg-MLL " << single_fit->neg_log_marginal_likelihood() << ", mixed neg-MLL "
+              << mixed_fit->neg_log_marginal_likelihood() << ", refinement iterations "
               << mixed_fit->refinement_summary()->iterations << '\n';
     // [end]
-    ok = ok && std::abs(single_fit->log_marginal_likelihood() - mixed_fit->log_marginal_likelihood()) < 0.5;
+    ok = ok && std::abs(single_fit->neg_log_marginal_likelihood() - mixed_fit->neg_log_marginal_likelihood()) < 0.5;
 
     // [optimizer]
     const auto restarts = trainer.with_optimizer(optimizer::Lbfgs().with_max_iterations(200U).with_restarts(3U, 42U));
     const auto restarted = restarts.fit(x, data.y);
-    std::cout << "with 3 restarts: neg-MLL " << restarted->log_marginal_likelihood() << '\n';
+    std::cout << "with 3 restarts: neg-MLL " << restarted->neg_log_marginal_likelihood() << '\n';
     // [end]
-    ok = ok && restarted.has_value() && restarted->log_marginal_likelihood() <= fitted->log_marginal_likelihood() + 1e-6;
+    ok = ok && restarted.has_value() && restarted->neg_log_marginal_likelihood() <= fitted->neg_log_marginal_likelihood() + 1e-6;
 
     // [policy]
     const auto lean = trainer.with_prefer_memory();
@@ -155,10 +155,10 @@ int main()
                                    .with_kernel_exp(KernelExp::FastApprox);
     const auto lean_fit = lean.fit(x, data.y);
     const auto custom_fit = custom_policy.fit(x, data.y);
-    std::cout << "prefer_memory neg-MLL " << lean_fit->log_marginal_likelihood() << ", custom policy neg-MLL "
-              << custom_fit->log_marginal_likelihood() << '\n';
+    std::cout << "prefer_memory neg-MLL " << lean_fit->neg_log_marginal_likelihood() << ", custom policy neg-MLL "
+              << custom_fit->neg_log_marginal_likelihood() << '\n';
     // [end]
-    ok = ok && std::abs(lean_fit->log_marginal_likelihood() - fitted->log_marginal_likelihood()) < 1e-6;
+    ok = ok && std::abs(lean_fit->neg_log_marginal_likelihood() - fitted->neg_log_marginal_likelihood()) < 1e-6;
 
     // [failure]
     std::vector<double> bad_y = data.y;
