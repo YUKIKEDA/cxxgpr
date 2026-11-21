@@ -557,6 +557,8 @@ namespace
             fallback_err = std::max(fallback_err, std::abs(ref - promote_fit->alpha()[i]));
         }
         EXPECT_LE(fallback_err, 1e-10 * alpha_max);
+    }
+
     /// @brief Checks that query batch sizes may shrink and grow in any order on one fitted model.
     /// @details Builds a 2-feature model from trainer, grows its query workspace with an 8-point batch, and
     /// compares the following 3-point batch bitwise against a separately factored model that never saw the

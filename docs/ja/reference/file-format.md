@@ -122,7 +122,7 @@
 
 `custom` ノードでは、未学習の変換と学習済みの変換は別々の登録になる。未学習側の `persist_id` は `register_unfitted_input` か `register_unfitted_target` で登録したファクトリへ、学習済み側の `persist_id` は `register_fitted_input` か `register_fitted_target` で登録したファクトリへ渡される。
 
-`custom` ノードの `state` は、構成要素の `persist_state_json` が返した文字列である。JSON として解析できれば構造化された JSON として、できなければ文字列として保存される。ファクトリには、それを文字列へ直したものが渡される。
+`custom` ノードの `state` には、構成要素の `persist_state_json` が返した文字列を収める。JSON のオブジェクト、配列、数値、`true`、`false`、`null` として解析できる文字列は、その JSON の値として保存し、ファクトリには値を詰めて再シリアライズした文字列を渡す。これは一般に元の文字列と同じではない。数値は同じ `double` に読み戻せる最短の形に書き直され（`2.500000` → `2.5`、`1e2` → `100.0`、`-0` → `0`、`12345678901234567890123` → `1.2345678901234568e+22`）、文字列の外の空白は除かれ、オブジェクトのキーは整列され、重複したキーは最後の 1 つだけが残る。それ以外の文字列は、`"abc"` のような JSON の文字列リテラルも含めて JSON の文字列として保存し、ファクトリには元の文字列が引用符も含めて 1 バイトも違わずに渡る。この文字列は有効な UTF-8 でなければならず、そうでない文字列を保存すると `PersistErrorKind::NotPersistable` になる。
 
 ### 例
 
@@ -283,10 +283,10 @@ def read_safetensors(path):
 | 条件 | エラー |
 |---|---|
 | ファイルを開けない、読めない、書けない、マップできない | `PersistFailed`、`PersistErrorKind::Io` |
-| JSON が不正、キーが欠けている・型が違う、入れ子が 128 段を超える | `PersistFailed`、`PersistErrorKind::Config` |
+| JSON が不正、キーが欠けている・型が違う、入れ子が 128 段を超える（読込時、または保存で書く `config.json`） | `PersistFailed`、`PersistErrorKind::Config` |
 | テンソルがない、形状や `dtype` が違う、アラインメントが合わない、有限でない要素がある | `PersistFailed`、`PersistErrorKind::Tensor` |
 | `model` キーか `distance` キーがある、`factor_kind` が `"llt"` 以外、`into_fitted` で精度が合わない | `PersistFailed`、`PersistErrorKind::WrongModel` |
 | ファイルの `persist_id` に登録されたファクトリがない | `PersistFailed`、`PersistErrorKind::UnregisteredId` |
-| `persist_id` が空、または `cxxgpr.` で始まる、または二重登録 | `PersistFailed`、`PersistErrorKind::InvalidPersistId` |
-| `persist_id` のない自作の構成要素を保存した | `PersistFailed`、`PersistErrorKind::NotPersistable` |
+| `persist_id` が空、`cxxgpr.` で始まる、有効な UTF-8 でない、または二重登録 | `PersistFailed`、`PersistErrorKind::InvalidPersistId` |
+| `persist_id` のない自作の構成要素、または文字列として保存する状態が有効な UTF-8 でない構成要素を保存した | `PersistFailed`、`PersistErrorKind::NotPersistable` |
 | `format_version` が `1` 以外 | `UnsupportedPersistVersion`（`found_version` と `supported_version` を持つ） |

@@ -68,11 +68,13 @@ namespace cxxgpr::persist
     using FittedTargetFactory = std::function<
         std::expected<std::unique_ptr<transform::FittedTargetTransform>, GprError>(std::string_view state_json)>;
 
-    /// @brief Validates a user-supplied persist_id against empty and reserved prefix rules.
-    /// @details Rejects empty strings and identifiers beginning with RESERVED_PREFIX ("cxxgpr.").
+    /// @brief Validates a user-supplied persist_id against the empty, reserved prefix, and encoding rules.
+    /// @details Rejects empty strings, identifiers beginning with RESERVED_PREFIX ("cxxgpr."), and identifiers
+    /// that are not valid UTF-8 (config.json is UTF-8 JSON, so such an identifier could not be written into it).
     /// @param[in] persist_id Candidate extension identifier string.
     /// @return Empty expected on success, or PersistFailed(InvalidPersistId) when invalid.
-    /// @retval GprErrorCode::PersistFailed When persist_id is empty or uses the reserved prefix.
+    /// @retval GprErrorCode::PersistFailed When persist_id is empty, uses the reserved prefix, or is not valid
+    /// UTF-8.
     [[nodiscard]] std::expected<void, GprError> validate_persist_id(std::string_view persist_id);
 
     /// @brief Registry mapping user-defined persist_id strings to deserialization factories across 5

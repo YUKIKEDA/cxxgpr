@@ -122,7 +122,7 @@ A transform is the string `"identity"` or an object with one key.
 
 The unfitted and fitted transforms form two separate registrations for custom nodes: the unfitted `persist_id` goes to a factory registered with `register_unfitted_input` or `register_unfitted_target`, and the fitted one to `register_fitted_input` or `register_fitted_target`.
 
-A custom node's `state` is the text returned by the component's `persist_state_json`, stored as structured JSON if it parses and as a string otherwise. The factory receives it serialized back to text.
+A custom node's `state` holds the text returned by the component's `persist_state_json`. Text that parses as a JSON object, array, number, `true`, `false` or `null` is stored as that JSON value, and the factory receives its compact re-serialization, which is not the original text in general: numbers are rewritten in the shortest form that reads back to the same `double` (`2.500000` → `2.5`, `1e2` → `100.0`, `-0` → `0`, `12345678901234567890123` → `1.2345678901234568e+22`), whitespace outside strings is dropped, object keys are sorted, and of duplicate keys only the last is kept. Every other text, including text that is itself a JSON string literal such as `"abc"`, is stored as a JSON string, and the factory receives the original text byte for byte, quotes included. Such text must be valid UTF-8; saving text that is not gives `PersistErrorKind::NotPersistable`.
 
 ### Example
 
@@ -283,10 +283,10 @@ With `has_factor == true`, the loader uses `l` and `alpha` as stored and does no
 | Condition | Error |
 |---|---|
 | file cannot be opened, read, written or mapped | `PersistFailed`, `PersistErrorKind::Io` |
-| invalid JSON, missing or mistyped key, nesting deeper than 128 | `PersistFailed`, `PersistErrorKind::Config` |
+| invalid JSON, missing or mistyped key, nesting deeper than 128 (on load, or in the `config.json` that saving would write) | `PersistFailed`, `PersistErrorKind::Config` |
 | missing tensor, wrong shape or `dtype`, misaligned data, non-finite element | `PersistFailed`, `PersistErrorKind::Tensor` |
 | `model` or `distance` key, or `factor_kind` other than `"llt"`, or a precision mismatch in `into_fitted` | `PersistFailed`, `PersistErrorKind::WrongModel` |
 | `persist_id` in the file has no registered factory | `PersistFailed`, `PersistErrorKind::UnregisteredId` |
-| `persist_id` empty or starting with `cxxgpr.`, or registered twice | `PersistFailed`, `PersistErrorKind::InvalidPersistId` |
-| saving a custom component without `persist_id` | `PersistFailed`, `PersistErrorKind::NotPersistable` |
+| `persist_id` empty, starting with `cxxgpr.` or not valid UTF-8, or registered twice | `PersistFailed`, `PersistErrorKind::InvalidPersistId` |
+| saving a custom component without `persist_id`, or with state stored as a string that is not valid UTF-8 | `PersistFailed`, `PersistErrorKind::NotPersistable` |
 | `format_version` other than `1` | `UnsupportedPersistVersion` with `found_version` and `supported_version` |
