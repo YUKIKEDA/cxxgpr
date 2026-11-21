@@ -56,6 +56,35 @@ namespace cxxgpr
     namespace detail
     {
 
+        /// @brief Cholesky factor storage that either owns its elements or views a read-only memory map.
+        /// @details A loaded double-precision checkpoint maps the stored factor instead of copying it; the mapping
+        /// is kept alive by keepalive for as long as any copy of this object exists. Every other factor is owned.
+        /// @tparam Storage Storage scalar type.
+        template <typename Storage> struct DistanceFactorStorage
+        {
+            /// @brief Owned elements, column-major n x n (empty when the factor is mapped).
+            std::vector<Storage> owned;
+            /// @brief Mapped elements, column-major n x n (empty when the factor is owned).
+            std::span<const Storage> mapped;
+            /// @brief Owner of the mapping behind mapped (null when the factor is owned).
+            std::shared_ptr<const void> keepalive;
+
+            /// @brief Returns the first element of the factor.
+            /// @return Pointer to the mapped or owned elements.
+            [[nodiscard]] const Storage* data() const noexcept { return mapped.empty() ? owned.data() : mapped.data(); }
+
+            /// @brief Returns the factor elements.
+            /// @return Read-only span over the mapped or owned elements.
+            [[nodiscard]] std::span<const Storage> view() const noexcept
+            {
+                return mapped.empty() ? std::span<const Storage>(owned) : mapped;
+            }
+
+            /// @brief Reports whether the factor views a memory map.
+            /// @return True when the elements are mapped rather than owned.
+            [[nodiscard]] bool is_mapped() const noexcept { return !mapped.empty(); }
+        };
+
         /// @brief Immutable fitted state of a supplied-distance model, shared between copies of the fitted model.
         /// @tparam P Precision policy.
         /// @tparam C Distance mode (DistanceOnly or WithPoints).
@@ -86,8 +115,8 @@ namespace cxxgpr
             std::vector<Storage> x_train;
             /// @brief Transformed training targets in the refinement scalar.
             std::vector<Refine> y_transformed;
-            /// @brief Lower Cholesky factor of K + (noise + jitter) I, column-major n x n.
-            std::vector<Storage> l_factor;
+            /// @brief Lower Cholesky factor of K + (noise + jitter) I, column-major n x n (owned or mapped).
+            DistanceFactorStorage<Storage> l_factor;
             /// @brief Weights alpha = (K + (noise + jitter) I)^-1 y.
             std::vector<Refine> alpha;
             /// @brief Number of training points.
@@ -201,6 +230,8 @@ namespace cxxgpr
         /// @param[in] l_factor Lower Cholesky factor, column-major n x n.
         /// @param[in] alpha Weights in the transformed target space.
         /// @param[in] factor_jitter Accepted diagonal jitter.
+        /// @param[in] l_keepalive Owner of a read-only mapping behind l_factor; when non-null and the storage is
+        /// double, the payload views l_factor instead of copying it.
         /// @return Fitted payload, or GprError describing the first failing check.
         /// @retval GprErrorCode::PersistFailed When the factor or the weights are not usable.
         /// @retval GprErrorCode::InvalidDistance When the tables are invalid.
@@ -218,7 +249,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>& target_transform,
             std::span<const typename P::Storage> l_factor,
             std::span<const typename P::Refine> alpha,
-            double factor_jitter
+            double factor_jitter,
+            std::shared_ptr<const void> l_keepalive
         );
 
         /// @brief Computes the posterior mean and diagonal variance at m query points.

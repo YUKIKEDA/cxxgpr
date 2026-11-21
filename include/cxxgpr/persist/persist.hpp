@@ -792,11 +792,11 @@ namespace cxxgpr::persist
             {
                 if constexpr (std::same_as<typename P::Storage, double>)
                 {
-                    l_f64 = payload.l_factor;
+                    l_f64 = payload.l_factor.view();
                 }
                 else
                 {
-                    l_f32 = payload.l_factor;
+                    l_f32 = payload.l_factor.view();
                 }
                 if constexpr (std::same_as<typename P::Refine, double>)
                 {
@@ -924,6 +924,13 @@ namespace cxxgpr::persist
         /// @brief Returns whether the checkpoint held the factor and weights.
         /// @return True when the factor was stored and not recomputed.
         [[nodiscard]] bool has_factor() const noexcept;
+
+        /// @brief Returns whether the Cholesky factor is read directly from a read-only memory map of the file.
+        /// @details True for a double-precision checkpoint written with save_with_factor(). The file must not be
+        /// rewritten in place while this object or a copy of it exists; replacing it through save() is safe.
+        /// into_fitted() copies the factor, so the returned model does not depend on the file.
+        /// @return True when the factor is memory-mapped, false when it is owned.
+        [[nodiscard]] bool has_mmap_factor() const noexcept;
 
         /// @brief Returns the accepted diagonal jitter of the factor.
         /// @return Jitter offset.

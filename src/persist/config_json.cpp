@@ -1526,6 +1526,15 @@ namespace cxxgpr::persist::detail
             {
                 return std::unexpected(config_err("d must be positive exactly for a with_points model"));
             }
+            // A distance-only model has no coordinates, so both coordinate transforms must be the identity.
+            if (!cfg.distance_with_points
+                && (!root.contains("x_unfitted") || root["x_unfitted"] != nlohmann::json("identity")
+                    || !root.contains("x_transform") || root["x_transform"] != nlohmann::json("identity")))
+            {
+                return std::unexpected(
+                    config_err("a distance_only model must have identity x_unfitted and x_transform")
+                );
+            }
             cxxgpr::detail::DistanceKernelDesc desc;
             for (const auto& s : dj["slots"])
             {
@@ -2041,7 +2050,16 @@ namespace cxxgpr::persist::detail
         {
             root["residual"] = res_str;
         }
-        return root.dump(2);
+
+        // Refuse to write a document that the loader would reject for its nesting depth: every composite kernel
+        // node adds two JSON levels, so a tree accepted by the node-depth bound can still exceed the JSON bound.
+        std::string text = root.dump(2);
+        if (auto depth_ok = check_json_max_depth(text, MAX_JSON_NESTING_DEPTH, PersistErrorKind::Config);
+            !depth_ok.has_value())
+        {
+            return std::unexpected(std::move(depth_ok).error());
+        }
+        return text;
     }
 
     /// @brief Reads, validates and parses a coordinate checkpoint config.json.

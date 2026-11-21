@@ -273,9 +273,10 @@ if (!loaded && loaded.error().code() == cxxgpr::GprErrorCode::UnsupportedPersist
 :end-before: // [end]
 ```
 
-`LoadedDistanceGpr` が持つのは、`load`、`n`、`d`、`precision_kind`、`has_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` である。予測系のメソッドは `FittedDistanceGpr` と同じ表（`WithPoints` では予測点の座標も）を受け取り、`double` の結果を返す。`into_fitted` は、保存した精度ポリシーの型付き `FittedDistanceGpr` を返す。
+`LoadedDistanceGpr` が持つのは、`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` である。予測系のメソッドは `FittedDistanceGpr` と同じ表（`WithPoints` では予測点の座標も）を受け取り、`double` の結果を返す。`into_fitted` は、保存した精度ポリシーの型付き `FittedDistanceGpr` を返す。
 
-- `save_with_factor` で保存すると、因子と重みは保存した値のまま復元され、予測は保存前のモデルとビット単位で一致する。`save` で保存した場合は、読み込み時に因子を計算し直し、予測は丸めの範囲で一致する。
+- `save_with_factor` で保存すると、因子と重みは保存した値のまま復元され、予測は保存前のモデルとビット単位で一致する。倍精度の因子は `LoadedGpr` と同じく読み取り専用のメモリマップで読む（`has_mmap_factor()` が `true`）。そのため同じ決まりに従い、モデルやそのコピーが生きている間はファイルをその場で書き換えないこと。`into_fitted` は因子をコピーするので、返すモデルはファイルに依存しない。`save` で保存した場合は、読み込み時に因子を計算し直し、予測は丸めの範囲で一致する。
+- 読み込んだ `MixedPrecision` のモデルは `refinement_summary` を持たない。`neg_log_marginal_likelihood` は保存した因子と改良後の重みから計算し直すので、学習時に報告した値（単精度の解から得た値）とわずかに違うことがある。
 - 表は、読み込み時にもう一度検査される。負の要素や 0 でない対角は `InvalidDistance`、非有限の値は壊れたテンソル（`PersistErrorKind::Tensor`）として拒否する。
 - 別のモードのチェックポイントや座標モデルのチェックポイントは、`PersistErrorKind::WrongModel` で拒否する。
 
@@ -296,7 +297,7 @@ if (!loaded && loaded.error().code() == cxxgpr::GprErrorCode::UnsupportedPersist
 | `save` | 因子なしでモデルを書き出す。ファイルごとに原子的 |
 | `save_with_factor` | $L$ と $\alpha$ を付けてモデルを書き出す |
 | `LoadedGpr` | 読み込んだ、型を消去したモデル。`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel_spec`、`likelihood`、`jitter`、`kernel_exp`、`distance_cache_policy`、`predict`、`predict_into`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` |
-| `LoadedDistanceGpr` | 読み込んだ供給距離のモデル（モードは `DistanceOnly` か `WithPoints`）。`load`、`n`、`d`、`precision_kind`、`has_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` |
+| `LoadedDistanceGpr` | 読み込んだ供給距離のモデル（モードは `DistanceOnly` か `WithPoints`）。`load`、`n`、`d`、`precision_kind`、`has_factor`、`has_mmap_factor`、`factor_jitter`、`kernel`、`likelihood`、`jitter`、`kernel_exp`、`predict`、`predict_covariance`、`sample`、`loo_predict`、`into_fitted` |
 | `PersistRegistry` | 自作の構成要素のファクトリ。`register_kernel`、`register_unfitted_input`、`register_fitted_input`、`register_unfitted_target`、`register_fitted_target`、および `create_kernel`、`create_unfitted_input`、`create_fitted_input`、`create_unfitted_target`、`create_fitted_target` |
 | `validate_persist_id` | 識別子を、空文字列、予約接頭辞、UTF-8 の規則に照らして検査する |
 | `CustomKernelFactory`、`UnfittedInputFactory`、`FittedInputFactory`、`UnfittedTargetFactory`、`FittedTargetFactory` | ファクトリ関数の型 |

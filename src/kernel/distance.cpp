@@ -4898,6 +4898,24 @@ namespace cxxgpr
             {
                 return std::unexpected(distance_config_error("distance slots do not match the kernel tree"));
             }
+            // The tables d2.<i> are bound to slots()[i], the i-th slot in depth-first first-appearance order, so the
+            // slot numbers of the tree must appear in that canonical order; a permuted numbering would silently pair
+            // each table with another leaf.
+            std::optional<SlotId> issued;
+            if (const auto& ar = slots.ard[i]; ar.has_value())
+            {
+                issued = ar->slot();
+            }
+            else if (const auto& sc = slots.scalar[i]; sc.has_value())
+            {
+                issued = sc->slot();
+            }
+            if (!issued.has_value() || rebuilt[i].id != *issued)
+            {
+                return std::unexpected(
+                    distance_config_error("distance slot numbers are not in depth-first first-appearance order")
+                );
+            }
         }
         return kernel;
     }

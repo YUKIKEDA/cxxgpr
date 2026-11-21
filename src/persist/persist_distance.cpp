@@ -302,6 +302,8 @@ namespace cxxgpr::persist
         PersistPrecisionKind kind{PersistPrecisionKind::Double};
         /// @brief Whether the factor and weights came from the checkpoint.
         bool has_factor{false};
+        /// @brief Whether the double factor views the memory-mapped checkpoint instead of an owned copy.
+        bool has_mmap_factor{false};
         /// @brief Accepted diagonal jitter reported by the checkpoint.
         double factor_jitter{0.0};
     };
@@ -318,6 +320,7 @@ namespace cxxgpr::persist
         /// @param[in] x_raw Raw training coordinates (empty for a DistanceOnly model).
         /// @param[in] y_raw Raw training targets.
         /// @param[in] st Mapped checkpoint tensors.
+        /// @param[in] keepalive Owner of the mapping, kept by a double factor that views it.
         /// @return The fitted model, or GprError when the stored factor or tables are unusable.
         template <PrecisionPolicyConcept P, DistanceModeConcept C>
         [[nodiscard]] std::expected<FittedDistanceGpr<optimizer::Lbfgs, P, C>, GprError> build_fitted(
@@ -326,7 +329,8 @@ namespace cxxgpr::persist
             const DistanceSource& source,
             std::span<const double> x_raw,
             std::span<const double> y_raw,
-            const detail::MappedSafetensors& st
+            const detail::MappedSafetensors& st,
+            const std::shared_ptr<const void>& keepalive
         )
         {
             using Storage = typename P::Storage;
@@ -394,7 +398,7 @@ namespace cxxgpr::persist
                 payload = cxxgpr::detail::assemble_distance_payload<P, C>(
                     kernel, likelihood, cfg.kernel_exp, source, x_raw, d, y_raw, x_fit,
                     std::shared_ptr<const transform::FittedTargetTransform>(std::move(cfg.y_transform)), l_span, a_span,
-                    cfg.factor_jitter
+                    cfg.factor_jitter, std::same_as<Storage, double> ? keepalive : nullptr
                 );
             }
             else
@@ -541,12 +545,15 @@ namespace cxxgpr::persist
             }
         }
 
+        // A double factor stored in the checkpoint is viewed through the mapping, which the payload keeps alive.
+        const std::shared_ptr<const void> keepalive = *st;
+        const bool has_mmap_factor = cfg->has_factor && cfg->precision_kind == PersistPrecisionKind::Double;
         std::optional<typename Impl::Model> model;
         switch (cfg->precision_kind)
         {
             case PersistPrecisionKind::Double:
             {
-                auto m = build_fitted<DoublePrecision, C>(*cfg, *kernel, source, x_sp, *y_sp, **st);
+                auto m = build_fitted<DoublePrecision, C>(*cfg, *kernel, source, x_sp, *y_sp, **st, keepalive);
                 if (!m.has_value())
                 {
                     return std::unexpected(std::move(m).error());
@@ -556,7 +563,7 @@ namespace cxxgpr::persist
             }
             case PersistPrecisionKind::Single:
             {
-                auto m = build_fitted<SinglePrecision, C>(*cfg, *kernel, source, x_sp, *y_sp, **st);
+                auto m = build_fitted<SinglePrecision, C>(*cfg, *kernel, source, x_sp, *y_sp, **st, keepalive);
                 if (!m.has_value())
                 {
                     return std::unexpected(std::move(m).error());
@@ -566,7 +573,9 @@ namespace cxxgpr::persist
             }
             case PersistPrecisionKind::MixedPromote:
             {
-                auto m = build_fitted<MixedPrecision<PromoteStorage>, C>(*cfg, *kernel, source, x_sp, *y_sp, **st);
+                auto m = build_fitted<MixedPrecision<PromoteStorage>, C>(
+                    *cfg, *kernel, source, x_sp, *y_sp, **st, keepalive
+                );
                 if (!m.has_value())
                 {
                     return std::unexpected(std::move(m).error());
@@ -576,7 +585,9 @@ namespace cxxgpr::persist
             }
             case PersistPrecisionKind::MixedReevaluate:
             {
-                auto m = build_fitted<MixedPrecision<ReevaluateKernel>, C>(*cfg, *kernel, source, x_sp, *y_sp, **st);
+                auto m = build_fitted<MixedPrecision<ReevaluateKernel>, C>(
+                    *cfg, *kernel, source, x_sp, *y_sp, **st, keepalive
+                );
                 if (!m.has_value())
                 {
                     return std::unexpected(std::move(m).error());
@@ -591,6 +602,7 @@ namespace cxxgpr::persist
             .d = d,
             .kind = cfg->precision_kind,
             .has_factor = cfg->has_factor,
+            .has_mmap_factor = has_mmap_factor,
             .factor_jitter = cfg->factor_jitter
         });
         return LoadedDistanceGpr(std::move(impl));
@@ -674,6 +686,14 @@ namespace cxxgpr::persist
     template <DistanceModeConcept C> bool LoadedDistanceGpr<C>::has_factor() const noexcept
     {
         return impl_->has_factor;
+    }
+
+    /// @brief Returns whether the factor is read from a read-only memory map of the checkpoint.
+    /// @tparam C Distance mode.
+    /// @return True when the double factor views the mapped file.
+    template <DistanceModeConcept C> bool LoadedDistanceGpr<C>::has_mmap_factor() const noexcept
+    {
+        return impl_->has_mmap_factor;
     }
 
     /// @brief Returns the accepted diagonal jitter of the factor.
@@ -848,7 +868,19 @@ namespace cxxgpr::persist
     template <PrecisionPolicyConcept P>
     std::shared_ptr<const cxxgpr::detail::DistanceFittedPayload<P, C>> LoadedDistanceGpr<C>::fitted_payload() const
     {
-        return detail::DistanceModelAccess::payload(std::get<FittedDistanceGpr<optimizer::Lbfgs, P, C>>(impl_->model));
+        const auto& shared =
+            detail::DistanceModelAccess::payload(std::get<FittedDistanceGpr<optimizer::Lbfgs, P, C>>(impl_->model));
+        if (!shared->l_factor.is_mapped())
+        {
+            return shared;
+        }
+        // The extracted model must not depend on the mapped file: copy the factor into owned storage.
+        auto owned = std::make_shared<cxxgpr::detail::DistanceFittedPayload<P, C>>(*shared);
+        const auto view = shared->l_factor.view();
+        owned->l_factor.owned.assign(view.begin(), view.end());
+        owned->l_factor.mapped = {};
+        owned->l_factor.keepalive.reset();
+        return owned;
     }
 
     /// @brief Returns a copy of the unfitted coordinate transform.

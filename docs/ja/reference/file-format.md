@@ -138,9 +138,9 @@
 
 - `distance.points` は `"distance_only"`（このとき `d` は `0`）か `"with_points"`（このとき `d > 0` で、`x` も保存する）。もう一方のモードのローダーは、`PersistErrorKind::WrongModel` でファイルを拒否する。
 - `distance.slots` は、カーネルに最初に現れる深さ優先の順で距離スロットを並べる。スロットは `{"kind": "scalar"}` か `{"kind": "ard", "dims": <整数>}` である。
-- カーネルの木では、距離スロットを読む葉は `{"distance": {"slot": <slots の添字>, "leaf": <カーネルの葉>}}` と書く。スカラースロットが取るのは `rbf`、`matern`、`periodic`、`rq`、`custom`、ARD スロットが取るのは `dims` 個の長さスケールを持つ `rbf_ard`、`matern_ard`、`rq_ard` である。それ以外の葉は、上の表のとおりに書く座標の葉である。距離のみのモデルが持てる座標の葉は、`constant` と `white` だけである。
+- カーネルの木では、距離スロットを読む葉は `{"distance": {"slot": <slots の添字>, "leaf": <カーネルの葉>}}` と書く。スロット番号は `distance.slots` の順に現れる。木を深さ優先・左から右にたどると、最初の新しい番号が `0`、次の新しい番号が `1` となる（2 つの葉が同じスロットを読むときは番号が繰り返される）。`d2.<k>` はスロット `k` のものなので、これと違う番号付けは `PersistErrorKind::Config` で拒否する。スカラースロットが取るのは `rbf`、`matern`、`periodic`、`rq`、`custom`、ARD スロットが取るのは `dims` 個の長さスケールを持つ `rbf_ard`、`matern_ard`、`rq_ard` である。それ以外の葉は、上の表のとおりに書く座標の葉である。距離のみのモデルが持てる座標の葉は、`constant` と `white` だけである。
 - `distance_cache` は `"always"` と書き、使わない。
-- `"distance_only"` では、`x_transform` は `"identity"` である。
+- `"distance_only"` では、`x_unfitted` と `x_transform` はどちらも `"identity"` である。それ以外は `PersistErrorKind::Config` で拒否する。
 
 **距離のテンソル。** スロット $k$ のテンソル `d2.<k>` は、修復済みの学習距離の下三角（対角を含む）を持つ。$i \ge j$ の要素 $(i, j)$ の詰めた位置は $p = j n - j(j-1)/2 + (i - j)$ で、詰めた長さは $n(n+1)/2$ である。ARD スロットは、次元ごとに詰めた配列を順に連結する。次元 `m` の平坦な添字は `m * packed_len + p` である。このため `x` や `l` と違って、`d2.<k>` は `reshape(shape, order="C")` で読む（1 次元であるスカラースロットでは、順序は結果に影響しない）。`"mixed"` の精度のモデルは、予測に使う精度と同じ `F32` の表を保存する。
 

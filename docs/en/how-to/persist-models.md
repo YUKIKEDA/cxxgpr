@@ -273,9 +273,10 @@ Loading issues **fresh slots**. A `ScalarDistance` or `ArdDistance` that you use
 :end-before: // [end]
 ```
 
-`LoadedDistanceGpr` offers `load`, `n`, `d`, `precision_kind`, `has_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict` and `into_fitted`. The query methods take the same tables as `FittedDistanceGpr` (and the query coordinates for `WithPoints`) and return `double` results. `into_fitted` gives back a typed `FittedDistanceGpr` for the precision policy that was saved.
+`LoadedDistanceGpr` offers `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict` and `into_fitted`. The query methods take the same tables as `FittedDistanceGpr` (and the query coordinates for `WithPoints`) and return `double` results. `into_fitted` gives back a typed `FittedDistanceGpr` for the precision policy that was saved.
 
-- With `save_with_factor`, the factor and weights are restored as stored, and every prediction is bit-identical to the model before saving. With `save`, the factor is computed again at load, and predictions agree to rounding.
+- With `save_with_factor`, the factor and weights are restored as stored, and every prediction is bit-identical to the model before saving. A double-precision factor is read through a read-only memory map, as for `LoadedGpr` (`has_mmap_factor()` is `true`), so the same rule holds: do not rewrite the file in place while the model or a copy of it is alive. `into_fitted` copies the factor, so the model it returns does not depend on the file. With `save`, the factor is computed again at load, and predictions agree to rounding.
+- A loaded `MixedPrecision` model has no `refinement_summary`, and its `neg_log_marginal_likelihood` is recomputed from the stored factor and the refined weights, so it can differ slightly from the value reported at training, which comes from the single-precision solve.
 - The tables are validated again on load. A negative entry or a nonzero diagonal gives `InvalidDistance`; a non-finite value is rejected as a corrupt tensor (`PersistErrorKind::Tensor`).
 - A checkpoint of the other mode, or of a coordinate model, is refused with `PersistErrorKind::WrongModel`:
 
@@ -296,7 +297,7 @@ A `MixedPrecision` model stores its tables in single precision, which is the pre
 | `save` | write a model without the factor; atomic per file |
 | `save_with_factor` | write a model with $L$ and $\alpha$ |
 | `LoadedGpr` | the loaded, type-erased model: `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel_spec`, `likelihood`, `jitter`, `kernel_exp`, `distance_cache_policy`, `predict`, `predict_into`, `predict_covariance`, `sample`, `loo_predict`, `into_fitted` |
-| `LoadedDistanceGpr` | the loaded supplied-distance model of mode `DistanceOnly` or `WithPoints`: `load`, `n`, `d`, `precision_kind`, `has_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict`, `into_fitted` |
+| `LoadedDistanceGpr` | the loaded supplied-distance model of mode `DistanceOnly` or `WithPoints`: `load`, `n`, `d`, `precision_kind`, `has_factor`, `has_mmap_factor`, `factor_jitter`, `kernel`, `likelihood`, `jitter`, `kernel_exp`, `predict`, `predict_covariance`, `sample`, `loo_predict`, `into_fitted` |
 | `PersistRegistry` | factories for custom components: `register_kernel`, `register_unfitted_input`, `register_fitted_input`, `register_unfitted_target`, `register_fitted_target`, and `create_kernel`, `create_unfitted_input`, `create_fitted_input`, `create_unfitted_target`, `create_fitted_target` |
 | `validate_persist_id` | checks an identifier against the empty-string, reserved-prefix and UTF-8 rules |
 | `CustomKernelFactory`, `UnfittedInputFactory`, `FittedInputFactory`, `UnfittedTargetFactory`, `FittedTargetFactory` | factory function types |

@@ -1104,7 +1104,7 @@ namespace cxxgpr
         payload.factor_jitter = buffers->core.factor_jitter;
         payload.neg_log_marginal_likelihood = final_mll;
         payload.optimizer_result = std::move(opt_res);
-        payload.l_factor = std::move(buffers->core.k_matrix);
+        payload.l_factor.owned = std::move(buffers->core.k_matrix);
         payload.compiled = std::move(compiled);
         payload.store = std::make_shared<const CheckedDistanceStore<Storage>>(std::move(*store));
         return payload;
@@ -1730,6 +1730,7 @@ namespace cxxgpr
     /// @param[in] l_factor Lower Cholesky factor, column-major n x n.
     /// @param[in] alpha Weights in the transformed target space.
     /// @param[in] factor_jitter Accepted diagonal jitter.
+    /// @param[in] l_keepalive Owner of a read-only mapping behind l_factor; non-null makes a double factor a view.
     /// @return Fitted payload, or GprError describing the first failing check.
     /// @retval GprErrorCode::PersistFailed When the factor or the weights are not usable.
     /// @retval GprErrorCode::InvalidDistance When the tables are invalid.
@@ -1746,7 +1747,8 @@ namespace cxxgpr
         const std::shared_ptr<const transform::FittedTargetTransform>& target_transform,
         std::span<const typename P::Storage> l_factor,
         std::span<const typename P::Refine> alpha,
-        double factor_jitter
+        double factor_jitter,
+        std::shared_ptr<const void> l_keepalive
     )
     {
         using Storage = typename P::Storage;
@@ -1813,7 +1815,7 @@ namespace cxxgpr
             .y_raw = std::vector<double>(y_raw.begin(), y_raw.end()),
             .x_train = {},
             .y_transformed = {},
-            .l_factor = std::vector<Storage>(l_factor.begin(), l_factor.end()),
+            .l_factor = {},
             .alpha = std::vector<Refine>(alpha.begin(), alpha.end()),
             .n_train = n,
             .n_features = n_features,
@@ -1822,6 +1824,16 @@ namespace cxxgpr
             .optimizer_result = {},
             .refinement_summary = std::nullopt,
         };
+        // A double factor backed by a live mapping is viewed in place; any other factor is copied.
+        if (std::same_as<Storage, double> && l_keepalive != nullptr)
+        {
+            payload.l_factor.mapped = l_factor;
+            payload.l_factor.keepalive = std::move(l_keepalive);
+        }
+        else
+        {
+            payload.l_factor.owned.assign(l_factor.begin(), l_factor.end());
+        }
         if constexpr (with_points)
         {
             if (!input_transform || x_raw.size() != n * n_features)
@@ -2255,7 +2267,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const DoublePrecision::Storage>,
             std::span<const DoublePrecision::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<DoublePrecision, WithPoints>, GprError> detail::
@@ -2271,7 +2284,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const DoublePrecision::Storage>,
             std::span<const DoublePrecision::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<SinglePrecision, DistanceOnly>, GprError> detail::
@@ -2287,7 +2301,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const SinglePrecision::Storage>,
             std::span<const SinglePrecision::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<SinglePrecision, WithPoints>, GprError> detail::
@@ -2303,7 +2318,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const SinglePrecision::Storage>,
             std::span<const SinglePrecision::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>, GprError>
@@ -2319,7 +2335,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<PromoteStorage>::Storage>,
             std::span<const MixedPrecision<PromoteStorage>::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>, GprError> detail::
@@ -2335,7 +2352,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<PromoteStorage>::Storage>,
             std::span<const MixedPrecision<PromoteStorage>::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>, GprError>
@@ -2351,7 +2369,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
             std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>, GprError>
@@ -2367,7 +2386,8 @@ namespace cxxgpr
             const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
             std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
-            double
+            double,
+            std::shared_ptr<const void>
         );
 
 }  // namespace cxxgpr
