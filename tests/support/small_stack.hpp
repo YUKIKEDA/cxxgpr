@@ -14,12 +14,11 @@ namespace cxxgpr::test_support
 {
 
     /// @brief Stack budget, in bytes, of the deep-model work without AddressSanitizer.
-    /// @return 256 KiB with MSVC, a quarter of the 1 MiB that Windows reserves for a thread by default, and 128 KiB
-    /// elsewhere.
+    /// @return 1 MiB with MSVC, the stack that Windows reserves for a thread by default, and 128 KiB elsewhere.
     [[nodiscard]] constexpr std::size_t uninstrumented_deep_model_stack_bytes() noexcept
     {
 #if defined(_MSC_VER)
-        return std::size_t{256} * 1024U;
+        return std::size_t{1024} * 1024U;
 #else
         return std::size_t{128} * 1024U;
 #endif
@@ -46,8 +45,10 @@ namespace cxxgpr::test_support
     /// @details Each value is about twice what that work needs once every recursion level keeps only its children
     /// on the stack, rounded up to a power of two, while keeping temporaries on every level needs several times
     /// more. Measured with GCC 14: 69 KiB unoptimized and 63 KiB optimized against 128 KiB, and 290 KiB with
-    /// AddressSanitizer, whose redzones enlarge every frame, against 1 MiB. MSVC could not be measured here; its
-    /// unoptimized frames resemble those of Clang without optimization, which needs 91 KiB, so MSVC gets 256 KiB.
+    /// AddressSanitizer, whose redzones enlarge every frame, against 1 MiB. MSVC could not be measured here, and a
+    /// 256 KiB budget derived from Clang without optimization (91 KiB) proved too small for MSVC Debug in CI, so
+    /// MSVC is held to the requirement itself: the deepest accepted models fit in the 1 MiB default stack of a
+    /// Windows thread. The code before the per-level stack reduction exceeded that stack in MSVC Debug CI.
     /// @return 1 MiB under AddressSanitizer, otherwise uninstrumented_deep_model_stack_bytes().
     [[nodiscard]] constexpr std::size_t deep_model_stack_bytes() noexcept
     {
