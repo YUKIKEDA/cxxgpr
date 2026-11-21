@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: compare the built-in optimizers, drive one directly on your own objective, and write a custom optimizer.
-#include <cxxgpr/core/rng.hpp>
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/optimizer/optimizer.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cxxgpr/core/rng.hpp>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/optimizer/optimizer.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <expected>
 #include <iomanip>
 #include <iostream>
@@ -82,6 +81,7 @@ namespace
             return best;
         }
     };
+
     // [end]
 
     // [objective]
@@ -156,10 +156,13 @@ namespace
         std::vector<double> target_;
         std::vector<double> weights_;
     };
+
     // [end]
 
     template <typename Optimizer>
-    bool run_on_gp(const std::string& name, const Optimizer& optimizer, std::span<const double> x, std::span<const double> y)
+    bool run_on_gp(
+        const std::string& name, const Optimizer& optimizer, std::span<const double> x, std::span<const double> y
+    )
     {
         const std::array<double, 1> length_scale{0.3};
         const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
@@ -185,7 +188,7 @@ namespace
         const auto& result = model->optimizer_result();
         std::cout << std::left << std::setw(22) << name << std::right << std::setw(7) << result.iterations
                   << std::setw(11) << (result.converged ? "yes" : "no") << std::setw(12)
-                  << model->log_marginal_likelihood() << std::setw(10) << pred->mean[0] << '\n';
+                  << model->neg_log_marginal_likelihood() << std::setw(10) << pred->mean[0] << '\n';
         return std::abs(pred->mean[0] - truth(0.35)) < 0.15;
     }
 }  // namespace
@@ -205,16 +208,16 @@ int main()
         y[i] = truth(x[i]) + 0.05 * rng.unit_normal();
     }
     std::cout << "truth at 0.35 = " << truth(0.35) << '\n';
-    std::cout << std::left << std::setw(22) << "optimizer" << std::right << std::setw(7) << "iters"
-              << std::setw(11) << "converged" << std::setw(12) << "neg-log-ML" << std::setw(10) << "mean@0.35" << '\n';
+    std::cout << std::left << std::setw(22) << "optimizer" << std::right << std::setw(7) << "iters" << std::setw(11)
+              << "converged" << std::setw(12) << "neg-log-ML" << std::setw(10) << "mean@0.35" << '\n';
 
     // [compare]
     using namespace cxxgpr::optimizer;
     ok = run_on_gp("Lbfgs", Lbfgs{}, x, y) && ok;
     ok = run_on_gp("TrustRegion", TrustRegion{}, x, y) && ok;
     ok = run_on_gp("NelderMead", NelderMead{}.with_max_iterations(400), x, y) && ok;
-    ok = run_on_gp("FastSimulatedAnnealing", FastSimulatedAnnealing{}.with_max_iterations(400).with_seed(7), x, y)
-        && ok;
+    ok =
+        run_on_gp("FastSimulatedAnnealing", FastSimulatedAnnealing{}.with_max_iterations(400).with_seed(7), x, y) && ok;
     ok = run_on_gp("Lbfgs + 3 restarts", Lbfgs{}.with_restarts(3, 11), x, y) && ok;
     ok = run_on_gp("Fixed", Fixed{}, x, y) && ok;
     ok = run_on_gp("RandomSearch (custom)", RandomSearch{}, x, y) && ok;
@@ -234,9 +237,9 @@ int main()
         std::cerr << result.error().message() << '\n';
         return 1;
     }
-    std::cout << "Lbfgs: converged = " << std::boolalpha << result->converged << ", iterations = "
-              << result->iterations << ", value = " << std::scientific << std::setprecision(2) << result->value
-              << std::fixed << std::setprecision(4) << '\n';
+    std::cout << "Lbfgs: converged = " << std::boolalpha << result->converged << ", iterations = " << result->iterations
+              << ", value = " << std::scientific << std::setprecision(2) << result->value << std::fixed
+              << std::setprecision(4) << '\n';
     std::cout << "  parameters = ";
     for (const double theta : result->params)
     {
@@ -295,8 +298,8 @@ int main()
         return 1;
     }
     bounds->to_constrained(z, theta_back);
-    std::cout << "z = (" << z[0] << ", " << z[1] << ", " << z[2] << "); round trip error = "
-              << std::abs(theta_back[0] - theta[0]) << '\n';
+    std::cout << "z = (" << z[0] << ", " << z[1] << ", " << z[2]
+              << "); round trip error = " << std::abs(theta_back[0] - theta[0]) << '\n';
     // [end]
     ok = ok && std::abs(theta_back[0] - theta[0]) < 1e-12 && std::abs(z[2]) < 1e-12;
 

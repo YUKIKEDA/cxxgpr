@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: fit and apply input/target transforms, compose them, and use them inside a Gpr.
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <iomanip>
 #include <iostream>
 #include <vector>
@@ -105,8 +104,8 @@ int main()
     {
         return 1;
     }
-    std::cout << "columnwise: row 0 -> (" << mixed[0] << ", " << mixed[n_rows] << "), row "
-              << n_rows - 1 << " -> (" << mixed[n_rows - 1] << ", " << mixed[2 * n_rows - 1] << ")\n";
+    std::cout << "columnwise: row 0 -> (" << mixed[0] << ", " << mixed[n_rows] << "), row " << n_rows - 1 << " -> ("
+              << mixed[n_rows - 1] << ", " << mixed[2 * n_rows - 1] << ")\n";
     // [end]
 
     // [pipeline]

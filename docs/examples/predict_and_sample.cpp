@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: predict, compute joint covariances, draw posterior samples, and use leave-one-out.
-#include <cxxgpr/core/rng.hpp>
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/optimizer/optimizer.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/core/rng.hpp>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/optimizer/optimizer.hpp>
 #include <iomanip>
 #include <iostream>
 #include <vector>
@@ -63,8 +62,8 @@ int main()
 
     // [variance-kind]
     const auto latent = fitted->predict(x_query, 4U, 1U, PredictOptions{.variance_kind = VarianceKind::Latent});
-    std::cout << "observation - latent variance = " << pred->variance[0] - latent->variance[0]
-              << " (noise variance " << fitted->likelihood().noise_variance() << ")\n";
+    std::cout << "observation - latent variance = " << pred->variance[0] - latent->variance[0] << " (noise variance "
+              << fitted->likelihood().noise_variance() << ")\n";
     // [end]
     ok = ok && std::abs(pred->variance[0] - latent->variance[0] - fitted->likelihood().noise_variance()) < 1e-9;
     ok = ok && latent->variance_kind == VarianceKind::Latent && pred->variance_kind == VarianceKind::Observation;
@@ -96,8 +95,8 @@ int main()
         return 1;
     }
     // Column-major m x m matrix: element (row, col) is covariance[col * n_points + row].
-    std::cout << "cov(0, 1) = " << cov->covariance[(1U * cov->n_points) + 0U] << ", var(0) = "
-              << cov->covariance[0] << '\n';
+    std::cout << "cov(0, 1) = " << cov->covariance[(1U * cov->n_points) + 0U] << ", var(0) = " << cov->covariance[0]
+              << '\n';
     // [end]
     ok = ok && cov->n_points == 4U && cov->covariance.size() == 16U;
     for (std::size_t i = 0; i < 4U; ++i)
@@ -111,9 +110,8 @@ int main()
 
     // [sample]
     constexpr std::size_t n_draws = 4000U;
-    const auto draws = fitted->sample(
-        x_query, 4U, 1U, n_draws, /*seed=*/123U, PredictOptions{.variance_kind = VarianceKind::Latent}
-    );
+    const auto draws =
+        fitted->sample(x_query, 4U, 1U, n_draws, /*seed=*/123U, PredictOptions{.variance_kind = VarianceKind::Latent});
     if (!draws)
     {
         std::cerr << draws.error().message() << '\n';
@@ -133,7 +131,8 @@ int main()
     std::cout << "sample mean " << mean0 << " (posterior " << latent->mean[0] << "), sample variance " << var0
               << " (posterior " << latent->variance[0] << ")\n";
     // [end]
-    ok = ok && std::abs(mean0 - latent->mean[0]) < 0.05 && std::abs(var0 - latent->variance[0]) < 0.2 * latent->variance[0];
+    ok = ok && std::abs(mean0 - latent->mean[0]) < 0.05
+        && std::abs(var0 - latent->variance[0]) < 0.2 * latent->variance[0];
 
     // [seed]
     const auto same = fitted->sample(x_query, 4U, 1U, 8U, 5U);
@@ -179,19 +178,19 @@ int main()
     // [errors]
     const std::array<double, 4> wrong{0.0, 1.0, 2.0, 3.0};
     const auto bad = fitted->predict(wrong, 2U, 2U);  // model was trained on one feature
-    std::cout << "two-column query: " << bad.error().message() << " (x_dim " << *bad.error().x_dim()
-              << ", expected " << *bad.error().expected_dim() << ")\n";
+    std::cout << "two-column query: " << bad.error().message() << " (x_dim " << *bad.error().x_dim() << ", expected "
+              << *bad.error().expected_dim() << ")\n";
     // [end]
     ok = ok && !bad && bad.error().code() == GprErrorCode::DimensionMismatch;
 
     // [rng]
     Xoshiro256PlusPlus rng(42U);
-    const double u = rng.unit();                  // uniform in [0, 1)
-    const double g = rng.unit_normal();           // standard normal
-    const std::size_t pick = rng.up_to(9U);       // uniform integer in [0, 9]
-    const double o = rng.open_unit();             // uniform strictly inside (0, 1)
-    const std::uint64_t w = rng.next_u64();       // raw 64-bit word
-    SeededRng copy(42U);                          // SeededRng is an alias of Xoshiro256PlusPlus
+    const double u = rng.unit();             // uniform in [0, 1)
+    const double g = rng.unit_normal();      // standard normal
+    const std::size_t pick = rng.up_to(9U);  // uniform integer in [0, 9]
+    const double o = rng.open_unit();        // uniform strictly inside (0, 1)
+    const std::uint64_t w = rng.next_u64();  // raw 64-bit word
+    SeededRng copy(42U);                     // SeededRng is an alias of Xoshiro256PlusPlus
     std::cout << "u = " << u << ", normal = " << g << ", pick = " << pick << ", open = " << o << ", word = " << w
               << ", fresh generator equals advanced one: " << (copy == rng) << '\n';
     // [end]

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to and explanation: the two exponential backends (KernelExp::Accurate and KernelExp::FastApprox),
 // their measured error, and their effect on a Gram matrix and its gradient.
-#include <cxxgpr/kernel/kernel.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cxxgpr/kernel/kernel.hpp>
 #include <iomanip>
 #include <iostream>
 #include <string_view>
@@ -82,7 +81,9 @@ int main()
     std::cout << "                FastApprox v - exp = " << fast.v - accurate.v << ", d1 - v = " << fast.d1 - fast.v
               << ", d2 - v = " << fast.d2 - fast.v << '\n';
     expect(accurate.v == accurate.d1 && accurate.v == accurate.d2, "Accurate jet");
-    expect(fast.d1 != fast.v && std::abs(fast.d1 - fast.v) < 1e-5, "FastApprox derivative is the polynomial derivative");
+    expect(
+        fast.d1 != fast.v && std::abs(fast.d1 - fast.v) < 1e-5, "FastApprox derivative is the polynomial derivative"
+    );
 
     // [kernel]
     // The backend is a property of the compiled kernel (Gpr exposes the same switch as with_kernel_exp).
@@ -99,7 +100,10 @@ int main()
     std::array<double, 64> grad_fast{};
     std::array<double, 64> grad_accurate{};
     std::array<double, 64> scratch_b{};
-    const auto m = [](std::array<double, 64>& v) { return MatrixMut<double>(v.data(), 8, 8); };
+    const auto m = [](std::array<double, 64>& v)
+    {
+        return MatrixMut<double>(v.data(), 8, 8);
+    };
     check(kernel.apply_points(x, m(accurate_gram), Triangle::Full, m(scratch)));
     check(kernel.grad_points(x, m(grad_accurate), 0, Triangle::Full, m(scratch), m(scratch_b)));
 
@@ -130,7 +134,8 @@ int main()
     std::array<double, 64> minus{};
     const std::array<double, 1> up{theta[0] + h};
     const std::array<double, 1> down{theta[0] - h};
-    auto fast_kernel = [&](const std::array<double, 1>& p, std::array<double, 64>& out) {
+    auto fast_kernel = [&](const std::array<double, 1>& p, std::array<double, 64>& out)
+    {
         check(probe.set_params(p));
         auto k = probe.compile<double>();
         k.set_kernel_exp(KernelExp::FastApprox);

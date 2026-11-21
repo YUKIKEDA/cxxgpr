@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Matrix views, prediction structs, and checked arithmetic / validation helpers.
+#include <array>
+#include <cstddef>
 #include <cxxgpr/core/checked.hpp>
 #include <cxxgpr/core/error.hpp>
 #include <cxxgpr/core/views.hpp>
-
-#include <array>
-#include <cstddef>
 #include <expected>
 #include <iostream>
 #include <limits>
@@ -30,7 +29,11 @@ int main()
 
     // [layout]
     // Row-major source data: one array per sample (3 samples, 2 features).
-    const std::vector<std::array<double, 2>> samples{{1.0, 10.0}, {2.0, 20.0}, {3.0, 30.0}};
+    const std::vector<std::array<double, 2>> samples{
+        {1.0, 10.0},
+        {2.0, 20.0},
+        {3.0, 30.0}
+    };
     // Column-major buffer: all values of feature 0, then all values of feature 1.
     std::vector<double> column_major(samples.size() * 2U);
     for (std::size_t row = 0; row < samples.size(); ++row)
@@ -98,25 +101,46 @@ int main()
 
     ok = ok && cxxgpr::require_nonempty(4U).has_value();
     ok = ok && expect_code("require_nonempty(0)", cxxgpr::require_nonempty(0U), cxxgpr::GprErrorCode::EmptyInput);
-    ok = ok && expect_code("require_count(3, 4)", cxxgpr::require_count(3U, 4U, "y"), cxxgpr::GprErrorCode::LengthMismatch);
-    ok = ok && expect_code("require_finite(bad)", cxxgpr::require_finite(std::span<const double>(bad)),
-                           cxxgpr::GprErrorCode::NonFiniteInput);
+    ok = ok
+        && expect_code("require_count(3, 4)", cxxgpr::require_count(3U, 4U, "y"), cxxgpr::GprErrorCode::LengthMismatch);
+    ok = ok
+        && expect_code(
+            "require_finite(bad)", cxxgpr::require_finite(std::span<const double>(bad)),
+            cxxgpr::GprErrorCode::NonFiniteInput
+        );
     ok = ok && cxxgpr::require_finite(std::span<const double>(good)).has_value();
-    ok = ok && expect_code("validate_matrix(2 x 3 over 4 values)", cxxgpr::validate_matrix(good, 2U, 3U, "X"),
-                           cxxgpr::GprErrorCode::LengthMismatch);
-    ok = ok && expect_code("validate_training(y too short)", cxxgpr::validate_training(good, 4U, 1U, short_y),
-                           cxxgpr::GprErrorCode::LengthMismatch);
-    ok = ok && expect_code("validate_training(wrong d)", cxxgpr::validate_training(good, 4U, 1U, good, 2U),
-                           cxxgpr::GprErrorCode::DimensionMismatch);
-    ok = ok && expect_code("validate_training(min_points = 5)",
-                           cxxgpr::validate_training(good, 4U, 1U, good, std::nullopt, 5U),
-                           cxxgpr::GprErrorCode::InsufficientData);
-    ok = ok && expect_code("validate_distance_targets(n = 3)", cxxgpr::validate_distance_targets(3U, good),
-                           cxxgpr::GprErrorCode::LengthMismatch);
-    ok = ok && expect_code("validate_query(d = 2 expected)", cxxgpr::validate_query(good, 4U, 1U, 2U),
-                           cxxgpr::GprErrorCode::DimensionMismatch);
-    ok = ok && cxxgpr::validate_training(good, 4U, 1U, good).has_value() &&
-         cxxgpr::validate_query(good, 4U, 1U, 1U).has_value();
+    ok = ok
+        && expect_code(
+            "validate_matrix(2 x 3 over 4 values)", cxxgpr::validate_matrix(good, 2U, 3U, "X"),
+            cxxgpr::GprErrorCode::LengthMismatch
+        );
+    ok = ok
+        && expect_code(
+            "validate_training(y too short)", cxxgpr::validate_training(good, 4U, 1U, short_y),
+            cxxgpr::GprErrorCode::LengthMismatch
+        );
+    ok = ok
+        && expect_code(
+            "validate_training(wrong d)", cxxgpr::validate_training(good, 4U, 1U, good, 2U),
+            cxxgpr::GprErrorCode::DimensionMismatch
+        );
+    ok = ok
+        && expect_code(
+            "validate_training(min_points = 5)", cxxgpr::validate_training(good, 4U, 1U, good, std::nullopt, 5U),
+            cxxgpr::GprErrorCode::InsufficientData
+        );
+    ok = ok
+        && expect_code(
+            "validate_distance_targets(n = 3)", cxxgpr::validate_distance_targets(3U, good),
+            cxxgpr::GprErrorCode::LengthMismatch
+        );
+    ok = ok
+        && expect_code(
+            "validate_query(d = 2 expected)", cxxgpr::validate_query(good, 4U, 1U, 2U),
+            cxxgpr::GprErrorCode::DimensionMismatch
+        );
+    ok = ok && cxxgpr::validate_training(good, 4U, 1U, good).has_value()
+        && cxxgpr::validate_query(good, 4U, 1U, 1U).has_value();
     // [end]
 
     // [results]
@@ -129,9 +153,8 @@ int main()
     joint.covariance = {0.04, 0.01, 0.01, 0.09};  // column-major 2 x 2: element (row, col) at col * 2 + row
     const cxxgpr::PredictOptions latent{.variance_kind = cxxgpr::VarianceKind::Latent};
     const cxxgpr::PredictOptions defaults;
-    std::cout << "default options are Observation: "
-              << (defaults.variance_kind == cxxgpr::VarianceKind::Observation) << ", options equal: "
-              << (latent == defaults) << ", prediction == itself: " << (prediction == prediction)
+    std::cout << "default options are Observation: " << (defaults.variance_kind == cxxgpr::VarianceKind::Observation)
+              << ", options equal: " << (latent == defaults) << ", prediction == itself: " << (prediction == prediction)
               << ", Cov(0, 1) = " << joint.covariance[1 * joint.n_points + 0] << '\n';
     ok = ok && latent != defaults && prediction == prediction && joint.covariance[2] == 0.01;
     // [end]

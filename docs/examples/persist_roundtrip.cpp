@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: save a fitted model, load it back, predict from the loaded model, and handle load errors.
-#include <cxxgpr/core/rng.hpp>
-#include <cxxgpr/core/views.hpp>
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/persist/persist.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cxxgpr/core/rng.hpp>
+#include <cxxgpr/core/views.hpp>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/persist/persist.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -27,11 +26,13 @@ namespace
     struct ScratchDir
     {
         fs::path path;
+
         explicit ScratchDir(std::string name) : path(fs::temp_directory_path() / std::move(name))
         {
             std::error_code ec;
             fs::remove_all(path, ec);
         }
+
         ~ScratchDir()
         {
             std::error_code ec;
@@ -133,8 +134,8 @@ int main()
     }
     // [end]
 
-    const bool bitwise_factor = same_bits(restored->mean, reference->mean)
-        && same_bits(restored->variance, reference->variance);
+    const bool bitwise_factor =
+        same_bits(restored->mean, reference->mean) && same_bits(restored->variance, reference->variance);
     std::cout << "save_with_factor round trip is bit-identical: " << bitwise_factor << '\n';
 
     auto light = cxxgpr::persist::LoadedGpr::load(light_dir.path);
@@ -205,7 +206,7 @@ int main()
     }
     // [end]
 
-    const bool ok = bitwise_factor && bitwise_typed && light_diff < 1e-9 && loaded->has_mmap_factor() && !wrong
-        && !missing;
+    const bool ok =
+        bitwise_factor && bitwise_typed && light_diff < 1e-9 && loaded->has_mmap_factor() && !wrong && !missing;
     return ok ? 0 : 1;
 }

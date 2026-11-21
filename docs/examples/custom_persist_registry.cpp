@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: persist a model that uses a custom kernel and a custom input transform through a PersistRegistry.
-#include <cxxgpr/core/rng.hpp>
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/persist/persist.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -13,6 +7,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cxxgpr/core/rng.hpp>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/persist/persist.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -50,6 +49,7 @@ namespace
         explicit GaussTerm(double length_scale = 1.0) : l_(length_scale) {}
 
         std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override { return std::make_unique<GaussTerm<T>>(l_); }
+
         std::size_t num_params() const noexcept override { return 1U; }
 
         std::expected<void, GprError> get_params(std::span<double> out) const override
@@ -57,6 +57,7 @@ namespace
             out[0] = std::log(l_);
             return {};
         }
+
         std::expected<void, GprError> set_params(std::span<const double> params) override
         {
             const double l = std::exp(params[0]);
@@ -67,6 +68,7 @@ namespace
             l_ = l;
             return {};
         }
+
         std::expected<void, GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
         {
             out[0] = cxxgpr::Interval::create(0.05, 50.0).value();
@@ -81,7 +83,8 @@ namespace
             {
                 for (std::size_t row = 0; row < dist.rows(); ++row)
                 {
-                    if ((uplo == cxxgpr::Triangle::Lower && row < col) || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
+                        || (uplo == cxxgpr::Triangle::Upper && row > col))
                     {
                         continue;
                     }
@@ -90,15 +93,18 @@ namespace
             }
             return {};
         }
+
         std::expected<void, GprError> apply_cross(cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out) const override
         {
             return apply(dist, out, cxxgpr::Triangle::Full);
         }
+
         std::expected<void, GprError> fill_diag(std::span<T> out) const override
         {
             std::ranges::fill(out, T{1});
             return {};
         }
+
         // d k / d log(l) = k * d2 / l^2
         std::expected<void, GprError> grad(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t, cxxgpr::Triangle uplo
@@ -109,7 +115,8 @@ namespace
             {
                 for (std::size_t row = 0; row < dist.rows(); ++row)
                 {
-                    if ((uplo == cxxgpr::Triangle::Lower && row < col) || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
+                        || (uplo == cxxgpr::Triangle::Upper && row > col))
                     {
                         continue;
                     }
@@ -118,6 +125,7 @@ namespace
             }
             return {};
         }
+
         // d2 k / d log(l)^2 = k * (d2^2 / l^4 - 2 d2 / l^2)
         std::expected<void, GprError> hess(
             cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t, std::size_t, cxxgpr::Triangle uplo
@@ -128,7 +136,8 @@ namespace
             {
                 for (std::size_t row = 0; row < dist.rows(); ++row)
                 {
-                    if ((uplo == cxxgpr::Triangle::Lower && row < col) || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
+                        || (uplo == cxxgpr::Triangle::Upper && row > col))
                     {
                         continue;
                     }
@@ -141,6 +150,7 @@ namespace
 
         // Persistence: a stable id (never "cxxgpr." ...) and the state needed to rebuild the leaf.
         std::string_view persist_id() const noexcept override { return "example.gauss"; }
+
         std::expected<std::string, GprError> persist_state_json() const override
         {
             return std::format("{}", l_);  // shortest decimal text that round-trips the double exactly
@@ -148,8 +158,10 @@ namespace
 
     private:
         T value(T d2) const { return std::exp(-d2 / static_cast<T>(2.0 * l_ * l_)); }
+
         double l_;
     };
+
     // [end]
 
     // ------------------------------------------------------------------------------------------------------------
@@ -165,18 +177,21 @@ namespace
         {
             return map(x, n_rows, n_cols, true, [](double v) { return std::log(v); });
         }
+
         std::expected<void, GprError> inverse_apply(
             std::span<double> x, std::size_t n_rows, std::size_t n_cols
         ) const override
         {
             return map(x, n_rows, n_cols, false, [](double v) { return std::exp(v); });
         }
+
         std::unique_ptr<cxxgpr::transform::FittedInputTransform> clone() const override
         {
             return std::make_unique<FittedLog>(*this);
         }
 
         std::string_view persist_id() const override { return "example.log.fitted"; }
+
         std::expected<std::string, GprError> persist_state_json() const override { return std::to_string(n_cols_); }
 
     private:
@@ -207,6 +222,7 @@ namespace
             }
             return {};
         }
+
         std::size_t n_cols_;
     };
 
@@ -223,14 +239,17 @@ namespace
             }
             return std::make_unique<FittedLog>(n_cols);
         }
+
         std::unique_ptr<cxxgpr::transform::UnfittedInputTransform> clone() const override
         {
             return std::make_unique<UnfittedLog>(*this);
         }
 
         std::string_view persist_id() const override { return "example.log.unfitted"; }
+
         std::expected<std::string, GprError> persist_state_json() const override { return "0"; }
     };
+
     // [end]
 
     // [registry]
@@ -240,46 +259,50 @@ namespace
         cxxgpr::persist::PersistRegistry registry;
 
         (void)registry.register_kernel(
-            "example.gauss",
-            [](std::string_view state) -> std::expected<cxxgpr::CustomKernel, GprError>
+            "example.gauss", [](std::string_view state) -> std::expected<cxxgpr::CustomKernel, GprError>
+        {
+            auto l = parse_state<double>(state);
+            if (!l)
             {
-                auto l = parse_state<double>(state);
-                if (!l)
-                {
-                    return std::unexpected(std::move(l).error());
-                }
-                return cxxgpr::make_custom_kernel<GaussTerm>(*l);
+                return std::unexpected(std::move(l).error());
             }
+            return cxxgpr::make_custom_kernel<GaussTerm>(*l);
+        }
         );
         (void)registry.register_unfitted_input(
             "example.log.unfitted",
             [](std::string_view) -> std::expected<std::unique_ptr<cxxgpr::transform::UnfittedInputTransform>, GprError>
-            { return std::make_unique<UnfittedLog>(); }
+        { return std::make_unique<UnfittedLog>(); }
         );
         (void)registry.register_fitted_input(
             "example.log.fitted",
-            [](std::string_view state) -> std::expected<std::unique_ptr<cxxgpr::transform::FittedInputTransform>, GprError>
+            [](
+                std::string_view state
+            ) -> std::expected<std::unique_ptr<cxxgpr::transform::FittedInputTransform>, GprError>
+        {
+            auto n_cols = parse_state<std::size_t>(state);
+            if (!n_cols)
             {
-                auto n_cols = parse_state<std::size_t>(state);
-                if (!n_cols)
-                {
-                    return std::unexpected(std::move(n_cols).error());
-                }
-                return std::make_unique<FittedLog>(*n_cols);
+                return std::unexpected(std::move(n_cols).error());
             }
+            return std::make_unique<FittedLog>(*n_cols);
+        }
         );
         return registry;
     }
+
     // [end]
 
     struct ScratchDir
     {
         std::filesystem::path path = std::filesystem::temp_directory_path() / "cxxgpr_example_custom_registry";
+
         ScratchDir()
         {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
+
         ~ScratchDir()
         {
             std::error_code ec;
@@ -324,8 +347,7 @@ int main()
         std::cerr << gauss.error().message() << '\n';
         return 1;
     }
-    const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
-        * cxxgpr::KernelSpec(*gauss);
+    const auto kernel = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value()) * cxxgpr::KernelSpec(*gauss);
 
     cxxgpr::transform::Pipeline features;
     features.then(UnfittedLog{}).then(cxxgpr::transform::StandardizeInput{});
@@ -385,11 +407,11 @@ int main()
     // [registration-errors]
     auto reserved = make_registry().register_kernel(
         "cxxgpr.mine", [](std::string_view) -> std::expected<cxxgpr::CustomKernel, GprError>
-        { return std::unexpected(GprError::empty_input()); }
+    { return std::unexpected(GprError::empty_input()); }
     );
     auto duplicate = make_registry().register_kernel(
         "example.gauss", [](std::string_view) -> std::expected<cxxgpr::CustomKernel, GprError>
-        { return std::unexpected(GprError::empty_input()); }
+    { return std::unexpected(GprError::empty_input()); }
     );
     std::cout << "reserved prefix rejected: " << !reserved << ", duplicate rejected: " << !duplicate << '\n';
     // [end]

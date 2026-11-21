@@ -79,7 +79,7 @@ namespace
         auto fit_lbfgs = gpr_lbfgs.fit(x_ref, y_train);
         ASSERT_TRUE(fit_lbfgs.has_value());
         EXPECT_TRUE(fit_lbfgs->optimizer_result().converged);
-        EXPECT_LT(fit_lbfgs->log_marginal_likelihood(), 15.0);
+        EXPECT_LT(fit_lbfgs->neg_log_marginal_likelihood(), 15.0);
 
         cxxgpr::Prediction<double> pred_out;
         ASSERT_TRUE(fit_lbfgs->predict_into(xq_ref, pred_out).has_value());
@@ -124,7 +124,7 @@ namespace
         auto trainer_back = fit_lbfgs->into_trainer();
         auto refitted = fit_lbfgs->refit(x_ref, y_train);
         ASSERT_TRUE(refitted.has_value());
-        EXPECT_NEAR(refitted->log_marginal_likelihood(), fit_lbfgs->log_marginal_likelihood(), 1e-6);
+        EXPECT_NEAR(refitted->neg_log_marginal_likelihood(), fit_lbfgs->neg_log_marginal_likelihood(), 1e-6);
 
         // 2. TrustRegion, NelderMead, FastSimulatedAnnealing (with LeafCache), and Fixed::factor.
         const auto gpr_tr = cxxgpr::Gpr<cxxgpr::optimizer::TrustRegion>(

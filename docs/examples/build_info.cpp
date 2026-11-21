@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Inspect the build provenance of the cxxgpr library you linked against.
 #include <cxxgpr/core/build_info.hpp>
-
 #include <iostream>
 
 int main()

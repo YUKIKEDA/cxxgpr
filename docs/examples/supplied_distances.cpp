@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: evaluate kernels from squared distances that you compute yourself (here: arc length on a circle),
 // mix them with coordinate kernels, and reuse a DistanceCache for coordinate kernels.
-#include <cxxgpr/kernel/kernel.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cxxgpr/kernel/kernel.hpp>
 #include <iostream>
 #include <numbers>
 #include <optional>
@@ -27,7 +26,8 @@ namespace
         return std::move(*result);
     }
 
-    // Borrow the value of an expected without moving it (a CheckedDistanceStore is built by the library and kept in place).
+    // Borrow the value of an expected without moving it (a CheckedDistanceStore is built by the library and kept in
+    // place).
     template <typename T> const T& borrow(const std::expected<T, cxxgpr::GprError>& result)
     {
         if (!result)
@@ -79,6 +79,7 @@ namespace
         }
         return d2;
     }
+
     // [end]
 
 }  // namespace
@@ -94,17 +95,18 @@ int main()
     // [kernel]
     // k(a, b) = 2 * exp(-arc(a, b) / 1.0) + 0.1 * delta: an exponential (Matern 1/2) kernel on the circle.
     const ScalarDistance arc_slot;  // a fresh slot; its identity is what binds a table to the kernel
-    const DistanceKernel<DistanceOnly> kernel =
-        DistanceKernel<DistanceOnly>(unwrap(ConstantKernel::create(2.0))) *
-            arc_slot.matern(unwrap(MaternKernel::create(1.0, MaternNu::OneHalf))) +
-        DistanceKernel<DistanceOnly>(unwrap(WhiteKernel::create(0.1)));
+    const DistanceKernel<DistanceOnly> kernel = DistanceKernel<DistanceOnly>(unwrap(ConstantKernel::create(2.0)))
+            * arc_slot.matern(unwrap(MaternKernel::create(1.0, MaternNu::OneHalf)))
+        + DistanceKernel<DistanceOnly>(unwrap(WhiteKernel::create(0.1)));
     // [end]
     std::cout << "num_params = " << kernel.num_params() << ", scalar slots = " << kernel.num_scalar_slots()
               << ", ARD slots = " << kernel.num_ard_slots() << '\n';
     expect(kernel.num_params() == 3 && kernel.num_scalar_slots() == 1 && kernel.num_ard_slots() == 0, "slot counts");
     const std::vector<SlotDescriptor> slots = kernel.slots();
-    expect(slots.size() == 1 && slots[0].id == arc_slot.slot() && !slots[0].ard_dims.has_value() && slots[0].at == 0,
-           "slot descriptor");
+    expect(
+        slots.size() == 1 && slots[0].id == arc_slot.slot() && !slots[0].ard_dims.has_value() && slots[0].at == 0,
+        "slot descriptor"
+    );
 
     // [prepare]
     const CompiledDistanceKernel<double> compiled = kernel.compile<double>();
@@ -121,11 +123,13 @@ int main()
     std::vector<double> gram(n * n);
     std::vector<double> scratch(n * n);
     NestedBuffers<double> nested = compiled.make_nested_buffers(n, n);
-    check(compiled.apply(store, std::nullopt, MatrixMut<double>(gram.data(), n, n), Triangle::Full,
-                         MatrixMut<double>(scratch.data(), n, n), nested));
+    check(compiled.apply(
+        store, std::nullopt, MatrixMut<double>(gram.data(), n, n), Triangle::Full,
+        MatrixMut<double>(scratch.data(), n, n), nested
+    ));
     // [end]
-    std::cout << "K(0,0) = " << gram[0] << "  K(1,0) = " << gram[1] << "  K(3,0) = " << gram[3] << "  K(4,0) = " << gram[4]
-              << '\n';
+    std::cout << "K(0,0) = " << gram[0] << "  K(1,0) = " << gram[1] << "  K(3,0) = " << gram[3]
+              << "  K(4,0) = " << gram[4] << '\n';
     // Hand values: angles 0.0/0.5 are 0.5 apart, 0.0/3.0 are 3.0 apart, 0.0/5.5 are 2 pi - 5.5 apart.
     expect(std::abs(gram[0] - 2.1) < 1e-14, "diagonal");
     expect(std::abs(gram[1] - 2.0 * std::exp(-0.5)) < 1e-14, "arc 0.5");
@@ -138,8 +142,10 @@ int main()
     // Gradient with respect to log(lengthscale), parameter 1: d/d(log l) [2 exp(-r / l)] = 2 exp(-r / l) r / l.
     std::vector<double> d_k(n * n);
     std::vector<double> scratch_b(n * n);
-    check(compiled.grad(store, std::nullopt, MatrixMut<double>(d_k.data(), n, n), 1, Triangle::Full,
-                        MatrixMut<double>(scratch.data(), n, n), MatrixMut<double>(scratch_b.data(), n, n), nested));
+    check(compiled.grad(
+        store, std::nullopt, MatrixMut<double>(d_k.data(), n, n), 1, Triangle::Full,
+        MatrixMut<double>(scratch.data(), n, n), MatrixMut<double>(scratch_b.data(), n, n), nested
+    ));
     // [end]
     expect(std::abs(d_k[1] - 2.0 * std::exp(-0.5) * 0.5) < 1e-14, "gradient");
 
@@ -153,8 +159,10 @@ int main()
     const CheckedDistanceStore<double>& cross_store = borrow(prepared_cross);
     std::vector<double> cross(2 * n);
     std::vector<double> cross_scratch(2 * n);
-    check(compiled.apply_cross(cross_store, std::nullopt, std::nullopt, MatrixMut<double>(cross.data(), 2, n),
-                               MatrixMut<double>(cross_scratch.data(), 2, n)));
+    check(compiled.apply_cross(
+        cross_store, std::nullopt, std::nullopt, MatrixMut<double>(cross.data(), 2, n),
+        MatrixMut<double>(cross_scratch.data(), 2, n)
+    ));
     // [end]
     std::cout << "k(1.0, 0.0) = " << cross[0] << " (hand " << 2.0 * std::exp(-1.0) << ")\n";
     expect(std::abs(cross[0] - 2.0 * std::exp(-1.0)) < 1e-14, "cross-covariance without white noise");
@@ -202,55 +210,70 @@ int main()
         }
     }
     const ArdDistance ard_slot = unwrap(ArdDistance::create(2));
-    const auto ard_kernel =
-        unwrap(ard_slot.rbf_ard(unwrap(RbfArdKernel::create(std::array<double, 2>{1.0, 2.0}))));
+    const auto ard_kernel = unwrap(ard_slot.rbf_ard(unwrap(RbfArdKernel::create(std::array<double, 2>{1.0, 2.0}))));
     const auto ard_compiled = ard_kernel.compile<double>();
-    const std::array<MatrixRef<double>, 2> tables{MatrixRef<double>(d2_t.data(), 3, 3),
-                                                  MatrixRef<double>(d2_s.data(), 3, 3)};
+    const std::array<MatrixRef<double>, 2> tables{
+        MatrixRef<double>(d2_t.data(), 3, 3), MatrixRef<double>(d2_s.data(), 3, 3)
+    };
     DistanceSource ard_source;
     ard_source.bind_ard(ard_slot.slot(), tables);
     const auto prepared_ard = ard_compiled.prepare_square(ard_source);
     const CheckedDistanceStore<double>& ard_store = borrow(prepared_ard);
     std::array<double, 9> ard_gram{};
     std::array<double, 9> ard_scratch{};
-    check(ard_compiled.apply(ard_store, std::nullopt, MatrixMut<double>(ard_gram.data(), 3, 3), Triangle::Full,
-                             MatrixMut<double>(ard_scratch.data(), 3, 3)));
+    check(ard_compiled.apply(
+        ard_store, std::nullopt, MatrixMut<double>(ard_gram.data(), 3, 3), Triangle::Full,
+        MatrixMut<double>(ard_scratch.data(), 3, 3)
+    ));
     // [end]
-    std::cout << "ARD K(1,0) = " << ard_gram[1] << " (hand " << std::exp(-1.0) << "), dims = " << ard_slot.dims() << '\n';
+    std::cout << "ARD K(1,0) = " << ard_gram[1] << " (hand " << std::exp(-1.0) << "), dims = " << ard_slot.dims()
+              << '\n';
     expect(std::abs(ard_gram[1] - std::exp(-1.0)) < 1e-14 && ard_slot.dims() == 2, "ARD from per-feature tables");
-    const auto wrong = ard_slot.matern_ard(unwrap(MaternArdKernel::create(std::array<double, 3>{1.0, 1.0, 1.0}, MaternNu::FiveHalves)));
+    const auto wrong = ard_slot.matern_ard(
+        unwrap(MaternArdKernel::create(std::array<double, 3>{1.0, 1.0, 1.0}, MaternNu::FiveHalves))
+    );
     expect(!wrong && wrong.error().code() == GprErrorCode::DimensionMismatch, "ARD leaf must match the slot");
     expect(!ArdDistance::create(0) && ArdDistance::create(0).error().code() == GprErrorCode::EmptyInput, "dims > 0");
     // The other leaf factories of the two slot types.
     const auto rbf_k = arc_slot.rbf(unwrap(RbfKernel::create(1.0)));
     const auto per_k = arc_slot.periodic(unwrap(PeriodicKernel::create(1.0, 6.0)));
     const auto rq_k = arc_slot.rational_quadratic(unwrap(RationalQuadraticKernel::create(1.0, 1.0)));
-    const auto rq_ard_k = ard_slot.rational_quadratic_ard(unwrap(RationalQuadraticArdKernel::create(std::array<double, 2>{1.0, 1.0}, 1.0)));
-    expect(rbf_k.num_params() == 1 && per_k.num_params() == 2 && rq_k.num_params() == 2 && rq_ard_k.has_value(),
-           "slot leaf factories");
+    const auto rq_ard_k = ard_slot.rational_quadratic_ard(
+        unwrap(RationalQuadraticArdKernel::create(std::array<double, 2>{1.0, 1.0}, 1.0))
+    );
+    expect(
+        rbf_k.num_params() == 1 && per_k.num_params() == 2 && rq_k.num_params() == 2 && rq_ard_k.has_value(),
+        "slot leaf factories"
+    );
 
     // [with-points]
     // Mix the supplied arc distance with a coordinate kernel on a numeric covariate (here the index of each point).
     const std::vector<double> index{0.0, 1.0, 2.0, 3.0, 4.0};
-    const DistanceKernel<WithPoints> mixed =
-        arc_slot.matern(unwrap(MaternKernel::create(1.0, MaternNu::OneHalf))) +
-        KernelSpec(unwrap(LinearKernel::create(0.5)));
+    const DistanceKernel<WithPoints> mixed = arc_slot.matern(unwrap(MaternKernel::create(1.0, MaternNu::OneHalf)))
+        + KernelSpec(unwrap(LinearKernel::create(0.5)));
     const auto mixed_compiled = mixed.compile<double>();
     std::vector<double> mixed_gram(n * n);
-    check(mixed_compiled.apply(store, MatrixRef<double>(index.data(), n, 1), MatrixMut<double>(mixed_gram.data(), n, n),
-                               Triangle::Full, MatrixMut<double>(scratch.data(), n, n)));
+    check(mixed_compiled.apply(
+        store, MatrixRef<double>(index.data(), n, 1), MatrixMut<double>(mixed_gram.data(), n, n), Triangle::Full,
+        MatrixMut<double>(scratch.data(), n, n)
+    ));
     // [end]
     // k(0, 1) = exp(-0.5) + 0.5 * (0 * 1) and k(1, 2) = exp(-1.0) + 0.5 * (1 * 2).
-    std::cout << "mixed requires_points = " << mixed_compiled.requires_points() << ", K(2,1) = " << mixed_gram[7] << '\n';
-    expect(mixed_compiled.requires_points() && std::abs(mixed_gram[1] - std::exp(-0.5)) < 1e-14 &&
-               std::abs(mixed_gram[7] - (std::exp(-1.0) + 0.5 * 2.0)) < 1e-14,
-           "supplied distance plus coordinate kernel");
+    std::cout << "mixed requires_points = " << mixed_compiled.requires_points() << ", K(2,1) = " << mixed_gram[7]
+              << '\n';
+    expect(
+        mixed_compiled.requires_points() && std::abs(mixed_gram[1] - std::exp(-0.5)) < 1e-14
+            && std::abs(mixed_gram[7] - (std::exp(-1.0) + 0.5 * 2.0)) < 1e-14,
+        "supplied distance plus coordinate kernel"
+    );
     const auto promoted = kernel.with_points();
     expect(promoted.num_params() == kernel.num_params(), "with_points keeps the parameters");
 
     // The coordinate evaluation of the same tree without the supplied table is rejected.
-    const auto no_points = mixed_compiled.apply(store, std::nullopt, MatrixMut<double>(mixed_gram.data(), n, n),
-                                                Triangle::Full, MatrixMut<double>(scratch.data(), n, n));
+    const auto no_points = mixed_compiled.apply(
+        store, std::nullopt, MatrixMut<double>(mixed_gram.data(), n, n), Triangle::Full,
+        MatrixMut<double>(scratch.data(), n, n)
+    );
     expect(!no_points && no_points.error().code() == GprErrorCode::UnsupportedKernelOperation, "points required");
 
     // [cache]
@@ -261,10 +284,13 @@ int main()
     std::cout << "cache: points = " << cache.num_points() << ", dims = " << cache.num_dims()
               << ", has_dist = " << cache.has_dist() << ", has_ard = " << cache.has_ard()
               << ", packed size = " << cache.ard_packed().size() << '\n';
-    const auto cached_kernel = KernelSpec(unwrap(RbfArdKernel::create(std::array<double, 2>{1.0, 2.0}))).compile<double>();
+    const auto cached_kernel =
+        KernelSpec(unwrap(RbfArdKernel::create(std::array<double, 2>{1.0, 2.0}))).compile<double>();
     std::array<double, 9> cached_gram{};
-    check(cached_kernel.apply_cached(x, cache, MatrixMut<double>(cached_gram.data(), 3, 3), Triangle::Lower,
-                                     MatrixMut<double>(ard_scratch.data(), 3, 3)));
+    check(cached_kernel.apply_cached(
+        x, cache, MatrixMut<double>(cached_gram.data(), 3, 3), Triangle::Lower,
+        MatrixMut<double>(ard_scratch.data(), 3, 3)
+    ));
     // [end]
     expect(cache.has_dist() && cache.has_ard() && cache.ard_packed().size() == 2 * 3 * 4 / 2, "cache sizes");
     expect(std::abs(cache.dist_view()(1, 0) - (1.0 + 4.0)) < 1e-15, "cached squared distance");

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The iterative-refinement engine on its own: a custom RefineSystem over a float Cholesky factor.
-#include <cxxgpr/linalg/cholesky.hpp>
-#include <cxxgpr/linalg/dense.hpp>
-#include <cxxgpr/precision/refine.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/linalg/cholesky.hpp>
+#include <cxxgpr/linalg/dense.hpp>
+#include <cxxgpr/precision/refine.hpp>
 #include <iomanip>
 #include <iostream>
 #include <span>
@@ -37,7 +36,7 @@ namespace
     // How the residual b - B w is evaluated, and whether a converged iterate is double-checked.
     enum class Residual
     {
-        StoredFloatMatrix,  // r = b - float(A) w: the matrix that the factor was built from
+        StoredFloatMatrix,   // r = b - float(A) w: the matrix that the factor was built from
         StoredFloatChecked,  // same residual, but accept() re-checks the exact double matrix
         ExactDouble,         // r = b - A w with the double matrix
     };
@@ -47,8 +46,12 @@ namespace
     {
     public:
         FloatFactorSystem(
-            cxxgpr::MatrixRef<double> a_f64, cxxgpr::MatrixRef<float> a_f32, cxxgpr::MatrixRef<float> l_f32,
-            std::span<const double> b, Residual residual, double damping = 1.0
+            cxxgpr::MatrixRef<double> a_f64,
+            cxxgpr::MatrixRef<float> a_f32,
+            cxxgpr::MatrixRef<float> l_f32,
+            std::span<const double> b,
+            Residual residual,
+            double damping = 1.0
         ) :
             a_f64_(a_f64),
             a_f32_(a_f32),
@@ -160,6 +163,7 @@ namespace
         std::vector<double> sum_;
         std::vector<float> delta_;
     };
+
     // [end]
 
     double relative_error(const std::vector<double>& a, const std::vector<double>& b)
@@ -231,6 +235,7 @@ int main()
               << " corrections, stagnation above ratio " << std::fixed << std::setprecision(1)
               << refinement_stagnation_ratio << " twice in a row\n"
               << std::scientific << std::setprecision(3);
+
     // [end]
 
     // [run]
@@ -241,12 +246,13 @@ int main()
         double damping;
         RefinementStatus expected;
     };
+
     const Case cases[] = {
-        {"stored float matrix        ", Residual::StoredFloatMatrix, 1.0, RefinementStatus::Converged},
-        {"stored float, checked      ", Residual::StoredFloatChecked, 1.0, RefinementStatus::RejectedByAccept},
-        {"exact double residual      ", Residual::ExactDouble, 1.0, RefinementStatus::Converged},
-        {"useless correction (x0)    ", Residual::ExactDouble, 0.0, RefinementStatus::Stagnated},
-        {"weak correction (x0.2)     ", Residual::ExactDouble, 0.2, RefinementStatus::MaxCorrectionsReached},
+        {"stored float matrix        ",  Residual::StoredFloatMatrix, 1.0,             RefinementStatus::Converged},
+        {"stored float, checked      ", Residual::StoredFloatChecked, 1.0,      RefinementStatus::RejectedByAccept},
+        {"exact double residual      ",        Residual::ExactDouble, 1.0,             RefinementStatus::Converged},
+        {"useless correction (x0)    ",        Residual::ExactDouble, 0.0,             RefinementStatus::Stagnated},
+        {"weak correction (x0.2)     ",        Residual::ExactDouble, 0.2, RefinementStatus::MaxCorrectionsReached},
     };
     bool ok = true;
     for (const Case& c : cases)
@@ -260,9 +266,9 @@ int main()
             std::cerr << summary.error().message() << '\n';
             return 1;
         }
-        std::cout << c.label << to_string(summary->status) << ", corrections " << summary->iterations
-                  << ", fallback " << summary->used_fallback() << ", relative residual "
-                  << summary->final_relative_residual << ", error " << relative_error(w, reference) << '\n';
+        std::cout << c.label << to_string(summary->status) << ", corrections " << summary->iterations << ", fallback "
+                  << summary->used_fallback() << ", relative residual " << summary->final_relative_residual
+                  << ", error " << relative_error(w, reference) << '\n';
         ok = ok && summary->status == c.expected;
     }
     // [end]
@@ -281,8 +287,8 @@ int main()
     const double a_inf = exact.residual(*refined, r).value();
     const double r_inf = inf_norm(r);
     const bool met = meets_relative_residual(a_inf, *refined, b, r, refinement_tolerance(n));
-    std::cout << "refine(): ||r||_inf = " << r_inf << ", ||A||_inf = " << a_inf
-              << ", tolerance met: " << met << ", error " << relative_error(*refined, reference) << '\n';
+    std::cout << "refine(): ||r||_inf = " << r_inf << ", ||A||_inf = " << a_inf << ", tolerance met: " << met
+              << ", error " << relative_error(*refined, reference) << '\n';
 
     // promoted_residual() is the same float-matrix residual that the loop uses in its first variant.
     std::vector<double> r_float(n);

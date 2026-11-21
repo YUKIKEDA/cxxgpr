@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Tutorial: fit a one-dimensional Gaussian process to noisy samples of sin(x)
 // and predict the mean and standard deviation at new inputs.
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <iostream>
 
 int main()
@@ -71,15 +70,15 @@ int main()
     std::cout << "signal variance = " << std::exp(log_params[0]) << ", lengthscale = " << std::exp(log_params[1])
               << '\n';
     std::cout << "noise variance = " << fitted->likelihood().noise_variance() << " (standardised scale)\n";
-    std::cout << "log marginal likelihood = " << fitted->log_marginal_likelihood() << '\n';
+    std::cout << "log marginal likelihood = " << fitted->neg_log_marginal_likelihood() << '\n';
     // [end]
     bool ok = true;
     for (std::size_t i = 0; i < x_query.size(); ++i)
     {
         const double sd = std::sqrt(pred->variance[i]);
         const double truth = std::sin(x_query[i]);
-        std::cout << "x = " << x_query[i] << "  mean = " << pred->mean[i] << "  std = " << sd
-                  << "  sin(x) = " << truth << '\n';
+        std::cout << "x = " << x_query[i] << "  mean = " << pred->mean[i] << "  std = " << sd << "  sin(x) = " << truth
+                  << '\n';
         // The posterior mean must be within three standard deviations of the noise-free function.
         ok = ok && std::abs(pred->mean[i] - truth) < 3.0 * sd;
     }

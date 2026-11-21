@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: write a custom input transform (a logarithmic map) and use it in a pipeline inside a Gpr.
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-#include <cxxgpr/transform/transform.hpp>
-
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
+#include <cxxgpr/transform/transform.hpp>
 #include <expected>
 #include <iostream>
 #include <memory>
@@ -102,6 +101,7 @@ namespace
     private:
         std::size_t n_cols_;
     };
+
     // [end]
 
     // [unfitted]
@@ -122,6 +122,7 @@ namespace
 
         std::unique_ptr<UnfittedInputTransform> clone() const override { return std::make_unique<LogInput>(*this); }
     };
+
     // [end]
 }  // namespace
 
@@ -131,7 +132,10 @@ int main()
     const std::size_t n = 25;
     std::vector<double> x(n);
     std::vector<double> y(n);
-    auto truth = [](double v) { return 2.0 + std::sin(1.2 * std::log(v)); };
+    auto truth = [](double v)
+    {
+        return 2.0 + std::sin(1.2 * std::log(v));
+    };
     for (std::size_t i = 0; i < n; ++i)
     {
         x[i] = std::pow(10.0, 3.7 * static_cast<double>(i) / static_cast<double>(n - 1));
@@ -150,9 +154,8 @@ int main()
     {
         return 1;
     }
-    const auto configured = trainer->with_input_transform(features).with_target_transform(
-        cxxgpr::transform::StandardizeTarget{}
-    );
+    const auto configured =
+        trainer->with_input_transform(features).with_target_transform(cxxgpr::transform::StandardizeTarget{});
     auto model = configured.fit(x, n, 1U, y);
     if (!model)
     {

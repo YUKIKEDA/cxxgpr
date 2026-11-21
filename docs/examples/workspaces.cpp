@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Workspace-level building blocks: factor, marginal likelihood, gradient, Hessian, incremental
 // Gram updates and posterior inference, all on caller-owned buffers.
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
 #include <cxxgpr/linalg/cholesky.hpp>
 #include <cxxgpr/linalg/dense.hpp>
 #include <cxxgpr/workspace/workspace.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstddef>
 #include <iomanip>
 #include <iostream>
 #include <numbers>
@@ -192,8 +191,7 @@ int main()
               << buffers->dist.has_value() << ", overwrites L " << buffers->overwrites_cholesky() << '\n';
     std::cout << "prefer_memory: W buffer " << lean->w_matrix.size() << " doubles, distance cache "
               << lean->dist.has_value() << ", overwrites L " << lean->overwrites_cholesky() << '\n';
-    std::cout << "same value and gradient under both policies: " << (*nll_lean == *nll_g && grad_lean == grad)
-              << '\n';
+    std::cout << "same value and gradient under both policies: " << (*nll_lean == *nll_g && grad_lean == grad) << '\n';
     if (*nll_lean != *nll_g || grad_lean != grad)
     {
         return 1;
@@ -213,7 +211,8 @@ int main()
     const MatrixMut<double> scr(scratch.data(), n, n, n);
 
     const std::array<std::size_t, p> everything{0, 1, 2};
-    if (auto r = cache.evaluate_incremental(kernel, x_ref, nullptr, theta, everything, p, out, Triangle::Lower, scr, nested);
+    if (auto r =
+            cache.evaluate_incremental(kernel, x_ref, nullptr, theta, everything, p, out, Triangle::Lower, scr, nested);
         !r)
     {
         return fail("evaluate_incremental", r.error());
@@ -252,8 +251,8 @@ int main()
     auto cheat = theta;
     cheat[0] += 0.5;
     const auto rejected = cache.prepare_step(cheat, only_length_scale, kernel, p);
-    std::cout << "undeclared change rejected: " << (!rejected && rejected.error().code() == GprErrorCode::IndexOutOfRange)
-              << '\n';
+    std::cout << "undeclared change rejected: "
+              << (!rejected && rejected.error().code() == GprErrorCode::IndexOutOfRange) << '\n';
     if (gram_diff > 1e-13 || rejected)
     {
         return 1;
@@ -337,10 +336,12 @@ int main()
         kernel, likelihood, x_ref, buffers->core.k_ref(), alpha, xq_ref, PredictOptions{VarianceKind::Latent}, query
     );
     auto draws_a = sample(
-        kernel, likelihood, x_ref, buffers->core.k_ref(), alpha, xq_ref, 4, 99, PredictOptions{VarianceKind::Latent}, query
+        kernel, likelihood, x_ref, buffers->core.k_ref(), alpha, xq_ref, 4, 99, PredictOptions{VarianceKind::Latent},
+        query
     );
     auto draws_b = sample(
-        kernel, likelihood, x_ref, buffers->core.k_ref(), alpha, xq_ref, 4, 99, PredictOptions{VarianceKind::Latent}, query
+        kernel, likelihood, x_ref, buffers->core.k_ref(), alpha, xq_ref, 4, 99, PredictOptions{VarianceKind::Latent},
+        query
     );
     if (!cov || !draws_a || !draws_b)
     {

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Zero-allocation prediction: warm up once, then predict_into() never touches the heap again.
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-
 #include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
 #include <iomanip>
 #include <iostream>
 #include <new>
@@ -33,8 +32,16 @@ void* operator new(std::size_t size)
     throw std::bad_alloc{};
 }
 
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p) noexcept
+{
+    std::free(p);
+}
+
+void operator delete(void* p, std::size_t) noexcept
+{
+    std::free(p);
+}
+
 // [end]
 
 namespace

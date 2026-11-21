@@ -136,7 +136,7 @@ namespace cxxgpr::persist
             /// @brief Active read-only span over alpha_owned (n).
             std::span<const Refine> alpha_view;
             /// @brief Negative log marginal likelihood computed from loaded or reconstructed factor.
-            double log_marginal_likelihood{0.0};
+            double neg_log_marginal_likelihood{0.0};
             /// @brief Mutable reusable query scratch buffers avoiding allocations on repeated predict_into().
             mutable QueryWorkspace<P> query_ws;
             /// @brief Temporary typed prediction buffer used to promote SinglePrecision outputs to double.
@@ -294,7 +294,7 @@ namespace cxxgpr::persist
                     log_det += std::log(l_ii);
                 }
                 const double log_2pi = std::log(2.0 * std::numbers::pi);
-                state.log_marginal_likelihood = (0.5 * quad) + log_det + (0.5 * static_cast<double>(n) * log_2pi);
+                state.neg_log_marginal_likelihood = (0.5 * quad) + log_det + (0.5 * static_cast<double>(n) * log_2pi);
                 return state;
             }
 
@@ -329,7 +329,7 @@ namespace cxxgpr::persist
             {
                 return std::unexpected(std::move(mll).error());
             }
-            state.log_marginal_likelihood = *mll;
+            state.neg_log_marginal_likelihood = *mll;
             state.l_owned.resize(n * n);
             for (std::size_t col = 0; col < n; ++col)
             {
@@ -1160,7 +1160,7 @@ namespace cxxgpr::persist
             .n_train = impl_->n,
             .n_features = impl_->d,
             .factor_jitter = impl_->factor_jitter,
-            .log_marginal_likelihood = st.log_marginal_likelihood,
+            .neg_log_marginal_likelihood = st.neg_log_marginal_likelihood,
             .refinement_summary = std::nullopt,
             .optimizer_result = {},
         };

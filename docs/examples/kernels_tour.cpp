@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: create each of the ten built-in kernel leaves and check its value against a hand-written formula.
-#include <cxxgpr/kernel/kernel.hpp>
-
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cxxgpr/kernel/kernel.hpp>
 #include <iomanip>
 #include <iostream>
 #include <numbers>
@@ -59,6 +58,7 @@ namespace
         check(compiled.apply_points(x, out, cxxgpr::Triangle::Full, work));
         return {gram[0], gram[1]};  // out(0, 0) and out(1, 0) in column-major order
     }
+
     // [end]
 
     bool all_ok = true;
@@ -67,9 +67,8 @@ namespace
     {
         const bool ok = std::abs(got.diagonal - expected_diag) < 1e-12 && std::abs(got.off_diag - expected_off) < 1e-12;
         all_ok = all_ok && ok;
-        std::cout << std::left << std::setw(28) << name << std::right << std::setw(12) << got.diagonal
-                  << std::setw(12) << got.off_diag << std::setw(12) << expected_off << (ok ? "   ok" : "   MISMATCH")
-                  << '\n';
+        std::cout << std::left << std::setw(28) << name << std::right << std::setw(12) << got.diagonal << std::setw(12)
+                  << got.off_diag << std::setw(12) << expected_off << (ok ? "   ok" : "   MISMATCH") << '\n';
     }
 
 }  // namespace

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Compare the four precision policies and the fast exponential on one problem.
-#include <cxxgpr/gpr/gpr.hpp>
-#include <cxxgpr/kernel/kernel.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cxxgpr/gpr/gpr.hpp>
+#include <cxxgpr/kernel/kernel.hpp>
 #include <iomanip>
 #include <iostream>
 #include <span>
@@ -50,8 +49,13 @@ namespace
     // runs is the arithmetic. optimizer::Fixed performs no optimization iterations.
     template <typename P>
     bool run(
-        std::string name, const cxxgpr::KernelSpec& spec, cxxgpr::KernelExp exp_mode, std::span<const double> x,
-        std::span<const double> y, std::span<const double> xq, Outcome& out
+        std::string name,
+        const cxxgpr::KernelSpec& spec,
+        cxxgpr::KernelExp exp_mode,
+        std::span<const double> x,
+        std::span<const double> y,
+        std::span<const double> xq,
+        Outcome& out
     )
     {
         using namespace cxxgpr;
@@ -78,11 +82,12 @@ namespace
         out.variance.assign(prediction->variance.begin(), prediction->variance.end());
         if (const auto& summary = fitted->refinement_summary(); summary)
         {
-            out.refinement = std::string(to_string(summary->status)) + ", " + std::to_string(summary->iterations)
-                + " corrections";
+            out.refinement =
+                std::string(to_string(summary->status)) + ", " + std::to_string(summary->iterations) + " corrections";
         }
         return true;
     }
+
     // [end]
 
     double max_abs_diff(const std::vector<double>& a, const std::vector<double>& b)

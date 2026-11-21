@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: inspect and react to errors returned through std::expected<T, GprError>.
+#include <array>
+#include <cmath>
+#include <cstddef>
 #include <cxxgpr/core/error.hpp>
 #include <cxxgpr/core/interval.hpp>
 #include <cxxgpr/core/likelihood.hpp>
@@ -8,17 +11,13 @@
 #include <cxxgpr/linalg/jitter.hpp>
 #include <cxxgpr/optimizer/optimizer.hpp>
 #include <cxxgpr/persist/persist.hpp>
-
-#include <array>
-#include <cmath>
-#include <cstddef>
 #include <expected>
 #include <iostream>
 #include <limits>
 #include <optional>
 #include <span>
-#include <utility>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -32,30 +31,52 @@ namespace
     {
         switch (code)
         {
-            case GprErrorCode::EmptyInput: return "EmptyInput";
-            case GprErrorCode::SizeOverflow: return "SizeOverflow";
-            case GprErrorCode::LengthMismatch: return "LengthMismatch";
-            case GprErrorCode::DimensionMismatch: return "DimensionMismatch";
-            case GprErrorCode::IndexOutOfRange: return "IndexOutOfRange";
-            case GprErrorCode::InsufficientData: return "InsufficientData";
-            case GprErrorCode::NonFiniteInput: return "NonFiniteInput";
-            case GprErrorCode::NonFiniteKernelValue: return "NonFiniteKernelValue";
-            case GprErrorCode::InvalidHyperparameter: return "InvalidHyperparameter";
-            case GprErrorCode::InvalidNoiseVariance: return "InvalidNoiseVariance";
-            case GprErrorCode::InvalidInterval: return "InvalidInterval";
-            case GprErrorCode::InvalidConfig: return "InvalidConfig";
-            case GprErrorCode::InvalidDistance: return "InvalidDistance";
-            case GprErrorCode::DistanceSlot: return "DistanceSlot";
-            case GprErrorCode::UnsupportedKernelOperation: return "UnsupportedKernelOperation";
-            case GprErrorCode::CholeskyFailed: return "CholeskyFailed";
-            case GprErrorCode::NonPositiveDefiniteMatrix: return "NonPositiveDefiniteMatrix";
-            case GprErrorCode::OptimizationNotConverged: return "OptimizationNotConverged";
-            case GprErrorCode::WorkspaceTooSmall: return "WorkspaceTooSmall";
-            case GprErrorCode::PersistFailed: return "PersistFailed";
-            case GprErrorCode::UnsupportedPersistVersion: return "UnsupportedPersistVersion";
+            case GprErrorCode::EmptyInput:
+                return "EmptyInput";
+            case GprErrorCode::SizeOverflow:
+                return "SizeOverflow";
+            case GprErrorCode::LengthMismatch:
+                return "LengthMismatch";
+            case GprErrorCode::DimensionMismatch:
+                return "DimensionMismatch";
+            case GprErrorCode::IndexOutOfRange:
+                return "IndexOutOfRange";
+            case GprErrorCode::InsufficientData:
+                return "InsufficientData";
+            case GprErrorCode::NonFiniteInput:
+                return "NonFiniteInput";
+            case GprErrorCode::NonFiniteKernelValue:
+                return "NonFiniteKernelValue";
+            case GprErrorCode::InvalidHyperparameter:
+                return "InvalidHyperparameter";
+            case GprErrorCode::InvalidNoiseVariance:
+                return "InvalidNoiseVariance";
+            case GprErrorCode::InvalidInterval:
+                return "InvalidInterval";
+            case GprErrorCode::InvalidConfig:
+                return "InvalidConfig";
+            case GprErrorCode::InvalidDistance:
+                return "InvalidDistance";
+            case GprErrorCode::DistanceSlot:
+                return "DistanceSlot";
+            case GprErrorCode::UnsupportedKernelOperation:
+                return "UnsupportedKernelOperation";
+            case GprErrorCode::CholeskyFailed:
+                return "CholeskyFailed";
+            case GprErrorCode::NonPositiveDefiniteMatrix:
+                return "NonPositiveDefiniteMatrix";
+            case GprErrorCode::OptimizationNotConverged:
+                return "OptimizationNotConverged";
+            case GprErrorCode::WorkspaceTooSmall:
+                return "WorkspaceTooSmall";
+            case GprErrorCode::PersistFailed:
+                return "PersistFailed";
+            case GprErrorCode::UnsupportedPersistVersion:
+                return "UnsupportedPersistVersion";
         }
         return "unknown";
     }
+
     // [end]
 
     // [report]
@@ -89,6 +110,7 @@ namespace
                 return Reaction::FixCaller;
         }
     }
+
     // [end]
 
     // [give-up]
@@ -104,6 +126,7 @@ namespace
             return std::unexpected(cxxgpr::GprError::optimization_not_converged(3U));
         }
     };
+
     // [end]
 }  // namespace
 
@@ -213,19 +236,16 @@ int main()
         && recovered->factor_jitter() > 0.0;
 
     // [and-then]
-    const auto chained = trainer.with_noise_variance(0.02).and_then(
-        [&](const auto& configured) { return configured.fit(x, x.size(), 1U, y); }
-    );
-    const auto chained_bad = trainer.with_noise_variance(-0.02).and_then(
-        [&](const auto& configured) { return configured.fit(x, x.size(), 1U, y); }
-    );
-    const auto mean_at_half = chained.and_then(
-        [](const auto& model)
-        {
-            const std::array<double, 1> q{0.5};
-            return model.predict(q, 1U, 1U);
-        }
-    ).transform([](const Prediction<double>& p) { return p.mean[0]; });
+    const auto chained = trainer.with_noise_variance(0.02).and_then([&](const auto& configured)
+    { return configured.fit(x, x.size(), 1U, y); });
+    const auto chained_bad = trainer.with_noise_variance(-0.02).and_then([&](const auto& configured)
+    { return configured.fit(x, x.size(), 1U, y); });
+    const auto mean_at_half = chained
+                                  .and_then([](const auto& model)
+    {
+        const std::array<double, 1> q{0.5};
+        return model.predict(q, 1U, 1U);
+    }).transform([](const Prediction<double>& p) { return p.mean[0]; });
     std::cout << "chained mean at 0.5: " << mean_at_half.value_or(-99.0)
               << ", failing chain stops at: " << code_name(chained_bad.error().code()) << '\n';
     // [end]
@@ -253,24 +273,27 @@ int main()
     // [end]
     ok = ok && threw;
 
-
-
     // [factories]
-    const auto distance_error = GprError::invalid_distance(std::nullopt, std::nullopt, std::pair<std::size_t, std::size_t>{1U, 2U}, "negative entry")
+    const auto distance_error = GprError::invalid_distance(
+        std::nullopt, std::nullopt, std::pair<std::size_t, std::size_t>{1U, 2U}, "negative entry"
+    )
                                     .with_slot_if_unset(2U)
                                     .with_dim_if_unset(0U);
     std::cout << "invalid_distance: " << distance_error.message() << " | slot " << *distance_error.distance_slot()
-              << ", dim " << *distance_error.distance_dim() << ", pair (" << distance_error.distance_pair()->first << ", "
-              << distance_error.distance_pair()->second << "), reason \"" << *distance_error.distance_reason() << "\"\n";
+              << ", dim " << *distance_error.distance_dim() << ", pair (" << distance_error.distance_pair()->first
+              << ", " << distance_error.distance_pair()->second << "), reason \"" << *distance_error.distance_reason()
+              << "\"\n";
     const GprError slot_error = GprError::distance_slot(SlotErrorKind::Missing, 1U);
     std::cout << "distance_slot: " << slot_error.message() << '\n';
     std::cout << "size_overflow: " << GprError::size_overflow().message() << '\n';
     std::cout << "insufficient_data: " << GprError::insufficient_data(2U, 5U).message() << '\n';
     std::cout << "non_finite_kernel_value: " << GprError::non_finite_kernel_value().message() << '\n';
     std::cout << "non_positive_definite_matrix: " << GprError::non_positive_definite_matrix().message() << '\n';
-    std::cout << "unsupported_kernel_operation: " << GprError::unsupported_kernel_operation("no coordinates").message() << '\n';
+    std::cout << "unsupported_kernel_operation: " << GprError::unsupported_kernel_operation("no coordinates").message()
+              << '\n';
     std::cout << "workspace_too_small: " << GprError::workspace_too_small().message() << '\n';
-    std::cout << "invalid_hyperparameter: " << GprError::invalid_hyperparameter("scale must be positive").message() << '\n';
+    std::cout << "invalid_hyperparameter: " << GprError::invalid_hyperparameter("scale must be positive").message()
+              << '\n';
     std::cout << "length_mismatch: " << GprError::length_mismatch("expected 3 values").message() << '\n';
     std::cout << "index_out_of_range: " << GprError::index_out_of_range("leaf 4 of 3").message() << '\n';
     std::cout << "persist_failed: " << GprError::persist_failed(PersistErrorKind::Config, "bad json").message() << '\n';
@@ -282,13 +305,15 @@ int main()
     std::cout << "dimension_mismatch: " << GprError::dimension_mismatch(2U, 3U).message() << '\n';
     std::cout << "cholesky_failed: " << GprError::cholesky_failed(1e-6, 10U, CholeskyStage::Predict).message() << '\n';
     std::cout << "invalid_interval_bounds: " << GprError::invalid_interval_bounds(2.0, 1.0).message() << '\n';
-    std::cout << "invalid_interval_out_of_range: " << GprError::invalid_interval_out_of_range(5.0, 0.0, 1.0).message() << '\n';
+    std::cout << "invalid_interval_out_of_range: " << GprError::invalid_interval_out_of_range(5.0, 0.0, 1.0).message()
+              << '\n';
     std::cout << "invalid_noise_variance: " << GprError::invalid_noise_variance("must be positive").message() << '\n';
     // [end]
     ok = ok && *distance_error.distance_slot() == 2U && *distance_error.distance_dim() == 0U
         && *slot_error.slot_error_kind() == SlotErrorKind::Missing && *slot_error.distance_slot() == 1U
         && GprError::empty_input() == GprError::empty_input() && GprError::empty_input() != GprError::non_finite_input()
-        && *GprError::insufficient_data(2U, 5U).n_points() == 2U && *GprError::insufficient_data(2U, 5U).min_points() == 5U
+        && *GprError::insufficient_data(2U, 5U).n_points() == 2U
+        && *GprError::insufficient_data(2U, 5U).min_points() == 5U
         && *GprError::optimization_not_converged(100U).iterations() == 100U
         && *GprError::unsupported_persist_version(2U, 1U).found_version() == 2U
         && *GprError::unsupported_persist_version(2U, 1U).supported_version() == 1U
@@ -308,8 +333,7 @@ int main()
     // [end]
     ok = ok && missing.error().code() == GprErrorCode::PersistFailed
         && classify(missing.error().code()) == Reaction::Environment
-        && classify(strict.error().code()) == Reaction::Retry
-        && classify(empty.error().code()) == Reaction::FixCaller;
+        && classify(strict.error().code()) == Reaction::Retry && classify(empty.error().code()) == Reaction::FixCaller;
 
     std::cout << (ok ? "OK" : "FAILED") << '\n';
     return ok ? 0 : 1;

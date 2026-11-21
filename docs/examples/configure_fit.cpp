@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // How-to: configure how a Gaussian process is trained (noise, jitter, precision, optimizer, buffers).
+#include <array>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
 #include <cxxgpr/core/rng.hpp>
 #include <cxxgpr/gpr/gpr.hpp>
 #include <cxxgpr/kernel/kernel.hpp>
 #include <cxxgpr/optimizer/optimizer.hpp>
 #include <cxxgpr/transform/transform.hpp>
-
-#include <array>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -63,9 +62,8 @@ int main()
         std::cerr << with_noise.error().message() << '\n';
         return 1;
     }
-    const auto bounded_noise = GaussianLikelihood::create(0.05).and_then(
-        [](const GaussianLikelihood& lik) { return lik.with_bounds(Interval::positive(1e-4, 1.0).value()); }
-    );
+    const auto bounded_noise = GaussianLikelihood::create(0.05).and_then([](const GaussianLikelihood& lik)
+    { return lik.with_bounds(Interval::positive(1e-4, 1.0).value()); });
     if (!bounded_noise)
     {
         std::cerr << bounded_noise.error().message() << '\n';
@@ -78,8 +76,8 @@ int main()
 
     // [reject]
     const auto bad_noise = base.with_noise_variance(-1.0);
-    std::cout << "negative noise rejected: " << (!bad_noise && bad_noise.error().code() == GprErrorCode::InvalidNoiseVariance)
-              << '\n';
+    std::cout << "negative noise rejected: "
+              << (!bad_noise && bad_noise.error().code() == GprErrorCode::InvalidNoiseVariance) << '\n';
     ok = ok && !bad_noise;
     // [end]
 
@@ -97,14 +95,14 @@ int main()
         std::cerr << "fit or factor failed\n";
         return 1;
     }
-    std::cout << "factor: neg-MLL " << factored->log_marginal_likelihood() << ", noise "
+    std::cout << "factor: neg-MLL " << factored->neg_log_marginal_likelihood() << ", noise "
               << factored->likelihood().noise_variance() << ", iterations " << factored->optimizer_result().iterations
               << '\n';
-    std::cout << "fit:    neg-MLL " << fitted->log_marginal_likelihood() << ", noise "
+    std::cout << "fit:    neg-MLL " << fitted->neg_log_marginal_likelihood() << ", noise "
               << fitted->likelihood().noise_variance() << ", iterations " << fitted->optimizer_result().iterations
               << ", converged " << fitted->optimizer_result().converged << '\n';
     // [end]
-    ok = ok && fitted->log_marginal_likelihood() < factored->log_marginal_likelihood();
+    ok = ok && fitted->neg_log_marginal_likelihood() < factored->neg_log_marginal_likelihood();
     ok = ok && std::abs(factored->likelihood().noise_variance() - 0.05) < 1e-12;
     // The data were generated with noise standard deviation 0.1 (variance 0.01) on a unit-variance
     // signal, so the optimized noise variance on standardized targets must be well below the start.
@@ -123,11 +121,13 @@ int main()
     ok = ok && jittered.has_value();
 
     // [precision]
-    const auto single = Gpr<optimizer::Lbfgs, SinglePrecision>(kernel).with_input_transform(transform::StandardizeInput())
+    const auto single = Gpr<optimizer::Lbfgs, SinglePrecision>(kernel)
+                            .with_input_transform(transform::StandardizeInput())
                             .with_target_transform(transform::StandardizeTarget());
     const auto single_fit = single.fit(x, data.y);
     using Mixed = MixedPrecision<PromoteStorage>;
-    const auto mixed = Gpr<optimizer::Lbfgs, Mixed>(kernel).with_input_transform(transform::StandardizeInput())
+    const auto mixed = Gpr<optimizer::Lbfgs, Mixed>(kernel)
+                           .with_input_transform(transform::StandardizeInput())
                            .with_target_transform(transform::StandardizeTarget());
     const auto mixed_fit = mixed.fit(x, data.y);
     if (!single_fit || !mixed_fit)
@@ -135,18 +135,19 @@ int main()
         std::cerr << "precision fit failed\n";
         return 1;
     }
-    std::cout << "single neg-MLL " << single_fit->log_marginal_likelihood() << ", mixed neg-MLL "
-              << mixed_fit->log_marginal_likelihood() << ", refinement iterations "
+    std::cout << "single neg-MLL " << single_fit->neg_log_marginal_likelihood() << ", mixed neg-MLL "
+              << mixed_fit->neg_log_marginal_likelihood() << ", refinement iterations "
               << mixed_fit->refinement_summary()->iterations << '\n';
     // [end]
-    ok = ok && std::abs(single_fit->log_marginal_likelihood() - mixed_fit->log_marginal_likelihood()) < 0.5;
+    ok = ok && std::abs(single_fit->neg_log_marginal_likelihood() - mixed_fit->neg_log_marginal_likelihood()) < 0.5;
 
     // [optimizer]
     const auto restarts = trainer.with_optimizer(optimizer::Lbfgs().with_max_iterations(200U).with_restarts(3U, 42U));
     const auto restarted = restarts.fit(x, data.y);
-    std::cout << "with 3 restarts: neg-MLL " << restarted->log_marginal_likelihood() << '\n';
+    std::cout << "with 3 restarts: neg-MLL " << restarted->neg_log_marginal_likelihood() << '\n';
     // [end]
-    ok = ok && restarted.has_value() && restarted->log_marginal_likelihood() <= fitted->log_marginal_likelihood() + 1e-6;
+    ok = ok && restarted.has_value()
+        && restarted->neg_log_marginal_likelihood() <= fitted->neg_log_marginal_likelihood() + 1e-6;
 
     // [policy]
     const auto lean = trainer.with_prefer_memory();
@@ -155,10 +156,10 @@ int main()
                                    .with_kernel_exp(KernelExp::FastApprox);
     const auto lean_fit = lean.fit(x, data.y);
     const auto custom_fit = custom_policy.fit(x, data.y);
-    std::cout << "prefer_memory neg-MLL " << lean_fit->log_marginal_likelihood() << ", custom policy neg-MLL "
-              << custom_fit->log_marginal_likelihood() << '\n';
+    std::cout << "prefer_memory neg-MLL " << lean_fit->neg_log_marginal_likelihood() << ", custom policy neg-MLL "
+              << custom_fit->neg_log_marginal_likelihood() << '\n';
     // [end]
-    ok = ok && std::abs(lean_fit->log_marginal_likelihood() - fitted->log_marginal_likelihood()) < 1e-6;
+    ok = ok && std::abs(lean_fit->neg_log_marginal_likelihood() - fitted->neg_log_marginal_likelihood()) < 1e-6;
 
     // [failure]
     std::vector<double> bad_y = data.y;
@@ -203,7 +204,8 @@ int main()
     const std::array<double, 4> cross{1.0, 2.0, 3.0, 4.0};  // 2 x 2 column-major k(X, X*)
     const std::array<double, 2> alpha{1.0, -1.0};
     std::array<double, 2> means{};
-    ok = ok && compute_storage_means<DoublePrecision>(MatrixRef<double>(cross.data(), 2U, 2U), alpha, means).has_value();
+    ok =
+        ok && compute_storage_means<DoublePrecision>(MatrixRef<double>(cross.data(), 2U, 2U), alpha, means).has_value();
     std::cout << "k^T alpha = " << means[0] << ", " << means[1] << '\n';
     // [end]
     ok = ok && means[0] == -1.0 && means[1] == -1.0;
