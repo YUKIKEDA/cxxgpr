@@ -94,6 +94,8 @@ When verifying or using the file directly from NumPy, column-major matrices such
 
 ## FMT-07 Persistence of supplied squared-distance models (`LoadedDistanceGpr<C>`)
 
+API: `persist::save(const FittedDistanceGpr<O, P, C>&, dir[, registry])`, `persist::save_with_factor(...)` and `persist::LoadedDistanceGpr<C>::load(dir[, registry])` (REL-7, DES-21). The loaded model exposes `predict`, `predict_covariance`, `sample`, `n()`, `d()` and typed extraction to `FittedDistanceGpr`, with the query supplies described in DES-21.
+
 For `DistanceKernel<C>` models, a `distance` section is added to `config.json`, and per-slot lower-triangular tensors `d2.<k>` are saved in `model.safetensors`.
 
 ```json
