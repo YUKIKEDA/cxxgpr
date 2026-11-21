@@ -253,9 +253,9 @@ namespace cxxgpr::persist
             for (std::size_t k = 0; k < desc.slots.size(); ++k)
             {
                 std::vector<std::size_t> shape{packed_len};
-                if (desc.slots[k].ard_dims.has_value())
+                if (const auto ard_dims = desc.slots[k].ard_dims; ard_dims.has_value())
                 {
-                    shape = {*desc.slots[k].ard_dims, packed_len};
+                    shape = {*ard_dims, packed_len};
                 }
                 const bool as_double = !packed_f64.empty();
                 tensors.push_back(
@@ -334,6 +334,13 @@ namespace cxxgpr::persist
             constexpr bool with_points = std::same_as<C, WithPoints>;
             const std::size_t n = cfg.n;
             const std::size_t d = cfg.d;
+            if (!cfg.likelihood.has_value())
+            {
+                return std::unexpected(
+                    GprError::persist_failed(PersistErrorKind::Config, "missing likelihood configuration")
+                );
+            }
+            const GaussianLikelihood likelihood = *cfg.likelihood;
 
             std::expected<cxxgpr::detail::DistanceFittedPayload<P, C>, GprError> payload =
                 std::unexpected(GprError::empty_input());
@@ -385,7 +392,7 @@ namespace cxxgpr::persist
                     x_fit = std::shared_ptr<const transform::FittedInputTransform>(std::move(cfg.x_transform));
                 }
                 payload = cxxgpr::detail::assemble_distance_payload<P, C>(
-                    kernel, *cfg.likelihood, cfg.kernel_exp, source, x_raw, d, y_raw, std::move(x_fit),
+                    kernel, likelihood, cfg.kernel_exp, source, x_raw, d, y_raw, x_fit,
                     std::shared_ptr<const transform::FittedTargetTransform>(std::move(cfg.y_transform)), l_span, a_span,
                     cfg.factor_jitter
                 );
@@ -395,7 +402,7 @@ namespace cxxgpr::persist
                 // Without a stored factor, factor again at the stored hyperparameters (no optimization).
                 const cxxgpr::detail::DistanceTrainConfig<C> train_cfg{
                     .kernel = kernel,
-                    .likelihood = *cfg.likelihood,
+                    .likelihood = likelihood,
                     .jitter = cfg.jitter,
                     .input_transform = *cfg.x_unfitted,
                     .target_transform = *cfg.y_unfitted,
@@ -479,7 +486,12 @@ namespace cxxgpr::persist
             x_sp = *x;
         }
 
-        auto kernel = cxxgpr::detail::build_distance_kernel<C>(*cfg->distance_kernel);
+        if (!cfg->distance_kernel.has_value())
+        {
+            return std::unexpected(GprError::persist_failed(PersistErrorKind::Config, "distance kernel is missing"));
+        }
+        const cxxgpr::detail::DistanceKernelDesc kernel_desc = *cfg->distance_kernel;
+        auto kernel = cxxgpr::detail::build_distance_kernel<C>(kernel_desc);
         if (!kernel.has_value())
         {
             return std::unexpected(std::move(kernel).error());
@@ -667,7 +679,7 @@ namespace cxxgpr::persist
     /// @brief Returns the accepted diagonal jitter of the factor.
     /// @tparam C Distance mode.
     /// @return Jitter offset as reported by the checkpoint.
-    template <DistanceModeConcept C> double LoadedDistanceGpr<C>::factor_jitter() const noexcept
+    template <DistanceModeConcept C> double LoadedDistanceGpr<C>::factor_jitter() const
     {
         return std::visit([](const auto& m) { return m.factor_jitter(); }, impl_->model);
     }
@@ -675,7 +687,7 @@ namespace cxxgpr::persist
     /// @brief Returns the kernel with its freshly issued slots.
     /// @tparam C Distance mode.
     /// @return Kernel carrying the fitted hyperparameters.
-    template <DistanceModeConcept C> const DistanceKernel<C>& LoadedDistanceGpr<C>::kernel() const noexcept
+    template <DistanceModeConcept C> const DistanceKernel<C>& LoadedDistanceGpr<C>::kernel() const
     {
         return std::visit([](const auto& m) -> const DistanceKernel<C>& { return m.kernel(); }, impl_->model);
     }
@@ -683,7 +695,7 @@ namespace cxxgpr::persist
     /// @brief Returns the likelihood with the fitted noise variance.
     /// @tparam C Distance mode.
     /// @return Gaussian likelihood.
-    template <DistanceModeConcept C> const GaussianLikelihood& LoadedDistanceGpr<C>::likelihood() const noexcept
+    template <DistanceModeConcept C> const GaussianLikelihood& LoadedDistanceGpr<C>::likelihood() const
     {
         return std::visit([](const auto& m) -> const GaussianLikelihood& { return m.likelihood(); }, impl_->model);
     }
@@ -691,7 +703,7 @@ namespace cxxgpr::persist
     /// @brief Returns the jitter policy.
     /// @tparam C Distance mode.
     /// @return Jitter policy.
-    template <DistanceModeConcept C> const JitterPolicy& LoadedDistanceGpr<C>::jitter() const noexcept
+    template <DistanceModeConcept C> const JitterPolicy& LoadedDistanceGpr<C>::jitter() const
     {
         return std::visit([](const auto& m) -> const JitterPolicy& {
             return detail::DistanceModelAccess::jitter(m);
@@ -701,7 +713,7 @@ namespace cxxgpr::persist
     /// @brief Returns the exponential mode.
     /// @tparam C Distance mode.
     /// @return Kernel exponential mode.
-    template <DistanceModeConcept C> KernelExp LoadedDistanceGpr<C>::kernel_exp() const noexcept
+    template <DistanceModeConcept C> KernelExp LoadedDistanceGpr<C>::kernel_exp() const
     {
         return std::visit([](const auto& m) { return detail::DistanceModelAccess::kernel_exp(m); }, impl_->model);
     }

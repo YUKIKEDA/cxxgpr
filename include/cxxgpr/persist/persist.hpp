@@ -925,23 +925,23 @@ namespace cxxgpr::persist
 
         /// @brief Returns the accepted diagonal jitter of the factor.
         /// @return Jitter offset.
-        [[nodiscard]] double factor_jitter() const noexcept;
+        [[nodiscard]] double factor_jitter() const;
 
         /// @brief Returns the kernel with its freshly issued slots.
         /// @return Kernel carrying the fitted hyperparameters.
-        [[nodiscard]] const DistanceKernel<C>& kernel() const noexcept;
+        [[nodiscard]] const DistanceKernel<C>& kernel() const;
 
         /// @brief Returns the likelihood with the fitted noise variance.
         /// @return Gaussian likelihood.
-        [[nodiscard]] const GaussianLikelihood& likelihood() const noexcept;
+        [[nodiscard]] const GaussianLikelihood& likelihood() const;
 
         /// @brief Returns the jitter policy.
         /// @return Jitter policy.
-        [[nodiscard]] const JitterPolicy& jitter() const noexcept;
+        [[nodiscard]] const JitterPolicy& jitter() const;
 
         /// @brief Returns the exponential mode.
         /// @return Kernel exponential mode.
-        [[nodiscard]] KernelExp kernel_exp() const noexcept;
+        [[nodiscard]] KernelExp kernel_exp() const;
 
         /// @brief Predicts the mean and variance at the queries of a DistanceOnly model.
         /// @param[in] cross Training-to-query tables bound to the slots of kernel().

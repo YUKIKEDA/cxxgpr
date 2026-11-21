@@ -207,8 +207,8 @@ namespace cxxgpr
             std::span<const double> x_raw,
             std::size_t n_features,
             std::span<const double> y_raw,
-            std::shared_ptr<const transform::FittedInputTransform> input_transform,
-            std::shared_ptr<const transform::FittedTargetTransform> target_transform,
+            const std::shared_ptr<const transform::FittedInputTransform>& input_transform,
+            const std::shared_ptr<const transform::FittedTargetTransform>& target_transform,
             std::span<const typename P::Storage> l_factor,
             std::span<const typename P::Refine> alpha,
             double factor_jitter

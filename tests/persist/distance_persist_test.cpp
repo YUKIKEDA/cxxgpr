@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -171,8 +172,10 @@ namespace
             {
                 if (slot.ard_dims.has_value())
                 {
+                    const std::size_t ard_dims = slot.ard_dims.value_or(0U);
                     std::vector<cxxgpr::MatrixRef<double>> dims;
-                    for (std::size_t k = 0; k < *slot.ard_dims; ++k)
+                    dims.reserve(ard_dims);
+                    for (std::size_t k = 0; k < ard_dims; ++k)
                     {
                         dims.emplace_back(f.tables[which][k].data(), rows, cols);
                     }
@@ -276,9 +279,9 @@ namespace
         }
         for (std::size_t i = 0; i < a.size(); ++i)
         {
-            const double x = static_cast<double>(a[i]);
-            const double y = static_cast<double>(b[i]);
-            if (std::memcmp(&x, &y, sizeof(double)) != 0)
+            const auto x = std::bit_cast<std::uint64_t>(static_cast<double>(a[i]));
+            const auto y = std::bit_cast<std::uint64_t>(static_cast<double>(b[i]));
+            if (x != y)
             {
                 return false;
             }
@@ -485,7 +488,7 @@ namespace
         ASSERT_TRUE(cxxgpr::persist::save_with_factor(*model, dir.path).has_value());
         auto loaded = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(dir.path);
         ASSERT_TRUE(loaded.has_value());
-        const auto copy = *loaded;
+        auto copy = *loaded;
         const Binder cross(f, 1, loaded->kernel().slots());
         auto a = loaded->predict(cross.source());
         auto b = copy.predict(cross.source());
@@ -533,7 +536,7 @@ namespace
     std::string slurp(const std::filesystem::path& path)
     {
         std::ifstream in(path, std::ios::binary);
-        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     }
 
     /// @brief Overwrites a whole file.
@@ -609,13 +612,13 @@ namespace
             EXPECT_EQ(loaded.error().persist_error_kind(), cxxgpr::PersistErrorKind::Config) << name;
         };
         // A distance-only model cannot claim coordinates.
-        expect_config_error("d", "\"d\": 0", "\"d\": 2");
+        expect_config_error("d", R"("d": 0)", R"("d": 2)");
         // A leaf that reads a slot which does not exist.
-        expect_config_error("slot", "\"slot\": 0", "\"slot\": 5");
+        expect_config_error("slot", R"("slot": 0)", R"("slot": 5)");
         // A slot list that disagrees with the kernel tree.
-        expect_config_error("slot_kind", "\"kind\": \"scalar\"", "\"kind\": \"ard\", \"dims\": 2");
+        expect_config_error("slot_kind", R"("kind": "scalar")", R"("kind": "ard", "dims": 2)");
         // An unknown mode.
-        expect_config_error("points", "\"distance_only\"", "\"sideways\"");
+        expect_config_error("points", R"("distance_only")", R"("sideways")");
     }
 
     /// @brief Tampered distance tables are rejected: invalid values by table validation, non-finite ones by the reader.

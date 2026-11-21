@@ -543,6 +543,7 @@ namespace cxxgpr
                         {
                             const Storage val = d_a(row, col);
                             s_i(row, col) = val;
+                            // NOLINTNEXTLINE(readability-suspicious-call-argument)
                             s_i(col, row) = val;
                         }
                     }
@@ -1369,7 +1370,7 @@ namespace cxxgpr
                     {
                         acc += static_cast<double>(v_row[i]) * static_cast<double>(v_col[i]);
                     }
-                    Refine value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
+                    auto value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
                     if (row == col)
                     {
                         value += noise;
@@ -1617,8 +1618,8 @@ namespace cxxgpr
         std::span<const double> x_raw,
         std::size_t n_features,
         std::span<const double> y_raw,
-        std::shared_ptr<const transform::FittedInputTransform> input_transform,
-        std::shared_ptr<const transform::FittedTargetTransform> target_transform,
+        const std::shared_ptr<const transform::FittedInputTransform>& input_transform,
+        const std::shared_ptr<const transform::FittedTargetTransform>& target_transform,
         std::span<const typename P::Storage> l_factor,
         std::span<const typename P::Refine> alpha,
         double factor_jitter
@@ -1683,7 +1684,7 @@ namespace cxxgpr
             .compiled = nullptr,
             .store = nullptr,
             .input_transform = nullptr,
-            .target_transform = std::move(target_transform),
+            .target_transform = target_transform,
             .x_raw = {},
             .y_raw = std::vector<double>(y_raw.begin(), y_raw.end()),
             .x_train = {},
@@ -1718,7 +1719,7 @@ namespace cxxgpr
                 }
                 payload.x_train[i] = static_cast<Storage>(x_t[i]);
             }
-            payload.input_transform = std::move(input_transform);
+            payload.input_transform = input_transform;
         }
         std::vector<double> y_t(y_raw.begin(), y_raw.end());
         if (auto tf = payload.target_transform->transform(y_t); !tf.has_value())
@@ -2126,8 +2127,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const DoublePrecision::Storage>,
             std::span<const DoublePrecision::Refine>,
             double
@@ -2142,8 +2143,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const DoublePrecision::Storage>,
             std::span<const DoublePrecision::Refine>,
             double
@@ -2158,8 +2159,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const SinglePrecision::Storage>,
             std::span<const SinglePrecision::Refine>,
             double
@@ -2174,8 +2175,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const SinglePrecision::Storage>,
             std::span<const SinglePrecision::Refine>,
             double
@@ -2190,8 +2191,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<PromoteStorage>::Storage>,
             std::span<const MixedPrecision<PromoteStorage>::Refine>,
             double
@@ -2206,8 +2207,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<PromoteStorage>::Storage>,
             std::span<const MixedPrecision<PromoteStorage>::Refine>,
             double
@@ -2222,8 +2223,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
             std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
             double
@@ -2238,8 +2239,8 @@ namespace cxxgpr
             std::span<const double>,
             std::size_t,
             std::span<const double>,
-            std::shared_ptr<const transform::FittedInputTransform>,
-            std::shared_ptr<const transform::FittedTargetTransform>,
+            const std::shared_ptr<const transform::FittedInputTransform>&,
+            const std::shared_ptr<const transform::FittedTargetTransform>&,
             std::span<const MixedPrecision<ReevaluateKernel>::Storage>,
             std::span<const MixedPrecision<ReevaluateKernel>::Refine>,
             double

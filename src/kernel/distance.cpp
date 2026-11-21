@@ -4661,9 +4661,9 @@ namespace cxxgpr
         slots.ard.resize(desc.slots.size());
         for (std::size_t i = 0; i < desc.slots.size(); ++i)
         {
-            if (desc.slots[i].ard_dims.has_value())
+            if (const auto ard_dims = desc.slots[i].ard_dims; ard_dims.has_value())
             {
-                auto ard = ArdDistance::create(*desc.slots[i].ard_dims);
+                auto ard = ArdDistance::create(*ard_dims);
                 if (!ard.has_value())
                 {
                     return std::unexpected(distance_config_error("ARD slot needs at least one dimension"));
