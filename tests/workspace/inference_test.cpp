@@ -899,8 +899,8 @@ namespace
                 EXPECT_EQ(res_alloc.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
 
                 const auto res_into = cxxgpr::loo_predict_into<P>(
-                    lik, l_sub_ref, alpha, y_train, opts, cxxgpr::MatrixMut<Storage>(sc_mat.data(), 1U, 1U, 1U), sc_diag,
-                    out
+                    lik, l_sub_ref, alpha, y_train, opts, cxxgpr::MatrixMut<Storage>(sc_mat.data(), 1U, 1U, 1U),
+                    sc_diag, out
                 );
                 ASSERT_FALSE(res_into.has_value());
                 EXPECT_EQ(res_into.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);

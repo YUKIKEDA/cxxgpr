@@ -870,7 +870,8 @@ namespace cxxgpr
     /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train/scratch sizes mismatch.
     /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
-    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to non-finite.
+    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to
+    /// non-finite.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> loo_predict_into(
         const GaussianLikelihood& likelihood,
@@ -960,7 +961,8 @@ namespace cxxgpr
     /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train lengths mismatch.
     /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
-    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to non-finite.
+    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to
+    /// non-finite.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> loo_predict(
         const GaussianLikelihood& likelihood,
