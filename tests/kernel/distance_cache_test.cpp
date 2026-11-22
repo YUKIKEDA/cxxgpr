@@ -77,6 +77,26 @@ namespace
             EXPECT_FALSE(unneeded.has_dist());
             EXPECT_FALSE(unneeded.has_ard());
         }
+
+#if !defined(_MSC_VER) || !defined(_DEBUG)
+        // Outside MSVC Debug (where default-constructing empty std::vector allocates an iterator proxy),
+        // also audit DistanceCache::build() directly for zero heap allocations.
+        {
+            const cxxgpr::test_support::NoAllocationScope audit;
+            auto built_uncached =
+                cxxgpr::DistanceCache<double>::build(x, true, true, cxxgpr::DistanceCachePolicy::Uncached);
+            ASSERT_TRUE(built_uncached.has_value());
+            EXPECT_FALSE(built_uncached->has_dist());
+            EXPECT_FALSE(built_uncached->has_ard());
+
+            auto built_unneeded = cxxgpr::DistanceCache<double>::build(
+                x, c_comp.reads_distances(), c_comp.needs_ard_sq_diff(), cxxgpr::DistanceCachePolicy::Cached
+            );
+            ASSERT_TRUE(built_unneeded.has_value());
+            EXPECT_FALSE(built_unneeded->has_dist());
+            EXPECT_FALSE(built_unneeded->has_ard());
+        }
+#endif
     }
 
     /// @brief Verifies packed lower-triangular ARD layout and input validation error codes.

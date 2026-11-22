@@ -428,10 +428,11 @@ namespace
             }
         }
 
-        // Case 2: High dimension d = 65 (> 64 incremental ARD cache cutoff) falls back cleanly with zero allocs.
+        // Case 2: High dimensions d = 65 (> 64 incremental ARD cutoff) and d = 257 (> 256 stack weight buffer)
+        // both fall back cleanly with zero heap allocations.
+        for (const std::size_t d : {std::size_t{65U}, std::size_t{257U}})
         {
             constexpr std::size_t n = 6U;
-            constexpr std::size_t d = 65U;
             std::vector<double> x_data(n * d);
             for (std::size_t idx = 0U; idx < x_data.size(); ++idx)
             {
