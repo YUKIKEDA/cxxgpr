@@ -299,7 +299,7 @@ namespace cxxgpr::persist
                 );
             }
             const std::string sid = compute_save_id(*cfg_str, tensors);
-            auto cfg_with_id = serialize_distance_config_json(input, desc, sid);
+            auto cfg_with_id = add_save_id_to_config_json(*cfg_str, sid);
             if (!cfg_with_id.has_value())
             {
                 return std::unexpected(std::move(cfg_with_id).error());
@@ -360,8 +360,8 @@ namespace cxxgpr::persist
             const std::shared_ptr<const void>& keepalive
         )
         {
-            using Storage = typename P::Storage;
-            using Refine = typename P::Refine;
+            using Storage = P::Storage;
+            using Refine = P::Refine;
             constexpr bool with_points = std::same_as<C, WithPoints>;
             const std::size_t n = cfg.n;
             const std::size_t d = cfg.d;

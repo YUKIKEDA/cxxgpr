@@ -89,12 +89,17 @@ namespace
         /// @param[in] scale Positive kernel output scale parameter.
         /// @param[in] state_text When set, persist_state_json() returns this text instead of the decimal scale.
         /// @param[in] id Persistence identifier reported by persist_id().
+        /// @param[in] persist_calls Optional shared counter incremented on each persist_state_json() call.
         explicit CustomScaleKernel(
-            double scale, std::optional<std::string> state_text = std::nullopt, std::string id = "user.custom_scale"
+            double scale,
+            std::optional<std::string> state_text = std::nullopt,
+            std::string id = "user.custom_scale",
+            std::shared_ptr<int> persist_calls = nullptr
         ) :
             scale_(scale),
             state_text_(std::move(state_text)),
-            id_(std::move(id))
+            id_(std::move(id)),
+            persist_calls_(std::move(persist_calls))
         {
         }
 
@@ -102,7 +107,7 @@ namespace
         /// @return Owning unique_ptr copy of this CustomScaleKernel.
         [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<double>> clone() const override
         {
-            return std::make_unique<CustomScaleKernel>(scale_, state_text_, id_);
+            return std::make_unique<CustomScaleKernel>(scale_, state_text_, id_, persist_calls_);
         }
 
         /// @brief Returns the number of trainable hyperparameters (1 for scale_).
@@ -227,6 +232,10 @@ namespace
         /// @return The state text given at construction, or else the decimal string representation of scale_.
         [[nodiscard]] std::expected<std::string, cxxgpr::GprError> persist_state_json() const override
         {
+            if (persist_calls_ != nullptr)
+            {
+                ++(*persist_calls_);
+            }
             return state_text_.has_value() ? *state_text_ : std::to_string(scale_);
         }
 
@@ -237,6 +246,8 @@ namespace
         std::optional<std::string> state_text_;
         /// @brief Persistence identifier.
         std::string id_;
+        /// @brief Optional counter incremented whenever persist_state_json() is invoked.
+        std::shared_ptr<int> persist_calls_;
     };
 
     /// @brief Single-precision companion of CustomScaleKernel required by CustomKernel::create().
@@ -2392,6 +2403,51 @@ namespace
         ASSERT_FALSE(res.has_value());
         EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
         EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+    }
+
+    /// @brief Verifies save() and save_with_factor() invoke custom persist_state_json() only once per save.
+    /// @details Guards against double config.json serialization when computing and attaching FMT-09 save_id.
+    TEST(PersistModelsTest, SaveInvokesCustomPersistStateJsonOnce)
+    {
+        // Spec: FMT-09, REQ-12
+        auto calls = std::make_shared<int>(0);
+        auto ck = cxxgpr::CustomKernel::create(
+            std::make_unique<CustomScaleKernel>(1.5, std::nullopt, "user.custom_scale", calls),
+            std::make_unique<CustomScaleKernelFloat>(1.5F)
+        );
+        ASSERT_TRUE(ck.has_value());
+
+        const std::vector<double> x_train{0.0, 0.5, 1.0};
+        const std::vector<double> y_train{1.0, 0.8, 0.4};
+        const auto fit =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(cxxgpr::KernelSpec(*ck)).factor(x_train, 3U, 1U, y_train);
+        ASSERT_TRUE(fit.has_value());
+
+        const TempDirGuard dir_no_factor("persist_once_no_factor");
+        *calls = 0;
+        ASSERT_TRUE(cxxgpr::persist::save(*fit, dir_no_factor.path).has_value());
+        EXPECT_EQ(*calls, 1);
+
+        const TempDirGuard dir_with_factor("persist_once_with_factor");
+        *calls = 0;
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit, dir_with_factor.path).has_value());
+        EXPECT_EQ(*calls, 1);
+
+        cxxgpr::persist::PersistRegistry reg;
+        ASSERT_TRUE(
+            reg.register_kernel(
+                   "user.custom_scale",
+                   [](std::string_view state) -> std::expected<cxxgpr::CustomKernel, cxxgpr::GprError>
+        {
+            const double s = std::stod(std::string(state));
+            return cxxgpr::CustomKernel::create(
+                std::make_unique<CustomScaleKernel>(s), std::make_unique<CustomScaleKernelFloat>(static_cast<float>(s))
+            );
+        }
+            ).has_value()
+        );
+        EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(dir_no_factor.path, reg).has_value());
+        EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(dir_with_factor.path, reg).has_value());
     }
 
 }  // namespace

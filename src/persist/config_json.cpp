@@ -2074,12 +2074,9 @@ namespace cxxgpr::persist::detail
     /// @details Encodes kernel AST, likelihood with bounds, jitter policy, unfitted/fitted transforms,
     /// precision/residual flags, exponential math mode, and distance cache policy.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
-    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON text on success, or GprError if any subtree or custom component fails encoding.
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or depth exceeds 128.
-    std::expected<std::string, GprError> serialize_config_json(
-        const SaveInput& input, std::optional<std::string_view> save_id
-    )
+    std::expected<std::string, GprError> serialize_config_json(const SaveInput& input)
     {
         // Encode the kernel and transform trees in order; each pass stops at its first error.
         ErrorSlot err;
@@ -2159,17 +2156,35 @@ namespace cxxgpr::persist::detail
         {
             root["residual"] = res_str;
         }
-        if (save_id.has_value())
-        {
-            root["save_id"] = std::string(*save_id);
-        }
-
         // Refuse to write a document that the loader would reject for its nesting depth, before the recursive
         // serializer descends into it once per level.
         if (auto depth_ok = check_value_max_depth(root, MAX_JSON_NESTING_DEPTH); !depth_ok.has_value())
         {
             return std::unexpected(std::move(depth_ok).error());
         }
+        return root.dump(2);
+    }
+
+    /// @brief Inserts a top-level `save_id` field into an already-serialized config.json document.
+    /// @details Re-parses the already-validated config.json string without re-invoking custom `persist_state_json()`
+    /// callbacks, attaches `save_id`, and returns the pretty-printed JSON text.
+    /// @param[in] config_json Pretty-printed config.json text produced by serialize_config_json or
+    /// serialize_distance_config_json.
+    /// @param[in] save_id Computed pairing identifier to store as top-level `save_id`.
+    /// @return Formatted JSON string containing `save_id`, or GprError if config_json is not a valid JSON object.
+    /// @retval GprErrorCode::PersistFailed When config_json cannot be parsed as a JSON object.
+    std::expected<std::string, GprError> add_save_id_to_config_json(
+        std::string_view config_json, std::string_view save_id
+    )
+    {
+        nlohmann::json root = nlohmann::json::parse(config_json, nullptr, false);
+        if (root.is_discarded() || !root.is_object())
+        {
+            return std::unexpected(
+                GprError::persist_failed(PersistErrorKind::Config, "failed to re-parse serialized config.json")
+            );
+        }
+        root["save_id"] = std::string(save_id);
         return root.dump(2);
     }
 
@@ -2471,13 +2486,10 @@ namespace cxxgpr::persist::detail
     /// extra distance section naming the mode and the slots.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
     /// @param[in] kernel Structural description of the kernel of the model.
-    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON text, or GprError when a custom component is not persistable.
     /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
     std::expected<std::string, GprError> serialize_distance_config_json(
-        const DistanceSaveInput& input,
-        const cxxgpr::detail::DistanceKernelDesc& kernel,
-        std::optional<std::string_view> save_id
+        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
     )
     {
         // Encode the kernel and transform trees in order; each pass stops at its first error.
@@ -2580,10 +2592,6 @@ namespace cxxgpr::persist::detail
         if (!res_str.empty())
         {
             root["residual"] = res_str;
-        }
-        if (save_id.has_value())
-        {
-            root["save_id"] = std::string(*save_id);
         }
 
         // Refuse to write a document that the loader would reject for its nesting depth: every composite kernel

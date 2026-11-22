@@ -850,11 +850,12 @@ namespace
         check_cov_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(200U);
     }
 
-    /// @brief Verifies loo_predict and loo_predict_into reject subnormal Q_ii when 1 / Q_ii overflows to +Inf.
+    /// @brief Verifies loo_predict and loo_predict_into reject subnormal Q_ii when LOO mean or variance overflows.
     /// @details Uses a 1x1 Cholesky factor whose inverse square Q_00 is positive and finite (IEEE 754 subnormal)
-    /// so inv_diag_from_chol_l succeeds, yet 1 / Q_00 overflows to +Inf. Checks all four precision policies and
-    /// both VarianceKind values return NonFiniteKernelValue, then confirms the buffers recover on a normal factor.
-    TEST(WorkspaceInferenceTest, SubnormalQiiOverflowsLooVarianceToNonFiniteKernelValue)
+    /// so inv_diag_from_chol_l succeeds, yet 1 / Q_00 (Double/Single) or alpha_0 / Q_00 (Mixed) overflows to
+    /// non-finite. Checks all four precision policies and both VarianceKind values return NonFiniteKernelValue,
+    /// then confirms the buffers recover on a normal factor.
+    TEST(WorkspaceInferenceTest, SubnormalQiiOverflowsLooResultToNonFiniteKernelValue)
     {
         // Spec: DES-02, DES-16
         const auto lik = cxxgpr::GaussianLikelihood::create(0.1).value();
