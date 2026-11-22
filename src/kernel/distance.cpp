@@ -1863,6 +1863,58 @@ namespace cxxgpr
         /// @brief Exponential evaluation precision mode shared by @c Rbf, @c Matern52, and @c Matern32 terms.
         KernelExp exp_mode = KernelExp::Accurate;
 
+        /// @brief Default-constructs an empty compiled distance implementation.
+        Impl() = default;
+        /// @brief Copy-constructs a compiled distance implementation.
+        Impl(const Impl&) = default;
+        /// @brief Move-constructs a compiled distance implementation.
+        Impl(Impl&&) noexcept = default;
+        /// @brief Copy-assigns a compiled distance implementation.
+        /// @return Reference to *this.
+        Impl& operator=(const Impl&) = default;
+        /// @brief Move-assigns a compiled distance implementation.
+        /// @return Reference to *this.
+        Impl& operator=(Impl&&) noexcept = default;
+
+        /// @brief Destroys the compiled distance AST iteratively to keep stack depth O(1) on deep trees.
+        ~Impl() noexcept { destroy_term_iterative(root); }
+
+        /// @brief Iteratively destroys nested SumTerm/ProductTerm subtrees without recursive calls.
+        /// @param[in,out] target Root compiled term to drain.
+        static void destroy_term_iterative(Term& target) noexcept
+        {
+            std::vector<Term> pending;
+            try
+            {
+                pending.push_back(std::move(target));
+                while (!pending.empty())
+                {
+                    Term cur = std::move(pending.back());
+                    pending.pop_back();
+                    if (auto* s = std::get_if<SumTerm>(&cur))
+                    {
+                        for (auto& child : s->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        s->terms.clear();
+                    }
+                    else if (auto* p = std::get_if<ProductTerm>(&cur))
+                    {
+                        for (auto& child : p->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        p->terms.clear();
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Fallback to bounded cleanup if OOM occurs while draining; noexcept boundary must not throw.
+            }
+        }
+
         /// @brief Synchronizes @c cached_ls with the current ARD lengthscale vectors stored in @c leaves.
         void refresh_cached_ls()
         {
@@ -1987,133 +2039,194 @@ namespace cxxgpr
         /// @tparam Mode Distance kernel mode tag (@c DistanceOnly or @c WithPoints).
         /// @param[in] node Symbolic AST node to compile.
         /// @param[in,out] out Target @c Impl receiving appended leaves, bindings, and @c has_coord_points flag.
+        /// @brief Iteratively compiles a distance-kernel AST node into a flattened @c Term tree.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] root_node Root AST node to compile.
+        /// @param[in,out] out Target @c Impl receiving leaf state, bindings, and coordinate flags.
         /// @param[in,out] next_param_idx Running global parameter counter incremented as leaves are visited.
-        /// @return Compiled @c Term corresponding to @p node.
+        /// @return Compiled @c Term corresponding to @p root_node.
         template <DistanceModeConcept Mode>
-        static Term compile_node(const DistanceKernel<Mode>::InternalNode& node, Impl& out, std::size_t& next_param_idx)
-        {
-            using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(s->leaf);
-                out.leaves.push_back(s->leaf);
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return SuppliedScalarRef{
-                    .leaf_idx = leaf_idx,
-                    .slot_at = find_slot_at(out.slots, s->slot),
-                    .param_begin = p_begin,
-                    .param_count = p_count
-                };
-            }
-            if (const auto* a = std::get_if<SuppliedArdNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(a->leaf);
-                out.leaves.push_back(a->leaf);
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return SuppliedArdRef{
-                    .leaf_idx = leaf_idx,
-                    .slot_at = find_slot_at(out.slots, a->slot),
-                    .dims = a->dims,
-                    .param_begin = p_begin,
-                    .param_count = p_count
-                };
-            }
-            if (const auto* c = std::get_if<CoordLeafNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(c->leaf);
-                out.leaves.push_back(c->leaf);
-                // Constant/White leaves do not access coordinates even in WithPoints trees;
-                // only point-reading coordinate leaves require non-null X matrices at runtime.
-                const CoordMode leaf_mode = detail::leaf_coord_mode(c->leaf);
-                if (leaf_mode != CoordMode::Either)
-                {
-                    out.has_coord_points = true;
-                }
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return CoordLeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count};
-            }
-            if (std::holds_alternative<typename Node::Sum>(node.data))
-            {
-                // Associatively flatten nested Sum chains into a single SumTerm with contiguous params.
-                std::vector<Term> flat;
-                const std::size_t p_begin = next_param_idx;
-                collect_sum<Mode>(node, flat, out, next_param_idx);
-                return SumTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
-            }
-            // Associatively flatten nested Product chains into a single ProductTerm with contiguous params.
-            std::vector<Term> flat;
-            const std::size_t p_begin = next_param_idx;
-            collect_product<Mode>(node, flat, out, next_param_idx);
-            return ProductTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
-        }
-
-        /// @brief Recursively flattens nested binary @c Sum nodes into @p out_terms in left-to-right order.
-        /// @tparam Mode Distance kernel mode tag.
-        /// @param[in] node Current AST node to flatten or compile.
-        /// @param[in,out] out_terms Output vector appending non-sum compiled child terms.
-        /// @param[in,out] out Target @c Impl receiving leaf state and bindings.
-        /// @param[in,out] next_param_idx Running global hyperparameter counter.
-        template <DistanceModeConcept Mode>
-        static void collect_sum(
-            const DistanceKernel<Mode>::InternalNode& node,
-            std::vector<Term>& out_terms,
-            Impl& out,
-            std::size_t& next_param_idx
+        static Term compile_node(
+            const DistanceKernel<Mode>::InternalNode& root_node, Impl& out, std::size_t& next_param_idx
         )
         {
             using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* sum = std::get_if<typename Node::Sum>(&node.data))
+            enum class FrameKind : std::uint8_t
             {
-                collect_sum<Mode>(*sum->lhs, out_terms, out, next_param_idx);
-                collect_sum<Mode>(*sum->rhs, out_terms, out, next_param_idx);
-                return;
-            }
-            out_terms.push_back(compile_node<Mode>(node, out, next_param_idx));
-        }
+                Sum,
+                Product,
+            };
 
-        /// @brief Recursively flattens nested binary @c Product nodes into @p out_terms in left-to-right order.
-        /// @tparam Mode Distance kernel mode tag.
-        /// @param[in] node Current AST node to flatten or compile.
-        /// @param[in,out] out_terms Output vector appending non-product compiled child terms.
-        /// @param[in,out] out Target @c Impl receiving leaf state and bindings.
-        /// @param[in,out] next_param_idx Running global hyperparameter counter.
-        template <DistanceModeConcept Mode>
-        static void collect_product(
-            const DistanceKernel<Mode>::InternalNode& node,
-            std::vector<Term>& out_terms,
-            Impl& out,
-            std::size_t& next_param_idx
-        )
-        {
-            using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* prod = std::get_if<typename Node::Product>(&node.data))
+            struct CompileFrame
             {
-                collect_product<Mode>(*prod->lhs, out_terms, out, next_param_idx);
-                collect_product<Mode>(*prod->rhs, out_terms, out, next_param_idx);
-                return;
+                FrameKind kind;
+                std::vector<Term> terms;
+                std::size_t param_begin;
+            };
+
+            struct WorkItem
+            {
+                const Node* node{nullptr};
+                bool close_frame{false};
+            };
+
+            std::vector<CompileFrame> frames;
+            std::vector<WorkItem> work;
+            std::vector<const Node*> flatten;
+            Term compiled_root;
+
+            auto emit_term = [&frames, &compiled_root](Term&& t)
+            {
+                if (frames.empty())
+                {
+                    compiled_root = std::move(t);
+                }
+                else
+                {
+                    frames.back().terms.push_back(std::move(t));
+                }
+            };
+
+            work.push_back(WorkItem{.node = &root_node, .close_frame = false});
+            while (!work.empty())
+            {
+                const WorkItem item = work.back();
+                work.pop_back();
+
+                if (item.close_frame)
+                {
+                    CompileFrame done = std::move(frames.back());
+                    frames.pop_back();
+                    if (done.kind == FrameKind::Sum)
+                    {
+                        emit_term(
+                            SumTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx
+                            }
+                        );
+                    }
+                    else
+                    {
+                        emit_term(
+                            ProductTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx
+                            }
+                        );
+                    }
+                    continue;
+                }
+
+                const Node& cur = *item.node;
+                if (const auto* s = std::get_if<SuppliedScalarNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(s->leaf);
+                    out.leaves.push_back(s->leaf);
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(
+                        SuppliedScalarRef{
+                            .leaf_idx = leaf_idx,
+                            .slot_at = find_slot_at(out.slots, s->slot),
+                            .param_begin = p_begin,
+                            .param_count = p_count
+                        }
+                    );
+                    continue;
+                }
+                if (const auto* a = std::get_if<SuppliedArdNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(a->leaf);
+                    out.leaves.push_back(a->leaf);
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(
+                        SuppliedArdRef{
+                            .leaf_idx = leaf_idx,
+                            .slot_at = find_slot_at(out.slots, a->slot),
+                            .dims = a->dims,
+                            .param_begin = p_begin,
+                            .param_count = p_count
+                        }
+                    );
+                    continue;
+                }
+                if (const auto* c = std::get_if<CoordLeafNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(c->leaf);
+                    out.leaves.push_back(c->leaf);
+                    // Constant/White leaves do not access coordinates even in WithPoints trees;
+                    // only point-reading coordinate leaves require non-null X matrices at runtime.
+                    const CoordMode leaf_mode = detail::leaf_coord_mode(c->leaf);
+                    if (leaf_mode != CoordMode::Either)
+                    {
+                        out.has_coord_points = true;
+                    }
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(CoordLeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count});
+                    continue;
+                }
+
+                const bool is_sum = std::holds_alternative<typename Node::Sum>(cur.data);
+                frames.push_back(
+                    CompileFrame{
+                        .kind = is_sum ? FrameKind::Sum : FrameKind::Product,
+                        .terms = {},
+                        .param_begin = next_param_idx,
+                    }
+                );
+                work.push_back(WorkItem{.node = nullptr, .close_frame = true});
+
+                // Flatten nested binary sums/products into work in reverse order so popping visits left-to-right.
+                flatten.push_back(&cur);
+                while (!flatten.empty())
+                {
+                    const Node* f = flatten.back();
+                    flatten.pop_back();
+                    if (is_sum)
+                    {
+                        if (const auto* sum = std::get_if<typename Node::Sum>(&f->data))
+                        {
+                            flatten.push_back(sum->lhs.get());
+                            flatten.push_back(sum->rhs.get());
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (const auto* prod = std::get_if<typename Node::Product>(&f->data))
+                        {
+                            flatten.push_back(prod->lhs.get());
+                            flatten.push_back(prod->rhs.get());
+                            continue;
+                        }
+                    }
+                    work.push_back(WorkItem{.node = f, .close_frame = false});
+                }
             }
-            out_terms.push_back(compile_node<Mode>(node, out, next_param_idx));
+            return compiled_root;
         }
 
         // --- Validation helpers for evaluation ---

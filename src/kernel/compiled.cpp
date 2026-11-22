@@ -614,6 +614,58 @@ namespace cxxgpr
         /// @brief True if at least one leaf can consume packed per-dimension ARD squared differences.
         bool needs_ard = false;
 
+        /// @brief Default-constructs an empty compiled implementation.
+        Impl() = default;
+        /// @brief Copy-constructs a compiled implementation.
+        Impl(const Impl&) = default;
+        /// @brief Move-constructs a compiled implementation.
+        Impl(Impl&&) noexcept = default;
+        /// @brief Copy-assigns a compiled implementation.
+        /// @return Reference to *this.
+        Impl& operator=(const Impl&) = default;
+        /// @brief Move-assigns a compiled implementation.
+        /// @return Reference to *this.
+        Impl& operator=(Impl&&) noexcept = default;
+
+        /// @brief Destroys the compiled AST iteratively to keep stack depth O(1) on deep trees.
+        ~Impl() noexcept { destroy_term_iterative(root); }
+
+        /// @brief Iteratively destroys nested SumTerm/ProductTerm subtrees without recursive calls.
+        /// @param[in,out] target Root compiled term to drain.
+        static void destroy_term_iterative(Term& target) noexcept
+        {
+            std::vector<Term> pending;
+            try
+            {
+                pending.push_back(std::move(target));
+                while (!pending.empty())
+                {
+                    Term cur = std::move(pending.back());
+                    pending.pop_back();
+                    if (auto* s = std::get_if<SumTerm>(&cur))
+                    {
+                        for (auto& child : s->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        s->terms.clear();
+                    }
+                    else if (auto* p = std::get_if<ProductTerm>(&cur))
+                    {
+                        for (auto& child : p->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        p->terms.clear();
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Fallback to bounded cleanup if OOM occurs while draining; noexcept boundary must not throw.
+            }
+        }
+
         /// @brief Refreshes `cached_ls` snapshots from current ARD leaf hyperparameters.
         /// @details Populates per-leaf vectors for ARD leaves and clears non-ARD entries so hot-path evaluation reads
         /// contiguous spans without calling `lengthscales()` allocations.
@@ -752,6 +804,14 @@ namespace cxxgpr
         /// @param[in,out] out_bindings Output vector accumulating parameter-to-leaf bindings.
         /// @param[in,out] next_param_idx Running global parameter counter incremented for each bound parameter.
         /// @return Compiled `Term` representing `spec`.
+        /// @brief Iteratively compiles a `KernelSpec` AST into a flattened `Term` tree.
+        /// @details Uses explicit work and flatten stacks so deep alternating sum/product trees do not overflow
+        /// small thread stacks, while preserving strict depth-first left-to-right leaf and parameter ordering.
+        /// @param[in] spec Root kernel specification node.
+        /// @param[in,out] out_leaves Destination vector of compiled leaf objects.
+        /// @param[in,out] out_bindings Destination vector of global hyperparameter bindings.
+        /// @param[in,out] next_param_idx Running global parameter counter.
+        /// @return Compiled `Term` tree.
         static Term compile_node(
             const KernelSpec& spec,
             std::vector<KernelLeaf>& out_leaves,
@@ -759,94 +819,135 @@ namespace cxxgpr
             std::size_t& next_param_idx
         )
         {
-            if (const auto* leaf = std::get_if<KernelLeaf>(&spec.node_))
+            enum class FrameKind : std::uint8_t
             {
-                const std::size_t leaf_idx = out_leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(*leaf);
-                out_leaves.push_back(*leaf);
-                // Bind all hyperparameters of this leaf consecutively in depth-first left-to-right order.
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out_bindings.push_back(
-                        ParameterBinding{
-                            .index = next_param_idx++,
-                            .leaf_id = leaf_idx,
-                            .local_index = local,
-                        }
-                    );
-                }
-                return LeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count};
-            }
-            if (std::holds_alternative<KernelSpec::SumNode>(spec.node_))
-            {
-                // Flatten nested binary sums into one flat SumTerm while preserving parameter order.
-                std::vector<Term> flat;
-                const std::size_t p_begin = next_param_idx;
-                collect_sum(spec, flat, out_leaves, out_bindings, next_param_idx);
-                return SumTerm{
-                    .terms = std::move(flat),
-                    .param_begin = p_begin,
-                    .param_end = next_param_idx,
-                };
-            }
-            // Flatten nested binary products into one flat ProductTerm while preserving parameter order.
-            std::vector<Term> flat;
-            const std::size_t p_begin = next_param_idx;
-            collect_product(spec, flat, out_leaves, out_bindings, next_param_idx);
-            return ProductTerm{
-                .terms = std::move(flat),
-                .param_begin = p_begin,
-                .param_end = next_param_idx,
+                Sum,
+                Product,
             };
-        }
 
-        /// @brief Associatively flattens nested `KernelSpec::SumNode` trees into `out_terms`.
-        /// @details Traverses `lhs` then `rhs` so leaf and parameter ordering stays strictly depth-first left-to-right.
-        /// @param[in] spec Current `KernelSpec` node being flattened.
-        /// @param[in,out] out_terms Destination list of non-sum summand `Term` nodes.
-        /// @param[in,out] out_leaves Accumulator of compiled leaf objects.
-        /// @param[in,out] out_bindings Accumulator of global parameter bindings.
-        /// @param[in,out] next_param_idx Running global parameter counter.
-        static void collect_sum(
-            const KernelSpec& spec,
-            std::vector<Term>& out_terms,
-            std::vector<KernelLeaf>& out_leaves,
-            std::vector<ParameterBinding>& out_bindings,
-            std::size_t& next_param_idx
-        )
-        {
-            if (const auto* s = std::get_if<KernelSpec::SumNode>(&spec.node_))
+            struct CompileFrame
             {
-                collect_sum(*s->lhs, out_terms, out_leaves, out_bindings, next_param_idx);
-                collect_sum(*s->rhs, out_terms, out_leaves, out_bindings, next_param_idx);
-                return;
-            }
-            out_terms.push_back(compile_node(spec, out_leaves, out_bindings, next_param_idx));
-        }
+                FrameKind kind;
+                std::vector<Term> terms;
+                std::size_t param_begin;
+            };
 
-        /// @brief Associatively flattens nested `KernelSpec::ProductNode` trees into `out_terms`.
-        /// @details Traverses `lhs` then `rhs` so leaf and parameter ordering stays strictly depth-first left-to-right.
-        /// @param[in] spec Current `KernelSpec` node being flattened.
-        /// @param[in,out] out_terms Destination list of non-product factor `Term` nodes.
-        /// @param[in,out] out_leaves Accumulator of compiled leaf objects.
-        /// @param[in,out] out_bindings Accumulator of global parameter bindings.
-        /// @param[in,out] next_param_idx Running global parameter counter.
-        static void collect_product(
-            const KernelSpec& spec,
-            std::vector<Term>& out_terms,
-            std::vector<KernelLeaf>& out_leaves,
-            std::vector<ParameterBinding>& out_bindings,
-            std::size_t& next_param_idx
-        )
-        {
-            if (const auto* p = std::get_if<KernelSpec::ProductNode>(&spec.node_))
+            struct WorkItem
             {
-                collect_product(*p->lhs, out_terms, out_leaves, out_bindings, next_param_idx);
-                collect_product(*p->rhs, out_terms, out_leaves, out_bindings, next_param_idx);
-                return;
+                const KernelSpec* node{nullptr};
+                bool close_frame{false};
+            };
+
+            std::vector<CompileFrame> frames;
+            std::vector<WorkItem> work;
+            std::vector<const KernelSpec*> flatten;
+            Term root;
+
+            auto emit_term = [&frames, &root](Term&& t)
+            {
+                if (frames.empty())
+                {
+                    root = std::move(t);
+                }
+                else
+                {
+                    frames.back().terms.push_back(std::move(t));
+                }
+            };
+
+            work.push_back(WorkItem{.node = &spec, .close_frame = false});
+            while (!work.empty())
+            {
+                const WorkItem item = work.back();
+                work.pop_back();
+
+                if (item.close_frame)
+                {
+                    CompileFrame done = std::move(frames.back());
+                    frames.pop_back();
+                    if (done.kind == FrameKind::Sum)
+                    {
+                        emit_term(
+                            SumTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx,
+                            }
+                        );
+                    }
+                    else
+                    {
+                        emit_term(
+                            ProductTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx,
+                            }
+                        );
+                    }
+                    continue;
+                }
+
+                const KernelSpec& cur = *item.node;
+                if (const auto* leaf = std::get_if<KernelLeaf>(&cur.node_))
+                {
+                    const std::size_t leaf_idx = out_leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(*leaf);
+                    out_leaves.push_back(*leaf);
+                    // Bind all hyperparameters of this leaf consecutively in depth-first left-to-right order.
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out_bindings.push_back(
+                            ParameterBinding{
+                                .index = next_param_idx++,
+                                .leaf_id = leaf_idx,
+                                .local_index = local,
+                            }
+                        );
+                    }
+                    emit_term(LeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count});
+                    continue;
+                }
+
+                const bool is_sum = std::holds_alternative<KernelSpec::SumNode>(cur.node_);
+                frames.push_back(
+                    CompileFrame{
+                        .kind = is_sum ? FrameKind::Sum : FrameKind::Product,
+                        .terms = {},
+                        .param_begin = next_param_idx,
+                    }
+                );
+                work.push_back(WorkItem{.node = nullptr, .close_frame = true});
+
+                // Flatten nested binary sums/products into work in reverse order so popping visits left-to-right.
+                flatten.push_back(&cur);
+                while (!flatten.empty())
+                {
+                    const KernelSpec* f = flatten.back();
+                    flatten.pop_back();
+                    if (is_sum)
+                    {
+                        if (const auto* s = std::get_if<KernelSpec::SumNode>(&f->node_))
+                        {
+                            flatten.push_back(s->lhs.get());
+                            flatten.push_back(s->rhs.get());
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (const auto* p = std::get_if<KernelSpec::ProductNode>(&f->node_))
+                        {
+                            flatten.push_back(p->lhs.get());
+                            flatten.push_back(p->rhs.get());
+                            continue;
+                        }
+                    }
+                    work.push_back(WorkItem{.node = f, .close_frame = false});
+                }
             }
-            out_terms.push_back(compile_node(spec, out_leaves, out_bindings, next_param_idx));
+            return root;
         }
 
         /// @brief Verifies that every ARD leaf in `leaves` expects `x_dim` input features.
