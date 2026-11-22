@@ -27,7 +27,8 @@ namespace cxxgpr::detail
     /// @param[in,out] cached_ls Per-leaf lengthscale snapshot vectors resized to leaves.size().
     void refresh_cached_ls_entries(std::span<const KernelLeaf> leaves, std::vector<std::vector<double>>& cached_ls);
 
-    /// @brief Atomically updates all leaf hyperparameters in leaves from log-space params without hot-path allocations.
+    /// @brief Atomically updates all leaf hyperparameters in leaves from log-space params without hot-path allocations
+    /// for built-in leaves.
     /// @details When leaves contains only built-in leaf types, validates every parameter against its leaf bounds before
     /// updating leaves in place so neither validation nor update allocates. When a CustomKernel is present, stages a
     /// copy of leaves so any custom set_params() error rolls back all leaves atomically.

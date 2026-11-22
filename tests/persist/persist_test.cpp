@@ -22,9 +22,11 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <iterator>
 #include <limits>
@@ -1328,7 +1330,7 @@ namespace
     /// temporary files are gone, config.json is untouched, and model.safetensors is already the new one.
     TEST(PersistModelsTest, SaveReportsIoWhenConfigJsonCannotBeReplaced)
     {
-        // Spec: FMT-02, FMT-08
+        // Spec: FMT-02, FMT-08, FMT-09
         const auto fit_old = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
         const auto fit_new = factor_rbf_model(0.4, {0.1, 0.7, 1.1, 1.9}, {-0.3, 0.8, 0.2, 1.4});
         ASSERT_TRUE(fit_old.has_value());
@@ -1337,6 +1339,7 @@ namespace
         const TempDirGuard reference("config_not_replaceable_ref");
         ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_old, dir.path).has_value());
         ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_new, reference.path).has_value());
+        const std::string cfg_old = read_file_bytes(dir.path / "config.json");
         const std::string tensors_old = read_file_bytes(dir.path / "model.safetensors");
         const std::string tensors_new = read_file_bytes(reference.path / "model.safetensors");
         ASSERT_NE(tensors_old, tensors_new);
@@ -1353,6 +1356,18 @@ namespace
         EXPECT_EQ(list_dir(dir.path), (std::vector<std::string>{"config.json", "model.safetensors"}));
         EXPECT_TRUE(std::filesystem::is_directory(dir.path / "config.json"));
         EXPECT_EQ(read_file_bytes(dir.path / "model.safetensors"), tensors_new);
+
+        // Restoring the untouched old config.json beside the newly replaced model.safetensors models the
+        // partial-rename failure state; FMT-09 requires load() to reject the mismatched pair as Tensor.
+        ASSERT_TRUE(std::filesystem::remove(dir.path / "config.json", ec));
+        {
+            std::ofstream ofs(dir.path / "config.json", std::ios::binary | std::ios::trunc);
+            ofs << cfg_old;
+        }
+        const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_FALSE(loaded.has_value());
+        EXPECT_EQ(loaded.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(loaded.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
     }
 
     /// @brief Negative control: save refuses a model whose config.json would be nested deeper than load accepts.
@@ -2026,6 +2041,357 @@ namespace
                 "shrink_mixed_reevaluate", true
             );
         }
+    }
+
+    namespace
+    {
+
+        /// @brief Extracts the string value of `save_id` from serialized config.json text.
+        /// @param[in] json_text Serialized config.json contents.
+        /// @return Extracted 32-character value if found, or empty string otherwise.
+        [[nodiscard]] std::string extract_json_save_id(const std::string& json_text)
+        {
+            const std::string needle = R"("save_id": ")";
+            const std::size_t pos = json_text.find(needle);
+            if (pos == std::string::npos)
+            {
+                return {};
+            }
+            const std::size_t start = pos + needle.size();
+            const std::size_t end = json_text.find('"', start);
+            if (end == std::string::npos)
+            {
+                return {};
+            }
+            return json_text.substr(start, end - start);
+        }
+
+        /// @brief Replaces or removes the `"save_id": "..."` line in pretty-printed config.json text.
+        /// @param[in] json_text Serialized config.json contents.
+        /// @param[in] replacement Replacement JSON value token (e.g. `123` or `"bad"`), or empty to erase the key.
+        /// @return Modified config.json text.
+        [[nodiscard]] std::string mutate_config_save_id(const std::string& json_text, const std::string& replacement)
+        {
+            const std::size_t key_pos = json_text.find("\"save_id\":");
+            if (key_pos == std::string::npos)
+            {
+                return json_text;
+            }
+            const std::size_t line_start = json_text.rfind('\n', key_pos);
+            const std::size_t line_end = json_text.find('\n', key_pos);
+            if (replacement.empty())
+            {
+                const bool has_trailing_comma =
+                    (line_end != std::string::npos && key_pos < line_end && json_text[line_end - 1U] == ',');
+                std::string out = json_text;
+                if (line_end != std::string::npos)
+                {
+                    out.erase(line_start, line_end - line_start);
+                }
+                if (!has_trailing_comma && line_start != std::string::npos && line_start > 0U
+                    && out[line_start - 1U] == ',')
+                {
+                    out.erase(line_start - 1U, 1U);
+                }
+                return out;
+            }
+            const std::size_t val_start = json_text.find(':', key_pos) + 2U;
+            const std::size_t comma_or_nl = json_text.find_first_of(",\r\n", val_start);
+            std::string out = json_text;
+            out.replace(val_start, comma_or_nl - val_start, replacement);
+            return out;
+        }
+
+        /// @brief Reads and mutates the raw JSON header string of a model.safetensors file, preserving 8-byte padding.
+        /// @param[in] path Filesystem path to model.safetensors.
+        /// @param[in] mutate Callback transforming the unpadded safetensors header JSON string.
+        void rewrite_safetensors_header_str(
+            const std::filesystem::path& path, const std::function<std::string(std::string)>& mutate
+        )
+        {
+            const std::string raw = read_file_bytes(path);
+            ASSERT_GE(raw.size(), 8U);
+            std::uint64_t hlen = 0U;
+            std::memcpy(&hlen, raw.data(), sizeof(hlen));
+            ASSERT_LE(8U + hlen, raw.size());
+            std::string hstr = mutate(raw.substr(8U, static_cast<std::size_t>(hlen)));
+            while (!hstr.empty() && hstr.back() == ' ')
+            {
+                hstr.pop_back();
+            }
+            const std::size_t padded = (hstr.size() + 7U) & ~std::size_t{7U};
+            hstr.append(padded - hstr.size(), ' ');
+            const auto new_hlen = static_cast<std::uint64_t>(hstr.size());
+            std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+            ASSERT_TRUE(ofs.good());
+            ofs.write(reinterpret_cast<const char*>(&new_hlen), sizeof(new_hlen));
+            ofs.write(hstr.data(), static_cast<std::streamsize>(hstr.size()));
+            ofs.write(raw.data() + 8U + hlen, static_cast<std::streamsize>(raw.size() - (8U + hlen)));
+            ofs.flush();
+            ASSERT_TRUE(ofs.good());
+        }
+
+        /// @brief Reads the raw JSON header string from a model.safetensors file.
+        /// @param[in] path Filesystem path to model.safetensors.
+        /// @return Raw header JSON text.
+        [[nodiscard]] std::string read_safetensors_header_str(const std::filesystem::path& path)
+        {
+            const std::string raw = read_file_bytes(path);
+            std::uint64_t hlen = 0U;
+            std::memcpy(&hlen, raw.data(), sizeof(hlen));
+            return raw.substr(8U, static_cast<std::size_t>(hlen));
+        }
+
+        /// @brief Returns true if s is exactly 32 lowercase hexadecimal digits.
+        /// @param[in] s Candidate identifier string.
+        /// @return True when s has length 32 and all characters match `[0-9a-f]`.
+        [[nodiscard]] bool is_hex32_lower(const std::string& s) noexcept
+        {
+            return s.size() == 32U && std::ranges::all_of(s, [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+        }
+
+    }  // namespace
+
+    /// @brief Verifies FMT-09 save_id determinism, format, and agreement between config.json and model.safetensors.
+    TEST(PersistModelsTest, SaveAndLoadEmitDeterministicMatchingSaveId)
+    {
+        // Spec: FMT-02, FMT-03, FMT-04, FMT-09
+        const auto fit_a1 = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        const auto fit_a2 = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        const auto fit_b = factor_rbf_model(0.6, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        ASSERT_TRUE(fit_a1.has_value());
+        ASSERT_TRUE(fit_a2.has_value());
+        ASSERT_TRUE(fit_b.has_value());
+
+        const TempDirGuard dir_a1("save_id_det_a1");
+        const TempDirGuard dir_a2("save_id_det_a2");
+        const TempDirGuard dir_b("save_id_det_b");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_a1, dir_a1.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_a2, dir_a2.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_b, dir_b.path).has_value());
+
+        const std::string cfg_a1_text = read_file_bytes(dir_a1.path / "config.json");
+        EXPECT_EQ(cfg_a1_text, read_file_bytes(dir_a2.path / "config.json"));
+        EXPECT_EQ(
+            read_file_bytes(dir_a1.path / "model.safetensors"), read_file_bytes(dir_a2.path / "model.safetensors")
+        );
+
+        const std::string id_a = extract_json_save_id(cfg_a1_text);
+        EXPECT_TRUE(is_hex32_lower(id_a));
+
+        const std::string hdr_a = read_safetensors_header_str(dir_a1.path / "model.safetensors");
+        EXPECT_NE(hdr_a.find("\"__metadata__\":{\"cxxgpr.save_id\":\"" + id_a + "\"}"), std::string::npos);
+
+        const std::string id_b = extract_json_save_id(read_file_bytes(dir_b.path / "config.json"));
+        EXPECT_TRUE(is_hex32_lower(id_b));
+        EXPECT_NE(id_b, id_a);
+
+        const auto loaded = cxxgpr::persist::LoadedGpr::load(dir_a1.path);
+        ASSERT_TRUE(loaded.has_value());
+    }
+
+    /// @brief Negative controls for FMT-09 pairing identifier mismatch, one-sided presence, legacy load, and syntax.
+    TEST(PersistModelsTest, RejectsMismatchedOneSidedLegacyAndMalformedSaveIds)
+    {
+        // Spec: FMT-02, FMT-03, FMT-04, FMT-08, FMT-09
+        const auto fit_old = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
+        const auto fit_new = factor_rbf_model(0.4, {0.1, 0.7, 1.1, 1.9}, {-0.3, 0.8, 0.2, 1.4});
+        const auto fit_other_n = factor_rbf_model(0.4, {0.1, 0.7, 1.1}, {-0.3, 0.8, 0.2});
+        ASSERT_TRUE(fit_old.has_value());
+        ASSERT_TRUE(fit_new.has_value());
+        ASSERT_TRUE(fit_other_n.has_value());
+
+        const TempDirGuard dir_old("save_id_old");
+        const TempDirGuard dir_new("save_id_new");
+        const TempDirGuard dir_other("save_id_other_n");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_old, dir_old.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_new, dir_new.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_other_n, dir_other.path).has_value());
+
+        const std::string cfg_old = read_file_bytes(dir_old.path / "config.json");
+        const std::string id_old = extract_json_save_id(cfg_old);
+        ASSERT_TRUE(is_hex32_lower(id_old));
+
+        // Mismatched pair (same shapes/dtypes, e.g., interrupted save or failed 2nd rename) -> PersistFailed(Tensor).
+        {
+            const TempDirGuard mix("save_id_mix_same");
+            std::filesystem::copy_file(dir_old.path / "config.json", mix.path / "config.json");
+            std::filesystem::copy_file(dir_new.path / "model.safetensors", mix.path / "model.safetensors");
+            const auto res = cxxgpr::persist::LoadedGpr::load(mix.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+
+        // Pairing check runs before tensor shape check even when shapes also differ.
+        {
+            const TempDirGuard mix("save_id_mix_diff_n");
+            std::filesystem::copy_file(dir_old.path / "config.json", mix.path / "config.json");
+            std::filesystem::copy_file(dir_other.path / "model.safetensors", mix.path / "model.safetensors");
+            const auto res = cxxgpr::persist::LoadedGpr::load(mix.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+            EXPECT_NE(res.error().message().find("different saves"), std::string_view::npos);
+        }
+
+        auto strip_metadata = [](std::string hdr)
+        {
+            const std::size_t pos = hdr.find("\"__metadata__\":{");
+            if (pos != std::string::npos)
+            {
+                const std::size_t end = hdr.find("},", pos);
+                if (end != std::string::npos)
+                {
+                    hdr.erase(pos, (end + 2U) - pos);
+                }
+            }
+            return hdr;
+        };
+
+        // Legacy pair (neither carries an identifier) loads cleanly.
+        {
+            const TempDirGuard leg("save_id_legacy");
+            std::filesystem::copy_file(dir_old.path / "config.json", leg.path / "config.json");
+            std::filesystem::copy_file(dir_old.path / "model.safetensors", leg.path / "model.safetensors");
+            {
+                std::ofstream ofs(leg.path / "config.json", std::ios::binary | std::ios::trunc);
+                ofs << mutate_config_save_id(cfg_old, "");
+            }
+            rewrite_safetensors_header_str(leg.path / "model.safetensors", strip_metadata);
+            EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(leg.path).has_value());
+        }
+
+        // One-sided pairs (only config.json or only model.safetensors carries an identifier) are rejected.
+        {
+            const TempDirGuard only_cfg("save_id_only_cfg");
+            std::filesystem::copy_file(dir_old.path / "config.json", only_cfg.path / "config.json");
+            std::filesystem::copy_file(dir_old.path / "model.safetensors", only_cfg.path / "model.safetensors");
+            rewrite_safetensors_header_str(only_cfg.path / "model.safetensors", strip_metadata);
+            const auto res = cxxgpr::persist::LoadedGpr::load(only_cfg.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+        {
+            const TempDirGuard only_st("save_id_only_st");
+            std::filesystem::copy_file(dir_old.path / "config.json", only_st.path / "config.json");
+            std::filesystem::copy_file(dir_old.path / "model.safetensors", only_st.path / "model.safetensors");
+            {
+                std::ofstream ofs(only_st.path / "config.json", std::ios::binary | std::ios::trunc);
+                ofs << mutate_config_save_id(cfg_old, "");
+            }
+            const auto res = cxxgpr::persist::LoadedGpr::load(only_st.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+
+        // Malformed config.json save_id -> PersistFailed(Config).
+        for (const std::string& bad_val : {
+                 std::string("123"),
+                 std::string("\"0123456789abcdef0123456789abcde\""),
+                 std::string("\"0123456789ABCDEF0123456789ABCDEF\""),
+                 std::string("\"0123456789abcdef0123456789abcdeg\""),
+             })
+        {
+            const TempDirGuard bad_cfg("save_id_bad_cfg");
+            std::filesystem::copy_file(dir_old.path / "config.json", bad_cfg.path / "config.json");
+            std::filesystem::copy_file(dir_old.path / "model.safetensors", bad_cfg.path / "model.safetensors");
+            {
+                std::ofstream ofs(bad_cfg.path / "config.json", std::ios::binary | std::ios::trunc);
+                ofs << mutate_config_save_id(cfg_old, bad_val);
+            }
+            const auto res = cxxgpr::persist::LoadedGpr::load(bad_cfg.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Config);
+        }
+
+        // Malformed __metadata__ / cxxgpr.save_id -> PersistFailed(Tensor), while extra metadata keys are ignored.
+        {
+            const TempDirGuard extra_meta("save_id_extra_meta");
+            std::filesystem::copy_file(dir_old.path / "config.json", extra_meta.path / "config.json");
+            std::filesystem::copy_file(dir_old.path / "model.safetensors", extra_meta.path / "model.safetensors");
+            const std::string meta_orig = R"("__metadata__":{"cxxgpr.save_id":")" + id_old + R"("})";
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
+                const std::size_t pos = hdr.find(meta_orig);
+                hdr.replace(
+                    pos, meta_orig.size(),
+                    R"("__metadata__":{"cxxgpr.save_id":")" + id_old + R"(","other_tool":"ignored"})"
+                );
+                return hdr;
+            }
+            );
+            EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(extra_meta.path).has_value());
+
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
+                const std::string target = R"("other_tool":"ignored")";
+                hdr.replace(hdr.find(target), target.size(), R"("other_tool":42)");
+                return hdr;
+            }
+            );
+            const auto non_str = cxxgpr::persist::LoadedGpr::load(extra_meta.path);
+            ASSERT_FALSE(non_str.has_value());
+            EXPECT_EQ(non_str.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
+                hdr.replace(hdr.find(id_old), id_old.size(), "0123456789ABCDEF0123456789ABCDEF");
+                return hdr;
+            }
+            );
+            const auto upper = cxxgpr::persist::LoadedGpr::load(extra_meta.path);
+            ASSERT_FALSE(upper.has_value());
+            EXPECT_EQ(upper.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+    }
+
+    /// @brief Verifies FMT-09 save_id against an independent Python hashlib SHA-256 reference and config-only changes.
+    /// @details Saves two factorless checkpoints sharing identical binary-exact (x, y) tensors but different
+    /// hyperparameters (simulating refit + save), verifies that save_id matches the independently computed FIPS 180-4
+    /// SHA-256 digest of the FMT-09 message M (catching SHA-256 constant, config-omission, and tensor-omission
+    /// mutations), and confirms that mixing config.json and model.safetensors across the two saves is rejected.
+    TEST(PersistModelsTest, PairingIdMatchesIndependentSha256ReferenceAndDetectsConfigOnlyChange)
+    {
+        // Spec: FMT-09
+        const auto fit_a = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.25, 0.75, 0.5});
+        const auto fit_b = factor_rbf_model(2.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.25, 0.75, 0.5});
+        ASSERT_TRUE(fit_a.has_value());
+        ASSERT_TRUE(fit_b.has_value());
+
+        const TempDirGuard dir_a("save_id_ref_a");
+        const TempDirGuard dir_b("save_id_ref_b");
+        ASSERT_TRUE(cxxgpr::persist::save(*fit_a, dir_a.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save(*fit_b, dir_b.path).has_value());
+
+        const std::string cfg_a = read_file_bytes(dir_a.path / "config.json");
+        const std::string cfg_b = read_file_bytes(dir_b.path / "config.json");
+        const std::string id_a = extract_json_save_id(cfg_a);
+        const std::string id_b = extract_json_save_id(cfg_b);
+
+        // Expected values independently computed with Python hashlib.sha256 over FMT-09 message M
+        // (domain tag "cxxgpr.save_id.v1\0" || le64(|C|) || C || le64(2) || x_desc || x_bytes || y_desc || y_bytes).
+        EXPECT_EQ(id_a, "6b97f9fa3fe021f5e10c0f82726c89c8");
+        EXPECT_EQ(id_b, "2978a912970efabbba0cd821c203bc8d");
+        EXPECT_NE(id_a, id_b);
+
+        // Mixing config.json from save A with model.safetensors from save B (identical tensor payloads,
+        // different hyperparameters) must be rejected with PersistFailed(Tensor).
+        const TempDirGuard mixed("save_id_ref_mixed");
+        std::filesystem::copy_file(dir_a.path / "config.json", mixed.path / "config.json");
+        std::filesystem::copy_file(dir_b.path / "model.safetensors", mixed.path / "model.safetensors");
+        const auto res = cxxgpr::persist::LoadedGpr::load(mixed.path);
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
     }
 
 }  // namespace

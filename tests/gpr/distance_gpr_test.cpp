@@ -1520,7 +1520,7 @@ namespace
                 v += 0.1;
             }
             {
-                const cxxgpr::test_support::NoAllocationScope scope;
+                const cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
                 auto value = obj.value_and_gradient_into(theta, grad);
                 *allocations = scope.delta_allocations();
                 if (!value.has_value())
@@ -1537,13 +1537,12 @@ namespace
         }
     };
 
-    /// @brief Verifies that an objective-and-gradient evaluation allocates no more than the coordinate model's.
-    /// @details Requirement: a supplied-distance model allocates no more than the coordinate model with the same
-    /// kernel, precision and size. Both objectives evaluate after warm-up without growing any workspace; the only
-    /// allocations left in either are those of the shared parameter rebinding (CompiledKernel::set_params and
-    /// CompiledDistanceKernel::set_params stage a copy of the leaves, the ARD leaves stage their length scales, and
-    /// the cached length scales are refreshed from a fresh vector), so the counts must be equal. Covers scalar and
-    /// ARD slots, every precision policy and a WithPoints kernel with a coordinate ARD leaf.
+    /// @brief Verifies that objective-and-gradient evaluation allocates zero heap memory for both distance and
+    /// coordinate models after warm-up.
+    /// @details Requirement: after warm-up, evaluating the MLL objective and gradient (including parameter rebinding
+    /// via set_params() and cached lengthscale refresh for built-in leaves) performs zero heap allocations in both
+    /// DistanceGpr and Gpr. Covers scalar and ARD slots, every precision policy, and WithPoints kernels with
+    /// coordinate RbfArd and RationalQuadraticArd leaves.
     TEST(DistanceGprTest, ObjectiveAndGradientAllocateNoMoreThanTheCoordinateModel)
     {
         // Spec: REQ-05, REQ-11, DES-13, DES-21
@@ -1580,6 +1579,8 @@ namespace
             ASSERT_TRUE(coord.has_value());
             auto coord_fitted = coord->fit(data.x, data.n, data.d, data.y);
             ASSERT_TRUE(coord_fitted.has_value()) << coord_fitted.error().message();
+            EXPECT_EQ(dist_allocations, 0U);
+            EXPECT_EQ(coord_allocations, 0U);
             EXPECT_LE(dist_allocations, coord_allocations);
             EXPECT_EQ(dist_allocations, coord_allocations);
         };
@@ -1627,6 +1628,16 @@ namespace
         check.template operator()<cxxgpr::SinglePrecision, cxxgpr::WithPoints>(
             "single with-points", wp_kernel, wp_coord, train
         );
+
+        // Cover WithPoints + coordinate RationalQuadraticArdKernel to guard validate_ard_coord_dims() against
+        // allocating via lengthscales().size() on the hot path.
+        const auto rq_ard = cxxgpr::RationalQuadraticArdKernel::create(coord_scales, 1.5).value();
+        const cxxgpr::DistanceKernel<cxxgpr::WithPoints> wp_rq_kernel =
+            distance_scalar_kernel(slot).with_points() + cxxgpr::KernelSpec(rq_ard);
+        const auto wp_rq_coord = coordinate_scalar_kernel() + cxxgpr::KernelSpec(rq_ard);
+        check.template operator()<cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+            "double with-points rq-ard", wp_rq_kernel, wp_rq_coord, train
+        );
     }
 
     /// @brief Verifies that a non-finite latent variance is reported instead of being clamped to zero.
@@ -1659,124 +1670,6 @@ namespace
             EXPECT_EQ(bad.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
         }
         EXPECT_TRUE(model->predict(cross, cxxgpr::MatrixRef<double>(data.q.data(), data.m, data.d)).has_value());
-    }
-
-    /// @brief Custom optimizer auditing heap allocations on the second MLL+grad call.
-    struct MllGradAuditOptimizer
-    {
-        /// @brief Opts out of incremental coordinate updates.
-        [[maybe_unused]] static constexpr bool uses_change_indices = false;
-        /// @brief Shared counter recording allocations observed on the second evaluation.
-        std::shared_ptr<std::size_t> second_eval_allocs = std::make_shared<std::size_t>(999U);
-
-        /// @brief Evaluates MLL+grad twice and records allocations on the second evaluation.
-        /// @param[in,out] obj Objective supplied by DistanceGpr::fit().
-        /// @param[in] init Initial log-space parameters.
-        /// @return OptimizerResult on success, or GprError.
-        [[nodiscard]] std::expected<cxxgpr::optimizer::OptimizerResult, cxxgpr::GprError> optimize(
-            cxxgpr::optimizer::TwiceDifferentiable& obj, std::span<const double> init
-        ) const
-        {
-            std::vector<double> grad(obj.dim(), 0.0);
-            std::vector<double> p1(init.begin(), init.end());
-            auto v1 = obj.value_and_gradient_into(p1, grad);
-            if (!v1.has_value())
-            {
-                return std::unexpected(std::move(v1).error());
-            }
-            std::vector<double> p2(init.begin(), init.end());
-            for (double& x : p2)
-            {
-                x += 0.1;
-            }
-            {
-                const cxxgpr::test_support::NoAllocationScope audit;
-                auto v2 = obj.value_and_gradient_into(p2, grad);
-                *second_eval_allocs = audit.delta_allocations();
-                if (!v2.has_value())
-                {
-                    return std::unexpected(std::move(v2).error());
-                }
-                return cxxgpr::optimizer::OptimizerResult{
-                    .params = std::move(p2),
-                    .value = *v2,
-                    .iterations = 2U,
-                    .converged = true,
-                };
-            }
-        }
-    };
-
-    /// @brief Verifies DistanceGpr MLL+grad evaluations (including set_params) perform zero heap allocations after
-    /// warmup.
-    TEST(DistanceGprTest, DistanceModelMllGradZeroAllocAfterWarmup)
-    {
-        // Spec: REQ-05, REQ-11, DES-21
-
-        const Data data = make_data(12, 2, 2);
-        const Tables t = euclid_tables(data);
-        const cxxgpr::ScalarDistance s_slot;
-        const auto a_slot = cxxgpr::ArdDistance::create(data.d).value();
-
-        cxxgpr::DistanceSource train_s;
-        train_s.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
-
-        const auto ard_t0 = table(data.x, data.n, data.x, data.n, data.d, 0);
-        const auto ard_t1 = table(data.x, data.n, data.x, data.n, data.d, 1);
-        const std::array<cxxgpr::MatrixRef<double>, 2> ard_refs{
-            cxxgpr::MatrixRef<double>(ard_t0.data(), data.n, data.n),
-            cxxgpr::MatrixRef<double>(ard_t1.data(), data.n, data.n),
-        };
-        cxxgpr::DistanceSource train_a;
-        train_a.bind_ard(a_slot.slot(), ard_refs);
-
-        cxxgpr::DistanceSource train_comp;
-        train_comp.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
-        train_comp.bind_ard(a_slot.slot(), ard_refs);
-
-        const auto k_scalar =
-            cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(s_slot.rbf(cxxgpr::RbfKernel::create(0.8).value()));
-        const auto k_ard = a_slot.rbf_ard(cxxgpr::RbfArdKernel::create(std::array{0.7, 1.2}).value()).value();
-        const auto k_comp = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.1).value())
-                * a_slot
-                      .matern_ard(
-                          cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::FiveHalves).value()
-                      )
-                      .value()
-            + s_slot.rational_quadratic(cxxgpr::RationalQuadraticKernel::create(0.9, 1.5).value());
-
-        auto run_case = [&]<typename P>(
-                            const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>& k, const cxxgpr::DistanceSource& src,
-                            const char* label
-                        )
-        {
-            SCOPED_TRACE(label);
-            const MllGradAuditOptimizer opt;
-            auto fit = cxxgpr::DistanceGpr<MllGradAuditOptimizer, P, cxxgpr::DistanceOnly>(k, opt)
-                           .with_noise_variance(0.05)
-                           .value()
-                           .fit(src, data.y);
-            ASSERT_TRUE(fit.has_value()) << fit.error().message();
-            EXPECT_EQ(*opt.second_eval_allocs, 0U);
-        };
-
-        for (const auto& [name, k_ptr, s_ptr] : std::array<
-                 std::tuple<
-                     const char*, const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>*, const cxxgpr::DistanceSource*>,
-                 3>{
-                 {{"scalar", &k_scalar, &train_s}, {"ard", &k_ard, &train_a}, {"composite", &k_comp, &train_comp}}
-        })
-        {
-            SCOPED_TRACE(name);
-            run_case.template operator()<cxxgpr::DoublePrecision>(*k_ptr, *s_ptr, "DoublePrecision");
-            run_case.template operator()<cxxgpr::SinglePrecision>(*k_ptr, *s_ptr, "SinglePrecision");
-            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(
-                *k_ptr, *s_ptr, "MixedPromote"
-            );
-            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
-                *k_ptr, *s_ptr, "MixedReevaluate"
-            );
-        }
     }
 
 }  // namespace

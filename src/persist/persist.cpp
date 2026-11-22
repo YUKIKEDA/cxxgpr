@@ -27,6 +27,7 @@
 
 #include "checkpoint_io.hpp"
 #include "config_json.hpp"
+#include "persist/save_id.hpp"
 #include "safetensors.hpp"
 #include "workspace/predict_diagonal.hpp"
 
@@ -738,6 +739,10 @@ namespace cxxgpr::persist
         {
             return std::unexpected(std::move(st).error());
         }
+        if (auto paired = detail::check_save_id_pairing(cfg->save_id, (*st)->save_id()); !paired.has_value())
+        {
+            return std::unexpected(std::move(paired).error());
+        }
 
         // Validate mandatory raw F64 training tensors x (n x d) and y (n).
         const std::array<std::size_t, 2> x_shape{cfg->n, cfg->d};
@@ -802,6 +807,7 @@ namespace cxxgpr::persist
             .y_transform = impl->y_transform->clone(),
             .distance_kernel = std::nullopt,
             .distance_with_points = false,
+            .save_id = std::nullopt,
         };
 
         // Construct only the precision-typed state matching precision_kind.
@@ -1188,10 +1194,14 @@ namespace cxxgpr::persist
         /// @param[in] dir Destination directory that already exists.
         /// @param[in] cfg_str Serialized config.json text.
         /// @param[in] tensors Tensors of model.safetensors.
+        /// @param[in] save_id Optional pairing identifier written to model.safetensors `__metadata__`.
         /// @return Empty expected on success, or GprError when writing or renaming fails (temporary files are removed).
         /// @retval GprErrorCode::PersistFailed When a file cannot be written or renamed.
         std::expected<void, GprError> write_checkpoint_files(
-            const std::filesystem::path& dir, const std::string& cfg_str, std::span<const TensorWriteView> tensors
+            const std::filesystem::path& dir,
+            const std::string& cfg_str,
+            std::span<const TensorWriteView> tensors,
+            std::optional<std::string_view> save_id
         )
         {
             std::error_code ec;
@@ -1199,7 +1209,7 @@ namespace cxxgpr::persist
             const std::filesystem::path tmp_st = dir / "model.safetensors.tmp";
             const std::filesystem::path tmp_cfg = dir / "config.json.tmp";
 
-            if (auto wr = write_safetensors_file(tmp_st, tensors); !wr.has_value())
+            if (auto wr = write_safetensors_file(tmp_st, tensors, save_id); !wr.has_value())
             {
                 std::filesystem::remove(tmp_st, ec);
                 return wr;
@@ -1393,7 +1403,13 @@ namespace cxxgpr::persist
                 }
             }
 
-            return write_checkpoint_files(dir, *cfg_str, tensors);
+            const std::string sid = compute_save_id(*cfg_str, tensors);
+            auto cfg_with_id = serialize_config_json(input, sid);
+            if (!cfg_with_id.has_value())
+            {
+                return std::unexpected(std::move(cfg_with_id).error());
+            }
+            return write_checkpoint_files(dir, *cfg_with_id, tensors, sid);
         }
 
     }  // namespace detail

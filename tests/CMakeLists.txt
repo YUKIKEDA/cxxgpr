@@ -15,6 +15,7 @@ target_include_directories(cxxgpr_test_support
 target_link_libraries(cxxgpr_test_support
     PUBLIC
         cxxgpr::eigen
+        GTest::gtest
         Threads::Threads
 )
 

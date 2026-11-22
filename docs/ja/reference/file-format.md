@@ -52,6 +52,7 @@
 | `y_unfitted` | 変換 | はい | — | 学習前の目的変数変換の設定 |
 | `y_transform` | 変換 | はい | — | 学習済みの目的変数変換 |
 | `distance` | オブジェクト | 供給距離のモデルのみ | — | モードと距離スロット。下記を参照 |
+| `save_id` | 文字列（小文字 16 進 32 桁） | いいえ | なし（ペアリング検査なし） | `model.safetensors` の `cxxgpr.save_id` と対になる内容ハッシュ識別子 |
 
 書き込み側は、`precision` が `"mixed"` でない限り `residual` を出力しない。`precision` と `residual` の組が、モデルの `PersistPrecisionKind` を決める。
 
@@ -232,7 +233,7 @@
 | 8 | $H$ バイト | 各テンソルの名前を `{"dtype", "shape", "data_offsets"}` に対応づける JSON オブジェクト |
 | $8 + H$ | 残り | テンソルのバイト列。`data_offsets` は、この位置を基準とした `[begin, end)` |
 
-書き込み側は、$8 + H$ が 8 の倍数になるようにヘッダーを詰め物で埋め、各テンソルを 8 の倍数のオフセットから始める。`__metadata__` エントリは書かない。数値はすべて、リトルエンディアンの IEEE 754 である。
+書き込み側は、$8 + H$ が 8 の倍数になるようにヘッダーを詰め物で埋め、各テンソルを 8 の倍数のオフセットから始める。`__metadata__` には `config.json` の `save_id` と一致する `{"cxxgpr.save_id": "<小文字16進32桁>"}` を書く。数値はすべて、リトルエンディアンの IEEE 754 である。
 
 ### テンソル
 
@@ -290,14 +291,15 @@ def read_safetensors(path):
 `LoadedGpr::load` と `LoadedDistanceGpr::load` は、ディレクトリを信頼できない入力として扱い、次の検査を行う。`LoadedGpr::load` は `distance` キーのあるファイルを、`LoadedDistanceGpr::load` は `distance` キーのないファイルや、`distance.points` が別のファイルを拒否する。どちらも `PersistErrorKind::WrongModel` である。
 
 1. 2 つのファイルを開いて読む。失敗は `PersistErrorKind::Io`。
-2. JSON の深さが 128 以下で、テキストが解析でき、ルートがオブジェクトで、`model` キーがない。`model` キーや `distance` キーがあれば `PersistErrorKind::WrongModel`。そのほかの構文やスキーマの誤りは `PersistErrorKind::Config`。
+2. JSON の深さが 128 以下で、テキストが解析でき、ルートがオブジェクトで、`model` キーがない。`model` キーや `distance` キーがあれば `PersistErrorKind::WrongModel`。`save_id` が存在する場合は 32 桁の小文字 16 進文字列である必要がある。そのほかの構文やスキーマの誤り（不正な `save_id` を含む）は `PersistErrorKind::Config`。
 3. `format_version` が存在し、整数である。`1` 以外の値は `GprErrorCode::UnsupportedPersistVersion`。
 4. `factor_kind` が `"llt"` である。そうでなければ `PersistErrorKind::WrongModel`。
-5. 各テンソルのヘッダーのエントリが、既知の `dtype`（`F64` か `F32`）、想定した形状、アラインメントの合った開始位置を持ち、バイト長が形状と要素サイズの積に等しい。失敗は `PersistErrorKind::Tensor`。
-6. すべてのテンソル要素が有限である。失敗は `PersistErrorKind::Tensor`。
-7. ハイパーパラメータ、区間、ジッタ、変換の統計量が、それぞれのコンストラクターの検査を通る。失敗は、そのコンストラクターのエラー（たとえば `GprErrorCode::InvalidHyperparameter` や `GprErrorCode::InvalidInterval`）。
-8. `custom` ノードをレジストリで検索する。未知の `persist_id` は `PersistErrorKind::UnregisteredId`。
-9. `has_factor` が `false` なら、保存されたデータとハイパーパラメータから分解を再計算する。失敗は `GprErrorCode::CholeskyFailed`。
+5. `model.safetensors` に `__metadata__` がある場合、値がすべて文字列の JSON オブジェクトであり、`cxxgpr.save_id`（存在時）が 32 桁の小文字 16 進文字列であること。ペア識別子は両ファイルにともに無い（旧チェックポイント）か、両方に存在して一致しなければならない。失敗は `PersistErrorKind::Tensor`。
+6. 各テンソルのヘッダーのエントリが、既知の `dtype`（`F64` か `F32`）、想定した形状、アラインメントの合った開始位置を持ち、バイト長が形状と要素サイズの積に等しい。失敗は `PersistErrorKind::Tensor`。
+7. すべてのテンソル要素が有限である。失敗は `PersistErrorKind::Tensor`。
+8. ハイパーパラメータ、区間、ジッタ、変換の統計量が、それぞれのコンストラクターの検査を通る。失敗は、そのコンストラクターのエラー（たとえば `GprErrorCode::InvalidHyperparameter` や `GprErrorCode::InvalidInterval`）。
+9. `custom` ノードをレジストリで検索する。未知の `persist_id` は `PersistErrorKind::UnregisteredId`。
+10. `has_factor` が `false` なら、保存されたデータとハイパーパラメータから分解を再計算する。失敗は `GprErrorCode::CholeskyFailed`。
 
 `has_factor == true` のとき、ローダーは `l` と `alpha` を保存されたとおりに使い、再分解しない。`double` 精度では、`l` を読み取り専用のメモリマップへ直接結びつける。それ以外の `l` は、メモリへコピーする。
 
@@ -306,8 +308,8 @@ def read_safetensors(path):
 | 条件 | エラー |
 |---|---|
 | ファイルを開けない、読めない、書けない、マップできない | `PersistFailed`、`PersistErrorKind::Io` |
-| JSON が不正、キーが欠けている・型が違う、入れ子が 128 段を超える（読込時、または保存で書く `config.json`） | `PersistFailed`、`PersistErrorKind::Config` |
-| テンソルがない、形状や `dtype` が違う、アラインメントが合わない、有限でない要素がある | `PersistFailed`、`PersistErrorKind::Tensor` |
+| JSON が不正、キーが欠けている・型が違う、`save_id` の形式が不正、入れ子が 128 段を超える（読込時、または保存で書く `config.json`） | `PersistFailed`、`PersistErrorKind::Config` |
+| テンソルがない、形状や `dtype` が違う、アラインメントが合わない、有限でない要素がある、`__metadata__` / `cxxgpr.save_id` が不正、またはペア識別子の不一致・片側欠落 | `PersistFailed`、`PersistErrorKind::Tensor` |
 | `model` キーがある、`LoadedGpr` で `distance` キーがある、`LoadedDistanceGpr` で `distance` キーがないか `distance.points` が別、`factor_kind` が `"llt"` 以外、`into_fitted` で精度が合わない | `PersistFailed`、`PersistErrorKind::WrongModel` |
 | ファイルの `persist_id` に登録されたファクトリがない | `PersistFailed`、`PersistErrorKind::UnregisteredId` |
 | `persist_id` が空、`cxxgpr.` で始まる、有効な UTF-8 でない、または二重登録 | `PersistFailed`、`PersistErrorKind::InvalidPersistId` |

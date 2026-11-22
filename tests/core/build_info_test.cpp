@@ -9,6 +9,7 @@
 #include "cxxgpr/core/build_info.hpp"
 
 #include <Eigen/Core>
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -119,14 +120,28 @@ namespace
     }
 
     /// @brief Negative control verifying NoAllocationScope detects dynamic C++ heap allocations.
-    /// @details Allocates a std::vector inside AuditMode::CppOnly and checks that delta_allocations() >= 1.
+    /// @details Allocates a std::vector inside AuditMode::CppOnly and checks that delta_allocations() >= 1,
+    /// and verifies AssertZeroOnExit emits a non-fatal failure on scope destruction even without explicit checks.
     TEST(AllocationAuditTest, DynamicVectorAllocationIsDetected)
     {
-        cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppOnly);
-        const std::vector<double> dynamic_buf(64, 1.25);
-        // Prevent the compiler from eliding the heap-allocated vector before delta_allocations().
-        cxxgpr::test_support::touch_for_test(dynamic_buf.data());
-        EXPECT_GE(scope.delta_allocations(), 1U);
+        {
+            cxxgpr::test_support::NoAllocationScope scope(
+                cxxgpr::test_support::AuditMode::CppOnly, cxxgpr::test_support::AuditExpectation::Manual
+            );
+            const std::vector<double> dynamic_buf(64, 1.25);
+            // Prevent the compiler from eliding the heap-allocated vector before delta_allocations().
+            cxxgpr::test_support::touch_for_test(dynamic_buf.data());
+            EXPECT_GE(scope.delta_allocations(), 1U);
+        }
+
+        EXPECT_NONFATAL_FAILURE(
+            {
+                const cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppOnly);
+                const std::vector<double> dynamic_buf(64, 1.25);
+                cxxgpr::test_support::touch_for_test(dynamic_buf.data());
+            },
+            "Expected zero heap allocations inside NoAllocationScope"
+        );
     }
 
 }  // namespace

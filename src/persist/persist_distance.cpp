@@ -25,6 +25,7 @@
 #include "checkpoint_io.hpp"
 #include "config_json.hpp"
 #include "kernel/distance_desc.hpp"
+#include "persist/save_id.hpp"
 #include "safetensors.hpp"
 
 namespace cxxgpr::persist
@@ -297,7 +298,13 @@ namespace cxxgpr::persist
                     GprError::persist_failed(PersistErrorKind::Io, "failed to create target persistence directory")
                 );
             }
-            return write_checkpoint_files(dir, *cfg_str, tensors);
+            const std::string sid = compute_save_id(*cfg_str, tensors);
+            auto cfg_with_id = serialize_distance_config_json(input, desc, sid);
+            if (!cfg_with_id.has_value())
+            {
+                return std::unexpected(std::move(cfg_with_id).error());
+            }
+            return write_checkpoint_files(dir, *cfg_with_id, tensors, sid);
         }
 
     }  // namespace detail
@@ -489,6 +496,10 @@ namespace cxxgpr::persist
         if (!st.has_value())
         {
             return std::unexpected(std::move(st).error());
+        }
+        if (auto paired = detail::check_save_id_pairing(cfg->save_id, (*st)->save_id()); !paired.has_value())
+        {
+            return std::unexpected(std::move(paired).error());
         }
         const std::size_t n = cfg->n;
         const std::size_t d = cfg->d;

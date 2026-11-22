@@ -142,20 +142,55 @@ namespace cxxgpr::detail
             }
         }
 
-        /// @brief Invokes `fn(std::span<const T> weights)` with precomputed `extra_scale / (ls[k]^2)` weights.
-        /// @details Uses a stack array of capacity 64 to keep all common ARD dimensions strictly allocation-free.
+        /// @brief Allocation-free view of per-dimension `extra_scale / (ls[k]^2)` ARD weights.
+        /// @details Reads from a stack-allocated precomputed buffer for common dimensions (`d <= 256`) and falls back
+        /// to on-the-fly evaluation for arbitrarily large `d`, guaranteeing zero heap allocations for every dimension.
         /// @tparam T Storage floating-point scalar type.
-        /// @tparam Fn Callable accepting `std::span<const T>` and returning `std::expected<void, GprError>`.
+        template <KernelScalarConcept T> struct ArdWeightView
+        {
+            /// @brief Stack-backed precomputed weights when `d <= 256`, empty otherwise.
+            std::span<const T> precomputed;
+            /// @brief Source lengthscales used for on-the-fly fallback when `precomputed` is empty.
+            std::span<const double> ls;
+            /// @brief Additional scalar factor folded into each inverse-squared weight.
+            T extra_scale{T{1}};
+
+            /// @brief Reports whether this view represents unweighted (isotropic) evaluation.
+            /// @return True when neither precomputed weights nor source lengthscales are set.
+            [[nodiscard]] bool empty() const noexcept { return precomputed.empty() && ls.empty(); }
+
+            /// @brief Returns the number of per-dimension weights.
+            /// @return Dimension count.
+            [[nodiscard]] std::size_t size() const noexcept
+            {
+                return !precomputed.empty() ? precomputed.size() : ls.size();
+            }
+
+            /// @brief Returns the inverse-squared weight for dimension `dim`.
+            /// @param[in] dim Feature dimension index.
+            /// @return `extra_scale / static_cast<T>(ls[dim] * ls[dim])`.
+            [[nodiscard]] T operator[](std::size_t dim) const noexcept
+            {
+                return !precomputed.empty() ? precomputed[dim] : (extra_scale / static_cast<T>(ls[dim] * ls[dim]));
+            }
+        };
+
+        /// @brief Invokes `fn(ArdWeightView<T> weights)` with `extra_scale / (ls[k]^2)` weights without heap
+        /// allocation.
+        /// @details Precomputes into a stack array for `d <= 256` and evaluates on the fly for `d > 256`, keeping
+        /// every ARD dimension strictly allocation-free.
+        /// @tparam T Storage floating-point scalar type.
+        /// @tparam Fn Callable accepting `ArdWeightView<T>` and returning `std::expected<void, GprError>`.
         /// @param[in] ls Per-dimension lengthscale span.
         /// @param[in] extra_scale Additional scalar factor folded into each inverse-squared weight.
-        /// @param[in] fn Callback consuming the precomputed inverse-squared lengthscale weights.
+        /// @param[in] fn Callback consuming the inverse-squared lengthscale weight view.
         /// @return Result returned by `fn`.
         template <KernelScalarConcept T, typename Fn>
         [[nodiscard]] std::expected<void, GprError> with_ard_inv_ell2(
             std::span<const double> ls, T extra_scale, Fn&& fn
         )
         {
-            constexpr std::size_t k_stack_cap = 64U;
+            constexpr std::size_t k_stack_cap = 256U;
             if (ls.size() <= k_stack_cap)
             {
                 std::array<T, k_stack_cap> buf{};
@@ -163,14 +198,15 @@ namespace cxxgpr::detail
                 {
                     buf[d] = extra_scale / static_cast<T>(ls[d] * ls[d]);
                 }
-                return fn(std::span<const T>(buf.data(), ls.size()));
+                return fn(
+                    ArdWeightView<T>{
+                        .precomputed = std::span<const T>(buf.data(), ls.size()),
+                        .ls = {},
+                        .extra_scale = T{1},
+                    }
+                );
             }
-            std::vector<T> heap_buf(ls.size());
-            for (std::size_t d = 0U; d < ls.size(); ++d)
-            {
-                heap_buf[d] = extra_scale / static_cast<T>(ls[d] * ls[d]);
-            }
-            return fn(std::span<const T>(heap_buf));
+            return fn(ArdWeightView<T>{.precomputed = {}, .ls = ls, .extra_scale = extra_scale});
         }
 
         /// @brief Fills a contiguous column slice of weighted squared coordinate differences and transforms via
@@ -186,7 +222,7 @@ namespace cxxgpr::detail
         /// @param[in] slice_fn In-place transformation applied to each populated contiguous column slice.
         template <KernelScalarConcept T, typename SliceFn>
         void eval_square_points_sq_dist_cols(
-            MatrixRef<T> x, MatrixMut<T> out, Triangle uplo, std::span<const T> weights, SliceFn&& slice_fn
+            MatrixRef<T> x, MatrixMut<T> out, Triangle uplo, ArdWeightView<T> weights, SliceFn&& slice_fn
         )
         {
             const std::size_t n = x.rows();
@@ -227,7 +263,7 @@ namespace cxxgpr::detail
         /// @param[in] slice_fn In-place kernel transform applied to each column slice.
         template <KernelScalarConcept T, typename SliceFn>
         void eval_cross_points_sq_dist_cols(
-            MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out, std::span<const T> weights, SliceFn&& slice_fn
+            MatrixRef<T> x1, MatrixRef<T> x2, MatrixMut<T> out, ArdWeightView<T> weights, SliceFn&& slice_fn
         )
         {
             const std::size_t n1 = x1.rows();
@@ -561,7 +597,7 @@ namespace cxxgpr::detail
         /// @return ARD-scaled squared distance $s^2$.
         template <KernelScalarConcept T>
         [[nodiscard]] T ard_scaled_sq_weights(
-            MatrixRef<T> x1, std::size_t row1, MatrixRef<T> x2, std::size_t row2, std::span<const T> inv_ell2
+            MatrixRef<T> x1, std::size_t row1, MatrixRef<T> x2, std::size_t row2, ArdWeightView<T> inv_ell2
         ) noexcept
         {
             T acc = T{0};
@@ -1157,7 +1193,7 @@ namespace cxxgpr::detail
                     const T ell = static_cast<T>(k.lengthscale());
                     const T neg_inv_2l2 = -T{1} / (T{2} * ell * ell);
                     eval_square_points_sq_dist_cols(
-                        x, out, uplo, std::span<const T>{}, [neg_inv_2l2, exp_mode](T* col_ptr, std::size_t len)
+                        x, out, uplo, ArdWeightView<T>{}, [neg_inv_2l2, exp_mode](T* col_ptr, std::size_t len)
                     { detail::exp_scaled_nonpos_in_place(col_ptr, len, neg_inv_2l2, exp_mode); }
                     );
                     return {};
@@ -1172,7 +1208,7 @@ namespace cxxgpr::detail
                             return d;
                         }
                         return with_ard_inv_ell2<T>(
-                            ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_square_points_sq_dist_cols(
                                 x, out, uplo, weights, [exp_mode](T* col_ptr, std::size_t len)
@@ -1189,7 +1225,7 @@ namespace cxxgpr::detail
                     const T scale_sq = matern_scale_sq<T>(k.nu()) / static_cast<T>(k.lengthscale() * k.lengthscale());
                     const MaternNu nu = k.nu();
                     eval_square_points_sq_dist_cols(
-                        x, out, uplo, std::span<const T>{}, [scale_sq, nu, exp_mode](T* col_ptr, std::size_t len)
+                        x, out, uplo, ArdWeightView<T>{}, [scale_sq, nu, exp_mode](T* col_ptr, std::size_t len)
                     { detail::matern_s2_in_place(col_ptr, len, scale_sq, nu, exp_mode); }
                     );
                     return {};
@@ -1206,7 +1242,7 @@ namespace cxxgpr::detail
                         const T c = matern_scale_sq<T>(k.nu());
                         const MaternNu nu = k.nu();
                         return with_ard_inv_ell2<T>(
-                            ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_square_points_sq_dist_cols(
                                 x, out, uplo, weights, [c, nu, exp_mode](T* col_ptr, std::size_t len)
@@ -1225,7 +1261,7 @@ namespace cxxgpr::detail
                     const T neg_coeff = -T{2} / (ell * ell);
                     const T pi_p = std::numbers::pi_v<T> / period;
                     eval_square_points_sq_dist_cols(
-                        x, out, uplo, std::span<const T>{}, [neg_coeff, pi_p, exp_mode](T* col_ptr, std::size_t len)
+                        x, out, uplo, ArdWeightView<T>{}, [neg_coeff, pi_p, exp_mode](T* col_ptr, std::size_t len)
                     { transform_periodic_d2_slice_in_place(col_ptr, len, neg_coeff, pi_p, exp_mode); }
                     );
                     return {};
@@ -1236,7 +1272,7 @@ namespace cxxgpr::detail
                     const T alpha = static_cast<T>(k.alpha());
                     const T w_scale = T{1} / (T{2} * alpha * ell * ell);
                     eval_square_points_sq_dist_cols(
-                        x, out, uplo, std::span<const T>{}, [w_scale, alpha, exp_mode](T* col_ptr, std::size_t len)
+                        x, out, uplo, ArdWeightView<T>{}, [w_scale, alpha, exp_mode](T* col_ptr, std::size_t len)
                     { transform_rq_slice_in_place(col_ptr, len, w_scale, alpha, exp_mode); }
                     );
                     return {};
@@ -1253,7 +1289,7 @@ namespace cxxgpr::detail
                         const T alpha = static_cast<T>(k.alpha());
                         const T inv_2alpha = T{1} / (T{2} * alpha);
                         return with_ard_inv_ell2<T>(
-                            ls, inv_2alpha, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, inv_2alpha, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_square_points_sq_dist_cols(
                                 x, out, uplo, weights, [alpha, exp_mode](T* col_ptr, std::size_t len)
@@ -1478,7 +1514,7 @@ namespace cxxgpr::detail
                     const T ell = static_cast<T>(k.lengthscale());
                     const T neg_inv_2l2 = -T{1} / (T{2} * ell * ell);
                     eval_cross_points_sq_dist_cols(
-                        x1, x2, out, std::span<const T>{}, [neg_inv_2l2, exp_mode](T* col_ptr, std::size_t len)
+                        x1, x2, out, ArdWeightView<T>{}, [neg_inv_2l2, exp_mode](T* col_ptr, std::size_t len)
                     { detail::exp_scaled_nonpos_in_place(col_ptr, len, neg_inv_2l2, exp_mode); }
                     );
                     return {};
@@ -1493,7 +1529,7 @@ namespace cxxgpr::detail
                             return d;
                         }
                         return with_ard_inv_ell2<T>(
-                            ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_cross_points_sq_dist_cols(
                                 x1, x2, out, weights, [exp_mode](T* col_ptr, std::size_t len)
@@ -1510,7 +1546,7 @@ namespace cxxgpr::detail
                     const T scale_sq = matern_scale_sq<T>(k.nu()) / static_cast<T>(k.lengthscale() * k.lengthscale());
                     const MaternNu nu = k.nu();
                     eval_cross_points_sq_dist_cols(
-                        x1, x2, out, std::span<const T>{}, [scale_sq, nu, exp_mode](T* col_ptr, std::size_t len)
+                        x1, x2, out, ArdWeightView<T>{}, [scale_sq, nu, exp_mode](T* col_ptr, std::size_t len)
                     { detail::matern_s2_in_place(col_ptr, len, scale_sq, nu, exp_mode); }
                     );
                     return {};
@@ -1527,7 +1563,7 @@ namespace cxxgpr::detail
                         const T c = matern_scale_sq<T>(k.nu());
                         const MaternNu nu = k.nu();
                         return with_ard_inv_ell2<T>(
-                            ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_cross_points_sq_dist_cols(
                                 x1, x2, out, weights, [c, nu, exp_mode](T* col_ptr, std::size_t len)
@@ -1546,7 +1582,7 @@ namespace cxxgpr::detail
                     const T neg_coeff = -T{2} / (ell * ell);
                     const T pi_p = std::numbers::pi_v<T> / period;
                     eval_cross_points_sq_dist_cols(
-                        x1, x2, out, std::span<const T>{}, [neg_coeff, pi_p, exp_mode](T* col_ptr, std::size_t len)
+                        x1, x2, out, ArdWeightView<T>{}, [neg_coeff, pi_p, exp_mode](T* col_ptr, std::size_t len)
                     { transform_periodic_d2_slice_in_place(col_ptr, len, neg_coeff, pi_p, exp_mode); }
                     );
                     return {};
@@ -1557,7 +1593,7 @@ namespace cxxgpr::detail
                     const T alpha = static_cast<T>(k.alpha());
                     const T w_scale = T{1} / (T{2} * alpha * ell * ell);
                     eval_cross_points_sq_dist_cols(
-                        x1, x2, out, std::span<const T>{}, [w_scale, alpha, exp_mode](T* col_ptr, std::size_t len)
+                        x1, x2, out, ArdWeightView<T>{}, [w_scale, alpha, exp_mode](T* col_ptr, std::size_t len)
                     { transform_rq_slice_in_place(col_ptr, len, w_scale, alpha, exp_mode); }
                     );
                     return {};
@@ -1574,7 +1610,7 @@ namespace cxxgpr::detail
                         const T alpha = static_cast<T>(k.alpha());
                         const T inv_2alpha = T{1} / (T{2} * alpha);
                         return with_ard_inv_ell2<T>(
-                            ls, inv_2alpha, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                            ls, inv_2alpha, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
                         {
                             eval_cross_points_sq_dist_cols(
                                 x1, x2, out, weights, [alpha, exp_mode](T* col_ptr, std::size_t len)
@@ -2407,7 +2443,7 @@ namespace cxxgpr::detail
                     }
                     // For ARD RBF, d(-0.5 * s^2)/d(log ell_p) = ((x_r1,p - x_r2,p)^2 / ell_p^2).
                     return with_ard_inv_ell2<T>(
-                        ls, T{1}, [&](std::span<const T> inv_ell2) -> std::expected<void, GprError>
+                        ls, T{1}, [&](ArdWeightView<T> inv_ell2) -> std::expected<void, GprError>
                     {
                         const T inv_lp2 = inv_ell2[param_idx];
                         write_square_points(
@@ -2451,7 +2487,7 @@ namespace cxxgpr::detail
                     const T c = matern_scale_sq<T>(k.nu());
                     const MaternNu nu = k.nu();
                     return with_ard_inv_ell2<T>(
-                        ls, T{1}, [&](std::span<const T> inv_ell2) -> std::expected<void, GprError>
+                        ls, T{1}, [&](ArdWeightView<T> inv_ell2) -> std::expected<void, GprError>
                     {
                         const T inv_lp2 = inv_ell2[param_idx];
                         write_square_points(
@@ -2511,7 +2547,7 @@ namespace cxxgpr::detail
                     const T alpha = static_cast<T>(k.alpha());
                     const std::size_t alpha_idx = ls.size();
                     return with_ard_inv_ell2<T>(
-                        ls, T{1}, [&](std::span<const T> inv_ell2) -> std::expected<void, GprError>
+                        ls, T{1}, [&](ArdWeightView<T> inv_ell2) -> std::expected<void, GprError>
                     {
                         const T inv_lp2 = (param_idx < alpha_idx) ? inv_ell2[param_idx] : T{0};
                         write_square_points(
@@ -3051,7 +3087,7 @@ namespace cxxgpr::detail
             std::span<const T> packed,
             std::size_t n,
             std::size_t per_dim,
-            std::span<const T> weights,
+            ArdWeightView<T> weights,
             std::size_t row,
             std::size_t col
         ) noexcept
@@ -3086,7 +3122,7 @@ namespace cxxgpr::detail
             std::span<const T> ard_packed,
             std::size_t n,
             std::size_t per_dim,
-            std::span<const T> weights,
+            ArdWeightView<T> weights,
             MatrixMut<T> out,
             Triangle uplo,
             SliceFn&& slice_fn
@@ -3321,7 +3357,7 @@ namespace cxxgpr::detail
         if (std::holds_alternative<RbfArdKernel>(leaf))
         {
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 if (uplo != Triangle::Upper)
                 {
@@ -3349,7 +3385,7 @@ namespace cxxgpr::detail
             const T c = matern_scale_sq<T>(mat->nu());
             const MaternNu nu = mat->nu();
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 if (uplo != Triangle::Upper)
                 {
@@ -3380,7 +3416,7 @@ namespace cxxgpr::detail
             const T alpha = static_cast<T>(rq->alpha());
             const T rq_scale = T{1} / (T{2} * alpha);
             return with_ard_inv_ell2<T>(
-                ls, rq_scale, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, rq_scale, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 if (uplo != Triangle::Upper)
                 {
@@ -3562,7 +3598,7 @@ namespace cxxgpr::detail
 
         if (auto res = with_ard_inv_ell2<T>(
                 ls, T{1},
-                [&](std::span<const T> weights) -> std::expected<void, GprError>
+                [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
         {
             auto build_cols = [&](std::size_t col_begin, std::size_t col_end)
             {
@@ -3682,7 +3718,7 @@ namespace cxxgpr::detail
         {
             // For RBF-ARD: dk/d(log ell_p) = (dx_p^2 / ell_p^2) * exp'(-0.5 * s^2).
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_l2 = weights[param_idx];
                 write_square_packed(
@@ -3705,7 +3741,7 @@ namespace cxxgpr::detail
             const T c = matern_scale_sq<T>(mat->nu());
             const MaternNu nu = mat->nu();
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_l2 = weights[param_idx];
                 write_square_packed(
@@ -3734,7 +3770,7 @@ namespace cxxgpr::detail
             const T alpha = static_cast<T>(rq->alpha());
             const std::size_t alpha_idx = ls.size();
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_l2 = (param_idx < alpha_idx) ? weights[param_idx] : T{0};
                 write_square_packed(
@@ -3816,7 +3852,7 @@ namespace cxxgpr::detail
         {
             // For RBF-ARD: s_i^2 * s_j^2 * d2 - 2 * delta_ij * s_i^2 * d1.
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_li2 = weights[i];
                 const T inv_lj2 = weights[j];
@@ -3847,7 +3883,7 @@ namespace cxxgpr::detail
             const T c = matern_scale_sq<T>(mat->nu());
             const MaternNu nu = mat->nu();
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_li2 = weights[i];
                 const T inv_lj2 = weights[j];
@@ -3883,7 +3919,7 @@ namespace cxxgpr::detail
             const T alpha = static_cast<T>(rq->alpha());
             const std::size_t alpha_idx = ls.size();
             return with_ard_inv_ell2<T>(
-                ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+                ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 write_square_packed(
                     n, d2_k, uplo,
@@ -4099,7 +4135,7 @@ namespace cxxgpr::detail
 
         double leaf_val = 0.0;
         auto weight_res = with_ard_inv_ell2<T>(
-            ls, T{1}, [&](std::span<const T> weights) -> std::expected<void, GprError>
+            ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
         {
             const T m_c = (mat != nullptr) ? matern_scale_sq<T>(mat->nu()) : T{1};
             const MaternNu m_nu = (mat != nullptr) ? mat->nu() : MaternNu::OneHalf;
