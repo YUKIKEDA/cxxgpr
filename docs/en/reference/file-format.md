@@ -291,14 +291,15 @@ def read_safetensors(path):
 `LoadedGpr::load` and `LoadedDistanceGpr::load` treat the directory as untrusted input and perform the following checks. `LoadedGpr::load` refuses a file with a `distance` key, and `LoadedDistanceGpr::load` refuses a file without one or with the other `distance.points`, both with `PersistErrorKind::WrongModel`.
 
 1. Both files open and read. Failure: `PersistErrorKind::Io`.
-2. The JSON depth does not exceed 128, the text parses, the root is an object, and no `model` key is present. A `model` key or a `distance` key: `PersistErrorKind::WrongModel`. Other syntax or schema errors: `PersistErrorKind::Config`.
+2. The JSON depth does not exceed 128, the text parses, the root is an object, and no `model` key is present. A `model` key or a `distance` key: `PersistErrorKind::WrongModel`. If `save_id` is present, it must be a 32-character lowercase hexadecimal string. Other syntax or schema errors (including malformed `save_id`): `PersistErrorKind::Config`.
 3. `format_version` is present and an integer. A value other than `1`: `GprErrorCode::UnsupportedPersistVersion`.
 4. `factor_kind` is `"llt"`. Otherwise: `PersistErrorKind::WrongModel`.
-5. Each tensor header entry has a known `dtype` (`F64` or `F32`), the expected shape, an aligned start, and a byte length equal to the product of the shape and the element size. Failure: `PersistErrorKind::Tensor`.
-6. Every tensor element is finite. Failure: `PersistErrorKind::Tensor`.
-7. Hyperparameters, intervals, jitter and transform statistics pass the checks of their constructors. Failure: the error of that constructor, for example `GprErrorCode::InvalidHyperparameter` or `GprErrorCode::InvalidInterval`.
-8. Custom nodes are looked up in the registry. An unknown `persist_id`: `PersistErrorKind::UnregisteredId`.
-9. If `has_factor` is `false`, the factorization is recomputed from the stored data and hyperparameters. Failure: `GprErrorCode::CholeskyFailed`.
+5. If `model.safetensors` contains `__metadata__`, it must be a JSON object whose values are strings, and `cxxgpr.save_id` (when present) must be a 32-character lowercase hexadecimal string. The pairing identifier must either be absent from both files (legacy checkpoints) or present in both and identical. Failure: `PersistErrorKind::Tensor`.
+6. Each tensor header entry has a known `dtype` (`F64` or `F32`), the expected shape, an aligned start, and a byte length equal to the product of the shape and the element size. Failure: `PersistErrorKind::Tensor`.
+7. Every tensor element is finite. Failure: `PersistErrorKind::Tensor`.
+8. Hyperparameters, intervals, jitter and transform statistics pass the checks of their constructors. Failure: the error of that constructor, for example `GprErrorCode::InvalidHyperparameter` or `GprErrorCode::InvalidInterval`.
+9. Custom nodes are looked up in the registry. An unknown `persist_id`: `PersistErrorKind::UnregisteredId`.
+10. If `has_factor` is `false`, the factorization is recomputed from the stored data and hyperparameters. Failure: `GprErrorCode::CholeskyFailed`.
 
 With `has_factor == true`, the loader uses `l` and `alpha` as stored and does not refactor. For `double` precision it binds `l` directly to a read-only memory map; every other `l` is copied into memory.
 
@@ -307,8 +308,8 @@ With `has_factor == true`, the loader uses `l` and `alpha` as stored and does no
 | Condition | Error |
 |---|---|
 | file cannot be opened, read, written or mapped | `PersistFailed`, `PersistErrorKind::Io` |
-| invalid JSON, missing or mistyped key, nesting deeper than 128 (on load, or in the `config.json` that saving would write) | `PersistFailed`, `PersistErrorKind::Config` |
-| missing tensor, wrong shape or `dtype`, misaligned data, non-finite element | `PersistFailed`, `PersistErrorKind::Tensor` |
+| invalid JSON, missing or mistyped key, malformed `save_id`, nesting deeper than 128 (on load, or in the `config.json` that saving would write) | `PersistFailed`, `PersistErrorKind::Config` |
+| missing tensor, wrong shape or `dtype`, misaligned data, non-finite element, malformed `__metadata__` / `cxxgpr.save_id`, or mismatched / one-sided pairing identifier | `PersistFailed`, `PersistErrorKind::Tensor` |
 | `model` key, `distance` key in `LoadedGpr`, missing `distance` key or other `distance.points` in `LoadedDistanceGpr`, `factor_kind` other than `"llt"`, or a precision mismatch in `into_fitted` | `PersistFailed`, `PersistErrorKind::WrongModel` |
 | `persist_id` in the file has no registered factory | `PersistFailed`, `PersistErrorKind::UnregisteredId` |
 | `persist_id` empty, starting with `cxxgpr.` or not valid UTF-8, or registered twice | `PersistFailed`, `PersistErrorKind::InvalidPersistId` |

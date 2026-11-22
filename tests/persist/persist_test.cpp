@@ -1330,7 +1330,7 @@ namespace
     /// temporary files are gone, config.json is untouched, and model.safetensors is already the new one.
     TEST(PersistModelsTest, SaveReportsIoWhenConfigJsonCannotBeReplaced)
     {
-        // Spec: FMT-02, FMT-08
+        // Spec: FMT-02, FMT-08, FMT-09
         const auto fit_old = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.2, 0.9, 0.5});
         const auto fit_new = factor_rbf_model(0.4, {0.1, 0.7, 1.1, 1.9}, {-0.3, 0.8, 0.2, 1.4});
         ASSERT_TRUE(fit_old.has_value());
@@ -1339,6 +1339,7 @@ namespace
         const TempDirGuard reference("config_not_replaceable_ref");
         ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_old, dir.path).has_value());
         ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fit_new, reference.path).has_value());
+        const std::string cfg_old = read_file_bytes(dir.path / "config.json");
         const std::string tensors_old = read_file_bytes(dir.path / "model.safetensors");
         const std::string tensors_new = read_file_bytes(reference.path / "model.safetensors");
         ASSERT_NE(tensors_old, tensors_new);
@@ -1355,6 +1356,18 @@ namespace
         EXPECT_EQ(list_dir(dir.path), (std::vector<std::string>{"config.json", "model.safetensors"}));
         EXPECT_TRUE(std::filesystem::is_directory(dir.path / "config.json"));
         EXPECT_EQ(read_file_bytes(dir.path / "model.safetensors"), tensors_new);
+
+        // Restoring the untouched old config.json beside the newly replaced model.safetensors models the
+        // partial-rename failure state; FMT-09 requires load() to reject the mismatched pair as Tensor.
+        ASSERT_TRUE(std::filesystem::remove(dir.path / "config.json", ec));
+        {
+            std::ofstream ofs(dir.path / "config.json", std::ios::binary | std::ios::trunc);
+            ofs << cfg_old;
+        }
+        const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_FALSE(loaded.has_value());
+        EXPECT_EQ(loaded.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(loaded.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
     }
 
     /// @brief Negative control: save refuses a model whose config.json would be nested deeper than load accepts.
@@ -2339,6 +2352,46 @@ namespace
             ASSERT_FALSE(upper.has_value());
             EXPECT_EQ(upper.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
         }
+    }
+
+    /// @brief Verifies FMT-09 save_id against an independent Python hashlib SHA-256 reference and config-only changes.
+    /// @details Saves two factorless checkpoints sharing identical binary-exact (x, y) tensors but different
+    /// hyperparameters (simulating refit + save), verifies that save_id matches the independently computed FIPS 180-4
+    /// SHA-256 digest of the FMT-09 message M (catching SHA-256 constant, config-omission, and tensor-omission
+    /// mutations), and confirms that mixing config.json and model.safetensors across the two saves is rejected.
+    TEST(PersistModelsTest, PairingIdMatchesIndependentSha256ReferenceAndDetectsConfigOnlyChange)
+    {
+        // Spec: FMT-09
+        const auto fit_a = factor_rbf_model(1.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.25, 0.75, 0.5});
+        const auto fit_b = factor_rbf_model(2.0, {0.0, 0.5, 1.0, 1.5}, {1.0, 1.25, 0.75, 0.5});
+        ASSERT_TRUE(fit_a.has_value());
+        ASSERT_TRUE(fit_b.has_value());
+
+        const TempDirGuard dir_a("save_id_ref_a");
+        const TempDirGuard dir_b("save_id_ref_b");
+        ASSERT_TRUE(cxxgpr::persist::save(*fit_a, dir_a.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save(*fit_b, dir_b.path).has_value());
+
+        const std::string cfg_a = read_file_bytes(dir_a.path / "config.json");
+        const std::string cfg_b = read_file_bytes(dir_b.path / "config.json");
+        const std::string id_a = extract_json_save_id(cfg_a);
+        const std::string id_b = extract_json_save_id(cfg_b);
+
+        // Expected values independently computed with Python hashlib.sha256 over FMT-09 message M
+        // (domain tag "cxxgpr.save_id.v1\0" || le64(|C|) || C || le64(2) || x_desc || x_bytes || y_desc || y_bytes).
+        EXPECT_EQ(id_a, "6b97f9fa3fe021f5e10c0f82726c89c8");
+        EXPECT_EQ(id_b, "2978a912970efabbba0cd821c203bc8d");
+        EXPECT_NE(id_a, id_b);
+
+        // Mixing config.json from save A with model.safetensors from save B (identical tensor payloads,
+        // different hyperparameters) must be rejected with PersistFailed(Tensor).
+        const TempDirGuard mixed("save_id_ref_mixed");
+        std::filesystem::copy_file(dir_a.path / "config.json", mixed.path / "config.json");
+        std::filesystem::copy_file(dir_b.path / "model.safetensors", mixed.path / "model.safetensors");
+        const auto res = cxxgpr::persist::LoadedGpr::load(mixed.path);
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+        EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
     }
 
 }  // namespace
