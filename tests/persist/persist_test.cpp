@@ -2038,7 +2038,7 @@ namespace
         /// @return Extracted 32-character value if found, or empty string otherwise.
         [[nodiscard]] std::string extract_json_save_id(const std::string& json_text)
         {
-            const std::string needle = "\"save_id\": \"";
+            const std::string needle = R"("save_id": ")";
             const std::size_t pos = json_text.find(needle);
             if (pos == std::string::npos)
             {
@@ -2302,14 +2302,14 @@ namespace
             const TempDirGuard extra_meta("save_id_extra_meta");
             std::filesystem::copy_file(dir_old.path / "config.json", extra_meta.path / "config.json");
             std::filesystem::copy_file(dir_old.path / "model.safetensors", extra_meta.path / "model.safetensors");
-            const std::string meta_orig = "\"__metadata__\":{\"cxxgpr.save_id\":\"" + id_old + "\"}";
+            const std::string meta_orig = R"("__metadata__":{"cxxgpr.save_id":")" + id_old + R"("})";
             rewrite_safetensors_header_str(
                 extra_meta.path / "model.safetensors", [&](std::string hdr)
             {
                 const std::size_t pos = hdr.find(meta_orig);
                 hdr.replace(
                     pos, meta_orig.size(),
-                    "\"__metadata__\":{\"cxxgpr.save_id\":\"" + id_old + "\",\"other_tool\":\"ignored\"}"
+                    R"("__metadata__":{"cxxgpr.save_id":")" + id_old + R"(","other_tool":"ignored"})"
                 );
                 return hdr;
             }
@@ -2319,8 +2319,8 @@ namespace
             rewrite_safetensors_header_str(
                 extra_meta.path / "model.safetensors", [&](std::string hdr)
             {
-                const std::string target = "\"other_tool\":\"ignored\"";
-                hdr.replace(hdr.find(target), target.size(), "\"other_tool\":42");
+                const std::string target = R"("other_tool":"ignored")";
+                hdr.replace(hdr.find(target), target.size(), R"("other_tool":42)");
                 return hdr;
             }
             );

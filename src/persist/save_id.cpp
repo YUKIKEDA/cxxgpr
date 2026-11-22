@@ -6,6 +6,7 @@
 
 #include "persist/save_id.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -278,16 +279,9 @@ namespace cxxgpr::persist::detail
         {
             return false;
         }
-        for (const char ch : text)
-        {
-            const bool is_digit = (ch >= '0' && ch <= '9');
-            const bool is_lower_hex = (ch >= 'a' && ch <= 'f');
-            if (!is_digit && !is_lower_hex)
-            {
-                return false;
-            }
-        }
-        return true;
+        return std::ranges::all_of(text, [](const char ch) noexcept {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        });
     }
 
     /// @brief Computes the pairing identifier for a checkpoint from config.json (without save_id) and tensors.
@@ -349,7 +343,24 @@ namespace cxxgpr::persist::detail
         }
 
         const auto digest = hasher.finish();
-        static constexpr char k_hex[] = "0123456789abcdef";
+        static constexpr std::array<char, 16> k_hex{
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+        };
         std::string out(32U, '0');
         for (std::size_t i = 0U; i < 16U; ++i)
         {
