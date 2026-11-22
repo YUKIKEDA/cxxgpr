@@ -1819,10 +1819,7 @@ namespace cxxgpr
         KernelExp exp_mode = KernelExp::Accurate;
 
         /// @brief Synchronizes @c cached_ls with the current ARD lengthscale vectors stored in @c leaves.
-        void refresh_cached_ls()
-        {
-            detail::refresh_cached_ls_entries(leaves, cached_ls);
-        }
+        void refresh_cached_ls() { detail::refresh_cached_ls_entries(leaves, cached_ls); }
 
         /// @brief Returns the half-open global parameter index range @c [begin, end) owned by @p term.
         /// @param[in] term Compiled AST term to inspect.
@@ -4309,7 +4306,8 @@ namespace cxxgpr
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledDistanceKernel<T>::set_params(std::span<const double> params)
     {
-        if (auto res = detail::set_leaves_params_atomic(impl_->leaves, params, impl_->bindings.size()); !res.has_value())
+        if (auto res = detail::set_leaves_params_atomic(impl_->leaves, params, impl_->bindings.size());
+            !res.has_value())
         {
             return res;
         }

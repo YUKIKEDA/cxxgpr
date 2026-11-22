@@ -783,7 +783,7 @@ namespace
     struct ProbeOptimizer
     {
         /// @brief The probe evaluates whole objectives only.
-        static constexpr bool uses_change_indices = false;
+        [[maybe_unused]] static constexpr bool uses_change_indices = false;
         /// @brief Destination of the recorded values (owned by the test).
         ProbeRecord* record = nullptr;
 
@@ -1496,7 +1496,7 @@ namespace
     struct AllocationProbeOptimizer
     {
         /// @brief The probe evaluates whole objectives only.
-        static constexpr bool uses_change_indices = false;
+        [[maybe_unused]] static constexpr bool uses_change_indices = false;
         /// @brief Destination of the allocation count (owned by the test).
         std::size_t* allocations = nullptr;
 
@@ -1665,7 +1665,7 @@ namespace
     struct MllGradAuditOptimizer
     {
         /// @brief Opts out of incremental coordinate updates.
-        static constexpr bool uses_change_indices = false;
+        [[maybe_unused]] static constexpr bool uses_change_indices = false;
         /// @brief Shared counter recording allocations observed on the second evaluation.
         std::shared_ptr<std::size_t> second_eval_allocs = std::make_shared<std::size_t>(999U);
 
@@ -1707,7 +1707,8 @@ namespace
         }
     };
 
-    /// @brief Verifies DistanceGpr MLL+grad evaluations (including set_params) perform zero heap allocations after warmup.
+    /// @brief Verifies DistanceGpr MLL+grad evaluations (including set_params) perform zero heap allocations after
+    /// warmup.
     TEST(DistanceGprTest, DistanceModelMllGradZeroAllocAfterWarmup)
     {
         // Spec: REQ-05, REQ-11, DES-21
@@ -1733,20 +1734,19 @@ namespace
         train_comp.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
         train_comp.bind_ard(a_slot.slot(), ard_refs);
 
-        const auto k_scalar = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(
-            s_slot.rbf(cxxgpr::RbfKernel::create(0.8).value())
-        );
-        const auto k_ard =
-            a_slot.rbf_ard(cxxgpr::RbfArdKernel::create(std::array{0.7, 1.2}).value()).value();
+        const auto k_scalar =
+            cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(s_slot.rbf(cxxgpr::RbfKernel::create(0.8).value()));
+        const auto k_ard = a_slot.rbf_ard(cxxgpr::RbfArdKernel::create(std::array{0.7, 1.2}).value()).value();
         const auto k_comp = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.1).value())
-                * a_slot.matern_ard(
-                    cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::FiveHalves).value()
-                ).value()
+                * a_slot
+                      .matern_ard(
+                          cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::FiveHalves).value()
+                      )
+                      .value()
             + s_slot.rational_quadratic(cxxgpr::RationalQuadraticKernel::create(0.9, 1.5).value());
 
         auto run_case = [&]<typename P>(
-                            const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>& k,
-                            const cxxgpr::DistanceSource& src,
+                            const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>& k, const cxxgpr::DistanceSource& src,
                             const char* label
                         )
         {
@@ -1760,12 +1760,9 @@ namespace
             EXPECT_EQ(*opt.second_eval_allocs, 0U);
         };
 
-        for (const auto& [name, k_ptr, s_ptr] :
-             std::array<
+        for (const auto& [name, k_ptr, s_ptr] : std::array<
                  std::tuple<
-                     const char*,
-                     const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>*,
-                     const cxxgpr::DistanceSource*>,
+                     const char*, const cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>*, const cxxgpr::DistanceSource*>,
                  3>{
                  {{"scalar", &k_scalar, &train_s}, {"ard", &k_ard, &train_a}, {"composite", &k_comp, &train_comp}}
         })
@@ -1773,8 +1770,12 @@ namespace
             SCOPED_TRACE(name);
             run_case.template operator()<cxxgpr::DoublePrecision>(*k_ptr, *s_ptr, "DoublePrecision");
             run_case.template operator()<cxxgpr::SinglePrecision>(*k_ptr, *s_ptr, "SinglePrecision");
-            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(*k_ptr, *s_ptr, "MixedPromote");
-            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(*k_ptr, *s_ptr, "MixedReevaluate");
+            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(
+                *k_ptr, *s_ptr, "MixedPromote"
+            );
+            run_case.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
+                *k_ptr, *s_ptr, "MixedReevaluate"
+            );
         }
     }
 

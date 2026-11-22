@@ -616,10 +616,7 @@ namespace cxxgpr
         /// @brief Refreshes `cached_ls` snapshots from current ARD leaf hyperparameters.
         /// @details Populates per-leaf vectors for ARD leaves and clears non-ARD entries so hot-path evaluation reads
         /// contiguous spans without calling `lengthscales()` allocations.
-        void refresh_cached_ls()
-        {
-            detail::refresh_cached_ls_entries(leaves, cached_ls);
-        }
+        void refresh_cached_ls() { detail::refresh_cached_ls_entries(leaves, cached_ls); }
 
         /// @brief Validates that populated distance and ARD caches match the shape of point matrix `x`.
         /// @details Checks square distance cache dimensions `(n, n)`, ARD point count `n`, ARD feature count `d`, and
@@ -2909,7 +2906,8 @@ namespace cxxgpr
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::set_params(std::span<const double> params)
     {
-        if (auto res = detail::set_leaves_params_atomic(impl_->leaves, params, impl_->bindings.size()); !res.has_value())
+        if (auto res = detail::set_leaves_params_atomic(impl_->leaves, params, impl_->bindings.size());
+            !res.has_value())
         {
             return res;
         }

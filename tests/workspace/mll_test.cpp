@@ -781,7 +781,9 @@ namespace
         const auto scalar_spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.8).value());
         const auto ard_spec = cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array{0.7, 1.3}).value());
         const auto composite_spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value())
-                * cxxgpr::KernelSpec(cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::ThreeHalves).value())
+                * cxxgpr::KernelSpec(
+                    cxxgpr::MaternArdKernel::create(std::array{0.6, 1.1}, cxxgpr::MaternNu::ThreeHalves).value()
+                )
             + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticArdKernel::create(std::array{0.9, 1.4}, 2.0).value());
 
         auto check = [&]<typename P>(const cxxgpr::KernelSpec& spec, const char* label)
@@ -806,9 +808,8 @@ namespace
             ASSERT_TRUE(compiled.get_params(after_bad).has_value());
             EXPECT_EQ(after_bad, params);
 
-            auto bufs = cxxgpr::FitBuffers<P>::create(
-                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain
-            );
+            auto bufs =
+                cxxgpr::FitBuffers<P>::create(n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain);
             ASSERT_TRUE(bufs.has_value());
             std::vector<Scalar> x_s(x_raw.size());
             std::vector<Scalar> y_s(y_raw.size());
@@ -846,12 +847,12 @@ namespace
             // Bitwise equivalence with a freshly compiled kernel updated to the same shifted parameters.
             auto fresh = spec.compile<Scalar>();
             ASSERT_TRUE(fresh.set_params(shifted).has_value());
-            auto fresh_bufs = cxxgpr::FitBuffers<P>::create(
-                n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain
-            );
+            auto fresh_bufs =
+                cxxgpr::FitBuffers<P>::create(n, cxxgpr::DistanceCachePolicy::Cached, cxxgpr::CholeskyBuffer::Retain);
             ASSERT_TRUE(fresh_bufs.has_value());
             std::vector<double> fresh_grad(nk + 1U, 0.0);
-            const auto fresh_mll = cxxgpr::mll_and_gradient_into(fresh, lik, x_ref, y_s, jitter, *fresh_bufs, fresh_grad);
+            const auto fresh_mll =
+                cxxgpr::mll_and_gradient_into(fresh, lik, x_ref, y_s, jitter, *fresh_bufs, fresh_grad);
             ASSERT_TRUE(fresh_mll.has_value());
             EXPECT_EQ(std::bit_cast<std::uint64_t>(mll_after), std::bit_cast<std::uint64_t>(*fresh_mll));
             for (std::size_t i = 0; i < grad.size(); ++i)

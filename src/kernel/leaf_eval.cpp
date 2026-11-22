@@ -1939,49 +1939,48 @@ namespace cxxgpr::detail
         {
             return std::visit(
                 [params]<typename LeafT>(const LeafT& k) -> std::expected<void, GprError>
+            {
+                if constexpr (std::same_as<LeafT, RbfKernel> || std::same_as<LeafT, MaternKernel>
+                    || std::same_as<LeafT, ConstantKernel> || std::same_as<LeafT, LinearKernel>
+                    || std::same_as<LeafT, WhiteKernel>)
                 {
-                    if constexpr (std::same_as<LeafT, RbfKernel> || std::same_as<LeafT, MaternKernel>
-                                  || std::same_as<LeafT, ConstantKernel> || std::same_as<LeafT, LinearKernel>
-                                  || std::same_as<LeafT, WhiteKernel>)
+                    return validate_log_param(params[0], k.interval());
+                }
+                else if constexpr (std::same_as<LeafT, PeriodicKernel>)
+                {
+                    if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
                     {
-                        return validate_log_param(params[0], k.interval());
+                        return r;
                     }
-                    else if constexpr (std::same_as<LeafT, PeriodicKernel>)
+                    return validate_log_param(params[1], k.period_interval());
+                }
+                else if constexpr (std::same_as<LeafT, RationalQuadraticKernel>)
+                {
+                    if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
                     {
-                        if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
-                        {
-                            return r;
-                        }
-                        return validate_log_param(params[1], k.period_interval());
+                        return r;
                     }
-                    else if constexpr (std::same_as<LeafT, RationalQuadraticKernel>)
+                    return validate_log_param(params[1], k.alpha_interval());
+                }
+                else if constexpr (std::same_as<LeafT, RbfArdKernel> || std::same_as<LeafT, MaternArdKernel>)
+                {
+                    return ArdLengthscaleAccess::validate_lengthscales(k, params);
+                }
+                else if constexpr (std::same_as<LeafT, RationalQuadraticArdKernel>)
+                {
+                    const std::size_t dims = k.num_params() - 1U;
+                    if (auto r = ArdLengthscaleAccess::validate_lengthscales(k, params.subspan(0, dims));
+                        !r.has_value())
                     {
-                        if (auto r = validate_log_param(params[0], k.lengthscale_interval()); !r.has_value())
-                        {
-                            return r;
-                        }
-                        return validate_log_param(params[1], k.alpha_interval());
+                        return r;
                     }
-                    else if constexpr (std::same_as<LeafT, RbfArdKernel> || std::same_as<LeafT, MaternArdKernel>)
-                    {
-                        return ArdLengthscaleAccess::validate_lengthscales(k, params);
-                    }
-                    else if constexpr (std::same_as<LeafT, RationalQuadraticArdKernel>)
-                    {
-                        const std::size_t dims = k.num_params() - 1U;
-                        if (auto r = ArdLengthscaleAccess::validate_lengthscales(k, params.subspan(0, dims));
-                            !r.has_value())
-                        {
-                            return r;
-                        }
-                        return validate_log_param(params[dims], k.alpha_interval());
-                    }
-                    else
-                    {
-                        return {};
-                    }
-                },
-                leaf
+                    return validate_log_param(params[dims], k.alpha_interval());
+                }
+                else
+                {
+                    return {};
+                }
+            }, leaf
             );
         }
     }  // namespace
