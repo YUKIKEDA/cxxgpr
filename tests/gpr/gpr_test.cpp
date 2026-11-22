@@ -31,6 +31,7 @@
 #endif
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 #include "span_shape_contract.hpp"
 
 namespace
@@ -1052,6 +1053,43 @@ namespace
         }
         EXPECT_FALSE(stopped->optimizer_result().converged);
         EXPECT_EQ(stopped->optimizer_result().iterations, StopEarlyOptimizer::k_iterations);
+    }
+
+    /// @brief Verifies depth-128 alternating sum/product Gpr fit (L-BFGS and TrustRegion), predict, covariance, and LOO
+    /// fit within the small thread stack budget.
+    TEST(GprModelsTest, DeepAlternatingTreeFitPredictCovarianceLooFitInSmallStack)
+    {
+        // Spec: REQ-02, REQ-05, REQ-11
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
+        {
+            cxxgpr::KernelSpec tree(cxxgpr::RbfKernel::create(1.1).value());
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                const auto leaf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.9).value());
+                tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
+            }
+            constexpr std::size_t n = 4U;
+            const std::array<double, 4> x_raw{0.0, 0.5, 1.0, 1.5};
+            const std::array<double, 4> y_raw{0.2, 0.8, 0.6, 0.1};
+            const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 1U, n);
+
+            const auto fit_lbfgs =
+                cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(tree, cxxgpr::optimizer::Lbfgs().with_max_iterations(2U))
+                    .fit(x, y_raw);
+            ASSERT_TRUE(fit_lbfgs.has_value()) << fit_lbfgs.error().message();
+            EXPECT_TRUE(fit_lbfgs->predict(x).has_value());
+            EXPECT_TRUE(fit_lbfgs->predict_covariance(x).has_value());
+            EXPECT_TRUE(fit_lbfgs->loo_predict().has_value());
+
+            const auto fit_tr = cxxgpr::Gpr<cxxgpr::optimizer::TrustRegion>(
+                tree, cxxgpr::optimizer::TrustRegion().with_max_iterations(1U)
+            )
+                                    .fit(x, y_raw);
+            ASSERT_TRUE(fit_tr.has_value()) << fit_tr.error().message();
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace

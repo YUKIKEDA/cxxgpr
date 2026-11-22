@@ -100,10 +100,11 @@ namespace
         EXPECT_EQ(bounds[0], cxxgpr::Interval::default_positive());
     }
 
-    /// @brief Verifies deep KernelSpec (depth 128) construction and iterative destruction fit within a small stack.
+    /// @brief Verifies deep KernelSpec (depth 128) construction, shared-subtree copy, and iterative destruction fit
+    /// within a small stack.
     TEST(KernelSpecTest, DeepTreeDestructionFitsInSmallStack)
     {
-        // Spec: REQ-02, REQ-12
+        // Spec: REQ-02
         const bool ran = cxxgpr::test_support::run_with_stack_size(
             cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
@@ -113,7 +114,9 @@ namespace
                 const auto leaf = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value());
                 tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
             }
+            const cxxgpr::KernelSpec shared_copy = tree;
             EXPECT_EQ(tree.num_params(), 128U);
+            EXPECT_EQ(shared_copy.num_params(), 128U);
         }
         );
         ASSERT_TRUE(ran);

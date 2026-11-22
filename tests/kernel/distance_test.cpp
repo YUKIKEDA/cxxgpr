@@ -620,7 +620,7 @@ namespace
     /// stack.
     TEST(DistanceKernelTest, DeepAlternatingTreeEvalGradHessFitInSmallStack)
     {
-        // Spec: REQ-05, REQ-12
+        // Spec: REQ-05
         const bool ran = cxxgpr::test_support::run_with_stack_size(
             cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
@@ -632,9 +632,13 @@ namespace
                 tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
             }
             const auto compiled = tree.compile<double>();
+            const auto compiled_copy = compiled;
+            EXPECT_EQ(compiled_copy.num_params(), 128U);
             constexpr std::size_t n = 3U;
             const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
             const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
+            std::vector<double> diag(n, 0.0);
+            ASSERT_TRUE(compiled.fill_diag(n, x, diag).has_value());
             const std::array<double, 9> d2_raw{0.0, 0.29, 1.36, 0.29, 0.0, 0.41, 1.36, 0.41, 0.0};
             cxxgpr::DistanceSource src;
             src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_raw.data(), n, n, n));

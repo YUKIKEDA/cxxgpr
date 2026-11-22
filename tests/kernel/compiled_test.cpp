@@ -463,7 +463,7 @@ namespace
     /// @brief Verifies depth-128 alternating sum/product CompiledKernel eval, grad, and hess fit within a small stack.
     TEST(CompiledKernelTest, DeepAlternatingTreeEvalGradHessFitInSmallStack)
     {
-        // Spec: REQ-02, REQ-12
+        // Spec: REQ-02
         const bool ran = cxxgpr::test_support::run_with_stack_size(
             cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
@@ -474,6 +474,8 @@ namespace
                 tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
             }
             const auto compiled = tree.compile<double>();
+            const auto compiled_copy = compiled;
+            EXPECT_EQ(compiled_copy.num_params(), 128U);
             constexpr std::size_t n = 3U;
             const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
             const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
@@ -481,7 +483,10 @@ namespace
             std::vector<double> sa(n * n, 0.0);
             std::vector<double> sb(n * n, 0.0);
             std::vector<double> sc(n * n, 0.0);
+            std::vector<double> diag(n, 0.0);
             auto nested = compiled.make_nested_buffers(n, n);
+
+            ASSERT_TRUE(compiled.fill_diag(x, diag).has_value());
 
             ASSERT_TRUE(compiled
                     .apply_points(

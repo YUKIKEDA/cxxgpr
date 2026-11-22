@@ -292,7 +292,7 @@ namespace
     /// stack.
     TEST(TransformPipelineTest, DeepNestedPipelinesFitApplyAndDestroyInSmallStack)
     {
-        // Spec: REQ-04, REQ-12
+        // Spec: REQ-02, REQ-03
         const bool ran = cxxgpr::test_support::run_with_stack_size(
             cxxgpr::test_support::deep_model_stack_bytes(), []()
         {

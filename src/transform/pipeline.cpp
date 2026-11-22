@@ -106,8 +106,9 @@ namespace cxxgpr::transform
         /// @tparam BaseT Base fitted transform interface (`FittedInputTransform` or `FittedTargetTransform`).
         /// @param[in] root_steps Top-level fitted step vector.
         /// @param[out] out Destination vector receiving flattened leaf pointers (including nullptr if present).
+        /// @return True on success, false if memory allocation failed while materializing the flat step list.
         template <typename PipeT, typename BaseT>
-        void rebuild_flat_steps_impl(
+        [[nodiscard]] bool rebuild_flat_steps_impl(
             const std::vector<std::unique_ptr<BaseT>>& root_steps, std::vector<const BaseT*>& out
         ) noexcept
         {
@@ -122,7 +123,7 @@ namespace cxxgpr::transform
                 };
 
                 std::vector<Frame> stack;
-                stack.push_back(Frame{&root_steps, 0U});
+                stack.push_back(Frame{.steps = &root_steps, .idx = 0U});
                 while (!stack.empty())
                 {
                     auto& top = stack.back();
@@ -134,17 +135,19 @@ namespace cxxgpr::transform
                     const BaseT* step = (*top.steps)[top.idx++].get();
                     if (const auto* sub = dynamic_cast<const PipeT*>(step))
                     {
-                        stack.push_back(Frame{&PipelineAccess::steps(*sub), 0U});
+                        stack.push_back(Frame{.steps = &PipelineAccess::steps(*sub), .idx = 0U});
                     }
                     else
                     {
                         out.push_back(step);
                     }
                 }
+                return true;
             }
             catch (...)
             {
                 out.clear();
+                return false;
             }
         }
 
@@ -153,9 +156,9 @@ namespace cxxgpr::transform
     // --- FittedPipeline ---
 
     /// @brief Rebuilds flat_steps_ iteratively from steps_.
-    void FittedPipeline::rebuild_flat_steps()
+    void FittedPipeline::rebuild_flat_steps() noexcept
     {
-        rebuild_flat_steps_impl<FittedPipeline>(steps_, flat_steps_);
+        flat_steps_ready_ = rebuild_flat_steps_impl<FittedPipeline>(steps_, flat_steps_);
     }
 
     /// @brief Constructs a fitted input pipeline from an ordered list of fitted steps.
@@ -212,6 +215,10 @@ namespace cxxgpr::transform
     ) const
     {
         // Delegate empty pipelines to identity so validation semantics remain uniform.
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.apply(x, n_rows, n_cols);
@@ -251,6 +258,10 @@ namespace cxxgpr::transform
         std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.apply_into(x, n_rows, n_cols, out);
@@ -298,6 +309,10 @@ namespace cxxgpr::transform
         std::span<double> x, std::size_t n_rows, std::size_t n_cols
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.inverse_apply(x, n_rows, n_cols);
@@ -339,6 +354,10 @@ namespace cxxgpr::transform
         std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityInput{}.inverse_apply_into(x, n_rows, n_cols, out);
@@ -519,6 +538,10 @@ namespace cxxgpr::transform
             }
             if (const auto* sub_pipe = dynamic_cast<const Pipeline*>(step.get()))
             {
+                if (auto check = detail::validate_input_matrix(buf, n_rows, n_cols); !check)
+                {
+                    return std::unexpected(std::move(check).error());
+                }
                 const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
                 stack.push_back(FitFrame{.steps = &sub_steps, .idx = 0U, .fitted = {}});
                 stack.back().fitted.reserve(sub_steps.size());
@@ -572,9 +595,9 @@ namespace cxxgpr::transform
     // --- FittedTargetPipeline ---
 
     /// @brief Rebuilds flat_steps_ iteratively from steps_.
-    void FittedTargetPipeline::rebuild_flat_steps()
+    void FittedTargetPipeline::rebuild_flat_steps() noexcept
     {
-        rebuild_flat_steps_impl<FittedTargetPipeline>(steps_, flat_steps_);
+        flat_steps_ready_ = rebuild_flat_steps_impl<FittedTargetPipeline>(steps_, flat_steps_);
     }
 
     /// @brief Constructs a fitted target pipeline from an ordered list of fitted steps.
@@ -624,6 +647,10 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::transform(std::span<double> y) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.transform(y);
@@ -659,6 +686,10 @@ namespace cxxgpr::transform
         std::span<const double> y, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.transform_into(y, out);
@@ -794,6 +825,10 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_mean(std::span<double> mean) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_mean(mean);
@@ -816,6 +851,10 @@ namespace cxxgpr::transform
         std::span<const double> mean, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_mean_into(mean, out);
@@ -837,6 +876,10 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_variance(std::span<double> var) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_variance(var);
@@ -859,6 +902,10 @@ namespace cxxgpr::transform
         std::span<const double> var, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_variance_into(var, out);
@@ -880,6 +927,10 @@ namespace cxxgpr::transform
     /// @retval GprErrorCode::InvalidConfig When any pipeline step pointer is null.
     std::expected<void, GprError> FittedTargetPipeline::inverse_transform_covariance(std::span<double> cov) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_covariance(cov);
@@ -902,6 +953,10 @@ namespace cxxgpr::transform
         std::span<const double> cov, std::span<double> out
     ) const
     {
+        if (!flat_steps_ready_)
+        {
+            return std::unexpected(GprError::invalid_config("flattened pipeline cache unavailable"));
+        }
         if (flat_steps_.empty())
         {
             return FittedIdentityTarget{}.inverse_transform_covariance_into(cov, out);
@@ -1056,6 +1111,10 @@ namespace cxxgpr::transform
             }
             if (const auto* sub_pipe = dynamic_cast<const TargetPipeline*>(step.get()))
             {
+                if (auto check = detail::validate_target_vector(buf); !check)
+                {
+                    return std::unexpected(std::move(check).error());
+                }
                 const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
                 stack.push_back(FitFrame{.steps = &sub_steps, .idx = 0U, .fitted = {}});
                 stack.back().fitted.reserve(sub_steps.size());

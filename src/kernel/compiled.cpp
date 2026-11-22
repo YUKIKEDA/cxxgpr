@@ -616,19 +616,138 @@ namespace cxxgpr
 
         /// @brief Default-constructs an empty compiled implementation.
         Impl() = default;
-        /// @brief Copy-constructs a compiled implementation.
-        Impl(const Impl&) = default;
+
+        /// @brief Copy-constructs a compiled implementation iteratively so deep ASTs do not overflow the stack.
+        /// @param[in] other Source compiled implementation.
+        Impl(const Impl& other) :
+            leaves(other.leaves),
+            cached_ls(other.cached_ls),
+            bindings(other.bindings),
+            root(clone_term_iterative(other.root)),
+            coord_mode(other.coord_mode),
+            nested_depth(other.nested_depth),
+            exp_mode(other.exp_mode),
+            reads_dist(other.reads_dist),
+            needs_ard(other.needs_ard)
+        {
+        }
+
         /// @brief Move-constructs a compiled implementation.
         Impl(Impl&&) noexcept = default;
-        /// @brief Copy-assigns a compiled implementation.
+
+        /// @brief Copy-assigns a compiled implementation iteratively.
+        /// @param[in] other Source compiled implementation.
         /// @return Reference to *this.
-        Impl& operator=(const Impl&) = default;
+        Impl& operator=(const Impl& other)
+        {
+            if (this == &other)
+            {
+                return *this;
+            }
+            Impl copy(other);
+            *this = std::move(copy);
+            return *this;
+        }
+
         /// @brief Move-assigns a compiled implementation.
         /// @return Reference to *this.
         Impl& operator=(Impl&&) noexcept = default;
 
         /// @brief Destroys the compiled AST iteratively to keep stack depth O(1) on deep trees.
         ~Impl() noexcept { destroy_term_iterative(root); }
+
+        /// @brief Iteratively deep-copies a compiled Term tree without recursive calls.
+        /// @param[in] src Root compiled term to clone.
+        /// @return Cloned compiled term.
+        [[nodiscard]] static Term clone_term_iterative(const Term& src)
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&src))
+            {
+                return *leaf;
+            }
+
+            struct Frame
+            {
+                const std::vector<Term>* src_terms;
+                std::size_t idx;
+                bool is_sum;
+                std::size_t param_begin;
+                std::size_t param_end;
+                std::vector<Term> dst_terms;
+            };
+
+            std::vector<Frame> stack;
+            auto push_composite = [&stack](const Term& t)
+            {
+                if (const auto* s = std::get_if<SumTerm>(&t))
+                {
+                    stack.push_back(
+                        Frame{
+                            .src_terms = &s->terms,
+                            .idx = 0U,
+                            .is_sum = true,
+                            .param_begin = s->param_begin,
+                            .param_end = s->param_end,
+                            .dst_terms = {},
+                        }
+                    );
+                    stack.back().dst_terms.reserve(s->terms.size());
+                }
+                else
+                {
+                    const auto& p = std::get<ProductTerm>(t);
+                    stack.push_back(
+                        Frame{
+                            .src_terms = &p.terms,
+                            .idx = 0U,
+                            .is_sum = false,
+                            .param_begin = p.param_begin,
+                            .param_end = p.param_end,
+                            .dst_terms = {},
+                        }
+                    );
+                    stack.back().dst_terms.reserve(p.terms.size());
+                }
+            };
+            push_composite(src);
+            while (true)
+            {
+                auto& top = stack.back();
+                if (top.idx >= top.src_terms->size())
+                {
+                    Term finished = top.is_sum ? Term(
+                                                     SumTerm{
+                                                         .terms = std::move(top.dst_terms),
+                                                         .param_begin = top.param_begin,
+                                                         .param_end = top.param_end,
+                                                     }
+                                                 )
+                                               : Term(
+                                                     ProductTerm{
+                                                         .terms = std::move(top.dst_terms),
+                                                         .param_begin = top.param_begin,
+                                                         .param_end = top.param_end,
+                                                     }
+                                                 );
+                    stack.pop_back();
+                    if (stack.empty())
+                    {
+                        return finished;
+                    }
+                    stack.back().dst_terms.push_back(std::move(finished));
+                    continue;
+                }
+                const Term& child = (*top.src_terms)[top.idx++];
+                if (const auto* leaf = std::get_if<LeafRef>(&child))
+                {
+                    top.dst_terms.push_back(*leaf);
+                }
+                else
+                {
+                    push_composite(child);
+                }
+            }
+        }
 
         /// @brief Iteratively destroys nested SumTerm/ProductTerm subtrees without recursive calls.
         /// @param[in,out] target Root compiled term to drain.
@@ -1335,16 +1454,6 @@ namespace cxxgpr
             return true;
         }
 
-        /// @brief Recursively evaluates a compiled `Term` into `out` from squared Euclidean distances.
-        /// @details Evaluates leaf terms directly and delegates sums/products to `eval_composite_terms`.
-        /// @param[in] term Compiled AST node to evaluate.
-        /// @param[in] dist Square squared-distance matrix.
-        /// @param[out] out Destination Gram matrix view.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @return Empty expected on success, or evaluation/workspace error.
         /// @brief Evaluates one distance leaf out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf_idx Leaf index into `leaves`.
         /// @param[in] dist Square squared-distance matrix.
@@ -1514,10 +1623,83 @@ namespace cxxgpr
             return eval_leaf_at(leaf_idx, x, out, uplo, nested, 0U, &cache);
         }
 
-        /// @brief Reconstructs the composite Gram matrix from precomputed per-leaf Gram matrices.
-        /// @details Walks the flattened AST, copying leaf views directly into `out` and combining composite children
-        /// via `nested` buffers without re-evaluating any kernel leaf.
-        /// @param[in] term Current compiled AST node.
+        /// @brief Invariant context for `eval_combine_term_rec` to keep recursive stack frames minimal.
+        struct CombineCtx
+        {
+            /// @brief Precomputed leaf Gram matrix views indexed by `leaf_idx`.
+            std::span<const MatrixRef<T>> leaf_grams;
+            /// @brief Active matrix triangle to combine.
+            Triangle uplo;
+            /// @brief Pre-allocated intermediate buffer pool for nested subtrees.
+            NestedBuffers<T>& nested;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_combine_term` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] level_idx Current nesting depth inside `ctx.nested`.
+        /// @param[in] ctx Invariant combine context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool eval_combine_term_rec(
+            const Term& term, const MatrixMut<T>& out, std::size_t level_idx, const CombineCtx& ctx
+        ) const
+        {
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                copy_into(out, ctx.leaf_grams[leaf->leaf_idx], ctx.uplo);
+                return true;
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            if (terms.empty())
+            {
+                return fail_empty_composite(ctx.err);
+            }
+            if (!eval_combine_term_rec(terms[0], out, level_idx, ctx))
+            {
+                return false;
+            }
+            for (std::size_t k = 1; k < terms.size(); ++k)
+            {
+                if (const auto* leaf = std::get_if<LeafRef>(&terms[k]))
+                {
+                    if (is_sum)
+                    {
+                        add_into(out, ctx.leaf_grams[leaf->leaf_idx], ctx.uplo);
+                    }
+                    else
+                    {
+                        mul_into(out, ctx.leaf_grams[leaf->leaf_idx], ctx.uplo);
+                    }
+                }
+                else
+                {
+                    if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                    {
+                        return false;
+                    }
+                    const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                    if (!eval_combine_term_rec(terms[k], buf, level_idx + 1U, ctx))
+                    {
+                        return false;
+                    }
+                    if (is_sum)
+                    {
+                        add_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                    else
+                    {
+                        mul_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                }
+            }
+            return true;
+        }
+
+        /// @brief Recursively combines precomputed leaf Gram matrices into `out` according to `term`.
+        /// @param[in] term Compiled AST node.
         /// @param[in] leaf_grams Precomputed Gram matrix views indexed by `leaf_idx`.
         /// @param[out] out Destination matrix view.
         /// @param[in] uplo Active matrix triangle to combine.
@@ -1533,70 +1715,23 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            std::optional<GprError> err;
+            const CombineCtx ctx{
+                .leaf_grams = leaf_grams,
+                .uplo = uplo,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_combine_term_rec(term, out, level_idx, ctx))
             {
-                copy_into(out, leaf_grams[leaf->leaf_idx], uplo);
-                return {};
-            }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            if (auto res = eval_combine_term(terms[0], leaf_grams, out, uplo, nested, level_idx); !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (const auto* leaf = std::get_if<LeafRef>(&terms[k]))
-                {
-                    if (is_sum)
-                    {
-                        add_into(out, leaf_grams[leaf->leaf_idx], uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, leaf_grams[leaf->leaf_idx], uplo);
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_combine_term(terms[k], leaf_grams, buf, uplo, nested, level_idx + 1U);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), uplo);
-                    }
-                }
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
 
-        /// @brief Recursively evaluates a compiled `Term` from point coordinates `x` (and optional `cache`).
-        /// @details Evaluates `terms[0]` into `out`, leaf siblings via `scratch`, and composite siblings via `nested`.
-        /// @param[in] term Compiled AST node to evaluate.
-        /// @param[in] x Input point coordinate matrix.
-        /// @param[out] out Destination square Gram matrix view.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @return Empty expected on success, or workspace/evaluation error.
         /// @brief Evaluates one point leaf out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf_idx Leaf index into `leaves`.
         /// @param[in] x Input point matrix.
@@ -1691,15 +1826,6 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates a compiled `Term` cross-covariance from rectangular squared distances.
-        /// @details Always evaluates full rectangular matrices (`Triangle::Full`) via `eval_composite_terms`.
-        /// @param[in] term Compiled AST node to evaluate.
-        /// @param[in] dist Rectangular squared-distance matrix.
-        /// @param[out] out Destination cross-covariance matrix view.
-        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @return Empty expected on success, or workspace/evaluation error.
         /// @brief Evaluates one cross-distance leaf out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf_idx Leaf index into `leaves`.
         /// @param[in] dist Rectangular squared-distance matrix.
@@ -1776,17 +1902,6 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates a compiled `Term` cross-covariance from two point coordinate matrices.
-        /// @details Uses `nested` to materialize cross squared distances for `CustomKernel` leaves and delegates child
-        /// composition to `eval_composite_terms`.
-        /// @param[in] term Compiled AST node to evaluate.
-        /// @param[in] x1 First point matrix of shape `(n1, d)`.
-        /// @param[in] x2 Second point matrix of shape `(n2, d)`.
-        /// @param[out] out Destination cross-covariance matrix of shape `(n1, n2)`.
-        /// @param[in,out] scratch Reusable scratch matrix for direct leaf siblings.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees and custom distances.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @return Empty expected on success, or workspace/evaluation error.
         /// @brief Evaluates one cross-points leaf out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf_idx Leaf index into `leaves`.
         /// @param[in] x1 First point matrix.
@@ -1889,50 +2004,79 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates the self-covariance diagonal $k(x_i, x_i)$ of a compiled `Term`.
-        /// @details Evaluates `terms[0]` into `out` and subsequent terms into disjoint slices of `scratch_vec` indexed
-        /// by `level_idx * out.size()` so zero heap allocations occur when caller scratch is provided.
+        /// @brief Writes LengthMismatch for an undersized diagonal scratch buffer out-of-line.
+        /// @param[out] err Destination error slot.
+        /// @return Always false.
+        [[nodiscard]] static CXXGPR_NOINLINE bool fail_diag_scratch_too_small(std::optional<GprError>& err)
+        {
+            err = GprError::length_mismatch("diagonal evaluation scratch buffer is too small");
+            return false;
+        }
+
+        /// @brief Evaluates one diagonal leaf out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] leaf_idx Leaf index into `leaves`.
+        /// @param[in] x Input point coordinate matrix.
+        /// @param[out] out Output diagonal span.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool fill_diag_leaf_step(
+            std::size_t leaf_idx, const MatrixRef<T>& x, std::span<T> out, std::optional<GprError>& err
+        ) const
+        {
+            return capture_expected(detail::leaf_fill_diag(leaves[leaf_idx], x, out, cached_ls[leaf_idx]), err);
+        }
+
+        /// @brief Invariant context for `eval_fill_diag_rec` to keep recursive stack frames minimal.
+        struct FillDiagCtx
+        {
+            /// @brief Input point coordinate matrix.
+            MatrixRef<T> x;
+            /// @brief Caller-supplied scratch vector sliced by recursion level.
+            std::span<T> scratch_vec;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_fill_diag` with minimal per-level stack frame size.
         /// @param[in] term Compiled AST node.
-        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
         /// @param[out] out Output diagonal span of length `n`.
-        /// @param[in,out] scratch_vec Caller-supplied scratch vector sliced by recursion level.
-        /// @param[in] level_idx Current nesting depth into `scratch_vec`.
-        /// @return Empty expected on success, or workspace/evaluation error.
-        /// @retval GprErrorCode::LengthMismatch If `scratch_vec` is shorter than `(level_idx + 1) * out.size()`.
-        [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
-            const Term& term, MatrixRef<T> x, std::span<T> out, std::span<T> scratch_vec, std::size_t level_idx
+        /// @param[in] level_idx Current nesting depth into `ctx.scratch_vec`.
+        /// @param[in] ctx Invariant diagonal evaluation context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool eval_fill_diag_rec(
+            const Term& term, std::span<T> out, std::size_t level_idx, const FillDiagCtx& ctx
         ) const
         {
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                return detail::leaf_fill_diag(leaves[leaf->leaf_idx], x, out, cached_ls[leaf->leaf_idx]);
+                return fill_diag_leaf_step(leaf->leaf_idx, ctx.x, out, ctx.err);
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
             if (terms.empty())
             {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+                return fail_empty_composite(ctx.err);
             }
-            if (auto res = eval_fill_diag(terms[0], x, out, scratch_vec, level_idx); !res.has_value())
+            if (!eval_fill_diag_rec(terms[0], out, level_idx, ctx))
             {
-                return res;
+                return false;
             }
             if (terms.size() == 1U)
             {
-                return {};
+                return true;
             }
             // Slice scratch_vec by recursion depth so sibling terms never clobber outer levels.
             const std::size_t slice_offset = level_idx * out.size();
-            if (scratch_vec.size() < slice_offset + out.size())
+            if (ctx.scratch_vec.size() < slice_offset + out.size())
             {
-                return std::unexpected(GprError::length_mismatch("diagonal evaluation scratch buffer is too small"));
+                return fail_diag_scratch_too_small(ctx.err);
             }
             for (std::size_t k = 1; k < terms.size(); ++k)
             {
-                const std::span<T> sub(scratch_vec.data() + slice_offset, out.size());
-                if (auto res = eval_fill_diag(terms[k], x, sub, scratch_vec, level_idx + 1U); !res.has_value())
+                const std::span<T> sub(ctx.scratch_vec.data() + slice_offset, out.size());
+                if (!eval_fill_diag_rec(terms[k], sub, level_idx + 1U, ctx))
                 {
-                    return res;
+                    return false;
                 }
                 for (std::size_t idx = 0; idx < out.size(); ++idx)
                 {
@@ -1946,24 +2090,37 @@ namespace cxxgpr
                     }
                 }
             }
+            return true;
+        }
+
+        /// @brief Recursively evaluates the self-covariance diagonal $k(x_i, x_i)$ of a compiled `Term`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[out] out Output diagonal span of length `n`.
+        /// @param[in,out] scratch_vec Caller-supplied scratch vector sliced by recursion level.
+        /// @param[in] level_idx Current nesting depth into `scratch_vec`.
+        /// @return Empty expected on success, or workspace/evaluation error.
+        /// @retval GprErrorCode::LengthMismatch If `scratch_vec` is shorter than `(level_idx + 1) * out.size()`.
+        [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
+            const Term& term, MatrixRef<T> x, std::span<T> out, std::span<T> scratch_vec, std::size_t level_idx
+        ) const
+        {
+            std::optional<GprError> err;
+            const FillDiagCtx ctx{
+                .x = x,
+                .scratch_vec = scratch_vec,
+                .err = err,
+            };
+            if (!eval_fill_diag_rec(term, out, level_idx, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
+            }
             return {};
         }
 
-        /// @brief Recursively evaluates the first log-hyperparameter derivative $\partial K / \partial \theta_p$
-        /// from squared Euclidean distances.
-        /// @details Routes sum nodes directly to the single summand owning `param_idx`, and applies the product rule
-        /// $(\partial f_{\text{owner}} / \partial \theta_p) \odot \prod_{m \ne \text{owner}} f_m$ on product nodes.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] dist Square squared-distance matrix.
-        /// @param[out] d_k Output derivative matrix view.
-        /// @param[in] param_idx Global hyperparameter index to differentiate with respect to.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @return Empty expected on success, or index/workspace/evaluation error.
-        /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
         /// @brief Evaluates one distance-leaf gradient out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf Leaf AST reference.
         /// @param[in] dist Square squared-distance matrix.
@@ -1987,18 +2144,6 @@ namespace cxxgpr
             );
         }
 
-        /// @brief Recursive body of `eval_grad_dist` using `bool` + out-of-line error slot.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] dist Square squared-distance matrix.
-        /// @param[out] d_k Output derivative matrix.
-        /// @param[in] param_idx Global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[out] err Populated with the error on failure.
-        /// @return True on success, false after writing `err`.
         /// @brief Invariant context for `eval_grad_dist_rec` to keep recursive frames minimal.
         struct GradDistCtx
         {
@@ -2125,21 +2270,6 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates $\partial K / \partial \theta_p$ from point coordinates (and optional cache).
-        /// @details Uses cached distance or packed ARD derivatives on compatible leaves, materializes distances into
-        /// `nested` for uncached `CustomKernel`, and folds sibling factors across sums and products.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] x Input point matrix of shape `(n, d)`.
-        /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
-        /// @param[in] param_idx Global hyperparameter index to differentiate with respect to.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @return Empty expected on success, or index/workspace/evaluation error.
-        /// @retval GprErrorCode::IndexOutOfRange If `param_idx` is not owned by any child of `term`.
         /// @brief Evaluates one point-leaf gradient out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf Leaf AST reference.
         /// @param[in] x Input point matrix.
@@ -2206,19 +2336,6 @@ namespace cxxgpr
             );
         }
 
-        /// @brief Recursive body of `eval_grad_points` using `bool` + out-of-line error slot.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] x Input point matrix.
-        /// @param[out] d_k Output derivative matrix.
-        /// @param[in] param_idx Global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @param[out] err Populated with the error on failure.
-        /// @return True on success, false after writing `err`.
         /// @brief Invariant context for `eval_grad_points_rec` to keep recursive frames minimal.
         struct GradPointsCtx
         {
@@ -2353,25 +2470,6 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates the second log-hyperparameter derivative $\partial^2 K / (\partial \theta_i
-        /// \partial \theta_j)$ from squared Euclidean distances.
-        /// @details Zeroes the active triangle when `i` and `j` belong to distinct summands of a `SumTerm`; on
-        /// `ProductTerm`, computes $(\partial^2 f_m / \partial \theta_i \partial \theta_j) \prod_{r \ne m} f_r$ when
-        /// co-located and $(\partial f_{m_i}/\partial \theta_i)(\partial f_{m_j}/\partial \theta_j) \prod_{r \ne
-        /// m_i,m_j} f_r$ across distinct factors.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] dist Square squared-distance matrix.
-        /// @param[out] d2_k Output second-derivative matrix view.
-        /// @param[in] i First global hyperparameter index.
-        /// @param[in] j Second global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] scratch_c Third reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @return Empty expected on success, or index/workspace/evaluation error.
-        /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
         /// @brief Evaluates one distance-leaf Hessian out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf Leaf AST reference.
         /// @param[in] dist Square squared-distance matrix.
@@ -2399,20 +2497,6 @@ namespace cxxgpr
             );
         }
 
-        /// @brief Recursive body of `eval_hess_dist` using `bool` + out-of-line error slot.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] dist Square squared-distance matrix.
-        /// @param[out] d2_k Output second-derivative matrix.
-        /// @param[in] i First global hyperparameter index.
-        /// @param[in] j Second global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] scratch_c Third reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[out] err Populated with the error on failure.
-        /// @return True on success, false after writing `err`.
         /// @brief Invariant context for `eval_hess_dist_rec` to keep recursive frames minimal.
         struct HessDistCtx
         {
@@ -2594,23 +2678,6 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Recursively evaluates $\partial^2 K / (\partial \theta_i \partial \theta_j)$ from point coordinates.
-        /// @details Handles cached distance/ARD acceleration, `CustomKernel` distance materialization, cross-summand
-        /// zeroing, and same-factor vs cross-factor product Hessian rules.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
-        /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
-        /// @param[in] i First global hyperparameter index.
-        /// @param[in] j Second global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle to populate.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] scratch_c Third reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @return Empty expected on success, or index/workspace/evaluation error.
-        /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is outside `term`'s parameter range.
         /// @brief Evaluates one point-leaf Hessian out-of-line so recursive frames stay free of `std::expected`.
         /// @param[in] leaf Leaf AST reference.
         /// @param[in] x Input point matrix.
@@ -2682,21 +2749,6 @@ namespace cxxgpr
             );
         }
 
-        /// @brief Recursive body of `eval_hess_points` using `bool` + out-of-line error slot.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] x Input point matrix.
-        /// @param[out] d2_k Output second-derivative matrix.
-        /// @param[in] i First global hyperparameter index.
-        /// @param[in] j Second global hyperparameter index.
-        /// @param[in] uplo Active matrix triangle.
-        /// @param[in,out] scratch_a First reusable square scratch buffer.
-        /// @param[in,out] scratch_b Second reusable square scratch buffer.
-        /// @param[in,out] scratch_c Third reusable square scratch buffer.
-        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
-        /// @param[in] level_idx Current nesting depth inside `nested`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @param[out] err Populated with the error on failure.
-        /// @return True on success, false after writing `err`.
         /// @brief Invariant context for `eval_hess_points_rec` to keep recursive frames minimal.
         struct HessPointsCtx
         {
@@ -3273,50 +3325,158 @@ namespace cxxgpr
             return {};
         }
 
-        /// @brief Single-pass adjoint contraction walk computing $\langle W, \partial K / \partial \theta_p \rangle_F$
-        /// for all parameters under `term`.
-        /// @details Propagates the incoming lower-triangular weight matrix `weight` top-down: sum nodes forward
-        /// `weight` unchanged; leaf nodes contract `weight` with each parameter derivative into `out_grads`; product
-        /// nodes form per-factor adjoint weights $W_{\text{eff}} = \text{scale} \cdot W \odot \prod_{r \ne m} G_r$
-        /// (reusing `kept_bufs` when `has_kept == true`) and optionally return $\langle W, K_{\text{term}} \rangle_F$
-        /// when
-        /// `need_value` is set or a sibling `ConstantKernel` requires its log-parameter gradient.
-        /// @param[in] term Compiled AST node being traversed.
-        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
-        /// @param[in] cache Optional precomputed distance and ARD cache.
-        /// @param[in] weight Incoming symmetric adjoint weight matrix (lower triangle read).
-        /// @param[out] out_grads Output span receiving $\langle W, \partial K / \partial \theta \rangle_F$ for `term`.
-        /// @param[in,out] kernel_scratch Reusable `n x n` scratch matrix for single-leaf gradient/value evaluation.
-        /// @param[in,out] nested Pre-allocated buffer pool for uncached `CustomKernel` distance matrices.
-        /// @param[in,out] weighted_bufs Pre-allocated `keep_plan` + walk buffer pool (`kept_bufs` followed by walk
-        /// scratch).
-        /// @param[in] kept_offset Starting buffer index in `weighted_bufs` if `has_kept` is true.
-        /// @param[in] kept_count Number of retained factor Grams starting at `kept_offset`.
-        /// @param[in] has_kept True when `term`'s varying factor Grams were pre-retained in `weighted_bufs`.
-        /// @param[in] walk_cursor First free buffer index in `weighted_bufs` beyond retained Grams and outer frames.
-        /// @param[in,out] col_partials Per-column scratch array of length at least `n` for deterministic serial
-        /// reductions.
-        /// @param[in] need_value True when an enclosing product needs $\langle W, K_{\text{term}} \rangle_F$ back.
-        /// @return Contracted term value $\langle W, K_{\text{term}} \rangle_F$ (when `need_value` or needed by a
-        /// sibling `ConstantKernel`), `0.0` otherwise, or an error.
-        [[nodiscard]] std::expected<double, GprError> walk_weighted(
-            const Term& term,
-            MatrixRef<T> x,
-            const DistanceCache<T>* cache,
-            MatrixRef<T> weight,
+        /// @brief Captures a `std::expected<double, GprError>` into `out_val` or `err` out-of-line.
+        /// @param[in] res Expected scalar result.
+        /// @param[out] out_val Destination value written on success.
+        /// @param[out] err Destination error slot written on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] static CXXGPR_NOINLINE bool capture_expected_double(
+            std::expected<double, GprError>&& res, double& out_val, std::optional<GprError>& err
+        ) noexcept
+        {
+            if (res.has_value())
+            {
+                out_val = *res;
+                return true;
+            }
+            err = std::move(res).error();
+            return false;
+        }
+
+        /// @brief Invariant context for `walk_weighted_rec` to keep recursive frames minimal.
+        struct WalkWeightedCtx
+        {
+            /// @brief Input point matrix.
+            MatrixRef<T> x;
+            /// @brief Optional precomputed distance/ARD cache.
+            const DistanceCache<T>* cache;
+            /// @brief Reusable `n x n` scratch matrix for leaf evaluation.
+            MatrixMut<T> kernel_scratch;
+            /// @brief Nested buffer pool for `eval_term_points_rec`.
+            NestedBuffers<T>& nested;
+            /// @brief Working buffer pool for adjoint effective weights and intermediate factor Grams.
+            NestedBuffers<T>& weighted_bufs;
+            /// @brief Scratch span for deterministic OpenMP column reductions.
+            std::span<double> col_partials;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Evaluates one weighted leaf adjoint contraction out-of-line so recursive frames stay minimal.
+        /// @param[in] leaf Compiled leaf reference.
+        /// @param[in] weight Lower-triangular adjoint weight matrix `W`.
+        /// @param[out] out_grads Output gradient slice for `leaf`.
+        /// @param[in] need_value True when caller requires $\langle W, K_{\text{leaf}} \rangle_F$.
+        /// @param[in] ctx Invariant walk context.
+        /// @param[out] out_val Contracted scalar value on success.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_leaf_step(
+            const LeafRef& leaf,
+            const MatrixRef<T>& weight,
             std::span<double> out_grads,
-            MatrixMut<T> kernel_scratch,
-            NestedBuffers<T>& nested,
-            NestedBuffers<T>& weighted_bufs,
+            bool need_value,
+            const WalkWeightedCtx& ctx,
+            double& out_val
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf.leaf_idx];
+            if (const auto* ck = std::get_if<ConstantKernel>(&kl))
+            {
+                const double val = ck->constant() * lower_sum(weight, ctx.col_partials);
+                out_grads[0] = val;
+                out_val = val;
+                return true;
+            }
+            if (const auto* wk = std::get_if<WhiteKernel>(&kl))
+            {
+                const double val = wk->variance() * lower_diag_sum(weight);
+                out_grads[0] = val;
+                out_val = need_value ? val : 0.0;
+                return true;
+            }
+            if (leaf_needs_ard(kl))
+            {
+                const std::span<const T> ard_packed =
+                    (ctx.cache != nullptr && ctx.cache->has_ard()) ? ctx.cache->ard_packed() : std::span<const T>{};
+                return capture_expected_double(
+                    detail::leaf_ard_weighted_grads(
+                        kl, cached_ls[leaf.leaf_idx], ctx.x, ard_packed, weight, ctx.kernel_scratch, ctx.col_partials,
+                        out_grads, need_value, exp_mode
+                    ),
+                    out_val, ctx.err
+                );
+            }
+            if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
+                || std::holds_alternative<PeriodicKernel>(kl) || std::holds_alternative<RationalQuadraticKernel>(kl)
+                || std::holds_alternative<LinearKernel>(kl))
+            {
+                const MatrixRef<T> dist_view =
+                    (ctx.cache != nullptr && ctx.cache->has_dist()) ? ctx.cache->dist_view() : MatrixRef<T>{};
+                return capture_expected_double(
+                    detail::leaf_iso_weighted_grads(
+                        kl, ctx.x, dist_view, weight, ctx.kernel_scratch, ctx.col_partials, out_grads, need_value,
+                        exp_mode
+                    ),
+                    out_val, ctx.err
+                );
+            }
+            for (std::size_t p = 0; p < leaf.param_count; ++p)
+            {
+                if (!capture_expected(
+                        grad_leaf_at(
+                            leaf.leaf_idx, ctx.x, ctx.cache, ctx.kernel_scratch, p, Triangle::Lower, ctx.nested, 0
+                        ),
+                        ctx.err
+                    ))
+                {
+                    return false;
+                }
+                out_grads[p] = lower_frobenius(weight, ctx.kernel_scratch.as_ref(), ctx.col_partials);
+            }
+            if (need_value)
+            {
+                if (!capture_expected(
+                        eval_leaf_at(
+                            leaf.leaf_idx, ctx.x, ctx.kernel_scratch, Triangle::Lower, ctx.nested, 0, ctx.cache
+                        ),
+                        ctx.err
+                    ))
+                {
+                    return false;
+                }
+                out_val = lower_frobenius(weight, ctx.kernel_scratch.as_ref(), ctx.col_partials);
+                return true;
+            }
+            out_val = 0.0;
+            return true;
+        }
+
+        /// @brief Recursive body of `walk_weighted` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] weight Lower-triangular adjoint weight matrix `W`.
+        /// @param[out] out_grads Output gradient slice for `term`.
+        /// @param[in] kept_offset Starting slot in `ctx.weighted_bufs` when `has_kept` is true.
+        /// @param[in] kept_count Number of pre-retained factor Grams when `has_kept` is true.
+        /// @param[in] has_kept True when enclosing `apply_keeping` pre-retained this product's factor Grams.
+        /// @param[in] walk_cursor Next free buffer slot in `ctx.weighted_bufs`.
+        /// @param[in] need_value True when caller requires $\langle W, K_{\text{term}} \rangle_F$.
+        /// @param[in] ctx Invariant walk context.
+        /// @param[out] out_val Contracted scalar value on success.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool walk_weighted_rec(
+            const Term& term,
+            const MatrixRef<T>& weight,
+            std::span<double> out_grads,
             std::size_t kept_offset,
             std::size_t kept_count,
             bool has_kept,
             std::size_t walk_cursor,
-            std::span<double> col_partials,
-            bool need_value
+            bool need_value,
+            const WalkWeightedCtx& ctx,
+            double& out_val
         ) const
         {
-            const std::size_t n = x.rows();
+            const std::size_t n = ctx.x.rows();
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
                 // Sum rule is linear in W: pass identical `weight` to every summand and sum their contractions.
@@ -3326,75 +3486,23 @@ namespace cxxgpr
                 {
                     const auto [cb, ce] = param_range(child);
                     const std::size_t count = ce - cb;
-                    auto res = walk_weighted(
-                        child, x, cache, weight, out_grads.subspan(p_off, count), kernel_scratch, nested, weighted_bufs,
-                        0, 0, false, walk_cursor, col_partials, need_value
-                    );
-                    if (!res.has_value())
+                    double child_val = 0.0;
+                    if (!walk_weighted_rec(
+                            child, weight, out_grads.subspan(p_off, count), 0, 0, false, walk_cursor, need_value, ctx,
+                            child_val
+                        ))
                     {
-                        return res;
+                        return false;
                     }
-                    value += *res;
+                    value += child_val;
                     p_off += count;
                 }
-                return value;
+                out_val = value;
+                return true;
             }
             if (const auto* leaf = std::get_if<LeafRef>(&term))
             {
-                const KernelLeaf& kl = leaves[leaf->leaf_idx];
-                if (const auto* ck = std::get_if<ConstantKernel>(&kl))
-                {
-                    // Since d(c)/d(log c) = c, gradient and <W, K_leaf>_F are both c * sum_{i,j} W_ij.
-                    const double val = ck->constant() * lower_sum(weight, col_partials);
-                    out_grads[0] = val;
-                    return val;
-                }
-                if (const auto* wk = std::get_if<WhiteKernel>(&kl))
-                {
-                    // WhiteKernel derivative and value live strictly on the diagonal: v * trace(W).
-                    const double val = wk->variance() * lower_diag_sum(weight);
-                    out_grads[0] = val;
-                    return need_value ? val : 0.0;
-                }
-                if (leaf_needs_ard(kl))
-                {
-                    const std::span<const T> ard_packed =
-                        (cache != nullptr && cache->has_ard()) ? cache->ard_packed() : std::span<const T>{};
-                    return detail::leaf_ard_weighted_grads(
-                        kl, cached_ls[leaf->leaf_idx], x, ard_packed, weight, kernel_scratch, col_partials, out_grads,
-                        need_value, exp_mode
-                    );
-                }
-                if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
-                    || std::holds_alternative<PeriodicKernel>(kl) || std::holds_alternative<RationalQuadraticKernel>(kl)
-                    || std::holds_alternative<LinearKernel>(kl))
-                {
-                    const MatrixRef<T> dist_view =
-                        (cache != nullptr && cache->has_dist()) ? cache->dist_view() : MatrixRef<T>{};
-                    return detail::leaf_iso_weighted_grads(
-                        kl, x, dist_view, weight, kernel_scratch, col_partials, out_grads, need_value, exp_mode
-                    );
-                }
-                for (std::size_t p = 0; p < leaf->param_count; ++p)
-                {
-                    if (auto res =
-                            grad_leaf_at(leaf->leaf_idx, x, cache, kernel_scratch, p, Triangle::Lower, nested, 0);
-                        !res.has_value())
-                    {
-                        return std::unexpected(std::move(res).error());
-                    }
-                    out_grads[p] = lower_frobenius(weight, kernel_scratch.as_ref(), col_partials);
-                }
-                if (need_value)
-                {
-                    if (auto res = eval_leaf_at(leaf->leaf_idx, x, kernel_scratch, Triangle::Lower, nested, 0, cache);
-                        !res.has_value())
-                    {
-                        return std::unexpected(std::move(res).error());
-                    }
-                    return lower_frobenius(weight, kernel_scratch.as_ref(), col_partials);
-                }
-                return 0.0;
+                return walk_weighted_leaf_step(*leaf, weight, out_grads, need_value, ctx, out_val);
             }
 
             const auto& p = std::get<ProductTerm>(term);
@@ -3404,8 +3512,7 @@ namespace cxxgpr
 
             if (varying == 0U)
             {
-                // All factors are ConstantKernel scalars; every constant parameter shares <W, prod c_k>_F.
-                const double val = static_cast<double>(scale) * lower_sum(weight, col_partials);
+                const double val = static_cast<double>(scale) * lower_sum(weight, ctx.col_partials);
                 std::size_t p_off = 0;
                 for (const auto& f : p.terms)
                 {
@@ -3413,13 +3520,12 @@ namespace cxxgpr
                     out_grads[p_off] = val;
                     p_off += (fe - fb);
                 }
-                return val;
+                out_val = val;
+                return true;
             }
 
             if (varying == 1U)
             {
-                // Single varying factor scaled by constant_scale: push linear scaling past contraction to avoid an n x
-                // n weight copy and matrix scale pass.
                 double val = 0.0;
                 std::size_t p_off = 0;
                 for (const auto& f : p.terms)
@@ -3428,15 +3534,13 @@ namespace cxxgpr
                     const std::size_t count = fe - fb;
                     if (!is_constant_term(f))
                     {
-                        auto res = walk_weighted(
-                            f, x, cache, weight, out_grads.subspan(p_off, count), kernel_scratch, nested, weighted_bufs,
-                            0, 0, false, walk_cursor, col_partials, need_value || has_const
-                        );
-                        if (!res.has_value())
+                        if (!walk_weighted_rec(
+                                f, weight, out_grads.subspan(p_off, count), 0, 0, false, walk_cursor,
+                                need_value || has_const, ctx, val
+                            ))
                         {
-                            return res;
+                            return false;
                         }
-                        val = *res;
                         if (has_const && scale != T{1})
                         {
                             const auto scale_d = static_cast<double>(scale);
@@ -3462,7 +3566,8 @@ namespace cxxgpr
                         c_off += (fe - fb);
                     }
                 }
-                return val;
+                out_val = val;
+                return true;
             }
 
             // Two or more varying factors: reuse pre-kept factor Grams when available, otherwise compute each once.
@@ -3477,29 +3582,30 @@ namespace cxxgpr
                     {
                         continue;
                     }
-                    if (auto ok = ensure_nested(weighted_bufs, g_base + v_idx, n, n); !ok.has_value())
+                    if (!ensure_nested_ok(ctx.weighted_bufs, g_base + v_idx, n, n, ctx.err))
                     {
-                        return std::unexpected(std::move(ok).error());
+                        return false;
                     }
-                    auto g_buf = weighted_bufs.level(g_base + v_idx, n, n);
-                    if (auto res = eval_term_points(f, x, g_buf, Triangle::Lower, kernel_scratch, nested, 0, cache);
-                        !res.has_value())
+                    const auto g_buf = ctx.weighted_bufs.level(g_base + v_idx, n, n);
+                    if (!eval_term_points_rec(
+                            f, ctx.x, g_buf, Triangle::Lower, ctx.kernel_scratch, ctx.nested, 0, ctx.cache, ctx.err
+                        ))
                     {
-                        return std::unexpected(std::move(res).error());
+                        return false;
                     }
                     ++v_idx;
                 }
             }
             else if (kept_count < varying)
             {
-                return std::unexpected(GprError::workspace_too_small());
+                return fail_workspace_too_small(ctx.err);
             }
 
-            if (auto ok = ensure_nested(weighted_bufs, next_cursor, n, n); !ok.has_value())
+            if (!ensure_nested_ok(ctx.weighted_bufs, next_cursor, n, n, ctx.err))
             {
-                return std::unexpected(std::move(ok).error());
+                return false;
             }
-            auto w_eff = weighted_bufs.level(next_cursor, n, n);
+            const auto w_eff = ctx.weighted_bufs.level(next_cursor, n, n);
 
             double val = 0.0;
             std::size_t p_off = 0;
@@ -3510,7 +3616,6 @@ namespace cxxgpr
                 const std::size_t count = fe - fb;
                 if (!is_constant_term(f))
                 {
-                    // Build adjoint weight W_eff = scale * W * prod_{r != cur_v} G_r and recurse into factor cur_v.
                     copy_into(w_eff, weight, Triangle::Lower);
                     if (scale != T{1})
                     {
@@ -3522,15 +3627,16 @@ namespace cxxgpr
                         {
                             continue;
                         }
-                        mul_into(w_eff, weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
+                        mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
                     }
-                    if (auto res = walk_weighted(
-                            f, x, cache, w_eff.as_ref(), out_grads.subspan(p_off, count), kernel_scratch, nested,
-                            weighted_bufs, 0, 0, false, next_cursor + 1U, col_partials, false
-                        );
-                        !res.has_value())
+                    const MatrixRef<T> w_eff_ref = w_eff.as_ref();
+                    double ignored_val = 0.0;
+                    if (!walk_weighted_rec(
+                            f, w_eff_ref, out_grads.subspan(p_off, count), 0, 0, false, next_cursor + 1U, false, ctx,
+                            ignored_val
+                        ))
                     {
-                        return res;
+                        return false;
                     }
                     ++cur_v;
                 }
@@ -3539,7 +3645,6 @@ namespace cxxgpr
 
             if (need_value || has_const)
             {
-                // Contract scale * W * prod_{r >= 1} G_r with G_0 to obtain <W, K_prod>_F for constants/parents.
                 copy_into(w_eff, weight, Triangle::Lower);
                 if (scale != T{1})
                 {
@@ -3547,9 +3652,9 @@ namespace cxxgpr
                 }
                 for (std::size_t r = 1U; r < varying; ++r)
                 {
-                    mul_into(w_eff, weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
+                    mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
                 }
-                val = lower_frobenius(w_eff.as_ref(), weighted_bufs.level(g_base, n, n).as_ref(), col_partials);
+                val = lower_frobenius(w_eff.as_ref(), ctx.weighted_bufs.level(g_base, n, n).as_ref(), ctx.col_partials);
                 if (has_const)
                 {
                     std::size_t c_off = 0;
@@ -3563,6 +3668,63 @@ namespace cxxgpr
                         c_off += (fe - fb);
                     }
                 }
+            }
+            out_val = val;
+            return true;
+        }
+
+        /// @brief Computes weighted parameter gradients $\langle W, \partial K / \partial \theta \rangle_F$ for `term`.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] x Input point matrix.
+        /// @param[in] cache Optional precomputed distance/ARD cache.
+        /// @param[in] weight Lower-triangular adjoint weight matrix `W`.
+        /// @param[out] out_grads Output gradient span for `term`.
+        /// @param[in,out] kernel_scratch Reusable `n x n` scratch matrix.
+        /// @param[in,out] nested Nested buffer pool.
+        /// @param[in,out] weighted_bufs Working buffer pool for adjoint weights and intermediate Grams.
+        /// @param[in] kept_offset Starting slot in `weighted_bufs` when `has_kept` is true.
+        /// @param[in] kept_count Number of pre-retained factor Grams when `has_kept` is true.
+        /// @param[in] has_kept True when `apply_keeping` pre-retained this product's factor Grams.
+        /// @param[in] walk_cursor Next free buffer slot in `weighted_bufs`.
+        /// @param[in,out] col_partials Scratch span for deterministic OpenMP reductions.
+        /// @param[in] need_value True when caller requires $\langle W, K_{\text{term}} \rangle_F$.
+        /// @return Contracted term value, or GprError on failure.
+        [[nodiscard]] std::expected<double, GprError> walk_weighted(
+            const Term& term,
+            MatrixRef<T> x,
+            const DistanceCache<T>* cache,
+            MatrixRef<T> weight,
+            std::span<double> out_grads,
+            MatrixMut<T> kernel_scratch,
+            NestedBuffers<T>& nested,
+            NestedBuffers<T>& weighted_bufs,
+            std::size_t kept_offset,
+            std::size_t kept_count,
+            bool has_kept,
+            std::size_t walk_cursor,
+            std::span<double> col_partials,
+            bool need_value
+        ) const
+        {
+            std::optional<GprError> err;
+            const WalkWeightedCtx ctx{
+                .x = x,
+                .cache = cache,
+                .kernel_scratch = kernel_scratch,
+                .nested = nested,
+                .weighted_bufs = weighted_bufs,
+                .col_partials = col_partials,
+                .err = err,
+            };
+            double val = 0.0;
+            if (!walk_weighted_rec(
+                    term, weight, out_grads, kept_offset, kept_count, has_kept, walk_cursor, need_value, ctx, val
+                ))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return val;
         }
