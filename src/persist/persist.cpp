@@ -1404,7 +1404,7 @@ namespace cxxgpr::persist
             }
 
             const std::string sid = compute_save_id(*cfg_str, tensors);
-            auto cfg_with_id = serialize_config_json(input, sid);
+            auto cfg_with_id = add_save_id_to_config_json(*cfg_str, sid);
             if (!cfg_with_id.has_value())
             {
                 return std::unexpected(std::move(cfg_with_id).error());

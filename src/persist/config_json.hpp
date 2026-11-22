@@ -81,11 +81,19 @@ namespace cxxgpr::persist::detail
     /// @details Encodes bounded parameters with open intervals and delegates custom kernel/transform state
     /// serialization while enforcing nesting depth and persist_id rules.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
-    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON string on success, or GprError if serialization or validation fails.
     /// @retval GprErrorCode::PersistFailed When custom components are not persistable or exceed depth limits.
-    [[nodiscard]] std::expected<std::string, GprError> serialize_config_json(
-        const SaveInput& input, std::optional<std::string_view> save_id = std::nullopt
+    [[nodiscard]] std::expected<std::string, GprError> serialize_config_json(const SaveInput& input);
+
+    /// @brief Inserts a top-level `save_id` field into an already-serialized config.json document.
+    /// @details Avoids re-invoking custom `persist_state_json()` callbacks when adding the computed pairing ID.
+    /// @param[in] config_json Pretty-printed config.json text produced by serialize_config_json or
+    /// serialize_distance_config_json.
+    /// @param[in] save_id Computed pairing identifier to store as top-level `save_id`.
+    /// @return Formatted JSON string containing `save_id`, or GprError if config_json cannot be parsed as an object.
+    /// @retval GprErrorCode::PersistFailed When config_json is not a valid JSON object.
+    [[nodiscard]] std::expected<std::string, GprError> add_save_id_to_config_json(
+        std::string_view config_json, std::string_view save_id
     );
 
     /// @brief Reads, validates, and parses a persisted config.json file into ParsedConfig.
@@ -103,13 +111,10 @@ namespace cxxgpr::persist::detail
     /// @brief Serializes a supplied-distance model into pretty-printed config.json text.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
     /// @param[in] kernel Structural description of the kernel of the model.
-    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON text, or GprError when a custom component is not persistable.
     /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
     [[nodiscard]] std::expected<std::string, GprError> serialize_distance_config_json(
-        const DistanceSaveInput& input,
-        const cxxgpr::detail::DistanceKernelDesc& kernel,
-        std::optional<std::string_view> save_id = std::nullopt
+        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
     );
 
     /// @brief Reads, validates and parses the config.json of a supplied-distance checkpoint.
