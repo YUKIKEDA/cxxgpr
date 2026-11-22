@@ -22,6 +22,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -2276,7 +2277,7 @@ namespace
         }
 
         // Malformed config.json save_id -> PersistFailed(Config).
-        for (const std::string bad_val : {
+        for (const std::string& bad_val : {
                  std::string("123"),
                  std::string("\"0123456789abcdef0123456789abcde\""),
                  std::string("\"0123456789ABCDEF0123456789ABCDEF\""),
