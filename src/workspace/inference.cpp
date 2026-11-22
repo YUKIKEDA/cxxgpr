@@ -870,6 +870,8 @@ namespace cxxgpr
     /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train/scratch sizes mismatch.
     /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
+    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to
+    /// non-finite.
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> loo_predict_into(
         const GaussianLikelihood& likelihood,
@@ -930,9 +932,16 @@ namespace cxxgpr
                 return std::unexpected(GprError::non_positive_definite_matrix());
             }
             const Refine inv_q = Refine{1} / q_ii;
-            out.mean[i] = y_train[i] - (alpha[i] / q_ii);
-            out.variance[i] =
+            const Refine mean_i = y_train[i] - (alpha[i] / q_ii);
+            const Refine var_i =
                 (options.variance_kind == VarianceKind::Observation) ? inv_q : std::max(Refine{0}, inv_q - noise_var);
+            // Subnormal positive q_ii passes the > 0 check above, yet 1 / q_ii or alpha_i / q_ii can overflow to Inf.
+            if (!std::isfinite(inv_q) || !std::isfinite(mean_i) || !std::isfinite(var_i))
+            {
+                return std::unexpected(GprError::non_finite_kernel_value());
+            }
+            out.mean[i] = mean_i;
+            out.variance[i] = var_i;
         }
 
         return {};
@@ -952,6 +961,8 @@ namespace cxxgpr
     /// @retval GprErrorCode::LengthMismatch When l_factor is non-square or alpha/y_train lengths mismatch.
     /// @retval GprErrorCode::NonFiniteInput When alpha or y_train contains NaN or +/-Inf.
     /// @retval GprErrorCode::NonPositiveDefiniteMatrix When l_factor is singular or yields q_ii <= 0.
+    /// @retval GprErrorCode::NonFiniteKernelValue When 1 / q_ii, the LOO mean, or the LOO variance overflows to
+    /// non-finite.
     template <PrecisionPolicyConcept P>
     std::expected<Prediction<typename P::Refine>, GprError> loo_predict(
         const GaussianLikelihood& likelihood,
