@@ -474,7 +474,8 @@ namespace
                 tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
             }
             const auto compiled = tree.compile<double>();
-            const auto compiled_copy = compiled;
+            auto compiled_copy = compiled;
+            compiled_copy = compiled;
             EXPECT_EQ(compiled_copy.num_params(), 128U);
             constexpr std::size_t n = 3U;
             const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
