@@ -3350,6 +3350,8 @@ namespace cxxgpr
             MatrixRef<T> x;
             /// @brief Optional precomputed distance/ARD cache.
             const DistanceCache<T>* cache;
+            /// @brief Full output gradient span indexed by `grad_offset`.
+            std::span<double> out_grads;
             /// @brief Reusable `n x n` scratch matrix for leaf evaluation.
             MatrixMut<T> kernel_scratch;
             /// @brief Nested buffer pool for `eval_term_points_rec`.
@@ -3358,6 +3360,12 @@ namespace cxxgpr
             NestedBuffers<T>& weighted_bufs;
             /// @brief Scratch span for deterministic OpenMP column reductions.
             std::span<double> col_partials;
+            /// @brief Root product pointer when pre-kept factor Grams are active, otherwise nullptr.
+            const Term* kept_root;
+            /// @brief Starting buffer slot for `kept_root`.
+            std::size_t kept_offset;
+            /// @brief Count of pre-retained factor Grams for `kept_root`.
+            std::size_t kept_count;
             /// @brief Out-of-line error slot.
             std::optional<GprError>& err;
         };
@@ -3451,131 +3459,99 @@ namespace cxxgpr
             return true;
         }
 
-        /// @brief Recursive body of `walk_weighted` with minimal per-level stack frame size.
-        /// @param[in] term Compiled AST node.
-        /// @param[in] weight Lower-triangular adjoint weight matrix `W`.
-        /// @param[out] out_grads Output gradient slice for `term`.
-        /// @param[in] kept_offset Starting slot in `ctx.weighted_bufs` when `has_kept` is true.
-        /// @param[in] kept_count Number of pre-retained factor Grams when `has_kept` is true.
-        /// @param[in] has_kept True when enclosing `apply_keeping` pre-retained this product's factor Grams.
-        /// @param[in] walk_cursor Next free buffer slot in `ctx.weighted_bufs`.
-        /// @param[in] need_value True when caller requires $\langle W, K_{\text{term}} \rangle_F$.
+        /// @brief Evaluates all-constant product adjoint contractions out-of-line.
+        /// @param[in] p Product term containing only constant factors.
+        /// @param[in] weight Lower-triangular adjoint weight matrix.
+        /// @param[in] scale Product of all constant factor values.
+        /// @param[in] grad_offset Base offset into `ctx.out_grads`.
         /// @param[in] ctx Invariant walk context.
-        /// @param[out] out_val Contracted scalar value on success.
-        /// @return True on success, false after writing `ctx.err`.
-        [[nodiscard]] bool walk_weighted_rec(
-            const Term& term,
+        /// @param[out] out_val Contracted scalar value.
+        CXXGPR_NOINLINE void walk_weighted_const_only_product(
+            const ProductTerm& p,
             const MatrixRef<T>& weight,
-            std::span<double> out_grads,
-            std::size_t kept_offset,
-            std::size_t kept_count,
-            bool has_kept,
-            std::size_t walk_cursor,
-            bool need_value,
+            T scale,
+            std::size_t grad_offset,
             const WalkWeightedCtx& ctx,
             double& out_val
         ) const
         {
+            const double val = static_cast<double>(scale) * lower_sum(weight, ctx.col_partials);
+            std::size_t p_off = 0U;
+            for (const auto& f : p.terms)
+            {
+                const auto [fb, fe] = param_range(f);
+                ctx.out_grads[grad_offset + p_off] = val;
+                p_off += (fe - fb);
+            }
+            out_val = val;
+        }
+
+        /// @brief Applies constant scaling and fills constant factor gradients for a single-varying product
+        /// out-of-line.
+        /// @param[in] p Product term with one varying factor.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] grad_offset Base offset into `ctx.out_grads`.
+        /// @param[in] varying_off Offset of the single varying factor within `p`.
+        /// @param[in] varying_count Parameter count of the single varying factor.
+        /// @param[in] has_const True if `p` has at least one constant factor.
+        /// @param[in] ctx Invariant walk context.
+        /// @param[in,out] val Contracted scalar value scaled in place.
+        CXXGPR_NOINLINE void walk_weighted_scale_and_fill_consts(
+            const ProductTerm& p,
+            T scale,
+            std::size_t grad_offset,
+            std::size_t varying_off,
+            std::size_t varying_count,
+            bool has_const,
+            const WalkWeightedCtx& ctx,
+            double& val
+        ) const
+        {
+            if (has_const && scale != T{1})
+            {
+                const auto scale_d = static_cast<double>(scale);
+                val *= scale_d;
+                for (double& g : ctx.out_grads.subspan(grad_offset + varying_off, varying_count))
+                {
+                    g *= scale_d;
+                }
+            }
+            if (has_const)
+            {
+                std::size_t c_off = 0U;
+                for (const auto& f : p.terms)
+                {
+                    const auto [fb, fe] = param_range(f);
+                    if (is_constant_term(f))
+                    {
+                        ctx.out_grads[grad_offset + c_off] = val;
+                    }
+                    c_off += (fe - fb);
+                }
+            }
+        }
+
+        /// @brief Evaluates sibling factor Grams and validates workspace slots for a multi-factor product out-of-line.
+        /// @param[in] p Product term with two or more varying factors.
+        /// @param[in] g_base Base buffer slot in `ctx.weighted_bufs`.
+        /// @param[in] next_cursor Buffer slot reserved for `w_eff`.
+        /// @param[in] varying Number of varying factors in `p`.
+        /// @param[in] use_kept True when factor Grams were pre-retained in `ctx.weighted_bufs`.
+        /// @param[in] ctx Invariant walk context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_prepare_factors(
+            const ProductTerm& p,
+            std::size_t g_base,
+            std::size_t next_cursor,
+            std::size_t varying,
+            bool use_kept,
+            const WalkWeightedCtx& ctx
+        ) const
+        {
             const std::size_t n = ctx.x.rows();
-            if (const auto* s = std::get_if<SumTerm>(&term))
+            if (!use_kept)
             {
-                // Sum rule is linear in W: pass identical `weight` to every summand and sum their contractions.
-                std::size_t p_off = 0;
-                double value = 0.0;
-                for (const auto& child : s->terms)
-                {
-                    const auto [cb, ce] = param_range(child);
-                    const std::size_t count = ce - cb;
-                    double child_val = 0.0;
-                    if (!walk_weighted_rec(
-                            child, weight, out_grads.subspan(p_off, count), 0, 0, false, walk_cursor, need_value, ctx,
-                            child_val
-                        ))
-                    {
-                        return false;
-                    }
-                    value += child_val;
-                    p_off += count;
-                }
-                out_val = value;
-                return true;
-            }
-            if (const auto* leaf = std::get_if<LeafRef>(&term))
-            {
-                return walk_weighted_leaf_step(*leaf, weight, out_grads, need_value, ctx, out_val);
-            }
-
-            const auto& p = std::get<ProductTerm>(term);
-            const std::size_t varying = varying_factors(p.terms);
-            const T scale = constant_scale(p.terms);
-            const bool has_const = (varying < p.terms.size());
-
-            if (varying == 0U)
-            {
-                const double val = static_cast<double>(scale) * lower_sum(weight, ctx.col_partials);
-                std::size_t p_off = 0;
-                for (const auto& f : p.terms)
-                {
-                    const auto [fb, fe] = param_range(f);
-                    out_grads[p_off] = val;
-                    p_off += (fe - fb);
-                }
-                out_val = val;
-                return true;
-            }
-
-            if (varying == 1U)
-            {
-                double val = 0.0;
-                std::size_t p_off = 0;
-                for (const auto& f : p.terms)
-                {
-                    const auto [fb, fe] = param_range(f);
-                    const std::size_t count = fe - fb;
-                    if (!is_constant_term(f))
-                    {
-                        if (!walk_weighted_rec(
-                                f, weight, out_grads.subspan(p_off, count), 0, 0, false, walk_cursor,
-                                need_value || has_const, ctx, val
-                            ))
-                        {
-                            return false;
-                        }
-                        if (has_const && scale != T{1})
-                        {
-                            const auto scale_d = static_cast<double>(scale);
-                            val *= scale_d;
-                            for (double& g : out_grads.subspan(p_off, count))
-                            {
-                                g *= scale_d;
-                            }
-                        }
-                    }
-                    p_off += count;
-                }
-                if (has_const)
-                {
-                    std::size_t c_off = 0;
-                    for (const auto& f : p.terms)
-                    {
-                        const auto [fb, fe] = param_range(f);
-                        if (is_constant_term(f))
-                        {
-                            out_grads[c_off] = val;
-                        }
-                        c_off += (fe - fb);
-                    }
-                }
-                out_val = val;
-                return true;
-            }
-
-            // Two or more varying factors: reuse pre-kept factor Grams when available, otherwise compute each once.
-            const std::size_t g_base = has_kept ? kept_offset : walk_cursor;
-            const std::size_t next_cursor = has_kept ? walk_cursor : (walk_cursor + varying);
-            if (!has_kept)
-            {
-                std::size_t v_idx = 0;
+                std::size_t v_idx = 0U;
                 for (const auto& f : p.terms)
                 {
                     if (is_constant_term(f))
@@ -3596,80 +3572,221 @@ namespace cxxgpr
                     ++v_idx;
                 }
             }
-            else if (kept_count < varying)
+            else if (ctx.kept_count < varying)
             {
                 return fail_workspace_too_small(ctx.err);
             }
+            return ensure_nested_ok(ctx.weighted_bufs, next_cursor, n, n, ctx.err);
+        }
 
-            if (!ensure_nested_ok(ctx.weighted_bufs, next_cursor, n, n, ctx.err))
+        /// @brief Builds the effective adjoint weight matrix `w_eff` in slot `next_cursor` out-of-line.
+        /// @param[in] weight Parent adjoint weight matrix.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] g_base Base buffer slot holding varying factor Grams.
+        /// @param[in] next_cursor Buffer slot receiving `w_eff`.
+        /// @param[in] varying Number of varying factors.
+        /// @param[in] cur_v Index of the excluded factor being differentiated.
+        /// @param[in] ctx Invariant walk context.
+        /// @return Read-only view of the populated `w_eff` buffer.
+        [[nodiscard]] CXXGPR_NOINLINE MatrixRef<T> walk_weighted_build_weff(
+            const MatrixRef<T>& weight,
+            T scale,
+            std::size_t g_base,
+            std::size_t next_cursor,
+            std::size_t varying,
+            std::size_t cur_v,
+            const WalkWeightedCtx& ctx
+        ) const
+        {
+            const std::size_t n = ctx.x.rows();
+            const auto w_eff = ctx.weighted_bufs.level(next_cursor, n, n);
+            copy_into(w_eff, weight, Triangle::Lower);
+            if (scale != T{1})
+            {
+                scale_lower(w_eff, scale);
+            }
+            for (std::size_t r = 0U; r < varying; ++r)
+            {
+                if (r == cur_v)
+                {
+                    continue;
+                }
+                mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
+            }
+            return w_eff.as_ref();
+        }
+
+        /// @brief Contracts the multi-factor product value and fills constant factor gradients out-of-line.
+        /// @param[in] p Product term with two or more varying factors.
+        /// @param[in] weight Parent adjoint weight matrix.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] g_base Base buffer slot holding varying factor Grams.
+        /// @param[in] next_cursor Buffer slot reused as temporary `w_eff`.
+        /// @param[in] varying Number of varying factors.
+        /// @param[in] grad_offset Base offset into `ctx.out_grads`.
+        /// @param[in] has_const True if `p` contains constant factors.
+        /// @param[in] ctx Invariant walk context.
+        /// @return Contracted scalar value $\langle W, K_{\text{prod}} \rangle_F$.
+        [[nodiscard]] CXXGPR_NOINLINE double walk_weighted_finish_product(
+            const ProductTerm& p,
+            const MatrixRef<T>& weight,
+            T scale,
+            std::size_t g_base,
+            std::size_t next_cursor,
+            std::size_t varying,
+            std::size_t grad_offset,
+            bool has_const,
+            const WalkWeightedCtx& ctx
+        ) const
+        {
+            const std::size_t n = ctx.x.rows();
+            const auto w_eff = ctx.weighted_bufs.level(next_cursor, n, n);
+            copy_into(w_eff, weight, Triangle::Lower);
+            if (scale != T{1})
+            {
+                scale_lower(w_eff, scale);
+            }
+            for (std::size_t r = 1U; r < varying; ++r)
+            {
+                mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
+            }
+            const double val =
+                lower_frobenius(w_eff.as_ref(), ctx.weighted_bufs.level(g_base, n, n).as_ref(), ctx.col_partials);
+            if (has_const)
+            {
+                std::size_t c_off = 0U;
+                for (const auto& f : p.terms)
+                {
+                    const auto [fb, fe] = param_range(f);
+                    if (is_constant_term(f))
+                    {
+                        ctx.out_grads[grad_offset + c_off] = val;
+                    }
+                    c_off += (fe - fb);
+                }
+            }
+            return val;
+        }
+
+        /// @brief Recursive body of `walk_weighted` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] weight Lower-triangular adjoint weight matrix `W`.
+        /// @param[in] grad_offset Starting offset inside `ctx.out_grads` for `term`.
+        /// @param[in] walk_cursor Next free buffer slot in `ctx.weighted_bufs`.
+        /// @param[in] need_value True when caller requires $\langle W, K_{\text{term}} \rangle_F$.
+        /// @param[in] ctx Invariant walk context.
+        /// @param[out] out_val Contracted scalar value on success.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool walk_weighted_rec(
+            const Term& term,
+            const MatrixRef<T>& weight,
+            std::size_t grad_offset,
+            std::size_t walk_cursor,
+            bool need_value,
+            const WalkWeightedCtx& ctx,
+            double& out_val
+        ) const
+        {
+            if (const auto* s = std::get_if<SumTerm>(&term))
+            {
+                std::size_t p_off = 0U;
+                double value = 0.0;
+                for (const auto& child : s->terms)
+                {
+                    const auto [cb, ce] = param_range(child);
+                    double child_val = 0.0;
+                    if (!walk_weighted_rec(child, weight, grad_offset + p_off, walk_cursor, need_value, ctx, child_val))
+                    {
+                        return false;
+                    }
+                    value += child_val;
+                    p_off += (ce - cb);
+                }
+                out_val = value;
+                return true;
+            }
+            if (const auto* leaf = std::get_if<LeafRef>(&term))
+            {
+                return walk_weighted_leaf_step(
+                    *leaf, weight, ctx.out_grads.subspan(grad_offset, leaf->param_count), need_value, ctx, out_val
+                );
+            }
+
+            const auto& p = std::get<ProductTerm>(term);
+            const std::size_t varying = varying_factors(p.terms);
+            const T scale = constant_scale(p.terms);
+            const bool has_const = (varying < p.terms.size());
+
+            if (varying == 0U)
+            {
+                walk_weighted_const_only_product(p, weight, scale, grad_offset, ctx, out_val);
+                return true;
+            }
+
+            if (varying == 1U)
+            {
+                double val = 0.0;
+                std::size_t p_off = 0U;
+                std::size_t varying_off = 0U;
+                std::size_t varying_count = 0U;
+                for (const auto& f : p.terms)
+                {
+                    const auto [fb, fe] = param_range(f);
+                    const std::size_t count = fe - fb;
+                    if (!is_constant_term(f))
+                    {
+                        varying_off = p_off;
+                        varying_count = count;
+                        if (!walk_weighted_rec(
+                                f, weight, grad_offset + p_off, walk_cursor, need_value || has_const, ctx, val
+                            ))
+                        {
+                            return false;
+                        }
+                    }
+                    p_off += count;
+                }
+                walk_weighted_scale_and_fill_consts(
+                    p, scale, grad_offset, varying_off, varying_count, has_const, ctx, val
+                );
+                out_val = val;
+                return true;
+            }
+
+            const bool use_kept = (ctx.kept_root == &term);
+            const std::size_t g_base = use_kept ? ctx.kept_offset : walk_cursor;
+            const std::size_t next_cursor = use_kept ? walk_cursor : (walk_cursor + varying);
+            if (!walk_weighted_prepare_factors(p, g_base, next_cursor, varying, use_kept, ctx))
             {
                 return false;
             }
-            const auto w_eff = ctx.weighted_bufs.level(next_cursor, n, n);
 
-            double val = 0.0;
-            std::size_t p_off = 0;
-            std::size_t cur_v = 0;
+            std::size_t p_off = 0U;
+            std::size_t cur_v = 0U;
             for (const auto& f : p.terms)
             {
                 const auto [fb, fe] = param_range(f);
-                const std::size_t count = fe - fb;
                 if (!is_constant_term(f))
                 {
-                    copy_into(w_eff, weight, Triangle::Lower);
-                    if (scale != T{1})
-                    {
-                        scale_lower(w_eff, scale);
-                    }
-                    for (std::size_t r = 0; r < varying; ++r)
-                    {
-                        if (r == cur_v)
-                        {
-                            continue;
-                        }
-                        mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
-                    }
-                    const MatrixRef<T> w_eff_ref = w_eff.as_ref();
+                    const MatrixRef<T> w_eff_ref =
+                        walk_weighted_build_weff(weight, scale, g_base, next_cursor, varying, cur_v, ctx);
                     double ignored_val = 0.0;
                     if (!walk_weighted_rec(
-                            f, w_eff_ref, out_grads.subspan(p_off, count), 0, 0, false, next_cursor + 1U, false, ctx,
-                            ignored_val
+                            f, w_eff_ref, grad_offset + p_off, next_cursor + 1U, false, ctx, ignored_val
                         ))
                     {
                         return false;
                     }
                     ++cur_v;
                 }
-                p_off += count;
+                p_off += (fe - fb);
             }
 
-            if (need_value || has_const)
-            {
-                copy_into(w_eff, weight, Triangle::Lower);
-                if (scale != T{1})
-                {
-                    scale_lower(w_eff, scale);
-                }
-                for (std::size_t r = 1U; r < varying; ++r)
-                {
-                    mul_into(w_eff, ctx.weighted_bufs.level(g_base + r, n, n).as_ref(), Triangle::Lower);
-                }
-                val = lower_frobenius(w_eff.as_ref(), ctx.weighted_bufs.level(g_base, n, n).as_ref(), ctx.col_partials);
-                if (has_const)
-                {
-                    std::size_t c_off = 0;
-                    for (const auto& f : p.terms)
-                    {
-                        const auto [fb, fe] = param_range(f);
-                        if (is_constant_term(f))
-                        {
-                            out_grads[c_off] = val;
-                        }
-                        c_off += (fe - fb);
-                    }
-                }
-            }
-            out_val = val;
+            out_val = (need_value || has_const)
+                ? walk_weighted_finish_product(
+                      p, weight, scale, g_base, next_cursor, varying, grad_offset, has_const, ctx
+                  )
+                : 0.0;
             return true;
         }
 
@@ -3710,16 +3827,18 @@ namespace cxxgpr
             const WalkWeightedCtx ctx{
                 .x = x,
                 .cache = cache,
+                .out_grads = out_grads,
                 .kernel_scratch = kernel_scratch,
                 .nested = nested,
                 .weighted_bufs = weighted_bufs,
                 .col_partials = col_partials,
+                .kept_root = has_kept ? &term : nullptr,
+                .kept_offset = kept_offset,
+                .kept_count = kept_count,
                 .err = err,
             };
             double val = 0.0;
-            if (!walk_weighted_rec(
-                    term, weight, out_grads, kept_offset, kept_count, has_kept, walk_cursor, need_value, ctx, val
-                ))
+            if (!walk_weighted_rec(term, weight, 0U, walk_cursor, need_value, ctx, val))
             {
                 return std::unexpected(
                     err.has_value() ? std::move(*err)
