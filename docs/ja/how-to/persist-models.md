@@ -38,7 +38,7 @@ model.safetensors: 5440 bytes
 - 保存できないモデルは、何かを書く前に検出され、保存先のディレクトリには触れない。有効な `persist_id` を持たない自作の構成要素があると `PersistErrorKind::NotPersistable` か `PersistErrorKind::InvalidPersistId`、UTF-8 の JSON に書けない自作の状態があると `PersistErrorKind::NotPersistable`（{ref}`persist-models-custom` を参照）、`load` が拒む 128 段より深い入れ子の `config.json` になると `PersistErrorKind::Config` を返す。
 
 :::{warning}
-2 つのファイルは、1 つのトランザクションではなく、順にリネームされる。2 回のリネームの間にプロセスが強制終了したとき、または 2 回目のリネームに失敗したとき（`save` は `PersistErrorKind::Io` を返す）、ディレクトリには新しい `model.safetensors` と古い `config.json` が残る。`save` は古い `model.safetensors` を元に戻さない。ローダーは、テンソルの形状や `dtype` が `config.json` と合わない組を拒む。しかし、形の合う 2 つのファイルが別々の保存から来たことまでは知りえず、その場合は新しいデータと古いハイパーパラメータを混ぜたモデルを読み込む。正確さが重要なら、新しいディレクトリへ保存し、ディレクトリごと所定の位置へ移す。
+2 つのファイルは、1 つのトランザクションではなく、順にリネームされる。2 回のリネームの間にプロセスが強制終了したとき、または 2 回目のリネームに失敗したとき（`save` は `PersistErrorKind::Io` を返す）、ディレクトリには新しい `model.safetensors` と古い `config.json` が残る。`save` は古い `model.safetensors` を元に戻さない。両ファイルには内容ハッシュに基づくペアリング識別子（`config.json` の `save_id` と `model.safetensors` の `__metadata__["cxxgpr.save_id"]`）が書かれるため、ローダーは異なる保存から来た組を `PersistErrorKind::Tensor` で拒む（2 回の保存内容が完全に同一である場合を除く）。中断時も直前のモデルを読み込める状態を保つ必要があるなら、新しいディレクトリへ保存し、ディレクトリごと所定の位置へ移す。
 :::
 
 :::{warning}

@@ -57,22 +57,46 @@ namespace
         const std::vector<double> x_data{0.0, 1.0, 2.0, -0.5, 0.3, 1.4};
         const cxxgpr::MatrixRef<double> x(x_data.data(), 3, 2, 3);
 
-        // Verify building an uncached or unneeded cache allocates zero heap memory.
+        // Verify populating an uncached or unneeded cache via ensure() allocates zero heap memory.
+        // Note: pre-construct DistanceCache outside NoAllocationScope so MSVC Debug STL iterator
+        // proxy allocations during std::vector default construction are excluded from the audit.
+        cxxgpr::DistanceCache<double> uncached;
+        cxxgpr::DistanceCache<double> unneeded;
         {
             const cxxgpr::test_support::NoAllocationScope audit;
-            auto uncached = cxxgpr::DistanceCache<double>::build(x, true, true, cxxgpr::DistanceCachePolicy::Uncached);
-            ASSERT_TRUE(uncached.has_value());
-            EXPECT_FALSE(uncached->has_dist());
-            EXPECT_FALSE(uncached->has_ard());
-            EXPECT_EQ(uncached->policy(), cxxgpr::DistanceCachePolicy::Uncached);
+            ASSERT_TRUE(uncached.ensure(x, true, true, cxxgpr::DistanceCachePolicy::Uncached).has_value());
+            EXPECT_FALSE(uncached.has_dist());
+            EXPECT_FALSE(uncached.has_ard());
+            EXPECT_EQ(uncached.policy(), cxxgpr::DistanceCachePolicy::Uncached);
 
-            auto unneeded = cxxgpr::DistanceCache<double>::build(
+            ASSERT_TRUE(unneeded
+                    .ensure(
+                        x, c_comp.reads_distances(), c_comp.needs_ard_sq_diff(), cxxgpr::DistanceCachePolicy::Cached
+                    )
+                    .has_value());
+            EXPECT_FALSE(unneeded.has_dist());
+            EXPECT_FALSE(unneeded.has_ard());
+        }
+
+#if !defined(_MSC_VER) || !defined(_DEBUG)
+        // Outside MSVC Debug (where default-constructing empty std::vector allocates an iterator proxy),
+        // also audit DistanceCache::build() directly for zero heap allocations.
+        {
+            const cxxgpr::test_support::NoAllocationScope audit;
+            auto built_uncached =
+                cxxgpr::DistanceCache<double>::build(x, true, true, cxxgpr::DistanceCachePolicy::Uncached);
+            ASSERT_TRUE(built_uncached.has_value());
+            EXPECT_FALSE(built_uncached->has_dist());
+            EXPECT_FALSE(built_uncached->has_ard());
+
+            auto built_unneeded = cxxgpr::DistanceCache<double>::build(
                 x, c_comp.reads_distances(), c_comp.needs_ard_sq_diff(), cxxgpr::DistanceCachePolicy::Cached
             );
-            ASSERT_TRUE(unneeded.has_value());
-            EXPECT_FALSE(unneeded->has_dist());
-            EXPECT_FALSE(unneeded->has_ard());
+            ASSERT_TRUE(built_unneeded.has_value());
+            EXPECT_FALSE(built_unneeded->has_dist());
+            EXPECT_FALSE(built_unneeded->has_ard());
         }
+#endif
     }
 
     /// @brief Verifies packed lower-triangular ARD layout and input validation error codes.

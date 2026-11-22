@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstddef>
+#include <source_location>
 
 /// @brief Test support utilities for allocation auditing and compiler dead-store barriers.
 namespace cxxgpr::test_support
@@ -20,6 +21,15 @@ namespace cxxgpr::test_support
         CppAndEigen,
         /// @brief Tracks global C++ operator new allocations without modifying Eigen runtime malloc state.
         CppOnly,
+    };
+
+    /// @brief Controls whether NoAllocationScope asserts zero heap allocations on scope exit.
+    enum class AuditExpectation
+    {
+        /// @brief Reports a GoogleTest non-fatal failure on destruction if delta_allocations() != 0.
+        AssertZeroOnExit,
+        /// @brief Leaves allocation count verification to explicit caller assertions (for negative tests).
+        Manual,
     };
 
     /// @brief Returns the thread-local cumulative count of tracked C++ heap allocations.
@@ -41,9 +51,15 @@ namespace cxxgpr::test_support
         /// @brief Enters an allocation audit scope and snapshots the current thread allocation count.
         /// @details When mode is AuditMode::CppAndEigen, disables Eigen runtime malloc until destruction.
         /// @param[in] mode Allocation auditing mode selecting C++ and Eigen checks or C++ tracking only.
-        explicit NoAllocationScope(AuditMode mode = AuditMode::CppAndEigen) noexcept;
+        /// @param[in] expectation Whether destruction asserts zero tracked allocations.
+        /// @param[in] loc Source location reported if AssertZeroOnExit detects allocations.
+        explicit NoAllocationScope(
+            AuditMode mode = AuditMode::CppAndEigen,
+            AuditExpectation expectation = AuditExpectation::AssertZeroOnExit,
+            std::source_location loc = std::source_location::current()
+        ) noexcept;
 
-        /// @brief Exits the allocation audit scope and restores prior Eigen runtime malloc state.
+        /// @brief Exits the allocation audit scope, checks expectations, and restores Eigen malloc state.
         /// @details Restores Eigen::internal::is_malloc_allowed() if AuditMode::CppAndEigen was active.
         ~NoAllocationScope() noexcept;
 
@@ -75,8 +91,12 @@ namespace cxxgpr::test_support
         std::size_t start_count_;
         /// @brief Auditing mode active for the lifetime of this scope guard.
         AuditMode mode_;
+        /// @brief Scope-exit assertion policy.
+        AuditExpectation expectation_;
         /// @brief Saved Eigen::internal::is_malloc_allowed() flag restored on scope exit.
         bool prev_eigen_allowed_;
+        /// @brief Caller source location used for scope-exit failure diagnostics.
+        std::source_location loc_;
     };
 
 }  // namespace cxxgpr::test_support

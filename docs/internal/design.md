@@ -56,7 +56,7 @@ There is no `NotFitted`. All failures of numerical computation, input, and persi
 | `IndexOutOfRange` | Parameter index `i >= p`, or a coordinate not designated changed in an incremental update |
 | `InsufficientData` | $n$ is below the minimum number of points of the kernel / model (in principle $n \ge 1$ for Exact GPR, including special requirements such as LOO) |
 | `NonFiniteInput` | `NaN` / `±∞` in `x`, `y`, the parameters $\theta$, or configured floating-point values |
-| `NonFiniteKernelValue` | A kernel evaluation, or a quantity derived from it (the marginal likelihood, a latent predictive variance before its clamp at $0$, an inverse-scaled moment), became non-finite |
+| `NonFiniteKernelValue` | A kernel evaluation, or a quantity derived from it (the marginal likelihood, a latent predictive variance before its clamp at $0$, a LOO reciprocal/mean/variance, an inverse-scaled moment), became non-finite |
 | `InvalidHyperparameter` | Domain violation of $\ell, \sigma^2, \alpha, p$, etc. (non-positive, non-finite, or outside the interval) |
 | `InvalidNoiseVariance` | $\sigma_n^2 \le 0$ or non-finite in `GaussianLikelihood` |
 | `InvalidInterval` | `Interval` lower bound $\ge$ upper bound, non-positive (for positive intervals), or non-finite |
@@ -296,6 +296,8 @@ $$
 \tilde{\sigma}_{\text{LOO}, \text{obs}, i}^2 = \frac{1}{Q_{ii}}, \qquad
 \tilde{\sigma}_{\text{LOO}, \text{lat}, i}^2 = \max\!\left(0,\; \frac{1}{Q_{ii}} - \sigma_n^2\right)
 $$
+
+  If $Q_{ii}$ is non-finite or non-positive, LOO fails with `NonPositiveDefiniteMatrix`; if $Q_{ii}$ is finite and positive (including IEEE 754 subnormals) but $1/Q_{ii}$, $\tilde{\mu}_{\text{LOO}, i}$, or $\tilde{\sigma}_{\text{LOO}, i}^2$ becomes non-finite, LOO fails with `NonFiniteKernelValue`.
 
 ### DES-17 Workspace structure and lifecycle
 

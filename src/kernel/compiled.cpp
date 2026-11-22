@@ -1103,7 +1103,8 @@ namespace cxxgpr
                 }
                 else if (const auto* k_rq = std::get_if<RationalQuadraticArdKernel>(&leaf))
                 {
-                    expected_dim = k_rq->lengthscales().size();
+                    // Subtract the scalar alpha parameter without allocating lengthscales() on the hot path.
+                    expected_dim = k_rq->num_params() - 1U;
                 }
                 if (expected_dim > 0 && x_dim != expected_dim)
                 {

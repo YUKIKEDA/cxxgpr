@@ -148,13 +148,23 @@ namespace cxxgpr::transform
         [[nodiscard]] std::unique_ptr<FittedInputTransform> clone() const override;
 
     private:
+        /// @brief Entry in the flattened execution plan: either a leaf transform or a nested pipeline boundary.
+        struct FlatStep
+        {
+            /// @brief Non-owning leaf transform pointer (unused when is_boundary is true; nullptr otherwise means null
+            /// step).
+            const FittedInputTransform* step{nullptr};
+            /// @brief True when this entry marks a nested FittedPipeline validation boundary.
+            bool is_boundary{false};
+        };
+
         /// @brief Rebuilds flat_steps_ iteratively from steps_.
         void rebuild_flat_steps() noexcept;
 
         /// @brief Ordered sequence of fitted input transforms applied forward during apply().
         std::vector<std::unique_ptr<FittedInputTransform>> steps_;
-        /// @brief Flattened non-owning leaf steps in forward application order.
-        std::vector<const FittedInputTransform*> flat_steps_;
+        /// @brief Flattened non-owning leaf steps and nested validation boundaries in forward application order.
+        std::vector<FlatStep> flat_steps_;
         /// @brief False if flat_steps_ could not be materialized due to allocation failure.
         bool flat_steps_ready_{true};
         friend struct PipelineAccess;
@@ -430,13 +440,23 @@ namespace cxxgpr::transform
         [[nodiscard]] std::unique_ptr<FittedTargetTransform> clone() const override;
 
     private:
+        /// @brief Entry in the flattened execution plan: either a leaf transform or a nested pipeline boundary.
+        struct FlatStep
+        {
+            /// @brief Non-owning leaf transform pointer (unused when is_boundary is true; nullptr otherwise means null
+            /// step).
+            const FittedTargetTransform* step{nullptr};
+            /// @brief True when this entry marks a nested FittedTargetPipeline validation boundary.
+            bool is_boundary{false};
+        };
+
         /// @brief Rebuilds flat_steps_ iteratively from steps_.
         void rebuild_flat_steps() noexcept;
 
         /// @brief Ordered sequence of fitted target transforms applied forward during transform().
         std::vector<std::unique_ptr<FittedTargetTransform>> steps_;
-        /// @brief Flattened non-owning leaf steps in forward application order.
-        std::vector<const FittedTargetTransform*> flat_steps_;
+        /// @brief Flattened non-owning leaf steps and nested validation boundaries in forward application order.
+        std::vector<FlatStep> flat_steps_;
         /// @brief False if flat_steps_ could not be materialized due to allocation failure.
         bool flat_steps_ready_{true};
         friend struct PipelineAccess;
