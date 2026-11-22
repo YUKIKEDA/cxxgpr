@@ -253,9 +253,9 @@ namespace cxxgpr
         /// @return Reference to this DistanceKernel.
         DistanceKernel& operator=(DistanceKernel&&) noexcept = default;
 
-        /// @brief Destroys a DistanceKernel.
+        /// @brief Destroys a DistanceKernel iteratively so deep trees do not overflow the stack.
         /// @details Releases the shared AST node reference.
-        ~DistanceKernel() = default;
+        ~DistanceKernel() noexcept;
 
         /// @brief Constructs a DistanceKernel from a ConstantKernel leaf.
         /// @details Available in both DistanceOnly and WithPoints modes because ConstantKernel requires

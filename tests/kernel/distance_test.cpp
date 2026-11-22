@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 
 namespace
 {
@@ -613,6 +614,74 @@ namespace
                     .has_value());
             EXPECT_EQ(audit.delta_allocations(), 0U);
         }
+    }
+
+    /// @brief Verifies depth-128 alternating sum/product DistanceKernel eval, grad, hess, and teardown fit in small
+    /// stack.
+    TEST(DistanceKernelTest, DeepAlternatingTreeEvalGradHessFitInSmallStack)
+    {
+        // Spec: REQ-05
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
+        {
+            const cxxgpr::ScalarDistance slot;
+            auto tree = slot.rbf(cxxgpr::RbfKernel::create(1.1).value()).with_points();
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                const auto leaf = slot.rbf(cxxgpr::RbfKernel::create(0.9).value()).with_points();
+                tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
+            }
+            const auto compiled = tree.compile<double>();
+            auto compiled_copy = compiled;
+            compiled_copy = compiled;
+            EXPECT_EQ(compiled_copy.num_params(), 128U);
+            constexpr std::size_t n = 3U;
+            const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
+            const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
+            std::vector<double> diag(n, 0.0);
+            ASSERT_TRUE(compiled.fill_diag(n, x, diag).has_value());
+            const std::array<double, 9> d2_raw{0.0, 0.29, 1.36, 0.29, 0.0, 0.41, 1.36, 0.41, 0.0};
+            cxxgpr::DistanceSource src;
+            src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_raw.data(), n, n, n));
+            const auto store = compiled.prepare_square(src);
+            ASSERT_TRUE(store.has_value());
+
+            std::vector<double> out(n * n, 0.0);
+            std::vector<double> sa(n * n, 0.0);
+            std::vector<double> sb(n * n, 0.0);
+            std::vector<double> sc(n * n, 0.0);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(compiled
+                    .apply(
+                        *store, x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .grad(
+                        *store, x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), 0U, cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n, n),
+                        nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(compiled
+                    .hess(
+                        *store, x, cxxgpr::MatrixMut<double>(out.data(), n, n, n), 0U, 1U, cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n, n),
+                        cxxgpr::MatrixMut<double>(sc.data(), n, n, n), nested
+                    )
+                    .has_value());
+            const auto cross_store = compiled.prepare_cross(src);
+            ASSERT_TRUE(cross_store.has_value());
+            ASSERT_TRUE(compiled
+                    .apply_cross(
+                        *cross_store, x, x, cxxgpr::MatrixMut<double>(out.data(), n, n, n),
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n, n), nested
+                    )
+                    .has_value());
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace

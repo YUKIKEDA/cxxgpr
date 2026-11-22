@@ -634,23 +634,69 @@ namespace cxxgpr
         struct Sum
         {
             /// @brief Left-hand summand subtree.
-            std::shared_ptr<const InternalNode> lhs;
+            mutable std::shared_ptr<const InternalNode> lhs;
             /// @brief Right-hand summand subtree.
-            std::shared_ptr<const InternalNode> rhs;
+            mutable std::shared_ptr<const InternalNode> rhs;
         };
 
         /// @brief Binary multiplication node combining `lhs * rhs`.
         struct Product
         {
             /// @brief Left-hand factor subtree.
-            std::shared_ptr<const InternalNode> lhs;
+            mutable std::shared_ptr<const InternalNode> lhs;
             /// @brief Right-hand factor subtree.
-            std::shared_ptr<const InternalNode> rhs;
+            mutable std::shared_ptr<const InternalNode> rhs;
         };
 
         /// @brief Node payload variant holding a leaf or binary operator.
         std::variant<SuppliedScalarNode, SuppliedArdNode, CoordLeafNode, Sum, Product> data;
     };
+
+    /// @brief Destroys composite subtrees iteratively so deep distance kernel trees do not overflow the stack.
+    /// @tparam Mode Distance kernel mode tag (`DistanceOnly` or `WithPoints`).
+    template <DistanceModeConcept Mode> DistanceKernel<Mode>::~DistanceKernel() noexcept
+    {
+        if (!root_ || root_.use_count() != 1L)
+        {
+            return;
+        }
+        try
+        {
+            std::vector<std::shared_ptr<const InternalNode>> work;
+            work.push_back(std::move(root_));
+            auto push_unique = [&work](std::shared_ptr<const InternalNode>& child)
+            {
+                if (child && child.use_count() == 1L)
+                {
+                    work.push_back(std::move(child));
+                }
+                else
+                {
+                    child.reset();
+                }
+            };
+            while (!work.empty())
+            {
+                auto cur = std::move(work.back());
+                work.pop_back();
+                if (const auto* s = std::get_if<typename InternalNode::Sum>(&cur->data))
+                {
+                    push_unique(s->lhs);
+                    push_unique(s->rhs);
+                }
+                else if (const auto* p = std::get_if<typename InternalNode::Product>(&cur->data))
+                {
+                    push_unique(p->lhs);
+                    push_unique(p->rhs);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Best-effort iterative teardown; remaining links fall back to default member destruction.
+            return;
+        }
+    }
 
     /// @brief Friend helper encapsulating recursive `DistanceKernel<Mode>` AST inspection and transformation.
     /// @details Isolates internal tree manipulation (`promote_node`, `from_coord_spec`, parameter/bound/slot walks, and
@@ -1854,6 +1900,179 @@ namespace cxxgpr
         /// @brief Exponential evaluation precision mode shared by @c Rbf, @c Matern52, and @c Matern32 terms.
         KernelExp exp_mode = KernelExp::Accurate;
 
+        /// @brief Default-constructs an empty compiled distance implementation.
+        Impl() = default;
+
+        /// @brief Copy-constructs a compiled distance implementation iteratively so deep ASTs stay stack-bounded.
+        /// @param[in] other Source compiled distance implementation.
+        Impl(const Impl& other) :
+            leaves(other.leaves),
+            cached_ls(other.cached_ls),
+            bindings(other.bindings),
+            slots(other.slots),
+            num_scalar_slots(other.num_scalar_slots),
+            num_ard_slots(other.num_ard_slots),
+            root(clone_term_iterative(other.root)),
+            has_coord_points(other.has_coord_points),
+            nested_depth(other.nested_depth),
+            exp_mode(other.exp_mode)
+        {
+        }
+
+        /// @brief Move-constructs a compiled distance implementation.
+        Impl(Impl&&) noexcept = default;
+
+        /// @brief Copy-assigns a compiled distance implementation iteratively.
+        /// @param[in] other Source compiled distance implementation.
+        /// @return Reference to *this.
+        Impl& operator=(const Impl& other)
+        {
+            if (this == &other)
+            {
+                return *this;
+            }
+            Impl copy(other);
+            *this = std::move(copy);
+            return *this;
+        }
+
+        /// @brief Move-assigns a compiled distance implementation.
+        /// @return Reference to *this.
+        Impl& operator=(Impl&&) noexcept = default;
+
+        /// @brief Destroys the compiled distance AST iteratively to keep stack depth O(1) on deep trees.
+        ~Impl() noexcept { destroy_term_iterative(root); }
+
+        /// @brief Iteratively deep-copies a compiled distance Term tree without recursive calls.
+        /// @param[in] src Root compiled term to clone.
+        /// @return Cloned compiled term.
+        [[nodiscard]] static Term clone_term_iterative(const Term& src)
+        {
+            if (is_leaf_term(src))
+            {
+                return src;
+            }
+
+            struct Frame
+            {
+                const std::vector<Term>* src_terms;
+                std::size_t idx;
+                bool is_sum;
+                std::size_t param_begin;
+                std::size_t param_end;
+                std::vector<Term> dst_terms;
+            };
+
+            std::vector<Frame> stack;
+            auto push_composite = [&stack](const Term& t)
+            {
+                if (const auto* s = std::get_if<SumTerm>(&t))
+                {
+                    stack.push_back(
+                        Frame{
+                            .src_terms = &s->terms,
+                            .idx = 0U,
+                            .is_sum = true,
+                            .param_begin = s->param_begin,
+                            .param_end = s->param_end,
+                            .dst_terms = {},
+                        }
+                    );
+                    stack.back().dst_terms.reserve(s->terms.size());
+                }
+                else
+                {
+                    const auto& p = std::get<ProductTerm>(t);
+                    stack.push_back(
+                        Frame{
+                            .src_terms = &p.terms,
+                            .idx = 0U,
+                            .is_sum = false,
+                            .param_begin = p.param_begin,
+                            .param_end = p.param_end,
+                            .dst_terms = {},
+                        }
+                    );
+                    stack.back().dst_terms.reserve(p.terms.size());
+                }
+            };
+            push_composite(src);
+            while (true)
+            {
+                auto& top = stack.back();
+                if (top.idx >= top.src_terms->size())
+                {
+                    Term finished = top.is_sum ? Term(
+                                                     SumTerm{
+                                                         .terms = std::move(top.dst_terms),
+                                                         .param_begin = top.param_begin,
+                                                         .param_end = top.param_end,
+                                                     }
+                                                 )
+                                               : Term(
+                                                     ProductTerm{
+                                                         .terms = std::move(top.dst_terms),
+                                                         .param_begin = top.param_begin,
+                                                         .param_end = top.param_end,
+                                                     }
+                                                 );
+                    stack.pop_back();
+                    if (stack.empty())
+                    {
+                        return finished;
+                    }
+                    stack.back().dst_terms.push_back(std::move(finished));
+                    continue;
+                }
+                const Term& child = (*top.src_terms)[top.idx++];
+                if (is_leaf_term(child))
+                {
+                    top.dst_terms.push_back(child);
+                }
+                else
+                {
+                    push_composite(child);
+                }
+            }
+        }
+
+        /// @brief Iteratively destroys nested SumTerm/ProductTerm subtrees without recursive calls.
+        /// @param[in,out] target Root compiled term to drain.
+        static void destroy_term_iterative(Term& target) noexcept
+        {
+            std::vector<Term> pending;
+            try
+            {
+                pending.push_back(std::move(target));
+                while (!pending.empty())
+                {
+                    Term cur = std::move(pending.back());
+                    pending.pop_back();
+                    if (auto* s = std::get_if<SumTerm>(&cur))
+                    {
+                        for (auto& child : s->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        s->terms.clear();
+                    }
+                    else if (auto* p = std::get_if<ProductTerm>(&cur))
+                    {
+                        for (auto& child : p->terms)
+                        {
+                            pending.push_back(std::move(child));
+                        }
+                        p->terms.clear();
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Fallback to bounded cleanup if OOM occurs while draining; noexcept boundary must not throw.
+                return;
+            }
+        }
+
         /// @brief Synchronizes @c cached_ls with the current ARD lengthscale vectors stored in @c leaves.
         void refresh_cached_ls() { detail::refresh_cached_ls_entries(leaves, cached_ls); }
 
@@ -1910,28 +2129,50 @@ namespace cxxgpr
         /// @return Minimum scratch buffer depth required for nested evaluation of @p term.
         static std::size_t compute_nested_depth(const Term& term) noexcept
         {
-            const std::vector<Term>* children = nullptr;
-            if (const auto* s = std::get_if<SumTerm>(&term))
+            struct DepthFrame
             {
-                children = &s->terms;
-            }
-            else if (const auto* p = std::get_if<ProductTerm>(&term))
+                const Term* node;
+                std::size_t depth;
+            };
+
+            std::vector<DepthFrame> work;
+            std::size_t max_depth = 0U;
+            try
             {
-                children = &p->terms;
-            }
-            else
-            {
-                return 0;
-            }
-            std::size_t max_child = 0;
-            for (const auto& child : *children)
-            {
-                if (!is_leaf_term(child))
+                work.push_back(DepthFrame{.node = &term, .depth = 0U});
+                while (!work.empty())
                 {
-                    max_child = std::max(max_child, 1U + compute_nested_depth(child));
+                    const DepthFrame cur = work.back();
+                    work.pop_back();
+                    const std::vector<Term>* children = nullptr;
+                    if (const auto* s = std::get_if<SumTerm>(cur.node))
+                    {
+                        children = &s->terms;
+                    }
+                    else if (const auto* p = std::get_if<ProductTerm>(cur.node))
+                    {
+                        children = &p->terms;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    for (const auto& child : *children)
+                    {
+                        if (!is_leaf_term(child))
+                        {
+                            const std::size_t child_depth = cur.depth + 1U;
+                            max_depth = std::max(max_depth, child_depth);
+                            work.push_back(DepthFrame{.node = &child, .depth = child_depth});
+                        }
+                    }
                 }
             }
-            return max_child;
+            catch (...)
+            {
+                return max_depth;
+            }
+            return max_depth;
         }
 
         /// @brief Looks up the packed @c at index assigned to supplied-distance slot @p id.
@@ -1950,139 +2191,194 @@ namespace cxxgpr
             return 0;
         }
 
-        /// @brief Compiles a symbolic @c DistanceKernel node into flattened @c Term IR and parameter bindings.
-        /// @details Traverses leaves left-to-right so each leaf receives a contiguous hyperparameter range
-        /// @c [param_begin, param_begin + param_count), and associatively flattens nested sums and products.
-        /// @tparam Mode Distance kernel mode tag (@c DistanceOnly or @c WithPoints).
-        /// @param[in] node Symbolic AST node to compile.
-        /// @param[in,out] out Target @c Impl receiving appended leaves, bindings, and @c has_coord_points flag.
+        /// @brief Iteratively compiles a distance-kernel AST node into a flattened @c Term tree.
+        /// @tparam Mode Distance kernel mode tag.
+        /// @param[in] root_node Root AST node to compile.
+        /// @param[in,out] out Target @c Impl receiving leaf state, bindings, and coordinate flags.
         /// @param[in,out] next_param_idx Running global parameter counter incremented as leaves are visited.
-        /// @return Compiled @c Term corresponding to @p node.
+        /// @return Compiled @c Term corresponding to @p root_node.
         template <DistanceModeConcept Mode>
-        static Term compile_node(const DistanceKernel<Mode>::InternalNode& node, Impl& out, std::size_t& next_param_idx)
-        {
-            using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* s = std::get_if<SuppliedScalarNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(s->leaf);
-                out.leaves.push_back(s->leaf);
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return SuppliedScalarRef{
-                    .leaf_idx = leaf_idx,
-                    .slot_at = find_slot_at(out.slots, s->slot),
-                    .param_begin = p_begin,
-                    .param_count = p_count
-                };
-            }
-            if (const auto* a = std::get_if<SuppliedArdNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(a->leaf);
-                out.leaves.push_back(a->leaf);
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return SuppliedArdRef{
-                    .leaf_idx = leaf_idx,
-                    .slot_at = find_slot_at(out.slots, a->slot),
-                    .dims = a->dims,
-                    .param_begin = p_begin,
-                    .param_count = p_count
-                };
-            }
-            if (const auto* c = std::get_if<CoordLeafNode>(&node.data))
-            {
-                const std::size_t leaf_idx = out.leaves.size();
-                const std::size_t p_begin = next_param_idx;
-                const std::size_t p_count = detail::leaf_num_params(c->leaf);
-                out.leaves.push_back(c->leaf);
-                // Constant/White leaves do not access coordinates even in WithPoints trees;
-                // only point-reading coordinate leaves require non-null X matrices at runtime.
-                const CoordMode leaf_mode = detail::leaf_coord_mode(c->leaf);
-                if (leaf_mode != CoordMode::Either)
-                {
-                    out.has_coord_points = true;
-                }
-                for (std::size_t local = 0; local < p_count; ++local)
-                {
-                    out.bindings.push_back(
-                        ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
-                    );
-                }
-                return CoordLeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count};
-            }
-            if (std::holds_alternative<typename Node::Sum>(node.data))
-            {
-                // Associatively flatten nested Sum chains into a single SumTerm with contiguous params.
-                std::vector<Term> flat;
-                const std::size_t p_begin = next_param_idx;
-                collect_sum<Mode>(node, flat, out, next_param_idx);
-                return SumTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
-            }
-            // Associatively flatten nested Product chains into a single ProductTerm with contiguous params.
-            std::vector<Term> flat;
-            const std::size_t p_begin = next_param_idx;
-            collect_product<Mode>(node, flat, out, next_param_idx);
-            return ProductTerm{.terms = std::move(flat), .param_begin = p_begin, .param_end = next_param_idx};
-        }
-
-        /// @brief Recursively flattens nested binary @c Sum nodes into @p out_terms in left-to-right order.
-        /// @tparam Mode Distance kernel mode tag.
-        /// @param[in] node Current AST node to flatten or compile.
-        /// @param[in,out] out_terms Output vector appending non-sum compiled child terms.
-        /// @param[in,out] out Target @c Impl receiving leaf state and bindings.
-        /// @param[in,out] next_param_idx Running global hyperparameter counter.
-        template <DistanceModeConcept Mode>
-        static void collect_sum(
-            const DistanceKernel<Mode>::InternalNode& node,
-            std::vector<Term>& out_terms,
-            Impl& out,
-            std::size_t& next_param_idx
+        static Term compile_node(
+            const DistanceKernel<Mode>::InternalNode& root_node, Impl& out, std::size_t& next_param_idx
         )
         {
             using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* sum = std::get_if<typename Node::Sum>(&node.data))
+            enum class FrameKind : std::uint8_t
             {
-                collect_sum<Mode>(*sum->lhs, out_terms, out, next_param_idx);
-                collect_sum<Mode>(*sum->rhs, out_terms, out, next_param_idx);
-                return;
-            }
-            out_terms.push_back(compile_node<Mode>(node, out, next_param_idx));
-        }
+                Sum,
+                Product,
+            };
 
-        /// @brief Recursively flattens nested binary @c Product nodes into @p out_terms in left-to-right order.
-        /// @tparam Mode Distance kernel mode tag.
-        /// @param[in] node Current AST node to flatten or compile.
-        /// @param[in,out] out_terms Output vector appending non-product compiled child terms.
-        /// @param[in,out] out Target @c Impl receiving leaf state and bindings.
-        /// @param[in,out] next_param_idx Running global hyperparameter counter.
-        template <DistanceModeConcept Mode>
-        static void collect_product(
-            const DistanceKernel<Mode>::InternalNode& node,
-            std::vector<Term>& out_terms,
-            Impl& out,
-            std::size_t& next_param_idx
-        )
-        {
-            using Node = DistanceKernel<Mode>::InternalNode;
-            if (const auto* prod = std::get_if<typename Node::Product>(&node.data))
+            struct CompileFrame
             {
-                collect_product<Mode>(*prod->lhs, out_terms, out, next_param_idx);
-                collect_product<Mode>(*prod->rhs, out_terms, out, next_param_idx);
-                return;
+                FrameKind kind;
+                std::vector<Term> terms;
+                std::size_t param_begin;
+            };
+
+            struct WorkItem
+            {
+                const Node* node{nullptr};
+                bool close_frame{false};
+            };
+
+            std::vector<CompileFrame> frames;
+            std::vector<WorkItem> work;
+            std::vector<const Node*> flatten;
+            Term compiled_root;
+
+            auto emit_term = [&frames, &compiled_root](Term&& t)
+            {
+                if (frames.empty())
+                {
+                    compiled_root = std::move(t);
+                }
+                else
+                {
+                    frames.back().terms.push_back(std::move(t));
+                }
+            };
+
+            work.push_back(WorkItem{.node = &root_node, .close_frame = false});
+            while (!work.empty())
+            {
+                const WorkItem item = work.back();
+                work.pop_back();
+
+                if (item.close_frame)
+                {
+                    CompileFrame done = std::move(frames.back());
+                    frames.pop_back();
+                    if (done.kind == FrameKind::Sum)
+                    {
+                        emit_term(
+                            SumTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx
+                            }
+                        );
+                    }
+                    else
+                    {
+                        emit_term(
+                            ProductTerm{
+                                .terms = std::move(done.terms),
+                                .param_begin = done.param_begin,
+                                .param_end = next_param_idx
+                            }
+                        );
+                    }
+                    continue;
+                }
+
+                const Node& cur = *item.node;
+                if (const auto* s = std::get_if<SuppliedScalarNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(s->leaf);
+                    out.leaves.push_back(s->leaf);
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(
+                        SuppliedScalarRef{
+                            .leaf_idx = leaf_idx,
+                            .slot_at = find_slot_at(out.slots, s->slot),
+                            .param_begin = p_begin,
+                            .param_count = p_count
+                        }
+                    );
+                    continue;
+                }
+                if (const auto* a = std::get_if<SuppliedArdNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(a->leaf);
+                    out.leaves.push_back(a->leaf);
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(
+                        SuppliedArdRef{
+                            .leaf_idx = leaf_idx,
+                            .slot_at = find_slot_at(out.slots, a->slot),
+                            .dims = a->dims,
+                            .param_begin = p_begin,
+                            .param_count = p_count
+                        }
+                    );
+                    continue;
+                }
+                if (const auto* c = std::get_if<CoordLeafNode>(&cur.data))
+                {
+                    const std::size_t leaf_idx = out.leaves.size();
+                    const std::size_t p_begin = next_param_idx;
+                    const std::size_t p_count = detail::leaf_num_params(c->leaf);
+                    out.leaves.push_back(c->leaf);
+                    // Constant/White leaves do not access coordinates even in WithPoints trees;
+                    // only point-reading coordinate leaves require non-null X matrices at runtime.
+                    const CoordMode leaf_mode = detail::leaf_coord_mode(c->leaf);
+                    if (leaf_mode != CoordMode::Either)
+                    {
+                        out.has_coord_points = true;
+                    }
+                    for (std::size_t local = 0; local < p_count; ++local)
+                    {
+                        out.bindings.push_back(
+                            ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
+                        );
+                    }
+                    emit_term(CoordLeafRef{.leaf_idx = leaf_idx, .param_begin = p_begin, .param_count = p_count});
+                    continue;
+                }
+
+                const bool is_sum = std::holds_alternative<typename Node::Sum>(cur.data);
+                frames.push_back(
+                    CompileFrame{
+                        .kind = is_sum ? FrameKind::Sum : FrameKind::Product,
+                        .terms = {},
+                        .param_begin = next_param_idx,
+                    }
+                );
+                work.push_back(WorkItem{.node = nullptr, .close_frame = true});
+
+                // Flatten nested binary sums/products into work in reverse order so popping visits left-to-right.
+                flatten.push_back(&cur);
+                while (!flatten.empty())
+                {
+                    const Node* f = flatten.back();
+                    flatten.pop_back();
+                    if (is_sum)
+                    {
+                        if (const auto* sum = std::get_if<typename Node::Sum>(&f->data))
+                        {
+                            flatten.push_back(sum->lhs.get());
+                            flatten.push_back(sum->rhs.get());
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (const auto* prod = std::get_if<typename Node::Product>(&f->data))
+                        {
+                            flatten.push_back(prod->lhs.get());
+                            flatten.push_back(prod->rhs.get());
+                            continue;
+                        }
+                    }
+                    work.push_back(WorkItem{.node = f, .close_frame = false});
+                }
             }
-            out_terms.push_back(compile_node<Mode>(node, out, next_param_idx));
+            return compiled_root;
         }
 
         // --- Validation helpers for evaluation ---
@@ -2754,16 +3050,227 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Writes WorkspaceTooSmall into @p err out-of-line so recursive frames construct no @c GprError.
+        /// @param[out] err Destination error slot.
+        /// @return Always false.
+        [[nodiscard]] static CXXGPR_NOINLINE bool fail_workspace_too_small(std::optional<GprError>& err) noexcept
+        {
+            err = GprError::workspace_too_small();
+            return false;
+        }
+
+        /// @brief Writes UnsupportedKernelOperation for an empty composite into @p err out-of-line.
+        /// @param[out] err Destination error slot.
+        /// @return Always false.
+        [[nodiscard]] static CXXGPR_NOINLINE bool fail_empty_composite(std::optional<GprError>& err)
+        {
+            err = GprError::unsupported_kernel_operation("composite kernel has no terms");
+            return false;
+        }
+
+        /// @brief Writes IndexOutOfRange for a parameter index into @p err out-of-line.
+        /// @param[out] err Destination error slot.
+        /// @return Always false.
+        [[nodiscard]] static CXXGPR_NOINLINE bool fail_param_out_of_range(std::optional<GprError>& err)
+        {
+            err = GprError::index_out_of_range("kernel parameter index out of range");
+            return false;
+        }
+
+        /// @brief Checks whether @p nested can serve @p level_idx without constructing @c std::expected.
+        /// @param[in,out] nested Caller-supplied nested buffer pool.
+        /// @param[in] level_idx Required zero-based buffer level index.
+        /// @param[in] rows Required row capacity.
+        /// @param[in] cols Required column capacity.
+        /// @param[out] err Populated with WorkspaceTooSmall on failure.
+        /// @return True when @p nested suffices, false otherwise.
+        [[nodiscard]] bool ensure_nested_ok(
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::size_t rows,
+            std::size_t cols,
+            std::optional<GprError>& err
+        ) const noexcept
+        {
+            if (nested.depth() <= level_idx || nested.rows() < rows || nested.cols() < cols)
+            {
+                return fail_workspace_too_small(err);
+            }
+            return true;
+        }
+
+        /// @brief Captures a `std::expected<void, GprError>` into @p err out-of-line.
+        /// @param[in] res Expected result to inspect.
+        /// @param[out] err Populated with error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] static CXXGPR_NOINLINE bool capture_expected(
+            std::expected<void, GprError>&& res, std::optional<GprError>& err
+        ) noexcept
+        {
+            if (res.has_value())
+            {
+                return true;
+            }
+            err = std::move(res).error();
+            return false;
+        }
+
+        /// @brief Evaluates one square leaf term out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] term Leaf AST node.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] out Destination matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @param[in,out] nested Multi-level workspace for @c CustomKernel distance buffers.
+        /// @param[in] level_idx Current nesting depth inside @p nested.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_square_leaf_step(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            {
+                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
+                return capture_expected(detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode), err);
+            }
+            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
+            {
+                eval_supplied_ard_square(*a, store, out, uplo);
+                return true;
+            }
+            const auto& c = std::get<CoordLeafRef>(term);
+            if (x.has_value())
+            {
+                const KernelLeaf& kl = leaves[c.leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
+                {
+                    if (!ensure_nested_ok(nested, level_idx, x->rows(), x->rows(), err))
+                    {
+                        return false;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return capture_expected(custom->template term<T>().apply(dist_buf.as_ref(), out, uplo), err);
+                }
+                return capture_expected(
+                    detail::leaf_apply_points(kl, *x, out, uplo, exp_mode, cached_ls[c.leaf_idx]), err
+                );
+            }
+            if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
+            {
+                const T val = static_cast<T>(ck->constant());
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { out(row, col) = val; });
+                return true;
+            }
+            const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
+            const T var = static_cast<T>(wk.variance());
+            visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
+                out(row, col) = (row == col) ? var : T{0};
+            });
+            return true;
+        }
+
+        /// @brief Invariant context for `eval_term_square_rec` to keep recursive stack frames minimal.
+        struct SquareEvalCtx
+        {
+            /// @brief Pre-validated square supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional coordinate matrix.
+            std::optional<MatrixRef<T>> x;
+            /// @brief Active matrix triangle.
+            Triangle uplo;
+            /// @brief Multi-level workspace for nested composite nodes.
+            NestedBuffers<T>& nested;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_term_square` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[out] out Destination matrix populated on @p ctx.uplo.
+        /// @param[in,out] scratch Leaf scratch matrix.
+        /// @param[in] level_idx Current recursion depth into @p ctx.nested.
+        /// @param[in] ctx Invariant square evaluation context.
+        /// @return True on success, false after writing @p ctx.err.
+        [[nodiscard]] bool eval_term_square_rec(
+            const Term& term,
+            const MatrixMut<T>& out,
+            const MatrixMut<T>& scratch,
+            std::size_t level_idx,
+            const SquareEvalCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return eval_square_leaf_step(term, ctx.store, ctx.x, out, ctx.uplo, ctx.nested, level_idx, ctx.err);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            if (terms.empty())
+            {
+                return fail_empty_composite(ctx.err);
+            }
+            if (!eval_term_square_rec(terms[0], out, scratch, level_idx, ctx))
+            {
+                return false;
+            }
+            for (std::size_t k = 1; k < terms.size(); ++k)
+            {
+                if (is_leaf_term(terms[k]))
+                {
+                    if (!eval_term_square_rec(terms[k], scratch, out, level_idx, ctx))
+                    {
+                        return false;
+                    }
+                    if (is_sum)
+                    {
+                        add_into(out, scratch.as_ref(), ctx.uplo);
+                    }
+                    else
+                    {
+                        mul_into(out, scratch.as_ref(), ctx.uplo);
+                    }
+                }
+                else
+                {
+                    if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                    {
+                        return false;
+                    }
+                    const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                    if (!eval_term_square_rec(terms[k], buf, scratch, level_idx + 1U, ctx))
+                    {
+                        return false;
+                    }
+                    if (is_sum)
+                    {
+                        add_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                    else
+                    {
+                        mul_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                }
+            }
+            return true;
+        }
+
         /// @brief Recursively evaluates compiled term @p term on a square @c CheckedDistanceStore over @p uplo.
-        /// @details Leaf terms write directly using @p scratch without advancing @p level_idx; composite subterms
-        /// acquire a temporary buffer at @p level_idx from @p nested and recurse at @p level_idx + 1.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] store Pre-validated square supplied-distance store.
-        /// @param[in] x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
+        /// @param[in] x Optional coordinate matrix.
         /// @param[out] out Destination matrix populated on @p uplo.
         /// @param[in] uplo Triangle mode specifying which entries to compute.
-        /// @param[in,out] scratch Leaf scratch matrix swapped during binary combination.
-        /// @param[in,out] nested Multi-level workspace for nested composite nodes and @c CustomKernel distance buffers.
+        /// @param[in,out] scratch Leaf scratch matrix.
+        /// @param[in,out] nested Multi-level workspace for nested composite nodes.
         /// @param[in] level_idx Current recursion depth into @p nested.
         /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_term_square(
@@ -2777,116 +3284,179 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
+            std::optional<GprError> err;
+            const SquareEvalCtx ctx{
+                .store = store,
+                .x = x,
+                .uplo = uplo,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_term_square_rec(term, out, scratch, level_idx, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
+            }
+            return {};
+        }
+
+        /// @brief Evaluates one cross leaf term out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] term Leaf AST node.
+        /// @param[in] store Pre-validated cross supplied-distance store.
+        /// @param[in] x1 Optional left coordinate matrix.
+        /// @param[in] x2 Optional right coordinate matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] nested Multi-level workspace for @c CustomKernel distances.
+        /// @param[in] level_idx Current recursion depth into @p nested.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_cross_leaf_step(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x1,
+            std::optional<MatrixRef<T>> x2,
+            MatrixMut<T> out,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
                 const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode);
+                return capture_expected(detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode), err);
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
-                eval_supplied_ard_square(*a, store, out, uplo);
-                return {};
+                eval_supplied_ard_cross(*a, store, out);
+                return true;
             }
-            if (const auto* c = std::get_if<CoordLeafRef>(&term))
+            const auto& c = std::get<CoordLeafRef>(term);
+            if (x1.has_value() && x2.has_value())
             {
-                if (x.has_value())
+                const KernelLeaf& kl = leaves[c.leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
                 {
-                    const KernelLeaf& kl = leaves[c->leaf_idx];
-                    if (const auto* custom = std::get_if<CustomKernel>(&kl))
+                    if (!ensure_nested_ok(nested, level_idx, x1->rows(), x2->rows(), err))
                     {
-                        // Materialize pairwise Euclidean squared distances before calling CustomKernel.
-                        if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows()); !ok.has_value())
-                        {
-                            return ok;
-                        }
-                        auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
-                        fill_square_sq_dist(*x, dist_buf);
-                        return custom->template term<T>().apply(dist_buf.as_ref(), out, uplo);
+                        return false;
                     }
-                    return detail::leaf_apply_points(kl, *x, out, uplo, exp_mode, cached_ls[c->leaf_idx]);
+                    auto dist_buf = nested.level(level_idx, x1->rows(), x2->rows());
+                    fill_cross_sq_dist(*x1, *x2, dist_buf);
+                    return capture_expected(custom->template term<T>().apply_cross(dist_buf.as_ref(), out), err);
                 }
-                // Constant or White only: pass dummy 0-safe shape via Constant/White on square n x n.
-                if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
+                return capture_expected(
+                    detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode, cached_ls[c.leaf_idx]), err
+                );
+            }
+            const T val = std::holds_alternative<ConstantKernel>(leaves[c.leaf_idx])
+                ? static_cast<T>(std::get<ConstantKernel>(leaves[c.leaf_idx]).constant())
+                : T{0};
+            for (std::size_t col = 0; col < out.cols(); ++col)
+            {
+                for (std::size_t row = 0; row < out.rows(); ++row)
                 {
-                    const T val = static_cast<T>(ck->constant());
-                    visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                        out(row, col) = val;
-                    });
-                    return {};
+                    out(row, col) = val;
                 }
-                const auto& wk = std::get<WhiteKernel>(leaves[c->leaf_idx]);
-                const T var = static_cast<T>(wk.variance());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    out(row, col) = (row == col) ? var : T{0};
-                });
-                return {};
+            }
+            return true;
+        }
+
+        /// @brief Invariant context for `eval_term_cross_rec` to keep recursive stack frames minimal.
+        struct CrossEvalCtx
+        {
+            /// @brief Pre-validated cross supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional left coordinate matrix.
+            std::optional<MatrixRef<T>> x1;
+            /// @brief Optional right coordinate matrix.
+            std::optional<MatrixRef<T>> x2;
+            /// @brief Multi-level workspace for nested composite nodes.
+            NestedBuffers<T>& nested;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_term_cross` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Leaf scratch matrix.
+        /// @param[in] level_idx Current recursion depth into @p ctx.nested.
+        /// @param[in] ctx Invariant cross evaluation context.
+        /// @return True on success, false after writing @p ctx.err.
+        [[nodiscard]] bool eval_term_cross_rec(
+            const Term& term,
+            const MatrixMut<T>& out,
+            const MatrixMut<T>& scratch,
+            std::size_t level_idx,
+            const CrossEvalCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return eval_cross_leaf_step(term, ctx.store, ctx.x1, ctx.x2, out, ctx.nested, level_idx, ctx.err);
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
             if (terms.empty())
             {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+                return fail_empty_composite(ctx.err);
             }
-            if (auto res = eval_term_square(terms[0], store, x, out, uplo, scratch, nested, level_idx);
-                !res.has_value())
+            if (!eval_term_cross_rec(terms[0], out, scratch, level_idx, ctx))
             {
-                return res;
+                return false;
             }
             for (std::size_t k = 1; k < terms.size(); ++k)
             {
                 if (is_leaf_term(terms[k]))
                 {
-                    // Leaf children write directly into scratch without consuming a nested level.
-                    if (auto res = eval_term_square(terms[k], store, x, scratch, uplo, out, nested, level_idx);
-                        !res.has_value())
+                    if (!eval_term_cross_rec(terms[k], scratch, out, level_idx, ctx))
                     {
-                        return res;
+                        return false;
                     }
                     if (is_sum)
                     {
-                        add_into(out, scratch.as_ref(), uplo);
+                        add_into(out, scratch.as_ref(), Triangle::Full);
                     }
                     else
                     {
-                        mul_into(out, scratch.as_ref(), uplo);
+                        mul_into(out, scratch.as_ref(), Triangle::Full);
                     }
                 }
                 else
                 {
-                    // Composite children need their own nested accumulator so out stays intact.
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
+                    if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
                     {
-                        return ok;
+                        return false;
                     }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_square(terms[k], store, x, buf, uplo, scratch, nested, level_idx + 1U);
-                        !res.has_value())
+                    const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                    if (!eval_term_cross_rec(terms[k], buf, scratch, level_idx + 1U, ctx))
                     {
-                        return res;
+                        return false;
                     }
                     if (is_sum)
                     {
-                        add_into(out, buf.as_ref(), uplo);
+                        add_into(out, buf.as_ref(), Triangle::Full);
                     }
                     else
                     {
-                        mul_into(out, buf.as_ref(), uplo);
+                        mul_into(out, buf.as_ref(), Triangle::Full);
                     }
                 }
             }
-            return {};
+            return true;
         }
 
         /// @brief Recursively evaluates compiled term @p term on a rectangular cross @c CheckedDistanceStore.
-        /// @details Evaluates supplied-distance leaves from cross slabs, @c CoordLeafRef nodes from @p x1 and @p x2
-        /// (with zero matrix for coordinate-free @c WhiteKernel cross blocks), and composite sums/products.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] store Pre-validated cross supplied-distance store.
-        /// @param[in] x1 Optional left coordinate matrix for coordinate-based leaves.
-        /// @param[in] x2 Optional right coordinate matrix for coordinate-based leaves.
-        /// @param[out] out Destination @c rows x cols matrix receiving cross-covariance values.
-        /// @param[in,out] scratch Leaf scratch matrix used for sibling leaf accumulation.
-        /// @param[in,out] nested Multi-level workspace for nested composite subtrees and @c CustomKernel distances.
+        /// @param[in] x1 Optional left coordinate matrix.
+        /// @param[in] x2 Optional right coordinate matrix.
+        /// @param[out] out Destination cross-covariance matrix view.
+        /// @param[in,out] scratch Leaf scratch matrix.
+        /// @param[in,out] nested Multi-level workspace.
         /// @param[in] level_idx Current recursion depth into @p nested.
         /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_term_cross(
@@ -2900,165 +3470,106 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            std::optional<GprError> err;
+            const CrossEvalCtx ctx{
+                .store = store,
+                .x1 = x1,
+                .x2 = x2,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_term_cross_rec(term, out, scratch, level_idx, ctx))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode);
-            }
-            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
-            {
-                eval_supplied_ard_cross(*a, store, out);
-                return {};
-            }
-            if (const auto* c = std::get_if<CoordLeafRef>(&term))
-            {
-                if (x1.has_value() && x2.has_value())
-                {
-                    const KernelLeaf& kl = leaves[c->leaf_idx];
-                    if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                    {
-                        if (auto ok = ensure_nested(nested, level_idx, x1->rows(), x2->rows()); !ok.has_value())
-                        {
-                            return ok;
-                        }
-                        auto dist_buf = nested.level(level_idx, x1->rows(), x2->rows());
-                        fill_cross_sq_dist(*x1, *x2, dist_buf);
-                        return custom->template term<T>().apply_cross(dist_buf.as_ref(), out);
-                    }
-                    return detail::leaf_apply_cross_points(kl, *x1, *x2, out, exp_mode, cached_ls[c->leaf_idx]);
-                }
-                // Without point coordinates, only Constant (broadcast constant) and White (zero cross) can appear.
-                const T val = std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx])
-                    ? static_cast<T>(std::get<ConstantKernel>(leaves[c->leaf_idx]).constant())
-                    : T{0};
-                for (std::size_t col = 0; col < out.cols(); ++col)
-                {
-                    for (std::size_t row = 0; row < out.rows(); ++row)
-                    {
-                        out(row, col) = val;
-                    }
-                }
-                return {};
-            }
-            const bool is_sum = std::holds_alternative<SumTerm>(term);
-            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
-            if (terms.empty())
-            {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
-            }
-            if (auto res = eval_term_cross(terms[0], store, x1, x2, out, scratch, nested, level_idx); !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t k = 1; k < terms.size(); ++k)
-            {
-                if (is_leaf_term(terms[k]))
-                {
-                    if (auto res = eval_term_cross(terms[k], store, x1, x2, scratch, out, nested, level_idx);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                }
-                else
-                {
-                    if (auto ok = ensure_nested(nested, level_idx, out.rows(), out.cols()); !ok.has_value())
-                    {
-                        return ok;
-                    }
-                    auto buf = nested.level(level_idx, out.rows(), out.cols());
-                    if (auto res = eval_term_cross(terms[k], store, x1, x2, buf, scratch, nested, level_idx + 1U);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                }
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
 
-        /// @brief Recursively evaluates the self-variance diagonal vector $\mathrm{diag}(K(X, X))$ for @p term.
-        /// @details Supplied-distance leaves have zero self-distance and therefore unit diagonal; coordinate leaves
-        /// dispatch to @c leaf_fill_diag when @p x is supplied or emit constant/white scalars directly.
-        /// @param[in] term Compiled AST node to evaluate along the diagonal.
-        /// @param[in] n Number of points (unused beyond caller validation; matches @p out length).
-        /// @param[in] x Optional coordinate matrix for coordinate-based leaves.
-        /// @param[out] out Output diagonal span of length @p n.
-        /// @param[in,out] scratch_vec Flat scratch vector partitioned by @p level_idx * @p out.size() for composite
-        /// subterms.
-        /// @param[in] level_idx Current recursion depth into @p scratch_vec.
-        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
-        [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
-            const Term& term,
-            std::size_t n,
-            std::optional<MatrixRef<T>> x,
-            std::span<T> out,
-            std::vector<T>& scratch_vec,
-            std::size_t level_idx
+        /// @brief Evaluates one distance-kernel diagonal leaf out-of-line so recursive frames stay minimal.
+        /// @param[in] term Leaf AST node.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] out Output diagonal span.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] CXXGPR_NOINLINE bool fill_diag_leaf_step(
+            const Term& term, const std::optional<MatrixRef<T>>& x, std::span<T> out, std::optional<GprError>& err
         ) const
         {
             if (std::holds_alternative<SuppliedScalarRef>(term) || std::holds_alternative<SuppliedArdRef>(term))
             {
-                // Stationary supplied-distance kernels evaluate k(d=0) = 1 along every diagonal entry.
                 std::fill(out.begin(), out.end(), T{1});
-                return {};
+                return true;
             }
-            if (const auto* c = std::get_if<CoordLeafRef>(&term))
+            const auto& c = std::get<CoordLeafRef>(term);
+            if (x.has_value())
             {
-                if (x.has_value())
-                {
-                    return detail::leaf_fill_diag(leaves[c->leaf_idx], *x, out, cached_ls[c->leaf_idx]);
-                }
-                if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
-                {
-                    std::fill(out.begin(), out.end(), static_cast<T>(ck->constant()));
-                    return {};
-                }
-                const auto& wk = std::get<WhiteKernel>(leaves[c->leaf_idx]);
-                std::fill(out.begin(), out.end(), static_cast<T>(wk.variance()));
-                return {};
+                return capture_expected(
+                    detail::leaf_fill_diag(leaves[c.leaf_idx], *x, out, cached_ls[c.leaf_idx]), err
+                );
+            }
+            if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
+            {
+                std::fill(out.begin(), out.end(), static_cast<T>(ck->constant()));
+                return true;
+            }
+            const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
+            std::fill(out.begin(), out.end(), static_cast<T>(wk.variance()));
+            return true;
+        }
+
+        /// @brief Invariant context for `eval_fill_diag_rec` to keep recursive stack frames minimal.
+        struct FillDiagCtx
+        {
+            /// @brief Optional coordinate matrix for coordinate-based leaves.
+            std::optional<MatrixRef<T>> x;
+            /// @brief Flat scratch vector partitioned by `level_idx * out.size()`.
+            std::vector<T>& scratch_vec;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_fill_diag` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node to evaluate along the diagonal.
+        /// @param[out] out Output diagonal span of length `n`.
+        /// @param[in] level_idx Current recursion depth into `ctx.scratch_vec`.
+        /// @param[in] ctx Invariant diagonal evaluation context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool eval_fill_diag_rec(
+            const Term& term, std::span<T> out, std::size_t level_idx, const FillDiagCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return fill_diag_leaf_step(term, ctx.x, out, ctx.err);
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
             if (terms.empty())
             {
-                return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+                return fail_empty_composite(ctx.err);
             }
-            if (auto res = eval_fill_diag(terms[0], n, x, out, scratch_vec, level_idx); !res.has_value())
+            if (!eval_fill_diag_rec(terms[0], out, level_idx, ctx))
             {
-                return res;
+                return false;
             }
             if (terms.size() == 1U)
             {
-                return {};
+                return true;
             }
             const std::size_t slice_offset = level_idx * out.size();
-            if (scratch_vec.size() < slice_offset + out.size())
+            if (ctx.scratch_vec.size() < slice_offset + out.size())
             {
-                scratch_vec.resize(slice_offset + out.size());
+                ctx.scratch_vec.resize(slice_offset + out.size());
             }
             for (std::size_t k = 1; k < terms.size(); ++k)
             {
-                const std::span<T> sub(scratch_vec.data() + slice_offset, out.size());
-                if (auto res = eval_fill_diag(terms[k], n, x, sub, scratch_vec, level_idx + 1U); !res.has_value())
+                const std::span<T> sub(ctx.scratch_vec.data() + slice_offset, out.size());
+                if (!eval_fill_diag_rec(terms[k], sub, level_idx + 1U, ctx))
                 {
-                    return res;
+                    return false;
                 }
                 for (std::size_t idx = 0; idx < out.size(); ++idx)
                 {
@@ -3072,21 +3583,216 @@ namespace cxxgpr
                     }
                 }
             }
+            return true;
+        }
+
+        /// @brief Recursively evaluates the diagonal $k(x_i, x_i)$ of compiled term @p term into @p out.
+        /// @param[in] term Compiled AST node.
+        /// @param[in] n Number of diagonal entries.
+        /// @param[in] x Optional coordinate matrix for coordinate-based leaves.
+        /// @param[out] out Output diagonal span of length @p n.
+        /// @param[in,out] scratch_vec Flat scratch vector partitioned by @p level_idx * @p out.size().
+        /// @param[in] level_idx Current recursion depth into @p scratch_vec.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
+        [[nodiscard]] std::expected<void, GprError> eval_fill_diag(
+            const Term& term,
+            std::size_t /*n*/,
+            std::optional<MatrixRef<T>> x,
+            std::span<T> out,
+            std::vector<T>& scratch_vec,
+            std::size_t level_idx
+        ) const
+        {
+            std::optional<GprError> err;
+            const FillDiagCtx ctx{
+                .x = x,
+                .scratch_vec = scratch_vec,
+                .err = err,
+            };
+            if (!eval_fill_diag_rec(term, out, level_idx, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
+            }
             return {};
         }
 
-        /// @brief Recursively computes the first log-parameter derivative matrix $\partial K / \partial \theta_p$.
-        /// @details Dispatches to the unique child term owning @p param_idx and applies the sum or product rule across
-        /// sibling factor matrices evaluated into @p scratch_a using @p scratch_b.
+        /// @brief Evaluates one leaf gradient out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] term Leaf AST node.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global flattened hyperparameter index.
+        /// @param[in] uplo Triangle mode.
+        /// @param[in,out] nested Multi-level workspace.
+        /// @param[in] level_idx Current recursion depth into @p nested.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] CXXGPR_NOINLINE bool grad_leaf_step(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            {
+                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
+                return capture_expected(
+                    detail::leaf_grad_dist(leaves[s->leaf_idx], dist, d_k, param_idx - s->param_begin, uplo, exp_mode),
+                    err
+                );
+            }
+            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
+            {
+                eval_supplied_ard_grad(*a, store, d_k, param_idx - a->param_begin, uplo);
+                return true;
+            }
+            const auto& c = std::get<CoordLeafRef>(term);
+            if (x.has_value())
+            {
+                const KernelLeaf& kl = leaves[c.leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
+                {
+                    if (!ensure_nested_ok(nested, level_idx, x->rows(), x->rows(), err))
+                    {
+                        return false;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return capture_expected(
+                        custom->template term<T>().grad(dist_buf.as_ref(), d_k, param_idx - c.param_begin, uplo), err
+                    );
+                }
+                return capture_expected(
+                    detail::leaf_grad_points(
+                        kl, *x, d_k, param_idx - c.param_begin, uplo, exp_mode, cached_ls[c.leaf_idx]
+                    ),
+                    err
+                );
+            }
+            if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
+            {
+                const T val = static_cast<T>(ck->constant());
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { d_k(row, col) = val; });
+                return true;
+            }
+            const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
+            const T var = static_cast<T>(wk.variance());
+            visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
+                d_k(row, col) = (row == col) ? var : T{0};
+            });
+            return true;
+        }
+
+        /// @brief Invariant context for `eval_grad_rec` to keep recursive stack frames minimal.
+        struct GradEvalCtx
+        {
+            /// @brief Pre-validated square supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional coordinate matrix.
+            std::optional<MatrixRef<T>> x;
+            /// @brief Active matrix triangle.
+            Triangle uplo;
+            /// @brief First scratch matrix.
+            MatrixMut<T> scratch_a;
+            /// @brief Second scratch matrix.
+            MatrixMut<T> scratch_b;
+            /// @brief Multi-level workspace.
+            NestedBuffers<T>& nested;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_grad` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node containing @p param_idx.
+        /// @param[out] d_k Output derivative matrix.
+        /// @param[in] param_idx Global flattened hyperparameter index.
+        /// @param[in] level_idx Current recursion depth into @p ctx.nested.
+        /// @param[in] ctx Invariant gradient evaluation context.
+        /// @return True on success, false after writing @p ctx.err.
+        [[nodiscard]] bool eval_grad_rec(
+            const Term& term,
+            const MatrixMut<T>& d_k,
+            std::size_t param_idx,
+            std::size_t level_idx,
+            const GradEvalCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return grad_leaf_step(term, ctx.store, ctx.x, d_k, param_idx, ctx.uplo, ctx.nested, level_idx, ctx.err);
+            }
+            if (const auto* s = std::get_if<SumTerm>(&term))
+            {
+                // Linearity of differentiation: only the single addend owning param_idx contributes.
+                for (const auto& child : s->terms)
+                {
+                    if (contains_param(child, param_idx))
+                    {
+                        return eval_grad_rec(child, d_k, param_idx, level_idx, ctx);
+                    }
+                }
+                return fail_param_out_of_range(ctx.err);
+            }
+            const auto& p = std::get<ProductTerm>(term);
+            std::size_t owner = p.terms.size();
+            for (std::size_t m = 0; m < p.terms.size(); ++m)
+            {
+                if (contains_param(p.terms[m], param_idx))
+                {
+                    owner = m;
+                    break;
+                }
+            }
+            if (owner == p.terms.size())
+            {
+                return fail_param_out_of_range(ctx.err);
+            }
+            // Product rule: differentiate the owning factor and scale by all other factor values.
+            if (!eval_grad_rec(p.terms[owner], d_k, param_idx, level_idx, ctx))
+            {
+                return false;
+            }
+            const SquareEvalCtx sctx{
+                .store = ctx.store,
+                .x = ctx.x,
+                .uplo = ctx.uplo,
+                .nested = ctx.nested,
+                .err = ctx.err,
+            };
+            for (std::size_t m = 0; m < p.terms.size(); ++m)
+            {
+                if (m == owner)
+                {
+                    continue;
+                }
+                if (!eval_term_square_rec(p.terms[m], ctx.scratch_a, ctx.scratch_b, level_idx, sctx))
+                {
+                    return false;
+                }
+                mul_into(d_k, ctx.scratch_a.as_ref(), ctx.uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively computes the first log-parameter derivative matrix.
         /// @param[in] term Compiled AST node containing @p param_idx.
         /// @param[in] store Pre-validated square supplied-distance store.
-        /// @param[in] x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
-        /// @param[out] d_k Output derivative matrix populated on @p uplo.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] d_k Output derivative matrix.
         /// @param[in] param_idx Global flattened hyperparameter index.
-        /// @param[in] uplo Triangle mode specifying which entries to compute.
-        /// @param[in,out] scratch_a First @c n x n scratch matrix for sibling product factors.
-        /// @param[in,out] scratch_b Second @c n x n scratch matrix passed to recursive evaluation calls.
-        /// @param[in,out] nested Multi-level workspace for composite subterms and @c CustomKernel distance buffers.
+        /// @param[in] uplo Triangle mode.
+        /// @param[in,out] scratch_a First scratch matrix.
+        /// @param[in,out] scratch_b Second scratch matrix.
+        /// @param[in,out] nested Multi-level workspace.
         /// @param[in] level_idx Current recursion depth into @p nested.
         /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_grad(
@@ -3102,121 +3808,260 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            std::optional<GprError> err;
+            const GradEvalCtx ctx{
+                .store = store,
+                .x = x,
+                .uplo = uplo,
+                .scratch_a = scratch_a,
+                .scratch_b = scratch_b,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_grad_rec(term, d_k, param_idx, level_idx, ctx))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_grad_dist(
-                    leaves[s->leaf_idx], dist, d_k, param_idx - s->param_begin, uplo, exp_mode
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
                 );
-            }
-            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
-            {
-                eval_supplied_ard_grad(*a, store, d_k, param_idx - a->param_begin, uplo);
-                return {};
-            }
-            if (const auto* c = std::get_if<CoordLeafRef>(&term))
-            {
-                if (x.has_value())
-                {
-                    const KernelLeaf& kl = leaves[c->leaf_idx];
-                    if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                    {
-                        if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows()); !ok.has_value())
-                        {
-                            return ok;
-                        }
-                        auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
-                        fill_square_sq_dist(*x, dist_buf);
-                        return custom->template term<T>().grad(
-                            dist_buf.as_ref(), d_k, param_idx - c->param_begin, uplo
-                        );
-                    }
-                    return detail::leaf_grad_points(
-                        kl, *x, d_k, param_idx - c->param_begin, uplo, exp_mode, cached_ls[c->leaf_idx]
-                    );
-                }
-                if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
-                {
-                    const T val = static_cast<T>(ck->constant());
-                    visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                        d_k(row, col) = val;
-                    });
-                    return {};
-                }
-                const auto& wk = std::get<WhiteKernel>(leaves[c->leaf_idx]);
-                const T var = static_cast<T>(wk.variance());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    d_k(row, col) = (row == col) ? var : T{0};
-                });
-                return {};
-            }
-            if (const auto* s = std::get_if<SumTerm>(&term))
-            {
-                // Linearity of differentiation: only the single addend owning param_idx contributes.
-                for (const auto& child : s->terms)
-                {
-                    if (contains_param(child, param_idx))
-                    {
-                        return eval_grad(
-                            child, store, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx
-                        );
-                    }
-                }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
-            }
-            const auto& p = std::get<ProductTerm>(term);
-            std::size_t owner = p.terms.size();
-            for (std::size_t m = 0; m < p.terms.size(); ++m)
-            {
-                if (contains_param(p.terms[m], param_idx))
-                {
-                    owner = m;
-                    break;
-                }
-            }
-            if (owner == p.terms.size())
-            {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
-            }
-            // Product rule: differentiate the owning factor and scale by all other factor values.
-            if (auto res =
-                    eval_grad(p.terms[owner], store, x, d_k, param_idx, uplo, scratch_a, scratch_b, nested, level_idx);
-                !res.has_value())
-            {
-                return res;
-            }
-            for (std::size_t m = 0; m < p.terms.size(); ++m)
-            {
-                if (m == owner)
-                {
-                    continue;
-                }
-                if (auto res = eval_term_square(p.terms[m], store, x, scratch_a, uplo, scratch_b, nested, level_idx);
-                    !res.has_value())
-                {
-                    return res;
-                }
-                mul_into(d_k, scratch_a.as_ref(), uplo);
             }
             return {};
         }
 
-        /// @brief Recursively computes the second log-parameter derivative matrix
-        /// $\partial^2 K / (\partial \theta_i \partial \theta_j)$.
-        /// @details Handles same-addend vs zero cross-addend Hessians in @c SumTerm nodes, and splits @c ProductTerm
-        /// Hessians into same-factor second derivatives (@c owner_i == owner_j) or mixed first-derivative products
-        /// (@c owner_i != owner_j) multiplied by all remaining non-differentiated factor matrices.
+        /// @brief Evaluates one leaf Hessian out-of-line so recursive frames stay free of `std::expected`.
+        /// @param[in] term Leaf AST node.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Triangle mode.
+        /// @param[in,out] nested Multi-level workspace.
+        /// @param[in] level_idx Current recursion depth into @p nested.
+        /// @param[out] err Populated with the error on failure.
+        /// @return True on success, false after writing @p err.
+        [[nodiscard]] CXXGPR_NOINLINE bool hess_leaf_step(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            {
+                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
+                return capture_expected(
+                    detail::leaf_hess_dist(
+                        leaves[s->leaf_idx], dist, d2_k, i - s->param_begin, j - s->param_begin, uplo, exp_mode
+                    ),
+                    err
+                );
+            }
+            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
+            {
+                eval_supplied_ard_hess(*a, store, d2_k, i - a->param_begin, j - a->param_begin, uplo);
+                return true;
+            }
+            const auto& c = std::get<CoordLeafRef>(term);
+            if (x.has_value())
+            {
+                const KernelLeaf& kl = leaves[c.leaf_idx];
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
+                {
+                    if (!ensure_nested_ok(nested, level_idx, x->rows(), x->rows(), err))
+                    {
+                        return false;
+                    }
+                    auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
+                    fill_square_sq_dist(*x, dist_buf);
+                    return capture_expected(
+                        custom->template term<T>().hess(
+                            dist_buf.as_ref(), d2_k, i - c.param_begin, j - c.param_begin, uplo
+                        ),
+                        err
+                    );
+                }
+                return capture_expected(
+                    detail::leaf_hess_points(
+                        kl, *x, d2_k, i - c.param_begin, j - c.param_begin, uplo, exp_mode, cached_ls[c.leaf_idx]
+                    ),
+                    err
+                );
+            }
+            if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
+            {
+                const T val = static_cast<T>(ck->constant());
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { d2_k(row, col) = val; });
+                return true;
+            }
+            const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
+            const T var = static_cast<T>(wk.variance());
+            visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
+                d2_k(row, col) = (row == col) ? var : T{0};
+            });
+            return true;
+        }
+
+        /// @brief Invariant context for `eval_hess_rec` to keep recursive stack frames minimal.
+        struct HessEvalCtx
+        {
+            /// @brief Pre-validated square supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional coordinate matrix.
+            std::optional<MatrixRef<T>> x;
+            /// @brief First global hyperparameter index.
+            std::size_t i;
+            /// @brief Second global hyperparameter index.
+            std::size_t j;
+            /// @brief Active matrix triangle.
+            Triangle uplo;
+            /// @brief First scratch matrix.
+            MatrixMut<T> scratch_a;
+            /// @brief Second scratch matrix.
+            MatrixMut<T> scratch_b;
+            /// @brief Third scratch matrix.
+            MatrixMut<T> scratch_c;
+            /// @brief Multi-level workspace.
+            NestedBuffers<T>& nested;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Recursive body of `eval_hess` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node containing @p ctx.i and @p ctx.j.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] level_idx Current recursion depth into @p ctx.nested.
+        /// @param[in] ctx Invariant Hessian evaluation context.
+        /// @return True on success, false after writing @p ctx.err.
+        [[nodiscard]] bool eval_hess_rec(
+            const Term& term, const MatrixMut<T>& d2_k, std::size_t level_idx, const HessEvalCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return hess_leaf_step(
+                    term, ctx.store, ctx.x, d2_k, ctx.i, ctx.j, ctx.uplo, ctx.nested, level_idx, ctx.err
+                );
+            }
+            if (const auto* s = std::get_if<SumTerm>(&term))
+            {
+                for (const auto& child : s->terms)
+                {
+                    const bool has_i = contains_param(child, ctx.i);
+                    const bool has_j = contains_param(child, ctx.j);
+                    if (has_i && has_j)
+                    {
+                        return eval_hess_rec(child, d2_k, level_idx, ctx);
+                    }
+                    if (has_i || has_j)
+                    {
+                        // Distinct addends in a sum depend on disjoint parameters, so mixed second partials vanish.
+                        visit_triangle<T>(ctx.store.rows(), ctx.uplo, [&](std::size_t row, std::size_t col) {
+                            d2_k(row, col) = T{0};
+                        });
+                        return true;
+                    }
+                }
+                return fail_param_out_of_range(ctx.err);
+            }
+            const auto& p = std::get<ProductTerm>(term);
+            std::size_t owner_i = p.terms.size();
+            std::size_t owner_j = p.terms.size();
+            for (std::size_t m = 0; m < p.terms.size(); ++m)
+            {
+                if (contains_param(p.terms[m], ctx.i))
+                {
+                    owner_i = m;
+                }
+                if (contains_param(p.terms[m], ctx.j))
+                {
+                    owner_j = m;
+                }
+            }
+            if (owner_i == p.terms.size() || owner_j == p.terms.size())
+            {
+                return fail_param_out_of_range(ctx.err);
+            }
+            const SquareEvalCtx sctx{
+                .store = ctx.store,
+                .x = ctx.x,
+                .uplo = ctx.uplo,
+                .nested = ctx.nested,
+                .err = ctx.err,
+            };
+            if (owner_i == owner_j)
+            {
+                // Both parameters belong to one factor: compute factor Hessian and multiply all sibling values.
+                if (!eval_hess_rec(p.terms[owner_i], d2_k, level_idx, ctx))
+                {
+                    return false;
+                }
+                for (std::size_t m = 0; m < p.terms.size(); ++m)
+                {
+                    if (m == owner_i)
+                    {
+                        continue;
+                    }
+                    if (!eval_term_square_rec(p.terms[m], ctx.scratch_b, ctx.scratch_c, level_idx, sctx))
+                    {
+                        return false;
+                    }
+                    mul_into(d2_k, ctx.scratch_b.as_ref(), ctx.uplo);
+                }
+                return true;
+            }
+            // Mixed product-rule: (d factor_i / d theta_i) * (d factor_j / d theta_j) * prod_{m != i,j} factor_m.
+            const GradEvalCtx gctx{
+                .store = ctx.store,
+                .x = ctx.x,
+                .uplo = ctx.uplo,
+                .scratch_a = ctx.scratch_b,
+                .scratch_b = ctx.scratch_c,
+                .nested = ctx.nested,
+                .err = ctx.err,
+            };
+            if (!eval_grad_rec(p.terms[owner_i], d2_k, ctx.i, level_idx, gctx))
+            {
+                return false;
+            }
+            if (!eval_grad_rec(p.terms[owner_j], ctx.scratch_a, ctx.j, level_idx, gctx))
+            {
+                return false;
+            }
+            mul_into(d2_k, ctx.scratch_a.as_ref(), ctx.uplo);
+            for (std::size_t m = 0; m < p.terms.size(); ++m)
+            {
+                if (m == owner_i || m == owner_j)
+                {
+                    continue;
+                }
+                if (!eval_term_square_rec(p.terms[m], ctx.scratch_b, ctx.scratch_c, level_idx, sctx))
+                {
+                    return false;
+                }
+                mul_into(d2_k, ctx.scratch_b.as_ref(), ctx.uplo);
+            }
+            return true;
+        }
+
+        /// @brief Recursively computes the second log-parameter derivative matrix.
         /// @param[in] term Compiled AST node containing @p i and @p j.
         /// @param[in] store Pre-validated square supplied-distance store.
-        /// @param[in] x Optional coordinate matrix for coordinate-based or @c CustomKernel leaves.
-        /// @param[out] d2_k Output second-derivative matrix populated on @p uplo.
-        /// @param[in] i First global flattened hyperparameter index.
-        /// @param[in] j Second global flattened hyperparameter index.
-        /// @param[in] uplo Triangle mode specifying which entries to compute.
-        /// @param[in,out] scratch_a First @c n x n scratch matrix for mixed gradient factors.
-        /// @param[in,out] scratch_b Second @c n x n scratch matrix for factor evaluation.
-        /// @param[in,out] scratch_c Third @c n x n scratch matrix forwarded to sub-calls.
-        /// @param[in,out] nested Multi-level workspace for composite subterms and @c CustomKernel distance buffers.
+        /// @param[in] x Optional coordinate matrix.
+        /// @param[out] d2_k Output second-derivative matrix.
+        /// @param[in] i First global hyperparameter index.
+        /// @param[in] j Second global hyperparameter index.
+        /// @param[in] uplo Triangle mode.
+        /// @param[in,out] scratch_a First scratch matrix.
+        /// @param[in,out] scratch_b Second scratch matrix.
+        /// @param[in,out] scratch_c Third scratch matrix.
+        /// @param[in,out] nested Multi-level workspace.
         /// @param[in] level_idx Current recursion depth into @p nested.
         /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_hess(
@@ -3234,148 +4079,25 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            std::optional<GprError> err;
+            const HessEvalCtx ctx{
+                .store = store,
+                .x = x,
+                .i = i,
+                .j = j,
+                .uplo = uplo,
+                .scratch_a = scratch_a,
+                .scratch_b = scratch_b,
+                .scratch_c = scratch_c,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_hess_rec(term, d2_k, level_idx, ctx))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_hess_dist(
-                    leaves[s->leaf_idx], dist, d2_k, i - s->param_begin, j - s->param_begin, uplo, exp_mode
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
                 );
-            }
-            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
-            {
-                eval_supplied_ard_hess(*a, store, d2_k, i - a->param_begin, j - a->param_begin, uplo);
-                return {};
-            }
-            if (const auto* c = std::get_if<CoordLeafRef>(&term))
-            {
-                if (x.has_value())
-                {
-                    const KernelLeaf& kl = leaves[c->leaf_idx];
-                    if (const auto* custom = std::get_if<CustomKernel>(&kl))
-                    {
-                        if (auto ok = ensure_nested(nested, level_idx, x->rows(), x->rows()); !ok.has_value())
-                        {
-                            return ok;
-                        }
-                        auto dist_buf = nested.level(level_idx, x->rows(), x->rows());
-                        fill_square_sq_dist(*x, dist_buf);
-                        return custom->template term<T>().hess(
-                            dist_buf.as_ref(), d2_k, i - c->param_begin, j - c->param_begin, uplo
-                        );
-                    }
-                    return detail::leaf_hess_points(
-                        kl, *x, d2_k, i - c->param_begin, j - c->param_begin, uplo, exp_mode, cached_ls[c->leaf_idx]
-                    );
-                }
-                if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
-                {
-                    const T val = static_cast<T>(ck->constant());
-                    visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                        d2_k(row, col) = val;
-                    });
-                    return {};
-                }
-                const auto& wk = std::get<WhiteKernel>(leaves[c->leaf_idx]);
-                const T var = static_cast<T>(wk.variance());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    d2_k(row, col) = (row == col) ? var : T{0};
-                });
-                return {};
-            }
-            if (const auto* s = std::get_if<SumTerm>(&term))
-            {
-                for (const auto& child : s->terms)
-                {
-                    const bool has_i = contains_param(child, i);
-                    const bool has_j = contains_param(child, j);
-                    if (has_i && has_j)
-                    {
-                        return eval_hess(
-                            child, store, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx
-                        );
-                    }
-                    if (has_i || has_j)
-                    {
-                        // Distinct addends in a sum depend on disjoint parameters, so mixed second partials vanish.
-                        visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                            d2_k(row, col) = T{0};
-                        });
-                        return {};
-                    }
-                }
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
-            }
-            const auto& p = std::get<ProductTerm>(term);
-            std::size_t owner_i = p.terms.size();
-            std::size_t owner_j = p.terms.size();
-            for (std::size_t m = 0; m < p.terms.size(); ++m)
-            {
-                if (contains_param(p.terms[m], i))
-                {
-                    owner_i = m;
-                }
-                if (contains_param(p.terms[m], j))
-                {
-                    owner_j = m;
-                }
-            }
-            if (owner_i == p.terms.size() || owner_j == p.terms.size())
-            {
-                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
-            }
-            if (owner_i == owner_j)
-            {
-                // Both parameters belong to one factor: compute factor Hessian and multiply all sibling values.
-                if (auto res = eval_hess(
-                        p.terms[owner_i], store, x, d2_k, i, j, uplo, scratch_a, scratch_b, scratch_c, nested, level_idx
-                    );
-                    !res.has_value())
-                {
-                    return res;
-                }
-                for (std::size_t m = 0; m < p.terms.size(); ++m)
-                {
-                    if (m == owner_i)
-                    {
-                        continue;
-                    }
-                    if (auto res =
-                            eval_term_square(p.terms[m], store, x, scratch_b, uplo, scratch_c, nested, level_idx);
-                        !res.has_value())
-                    {
-                        return res;
-                    }
-                    mul_into(d2_k, scratch_b.as_ref(), uplo);
-                }
-                return {};
-            }
-            // Mixed product-rule: (d factor_i / d theta_i) * (d factor_j / d theta_j) * prod_{m != i,j} factor_m.
-            MatrixMut<T> grad_rhs = scratch_a;
-            MatrixMut<T> work_a = scratch_b;
-            MatrixMut<T> work_b = scratch_c;
-            if (auto res = eval_grad(p.terms[owner_i], store, x, d2_k, i, uplo, work_a, work_b, nested, level_idx);
-                !res.has_value())
-            {
-                return res;
-            }
-            if (auto res = eval_grad(p.terms[owner_j], store, x, grad_rhs, j, uplo, work_a, work_b, nested, level_idx);
-                !res.has_value())
-            {
-                return res;
-            }
-            mul_into(d2_k, grad_rhs.as_ref(), uplo);
-            for (std::size_t m = 0; m < p.terms.size(); ++m)
-            {
-                if (m == owner_i || m == owner_j)
-                {
-                    continue;
-                }
-                if (auto res = eval_term_square(p.terms[m], store, x, scratch_b, uplo, scratch_c, nested, level_idx);
-                    !res.has_value())
-                {
-                    return res;
-                }
-                mul_into(d2_k, scratch_b.as_ref(), uplo);
             }
             return {};
         }

@@ -13,5 +13,5 @@
 #    define CXXGPR_NOINLINE __declspec(noinline)
 #else
 /// @brief Forbids the compiler from inlining the function it precedes into its callers.
-#    define CXXGPR_NOINLINE [[gnu::noinline]]
+#    define CXXGPR_NOINLINE __attribute__((noinline))
 #endif

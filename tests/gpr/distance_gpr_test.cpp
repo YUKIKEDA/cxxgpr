@@ -33,6 +33,7 @@
 #endif
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 
 namespace
 {
@@ -1670,6 +1671,41 @@ namespace
             EXPECT_EQ(bad.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
         }
         EXPECT_TRUE(model->predict(cross, cxxgpr::MatrixRef<double>(data.q.data(), data.m, data.d)).has_value());
+    }
+
+    /// @brief Verifies depth-128 alternating sum/product DistanceGpr fit and predict fit within the small stack budget.
+    TEST(DistanceGprTest, DeepAlternatingTreeFitAndPredictFitInSmallStack)
+    {
+        // Spec: REQ-05, DES-21
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
+        {
+            const cxxgpr::ScalarDistance slot;
+            auto tree = slot.rbf(cxxgpr::RbfKernel::create(1.1).value()).with_points();
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                const auto leaf = slot.rbf(cxxgpr::RbfKernel::create(0.9).value()).with_points();
+                tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
+            }
+            constexpr std::size_t n = 3U;
+            const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
+            const std::array<double, 3> y_raw{0.3, 0.9, 0.4};
+            const std::array<double, 9> d2_raw{0.0, 0.29, 1.36, 0.29, 0.0, 0.41, 1.36, 0.41, 0.0};
+            const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
+            cxxgpr::DistanceSource src;
+            src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_raw.data(), n, n, n));
+
+            const auto fitted =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+                    tree, cxxgpr::optimizer::Lbfgs().with_max_iterations(2U)
+                )
+                    .fit(src, x, y_raw);
+            ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
+            EXPECT_TRUE(fitted->predict(src, x).has_value());
+            EXPECT_TRUE(fitted->loo_predict().has_value());
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace
