@@ -807,6 +807,7 @@ namespace cxxgpr::persist
             .y_transform = impl->y_transform->clone(),
             .distance_kernel = std::nullopt,
             .distance_with_points = false,
+            .save_id = std::nullopt,
         };
 
         // Construct only the precision-typed state matching precision_kind.

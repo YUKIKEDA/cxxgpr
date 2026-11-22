@@ -6,7 +6,6 @@
 /// transforms while enforcing MAX_JSON_NESTING_DEPTH and schema invariants.
 
 #include "config_json.hpp"
-#include "persist/save_id.hpp"
 
 #include "cxxgpr/core/interval.hpp"
 #include "cxxgpr/kernel/leaves.hpp"
@@ -27,6 +26,7 @@
 
 #include "core/noinline.hpp"
 #include "json_depth.hpp"
+#include "persist/save_id.hpp"
 
 namespace cxxgpr
 {

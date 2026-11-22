@@ -547,7 +547,9 @@ namespace cxxgpr::persist::detail
         nlohmann::json header = nlohmann::json::object();
         if (save_id.has_value())
         {
-            header["__metadata__"] = nlohmann::json{{"cxxgpr.save_id", std::string(*save_id)}};
+            header["__metadata__"] = nlohmann::json{
+                {"cxxgpr.save_id", std::string(*save_id)}
+            };
         }
         std::size_t cursor = 0U;
         std::vector<std::pair<std::size_t, std::size_t>> offsets;

@@ -9,13 +9,12 @@
 
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "safetensors.hpp"
-
-#include <optional>
-#include <string_view>
 
 /// @brief Library-internal helpers of the persistence layer.
 namespace cxxgpr::persist::detail

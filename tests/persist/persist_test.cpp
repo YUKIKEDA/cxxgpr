@@ -2302,29 +2302,38 @@ namespace
             std::filesystem::copy_file(dir_old.path / "config.json", extra_meta.path / "config.json");
             std::filesystem::copy_file(dir_old.path / "model.safetensors", extra_meta.path / "model.safetensors");
             const std::string meta_orig = "\"__metadata__\":{\"cxxgpr.save_id\":\"" + id_old + "\"}";
-            rewrite_safetensors_header_str(extra_meta.path / "model.safetensors", [&](std::string hdr) {
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
                 const std::size_t pos = hdr.find(meta_orig);
                 hdr.replace(
                     pos, meta_orig.size(),
                     "\"__metadata__\":{\"cxxgpr.save_id\":\"" + id_old + "\",\"other_tool\":\"ignored\"}"
                 );
                 return hdr;
-            });
+            }
+            );
             EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(extra_meta.path).has_value());
 
-            rewrite_safetensors_header_str(extra_meta.path / "model.safetensors", [&](std::string hdr) {
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
                 const std::string target = "\"other_tool\":\"ignored\"";
                 hdr.replace(hdr.find(target), target.size(), "\"other_tool\":42");
                 return hdr;
-            });
+            }
+            );
             const auto non_str = cxxgpr::persist::LoadedGpr::load(extra_meta.path);
             ASSERT_FALSE(non_str.has_value());
             EXPECT_EQ(non_str.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
 
-            rewrite_safetensors_header_str(extra_meta.path / "model.safetensors", [&](std::string hdr) {
+            rewrite_safetensors_header_str(
+                extra_meta.path / "model.safetensors", [&](std::string hdr)
+            {
                 hdr.replace(hdr.find(id_old), id_old.size(), "0123456789ABCDEF0123456789ABCDEF");
                 return hdr;
-            });
+            }
+            );
             const auto upper = cxxgpr::persist::LoadedGpr::load(extra_meta.path);
             ASSERT_FALSE(upper.has_value());
             EXPECT_EQ(upper.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);

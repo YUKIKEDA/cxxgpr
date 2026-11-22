@@ -8,13 +8,14 @@
 #pragma once
 
 #include "cxxgpr/core/error.hpp"
-#include "persist/safetensors.hpp"
 
 #include <expected>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+
+#include "persist/safetensors.hpp"
 
 /// @brief Internal persistence helpers for Exact GPR serialization and loading.
 namespace cxxgpr::persist::detail
