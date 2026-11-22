@@ -303,11 +303,11 @@ namespace
             for (int depth = 1; depth < 128; ++depth)
             {
                 Pipeline outer;
-                outer.then(std::move(pipe));
+                outer.then(pipe);
                 pipe = std::move(outer);
 
                 TargetPipeline t_outer;
-                t_outer.then(std::move(tpipe));
+                t_outer.then(tpipe);
                 tpipe = std::move(t_outer);
             }
 

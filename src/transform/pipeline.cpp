@@ -74,6 +74,7 @@ namespace cxxgpr::transform
             catch (...)
             {
                 // Best-effort iterative teardown; remaining links fall back to default vector destruction.
+                return;
             }
         }
     };
@@ -494,7 +495,7 @@ namespace cxxgpr::transform
         };
 
         std::vector<FitFrame> stack;
-        stack.push_back(FitFrame{&steps_, 0U, {}});
+        stack.push_back(FitFrame{.steps = &steps_, .idx = 0U, .fitted = {}});
         stack.back().fitted.reserve(steps_.size());
 
         while (true)
@@ -519,7 +520,7 @@ namespace cxxgpr::transform
             if (const auto* sub_pipe = dynamic_cast<const Pipeline*>(step.get()))
             {
                 const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
-                stack.push_back(FitFrame{&sub_steps, 0U, {}});
+                stack.push_back(FitFrame{.steps = &sub_steps, .idx = 0U, .fitted = {}});
                 stack.back().fitted.reserve(sub_steps.size());
                 continue;
             }
@@ -1031,7 +1032,7 @@ namespace cxxgpr::transform
         };
 
         std::vector<FitFrame> stack;
-        stack.push_back(FitFrame{&steps_, 0U, {}});
+        stack.push_back(FitFrame{.steps = &steps_, .idx = 0U, .fitted = {}});
         stack.back().fitted.reserve(steps_.size());
 
         while (true)
@@ -1056,7 +1057,7 @@ namespace cxxgpr::transform
             if (const auto* sub_pipe = dynamic_cast<const TargetPipeline*>(step.get()))
             {
                 const auto& sub_steps = PipelineAccess::steps(*sub_pipe);
-                stack.push_back(FitFrame{&sub_steps, 0U, {}});
+                stack.push_back(FitFrame{.steps = &sub_steps, .idx = 0U, .fitted = {}});
                 stack.back().fitted.reserve(sub_steps.size());
                 continue;
             }

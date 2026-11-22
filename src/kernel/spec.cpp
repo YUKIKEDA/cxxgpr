@@ -94,6 +94,7 @@ namespace cxxgpr
         catch (...)
         {
             // Best-effort iterative teardown; remaining links fall back to default member destruction.
+            return;
         }
     }
 
