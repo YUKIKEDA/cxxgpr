@@ -789,29 +789,7 @@ namespace cxxgpr
         /// @brief Refreshes `cached_ls` snapshots from current ARD leaf hyperparameters.
         /// @details Populates per-leaf vectors for ARD leaves and clears non-ARD entries so hot-path evaluation reads
         /// contiguous spans without calling `lengthscales()` allocations.
-        void refresh_cached_ls()
-        {
-            cached_ls.resize(leaves.size());
-            for (std::size_t idx = 0; idx < leaves.size(); ++idx)
-            {
-                if (const auto* k = std::get_if<RbfArdKernel>(&leaves[idx]))
-                {
-                    cached_ls[idx] = k->lengthscales();
-                }
-                else if (const auto* km = std::get_if<MaternArdKernel>(&leaves[idx]))
-                {
-                    cached_ls[idx] = km->lengthscales();
-                }
-                else if (const auto* krq = std::get_if<RationalQuadraticArdKernel>(&leaves[idx]))
-                {
-                    cached_ls[idx] = krq->lengthscales();
-                }
-                else
-                {
-                    cached_ls[idx].clear();
-                }
-            }
-        }
+        void refresh_cached_ls() { detail::refresh_cached_ls_entries(leaves, cached_ls); }
 
         /// @brief Validates that populated distance and ARD caches match the shape of point matrix `x`.
         /// @details Checks square distance cache dimensions `(n, n)`, ARD point count `n`, ARD feature count `d`, and
@@ -4066,23 +4044,11 @@ namespace cxxgpr
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::set_params(std::span<const double> params)
     {
-        if (auto cnt = require_count(params.size(), impl_->bindings.size(), "params"); !cnt.has_value())
+        if (auto res = detail::set_leaves_params_atomic(impl_->leaves, params, impl_->bindings.size());
+            !res.has_value())
         {
-            return std::unexpected(std::move(cnt).error());
+            return res;
         }
-        // Stage updates on a temporary vector so failed validation leaves all leaves unchanged.
-        std::vector<KernelLeaf> updated = impl_->leaves;
-        std::size_t offset = 0;
-        for (auto& leaf : updated)
-        {
-            const std::size_t count = detail::leaf_num_params(leaf);
-            if (auto res = detail::leaf_set_params(leaf, params.subspan(offset, count)); !res.has_value())
-            {
-                return res;
-            }
-            offset += count;
-        }
-        impl_->leaves = std::move(updated);
         impl_->refresh_cached_ls();
         return {};
     }

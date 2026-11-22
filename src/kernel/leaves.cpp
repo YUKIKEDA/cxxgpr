@@ -369,19 +369,19 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(cnt).error());
         }
-        // Stage all updated parameters first so any out-of-range dimension leaves lengthscales_ unchanged.
-        std::vector<BoundedParam> updated;
-        updated.reserve(lengthscales_.size());
+        // Validate every dimension before mutating any element so errors leave lengthscales_ unchanged without
+        // allocating a staging vector.
         for (std::size_t i = 0; i < lengthscales_.size(); ++i)
         {
-            auto next = update_param_from_log(lengthscales_[i], params[i]);
-            if (!next.has_value())
+            if (auto next = update_param_from_log(lengthscales_[i], params[i]); !next.has_value())
             {
                 return std::unexpected(std::move(next).error());
             }
-            updated.push_back(*next);
         }
-        lengthscales_ = std::move(updated);
+        for (std::size_t i = 0; i < lengthscales_.size(); ++i)
+        {
+            lengthscales_[i] = *update_param_from_log(lengthscales_[i], params[i]);
+        }
         return {};
     }
 
@@ -552,19 +552,19 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(cnt).error());
         }
-        // Stage all updated parameters first so any error preserves all previous lengthscales.
-        std::vector<BoundedParam> updated;
-        updated.reserve(lengthscales_.size());
+        // Validate every dimension before mutating any element so errors preserve all previous lengthscales without
+        // allocating a staging vector.
         for (std::size_t i = 0; i < lengthscales_.size(); ++i)
         {
-            auto next = update_param_from_log(lengthscales_[i], params[i]);
-            if (!next.has_value())
+            if (auto next = update_param_from_log(lengthscales_[i], params[i]); !next.has_value())
             {
                 return std::unexpected(std::move(next).error());
             }
-            updated.push_back(*next);
         }
-        lengthscales_ = std::move(updated);
+        for (std::size_t i = 0; i < lengthscales_.size(); ++i)
+        {
+            lengthscales_[i] = *update_param_from_log(lengthscales_[i], params[i]);
+        }
         return {};
     }
 
@@ -889,24 +889,23 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(cnt).error());
         }
-        // Stage both lengthscale vector and alpha before moving either into *this.
-        std::vector<BoundedParam> updated;
-        updated.reserve(lengthscales_.size());
+        // Validate all lengthscales and alpha before mutating any member, without allocating a staging vector.
         for (std::size_t i = 0; i < lengthscales_.size(); ++i)
         {
-            auto next = update_param_from_log(lengthscales_[i], params[i]);
-            if (!next.has_value())
+            if (auto next = update_param_from_log(lengthscales_[i], params[i]); !next.has_value())
             {
                 return std::unexpected(std::move(next).error());
             }
-            updated.push_back(*next);
         }
         auto next_a = update_param_from_log(alpha_, params[lengthscales_.size()]);
         if (!next_a.has_value())
         {
             return std::unexpected(std::move(next_a).error());
         }
-        lengthscales_ = std::move(updated);
+        for (std::size_t i = 0; i < lengthscales_.size(); ++i)
+        {
+            lengthscales_[i] = *update_param_from_log(lengthscales_[i], params[i]);
+        }
         alpha_ = *next_a;
         return {};
     }
