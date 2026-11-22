@@ -23,9 +23,22 @@ namespace cxxgpr
 #    pragma GCC diagnostic push
 #    pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
+    /// @brief Copy-constructs a kernel specification sharing child subtrees.
+    /// @param[in] other Source kernel specification.
     KernelSpec::KernelSpec(const KernelSpec& other) = default;
+
+    /// @brief Move-constructs a kernel specification.
+    /// @param[in,out] other Source kernel specification.
     KernelSpec::KernelSpec(KernelSpec&& other) noexcept = default;
+
+    /// @brief Copy-assigns a kernel specification.
+    /// @param[in] other Source kernel specification.
+    /// @return Reference to *this.
     KernelSpec& KernelSpec::operator=(const KernelSpec& other) = default;
+
+    /// @brief Move-assigns a kernel specification.
+    /// @param[in,out] other Source kernel specification.
+    /// @return Reference to *this.
     KernelSpec& KernelSpec::operator=(KernelSpec&& other) noexcept = default;
 #if defined(__GNUC__) && !defined(__clang__)
 #    pragma GCC diagnostic pop
