@@ -3175,7 +3175,10 @@ namespace cxxgpr
             };
             if (!eval_term_square_rec(term, out, scratch, level_idx, ctx))
             {
-                return std::unexpected(std::move(*err));
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
@@ -3381,7 +3384,10 @@ namespace cxxgpr
             };
             if (!eval_term_cross_rec(term, out, scratch, level_idx, ctx))
             {
-                return std::unexpected(std::move(*err));
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
@@ -3696,7 +3702,10 @@ namespace cxxgpr
             };
             if (!eval_grad_rec(term, d_k, param_idx, level_idx, ctx))
             {
-                return std::unexpected(std::move(*err));
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
@@ -4000,7 +4009,10 @@ namespace cxxgpr
             };
             if (!eval_hess_rec(term, d2_k, level_idx, ctx))
             {
-                return std::unexpected(std::move(*err));
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
             }
             return {};
         }
