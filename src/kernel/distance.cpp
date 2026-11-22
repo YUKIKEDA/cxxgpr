@@ -2875,9 +2875,7 @@ namespace cxxgpr
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
             {
                 const T val = static_cast<T>(ck->constant());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    out(row, col) = val;
-                });
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { out(row, col) = val; });
                 return true;
             }
             const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
@@ -3336,9 +3334,7 @@ namespace cxxgpr
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
             {
                 const T val = static_cast<T>(ck->constant());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    d_k(row, col) = val;
-                });
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { d_k(row, col) = val; });
                 return true;
             }
             const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
@@ -3552,9 +3548,7 @@ namespace cxxgpr
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
             {
                 const T val = static_cast<T>(ck->constant());
-                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                    d2_k(row, col) = val;
-                });
+                visit_triangle<T>(store.rows(), uplo, [&](std::size_t row, std::size_t col) { d2_k(row, col) = val; });
                 return true;
             }
             const auto& wk = std::get<WhiteKernel>(leaves[c.leaf_idx]);
@@ -3659,9 +3653,7 @@ namespace cxxgpr
                     {
                         continue;
                     }
-                    if (!eval_term_square_rec(
-                            p.terms[m], store, x, scratch_b, uplo, scratch_c, nested, level_idx, err
-                        ))
+                    if (!eval_term_square_rec(p.terms[m], store, x, scratch_b, uplo, scratch_c, nested, level_idx, err))
                     {
                         return false;
                     }

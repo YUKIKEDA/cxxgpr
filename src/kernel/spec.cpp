@@ -17,6 +17,20 @@
 namespace cxxgpr
 {
 
+// Out-of-line defaulted copy/move members avoid GCC 14 -O3 -Wmaybe-uninitialized false positives
+// on nested std::variant::_M_index in callers after ~KernelSpec() became user-declared.
+#if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+    KernelSpec::KernelSpec(const KernelSpec& other) = default;
+    KernelSpec::KernelSpec(KernelSpec&& other) noexcept = default;
+    KernelSpec& KernelSpec::operator=(const KernelSpec& other) = default;
+    KernelSpec& KernelSpec::operator=(KernelSpec&& other) noexcept = default;
+#if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic pop
+#endif
+
     /// @brief Destroys composite subtrees iteratively using an explicit queue so deep trees do not overflow.
     KernelSpec::~KernelSpec() noexcept
     {

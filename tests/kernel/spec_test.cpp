@@ -12,12 +12,12 @@
 
 #include <gtest/gtest.h>
 
-#include "small_stack.hpp"
-
 #include <array>
 #include <cmath>
 #include <numbers>
 #include <vector>
+
+#include "small_stack.hpp"
 
 namespace
 {
@@ -105,8 +105,7 @@ namespace
     {
         // Spec: REQ-02, REQ-12
         const bool ran = cxxgpr::test_support::run_with_stack_size(
-            cxxgpr::test_support::deep_model_stack_bytes(),
-            []()
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
             cxxgpr::KernelSpec tree(cxxgpr::RbfKernel::create(1.0).value());
             for (int depth = 1; depth < 128; ++depth)

@@ -622,8 +622,7 @@ namespace
     {
         // Spec: REQ-05, REQ-12
         const bool ran = cxxgpr::test_support::run_with_stack_size(
-            cxxgpr::test_support::deep_model_stack_bytes(),
-            []()
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
             const cxxgpr::ScalarDistance slot;
             auto tree = slot.rbf(cxxgpr::RbfKernel::create(1.1).value()).with_points();

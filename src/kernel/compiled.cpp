@@ -1972,7 +1972,9 @@ namespace cxxgpr
                 if (cache->has_dist() && leaf_reads_distances(kl))
                 {
                     return capture_expected(
-                        detail::leaf_grad_dist(kl, cache->dist_view(), d_k, param_idx - leaf.param_begin, uplo, exp_mode),
+                        detail::leaf_grad_dist(
+                            kl, cache->dist_view(), d_k, param_idx - leaf.param_begin, uplo, exp_mode
+                        ),
                         err
                     );
                 }

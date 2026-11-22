@@ -294,8 +294,7 @@ namespace
     {
         // Spec: REQ-04, REQ-12
         const bool ran = cxxgpr::test_support::run_with_stack_size(
-            cxxgpr::test_support::deep_model_stack_bytes(),
-            []()
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
         {
             Pipeline pipe;
             pipe.then(StandardizeInput{});

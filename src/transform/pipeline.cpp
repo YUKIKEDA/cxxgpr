@@ -113,11 +113,13 @@ namespace cxxgpr::transform
             try
             {
                 out.clear();
+
                 struct Frame
                 {
                     const std::vector<std::unique_ptr<BaseT>>* steps;
                     std::size_t idx;
                 };
+
                 std::vector<Frame> stack;
                 stack.push_back(Frame{&root_steps, 0U});
                 while (!stack.empty())
@@ -483,12 +485,14 @@ namespace cxxgpr::transform
         }
         // Maintain a single mutable working buffer and an explicit frame stack so nested pipelines do not recurse.
         std::vector<double> buf(x.begin(), x.end());
+
         struct FitFrame
         {
             const std::vector<std::unique_ptr<UnfittedInputTransform>>* steps;
             std::size_t idx;
             std::vector<std::unique_ptr<FittedInputTransform>> fitted;
         };
+
         std::vector<FitFrame> stack;
         stack.push_back(FitFrame{&steps_, 0U, {}});
         stack.back().fitted.reserve(steps_.size());
@@ -816,10 +820,10 @@ namespace cxxgpr::transform
             return FittedIdentityTarget{}.inverse_transform_mean_into(mean, out);
         }
         return reverse_target_into(
-            flat_steps_, mean, out,
-            [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst)
-        { return step.inverse_transform_mean_into(src, dst); },
-            [](const FittedTargetTransform& step, std::span<double> buf) { return step.inverse_transform_mean(buf); }
+            flat_steps_, mean,
+            out, [](const FittedTargetTransform& step, std::span<const double> src, std::span<double> dst) {
+            return step.inverse_transform_mean_into(src, dst);
+        }, [](const FittedTargetTransform& step, std::span<double> buf) { return step.inverse_transform_mean(buf); }
         );
     }
 
@@ -1018,12 +1022,14 @@ namespace cxxgpr::transform
         }
         // Maintain a single mutable working buffer and an explicit frame stack so nested pipelines do not recurse.
         std::vector<double> buf(y.begin(), y.end());
+
         struct FitFrame
         {
             const std::vector<std::unique_ptr<UnfittedTargetTransform>>* steps;
             std::size_t idx;
             std::vector<std::unique_ptr<FittedTargetTransform>> fitted;
         };
+
         std::vector<FitFrame> stack;
         stack.push_back(FitFrame{&steps_, 0U, {}});
         stack.back().fitted.reserve(steps_.size());

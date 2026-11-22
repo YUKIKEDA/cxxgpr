@@ -93,21 +93,21 @@ namespace cxxgpr
 
         /// @brief Copy-constructs a kernel specification sharing child subtrees.
         /// @param[in] other Source kernel specification.
-        KernelSpec(const KernelSpec& other) = default;
+        KernelSpec(const KernelSpec& other);
 
         /// @brief Move-constructs a kernel specification.
         /// @param[in,out] other Source kernel specification.
-        KernelSpec(KernelSpec&& other) noexcept = default;
+        KernelSpec(KernelSpec&& other) noexcept;
 
         /// @brief Copy-assigns a kernel specification.
         /// @param[in] other Source kernel specification.
         /// @return Reference to *this.
-        KernelSpec& operator=(const KernelSpec& other) = default;
+        KernelSpec& operator=(const KernelSpec& other);
 
         /// @brief Move-assigns a kernel specification.
         /// @param[in,out] other Source kernel specification.
         /// @return Reference to *this.
-        KernelSpec& operator=(KernelSpec&& other) noexcept = default;
+        KernelSpec& operator=(KernelSpec&& other) noexcept;
 
         /// @brief Destroys the expression tree iteratively to bound stack usage on deep trees.
         ~KernelSpec() noexcept;
