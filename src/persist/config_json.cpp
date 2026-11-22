@@ -26,6 +26,7 @@
 
 #include "core/noinline.hpp"
 #include "json_depth.hpp"
+#include "persist/save_id.hpp"
 
 namespace cxxgpr
 {
@@ -2073,9 +2074,12 @@ namespace cxxgpr::persist::detail
     /// @details Encodes kernel AST, likelihood with bounds, jitter policy, unfitted/fitted transforms,
     /// precision/residual flags, exponential math mode, and distance cache policy.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
+    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON text on success, or GprError if any subtree or custom component fails encoding.
     /// @retval GprErrorCode::PersistFailed When custom kernels/transforms are non-persistable or depth exceeds 128.
-    std::expected<std::string, GprError> serialize_config_json(const SaveInput& input)
+    std::expected<std::string, GprError> serialize_config_json(
+        const SaveInput& input, std::optional<std::string_view> save_id
+    )
     {
         // Encode the kernel and transform trees in order; each pass stops at its first error.
         ErrorSlot err;
@@ -2154,6 +2158,10 @@ namespace cxxgpr::persist::detail
             || input.precision_kind == PersistPrecisionKind::MixedReevaluate)
         {
             root["residual"] = res_str;
+        }
+        if (save_id.has_value())
+        {
+            root["save_id"] = std::string(*save_id);
         }
 
         // Refuse to write a document that the loader would reject for its nesting depth, before the recursive
@@ -2257,6 +2265,19 @@ namespace cxxgpr::persist::detail
         }
 
         ParsedConfig cfg;
+        if (root.contains("save_id"))
+        {
+            if (!root["save_id"].is_string())
+            {
+                return std::unexpected(config_err("save_id must be a string"));
+            }
+            const auto& sid = root["save_id"].get_ref<const std::string&>();
+            if (!is_valid_save_id(sid))
+            {
+                return std::unexpected(config_err("save_id must be 32 lowercase hexadecimal digits"));
+            }
+            cfg.save_id = sid;
+        }
         cfg.n = root["n"].get<std::size_t>();
         cfg.d = root["d"].get<std::size_t>();
         if (cfg.n == 0U || (!distance && cfg.d == 0U))
@@ -2450,10 +2471,13 @@ namespace cxxgpr::persist::detail
     /// extra distance section naming the mode and the slots.
     /// @param[in] input Borrowed model configuration and transform references to serialize.
     /// @param[in] kernel Structural description of the kernel of the model.
+    /// @param[in] save_id Optional pairing identifier written as top-level `save_id`.
     /// @return Formatted JSON text, or GprError when a custom component is not persistable.
     /// @retval GprErrorCode::PersistFailed When a custom kernel or transform is non-persistable or nesting is too deep.
     std::expected<std::string, GprError> serialize_distance_config_json(
-        const DistanceSaveInput& input, const cxxgpr::detail::DistanceKernelDesc& kernel
+        const DistanceSaveInput& input,
+        const cxxgpr::detail::DistanceKernelDesc& kernel,
+        std::optional<std::string_view> save_id
     )
     {
         // Encode the kernel and transform trees in order; each pass stops at its first error.
@@ -2556,6 +2580,10 @@ namespace cxxgpr::persist::detail
         if (!res_str.empty())
         {
             root["residual"] = res_str;
+        }
+        if (save_id.has_value())
+        {
+            root["save_id"] = std::string(*save_id);
         }
 
         // Refuse to write a document that the loader would reject for its nesting depth: every composite kernel

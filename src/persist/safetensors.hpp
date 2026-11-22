@@ -14,6 +14,7 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -143,6 +144,10 @@ namespace cxxgpr::persist::detail
             const std::filesystem::path& path
         );
 
+        /// @brief Returns the validated pairing identifier from `__metadata__["cxxgpr.save_id"]`, if present.
+        /// @return Optional 32-lowercase-hex-digit identifier stored in the header metadata.
+        [[nodiscard]] const std::optional<std::string>& save_id() const noexcept { return save_id_; }
+
         /// @brief Returns true if a tensor named name exists in the parsed header index.
         /// @param[in] name Tensor key name to look up.
         /// @return True when name is present in records_.
@@ -177,6 +182,8 @@ namespace cxxgpr::persist::detail
         std::size_t data_base_offset_{0};
         /// @brief Map from tensor name to validated TensorRecord metadata.
         std::unordered_map<std::string, TensorRecord> records_;
+        /// @brief Optional pairing identifier parsed from `__metadata__["cxxgpr.save_id"]`.
+        std::optional<std::string> save_id_;
     };
 
     /// @brief Writes a Safetensors file with an 8-byte aligned JSON header and 8-byte aligned tensor payloads.
@@ -184,10 +191,13 @@ namespace cxxgpr::persist::detail
     /// stored tensor begins on an 8-byte boundary suitable for zero-copy mmap access.
     /// @param[in] path Destination path (typically a temporary staging file before atomic rename).
     /// @param[in] tensors Sequence of tensor descriptors and raw byte spans to serialize.
+    /// @param[in] save_id Optional pairing identifier written under `__metadata__["cxxgpr.save_id"]`.
     /// @return Empty expected on success, or PersistFailed(Io) on stream write failure.
     /// @retval GprErrorCode::PersistFailed When opening or writing the Safetensors file fails.
     [[nodiscard]] std::expected<void, GprError> write_safetensors_file(
-        const std::filesystem::path& path, std::span<const TensorWriteView> tensors
+        const std::filesystem::path& path,
+        std::span<const TensorWriteView> tensors,
+        std::optional<std::string_view> save_id = std::nullopt
     );
 
 }  // namespace cxxgpr::persist::detail

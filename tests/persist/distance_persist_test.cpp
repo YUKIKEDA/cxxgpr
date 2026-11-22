@@ -1255,4 +1255,98 @@ namespace
         check.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>("summary_reevaluate");
     }
 
+    /// @brief Verifies FMT-09 save_id determinism, mismatch rejection, one-sided rejection, and legacy compatibility
+    /// for supplied-distance checkpoints (DistanceOnly and WithPoints).
+    TEST(DistancePersistTest, SaveIdDeterminismMismatchAndLegacyCompatibility)
+    {
+        // Spec: FMT-07, FMT-08, FMT-09
+        const Fixture f_a = make_fixture(26, 6);
+        const Fixture f_b = make_fixture(27, 6);
+        auto m_a = fit_model<cxxgpr::DoublePrecision, cxxgpr::DistanceOnly>(f_a);
+        auto m_b = fit_model<cxxgpr::DoublePrecision, cxxgpr::DistanceOnly>(f_b);
+        ASSERT_TRUE(m_a.has_value());
+        ASSERT_TRUE(m_b.has_value());
+
+        const TempDir dir_a1("dist_save_id_a1");
+        const TempDir dir_a2("dist_save_id_a2");
+        const TempDir dir_b("dist_save_id_b");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*m_a, dir_a1.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*m_a, dir_a2.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*m_b, dir_b.path).has_value());
+
+        auto read_bytes = [](const std::filesystem::path& p)
+        {
+            std::ifstream ifs(p, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+        };
+        const std::string cfg_a1 = read_bytes(dir_a1.path / "config.json");
+        EXPECT_EQ(cfg_a1, read_bytes(dir_a2.path / "config.json"));
+        EXPECT_NE(cfg_a1, read_bytes(dir_b.path / "config.json"));
+
+        // Cross-save pair is rejected with PersistFailed(Tensor).
+        {
+            const TempDir mix("dist_save_id_mix");
+            std::filesystem::copy_file(dir_a1.path / "config.json", mix.path / "config.json");
+            std::filesystem::copy_file(dir_b.path / "model.safetensors", mix.path / "model.safetensors");
+            const auto res = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(mix.path);
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(res.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+
+        // Legacy WithPoints pair without save_id / __metadata__ loads cleanly, while one-sided is rejected.
+        auto m_wp = fit_model<cxxgpr::DoublePrecision, cxxgpr::WithPoints>(f_a);
+        ASSERT_TRUE(m_wp.has_value());
+        const TempDir dir_wp("dist_save_id_wp");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*m_wp, dir_wp.path).has_value());
+        {
+            std::string cfg = read_bytes(dir_wp.path / "config.json");
+            const std::size_t kpos = cfg.find("\"save_id\":");
+            ASSERT_NE(kpos, std::string::npos);
+            const std::size_t lstart = cfg.rfind('\n', kpos);
+            const std::size_t lend = cfg.find('\n', kpos);
+            const bool trailing = (lend != std::string::npos && cfg[lend - 1U] == ',');
+            cfg.erase(lstart, lend - lstart);
+            if (!trailing && lstart > 0U && cfg[lstart - 1U] == ',')
+            {
+                cfg.erase(lstart - 1U, 1U);
+            }
+            std::ofstream ofs(dir_wp.path / "config.json", std::ios::binary | std::ios::trunc);
+            ofs << cfg;
+        }
+        // Only safetensors has cxxgpr.save_id -> rejected.
+        {
+            const auto one_sided = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::WithPoints>::load(dir_wp.path);
+            ASSERT_FALSE(one_sided.has_value());
+            EXPECT_EQ(one_sided.error().persist_error_kind(), cxxgpr::PersistErrorKind::Tensor);
+        }
+        // Strip __metadata__ too -> legacy pair loads cleanly.
+        {
+            const std::string raw = read_bytes(dir_wp.path / "model.safetensors");
+            std::uint64_t hlen = 0U;
+            std::memcpy(&hlen, raw.data(), sizeof(hlen));
+            std::string hstr = raw.substr(8U, static_cast<std::size_t>(hlen));
+            while (!hstr.empty() && hstr.back() == ' ')
+            {
+                hstr.pop_back();
+            }
+            const std::size_t mpos = hstr.find("\"__metadata__\":{");
+            ASSERT_NE(mpos, std::string::npos);
+            const std::size_t mend = hstr.find("},", mpos);
+            ASSERT_NE(mend, std::string::npos);
+            hstr.erase(mpos, (mend + 2U) - mpos);
+            const std::size_t padded = (hstr.size() + 7U) & ~std::size_t{7U};
+            hstr.append(padded - hstr.size(), ' ');
+            const auto new_hlen = static_cast<std::uint64_t>(hstr.size());
+            std::ofstream ofs(dir_wp.path / "model.safetensors", std::ios::binary | std::ios::trunc);
+            ofs.write(reinterpret_cast<const char*>(&new_hlen), sizeof(new_hlen));
+            ofs.write(hstr.data(), static_cast<std::streamsize>(hstr.size()));
+            ofs.write(raw.data() + 8U + hlen, static_cast<std::streamsize>(raw.size() - (8U + hlen)));
+            ofs.flush();
+            ofs.close();
+            const auto leg_wp = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::WithPoints>::load(dir_wp.path);
+            EXPECT_TRUE(leg_wp.has_value()) << (leg_wp.has_value() ? std::string_view{} : leg_wp.error().message());
+        }
+    }
+
 }  // namespace

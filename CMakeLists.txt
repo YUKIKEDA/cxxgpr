@@ -74,6 +74,7 @@ add_library(cxxgpr STATIC
     src/persist/persist.cpp
     src/persist/persist_distance.cpp
     src/persist/safetensors.cpp
+    src/persist/save_id.cpp
     src/precision/refine.cpp
     src/transform/columnwise.cpp
     src/transform/input.cpp
