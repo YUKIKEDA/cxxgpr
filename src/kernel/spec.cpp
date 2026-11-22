@@ -17,6 +17,87 @@
 namespace cxxgpr
 {
 
+// Out-of-line defaulted copy/move members avoid GCC 14 -O3 -Wmaybe-uninitialized false positives
+// on nested std::variant::_M_index in callers after ~KernelSpec() became user-declared.
+#if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+    /// @brief Copy-constructs a kernel specification sharing child subtrees.
+    /// @param[in] other Source kernel specification.
+    KernelSpec::KernelSpec(const KernelSpec& other) = default;
+
+    /// @brief Move-constructs a kernel specification.
+    /// @param[in,out] other Source kernel specification.
+    KernelSpec::KernelSpec(KernelSpec&& other) noexcept = default;
+
+    /// @brief Copy-assigns a kernel specification.
+    /// @param[in] other Source kernel specification.
+    /// @return Reference to *this.
+    KernelSpec& KernelSpec::operator=(const KernelSpec& other) = default;
+
+    /// @brief Move-assigns a kernel specification.
+    /// @param[in,out] other Source kernel specification.
+    /// @return Reference to *this.
+    KernelSpec& KernelSpec::operator=(KernelSpec&& other) noexcept = default;
+#if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic pop
+#endif
+
+    /// @brief Destroys composite subtrees iteratively using an explicit queue so deep trees do not overflow.
+    KernelSpec::~KernelSpec() noexcept
+    {
+        if (!std::holds_alternative<SumNode>(node_) && !std::holds_alternative<ProductNode>(node_))
+        {
+            return;
+        }
+        try
+        {
+            std::vector<std::shared_ptr<const KernelSpec>> work;
+            auto push_unique = [&work](std::shared_ptr<const KernelSpec>& child)
+            {
+                if (child && child.use_count() == 1L)
+                {
+                    work.push_back(std::move(child));
+                }
+                else
+                {
+                    child.reset();
+                }
+            };
+            if (auto* s = std::get_if<SumNode>(&node_))
+            {
+                push_unique(s->lhs);
+                push_unique(s->rhs);
+            }
+            else if (auto* p = std::get_if<ProductNode>(&node_))
+            {
+                push_unique(p->lhs);
+                push_unique(p->rhs);
+            }
+            while (!work.empty())
+            {
+                auto cur = std::move(work.back());
+                work.pop_back();
+                if (const auto* s = std::get_if<SumNode>(&cur->node_))
+                {
+                    push_unique(s->lhs);
+                    push_unique(s->rhs);
+                }
+                else if (const auto* p = std::get_if<ProductNode>(&cur->node_))
+                {
+                    push_unique(p->lhs);
+                    push_unique(p->rhs);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Best-effort iterative teardown; remaining links fall back to default member destruction.
+            return;
+        }
+    }
+
     namespace
     {
 

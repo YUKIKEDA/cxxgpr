@@ -91,6 +91,27 @@ namespace cxxgpr
         /// @param[in] leaf Built-in or custom kernel leaf value.
         /* implicit */ KernelSpec(KernelLeaf leaf);
 
+        /// @brief Copy-constructs a kernel specification sharing child subtrees.
+        /// @param[in] other Source kernel specification.
+        KernelSpec(const KernelSpec& other);
+
+        /// @brief Move-constructs a kernel specification.
+        /// @param[in,out] other Source kernel specification.
+        KernelSpec(KernelSpec&& other) noexcept;
+
+        /// @brief Copy-assigns a kernel specification.
+        /// @param[in] other Source kernel specification.
+        /// @return Reference to *this.
+        KernelSpec& operator=(const KernelSpec& other);
+
+        /// @brief Move-assigns a kernel specification.
+        /// @param[in,out] other Source kernel specification.
+        /// @return Reference to *this.
+        KernelSpec& operator=(KernelSpec&& other) noexcept;
+
+        /// @brief Destroys the expression tree iteratively to bound stack usage on deep trees.
+        ~KernelSpec() noexcept;
+
         /// @brief Constructs a leaf specification from a user-defined CustomKernel.
         /// @details Convenience factory wrapping a CustomKernel inside a leaf KernelSpec.
         /// @param[in] leaf Validated CustomKernel value wrapper.
@@ -176,9 +197,9 @@ namespace cxxgpr
         struct SumNode
         {
             /// @brief Left addend subtree.
-            std::shared_ptr<const KernelSpec> lhs;
+            mutable std::shared_ptr<const KernelSpec> lhs;
             /// @brief Right addend subtree.
-            std::shared_ptr<const KernelSpec> rhs;
+            mutable std::shared_ptr<const KernelSpec> rhs;
         };
 
         /// @brief Internal AST node representing lhs * rhs.
@@ -186,9 +207,9 @@ namespace cxxgpr
         struct ProductNode
         {
             /// @brief Left factor subtree.
-            std::shared_ptr<const KernelSpec> lhs;
+            mutable std::shared_ptr<const KernelSpec> lhs;
             /// @brief Right factor subtree.
-            std::shared_ptr<const KernelSpec> rhs;
+            mutable std::shared_ptr<const KernelSpec> rhs;
         };
 
         /// @brief Empty tag disambiguating internal composite-node construction.

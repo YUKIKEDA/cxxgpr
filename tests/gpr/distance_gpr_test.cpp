@@ -33,6 +33,7 @@
 #endif
 
 #include "allocation_audit.hpp"
+#include "small_stack.hpp"
 
 namespace
 {
@@ -783,7 +784,7 @@ namespace
     struct ProbeOptimizer
     {
         /// @brief The probe evaluates whole objectives only.
-        static constexpr bool uses_change_indices = false;
+        [[maybe_unused]] static constexpr bool uses_change_indices = false;
         /// @brief Destination of the recorded values (owned by the test).
         ProbeRecord* record = nullptr;
 
@@ -1496,7 +1497,7 @@ namespace
     struct AllocationProbeOptimizer
     {
         /// @brief The probe evaluates whole objectives only.
-        static constexpr bool uses_change_indices = false;
+        [[maybe_unused]] static constexpr bool uses_change_indices = false;
         /// @brief Destination of the allocation count (owned by the test).
         std::size_t* allocations = nullptr;
 
@@ -1520,9 +1521,7 @@ namespace
                 v += 0.1;
             }
             {
-                const cxxgpr::test_support::NoAllocationScope scope(
-                    cxxgpr::test_support::AuditMode::CppAndEigen, cxxgpr::test_support::AuditExpectation::Manual
-                );
+                const cxxgpr::test_support::NoAllocationScope scope(cxxgpr::test_support::AuditMode::CppAndEigen);
                 auto value = obj.value_and_gradient_into(theta, grad);
                 *allocations = scope.delta_allocations();
                 if (!value.has_value())
@@ -1539,13 +1538,12 @@ namespace
         }
     };
 
-    /// @brief Verifies that an objective-and-gradient evaluation allocates no more than the coordinate model's.
-    /// @details Requirement: a supplied-distance model allocates no more than the coordinate model with the same
-    /// kernel, precision and size. Both objectives evaluate after warm-up without growing any workspace; the only
-    /// allocations left in either are those of the shared parameter rebinding (CompiledKernel::set_params and
-    /// CompiledDistanceKernel::set_params stage a copy of the leaves, the ARD leaves stage their length scales, and
-    /// the cached length scales are refreshed from a fresh vector), so the counts must be equal. Covers scalar and
-    /// ARD slots, every precision policy and a WithPoints kernel with a coordinate ARD leaf.
+    /// @brief Verifies that objective-and-gradient evaluation allocates zero heap memory for both distance and
+    /// coordinate models after warm-up.
+    /// @details Requirement: after warm-up, evaluating the MLL objective and gradient (including parameter rebinding
+    /// via set_params() and cached lengthscale refresh for built-in leaves) performs zero heap allocations in both
+    /// DistanceGpr and Gpr. Covers scalar and ARD slots, every precision policy, and WithPoints kernels with
+    /// coordinate RbfArd and RationalQuadraticArd leaves.
     TEST(DistanceGprTest, ObjectiveAndGradientAllocateNoMoreThanTheCoordinateModel)
     {
         // Spec: REQ-05, REQ-11, DES-13, DES-21
@@ -1582,6 +1580,8 @@ namespace
             ASSERT_TRUE(coord.has_value());
             auto coord_fitted = coord->fit(data.x, data.n, data.d, data.y);
             ASSERT_TRUE(coord_fitted.has_value()) << coord_fitted.error().message();
+            EXPECT_EQ(dist_allocations, 0U);
+            EXPECT_EQ(coord_allocations, 0U);
             EXPECT_LE(dist_allocations, coord_allocations);
             EXPECT_EQ(dist_allocations, coord_allocations);
         };
@@ -1629,6 +1629,16 @@ namespace
         check.template operator()<cxxgpr::SinglePrecision, cxxgpr::WithPoints>(
             "single with-points", wp_kernel, wp_coord, train
         );
+
+        // Cover WithPoints + coordinate RationalQuadraticArdKernel to guard validate_ard_coord_dims() against
+        // allocating via lengthscales().size() on the hot path.
+        const auto rq_ard = cxxgpr::RationalQuadraticArdKernel::create(coord_scales, 1.5).value();
+        const cxxgpr::DistanceKernel<cxxgpr::WithPoints> wp_rq_kernel =
+            distance_scalar_kernel(slot).with_points() + cxxgpr::KernelSpec(rq_ard);
+        const auto wp_rq_coord = coordinate_scalar_kernel() + cxxgpr::KernelSpec(rq_ard);
+        check.template operator()<cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+            "double with-points rq-ard", wp_rq_kernel, wp_rq_coord, train
+        );
     }
 
     /// @brief Verifies that a non-finite latent variance is reported instead of being clamped to zero.
@@ -1661,6 +1671,41 @@ namespace
             EXPECT_EQ(bad.error().code(), cxxgpr::GprErrorCode::NonFiniteKernelValue);
         }
         EXPECT_TRUE(model->predict(cross, cxxgpr::MatrixRef<double>(data.q.data(), data.m, data.d)).has_value());
+    }
+
+    /// @brief Verifies depth-128 alternating sum/product DistanceGpr fit and predict fit within the small stack budget.
+    TEST(DistanceGprTest, DeepAlternatingTreeFitAndPredictFitInSmallStack)
+    {
+        // Spec: REQ-05, DES-21
+        const bool ran = cxxgpr::test_support::run_with_stack_size(
+            cxxgpr::test_support::deep_model_stack_bytes(), []()
+        {
+            const cxxgpr::ScalarDistance slot;
+            auto tree = slot.rbf(cxxgpr::RbfKernel::create(1.1).value()).with_points();
+            for (int depth = 1; depth < 128; ++depth)
+            {
+                const auto leaf = slot.rbf(cxxgpr::RbfKernel::create(0.9).value()).with_points();
+                tree = (depth % 2 == 0) ? (std::move(tree) + leaf) : (std::move(tree) * leaf);
+            }
+            constexpr std::size_t n = 3U;
+            const std::array<double, 6> x_raw{0.0, 0.5, 1.0, 0.2, 0.4, 0.8};
+            const std::array<double, 3> y_raw{0.3, 0.9, 0.4};
+            const std::array<double, 9> d2_raw{0.0, 0.29, 1.36, 0.29, 0.0, 0.41, 1.36, 0.41, 0.0};
+            const cxxgpr::MatrixRef<double> x(x_raw.data(), n, 2U, n);
+            cxxgpr::DistanceSource src;
+            src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_raw.data(), n, n, n));
+
+            const auto fitted =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+                    tree, cxxgpr::optimizer::Lbfgs().with_max_iterations(2U)
+                )
+                    .fit(src, x, y_raw);
+            ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
+            EXPECT_TRUE(fitted->predict(src, x).has_value());
+            EXPECT_TRUE(fitted->loo_predict().has_value());
+        }
+        );
+        ASSERT_TRUE(ran);
     }
 
 }  // namespace
