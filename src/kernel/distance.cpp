@@ -93,6 +93,116 @@ namespace cxxgpr
             }
         }
 
+        /// @brief Copies matrix triangle (or full matrix) `src` into `dst`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[out] dst Destination matrix view.
+        /// @param[in] src Source matrix view.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void copy_triangle(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                for (std::size_t col = 0U; col < n_cols; ++col)
+                {
+                    std::copy_n(&src(col, col), n_rows - col, &dst(col, col));
+                }
+                return;
+            }
+            if (uplo == Triangle::Upper && n_rows == n_cols)
+            {
+                for (std::size_t col = 0U; col < n_cols; ++col)
+                {
+                    std::copy_n(&src(0U, col), col + 1U, &dst(0U, col));
+                }
+                return;
+            }
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                std::copy_n(&src(0U, col), n_rows, &dst(0U, col));
+            }
+        }
+
+        /// @brief Computes deterministic full symmetric entry sum of lower-triangular matrix `mat`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] mat Square matrix whose lower triangle represents a symmetric matrix.
+        /// @param[in,out] col_partials Per-column partial sum scratch of length `>= mat.rows()`.
+        /// @return Exact symmetric entry sum $\sum_{i,j} \text{mat}_{ij}$.
+        template <KernelScalarConcept T>
+        [[nodiscard]] double lower_sum(MatrixRef<T> mat, std::span<double> col_partials) noexcept
+        {
+            const std::size_t n = mat.rows();
+            const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n >= 128U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                const auto diag = static_cast<double>(mat(col, col));
+                double off = 0.0;
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    off += static_cast<double>(mat(row, col));
+                }
+                col_partials[col] = diag + (2.0 * off);
+            }
+            double total = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                total += col_partials[col];
+            }
+            return total;
+        }
+
+        /// @brief Computes diagonal sum of `mat`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] mat Square matrix.
+        /// @return Diagonal trace $\sum_i \text{mat}_{ii}$.
+        template <KernelScalarConcept T> [[nodiscard]] double lower_diag_sum(MatrixRef<T> mat) noexcept
+        {
+            double total = 0.0;
+            for (std::size_t i = 0U; i < mat.rows(); ++i)
+            {
+                total += static_cast<double>(mat(i, i));
+            }
+            return total;
+        }
+
+        /// @brief Computes deterministic symmetric Frobenius product $\langle A, B \rangle_F$ from lower triangles.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] a First symmetric matrix (lower triangle read).
+        /// @param[in] b Second symmetric matrix (lower triangle read).
+        /// @param[in,out] col_partials Per-column partial sum scratch of length `>= a.rows()`.
+        /// @return Deterministic Frobenius inner product.
+        template <KernelScalarConcept T>
+        [[nodiscard]] double lower_frobenius(MatrixRef<T> a, MatrixRef<T> b, std::span<double> col_partials) noexcept
+        {
+            const std::size_t n = a.rows();
+            const auto n_cols = static_cast<std::ptrdiff_t>(n);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n >= 128U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < n_cols; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                const auto diag = static_cast<double>(a(col, col)) * static_cast<double>(b(col, col));
+                double off = 0.0;
+                for (std::size_t row = col + 1U; row < n; ++row)
+                {
+                    off += static_cast<double>(a(row, col)) * static_cast<double>(b(row, col));
+                }
+                col_partials[col] = diag + (2.0 * off);
+            }
+            double total = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                total += col_partials[col];
+            }
+            return total;
+        }
+
         /// @brief Multiplies `dst *= src` element-wise over the active matrix region `uplo`.
         /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
         /// @tparam T Storage floating-point scalar type.
@@ -1879,10 +1989,49 @@ namespace cxxgpr
             std::size_t param_end = 0;
         };
 
+        /// @brief Sentinel slot index indicating a non-ARD kernel leaf.
+        static constexpr std::size_t k_no_ard_slot = ~std::size_t{0};
+
+        /// @brief Source classification for flattened distance-kernel leaves.
+        enum class LeafKind : std::uint8_t
+        {
+            /// @brief Leaf reading a scalar distance table from `CheckedDistanceStore`.
+            SuppliedScalar,
+            /// @brief Leaf reading a per-dimension packed ARD table from `CheckedDistanceStore`.
+            SuppliedArd,
+            /// @brief Coordinate or constant/white leaf evaluated without a store table.
+            Coord,
+        };
+
+        /// @brief Compact per-leaf metadata indexed directly by `leaf_idx`.
+        struct LeafMeta
+        {
+            /// @brief Distance source kind.
+            LeafKind kind = LeafKind::Coord;
+            /// @brief Slot index inside `CheckedDistanceStore` scalar or ARD slab vectors.
+            std::size_t slot_at = 0U;
+            /// @brief First global parameter index owned by this leaf.
+            std::size_t param_begin = 0U;
+            /// @brief Number of hyperparameters owned by this leaf.
+            std::size_t param_count = 0U;
+            /// @brief Dense ARD slot index in `[0, ard_leaf_count)`, or `k_no_ard_slot`.
+            std::size_t ard_slot = k_no_ard_slot;
+            /// @brief Feature dimension count for ARD leaves, or `0` otherwise.
+            std::size_t ard_dims = 0U;
+        };
+
         /// @brief Flattened leaf kernel instances ordered by pre-order AST traversal.
         std::vector<KernelLeaf> leaves;
         /// @brief Per-leaf cached ARD lengthscale vectors (empty for non-ARD leaves) to avoid allocation in loops.
         std::vector<std::vector<double>> cached_ls;
+        /// @brief Compact per-leaf metadata ordered identically to `leaves`.
+        std::vector<LeafMeta> leaf_meta;
+        /// @brief Feature dimension count per leaf (`0` for non-ARD leaves), indexed by `leaf_idx`.
+        std::vector<std::size_t> leaf_dims;
+        /// @brief Total number of ARD leaves (both supplied-ARD and coordinate ARD).
+        std::size_t ard_leaf_count = 0U;
+        /// @brief Maximum adjoint weight buffer depth required for `ProductTerm` trees.
+        std::size_t weighted_depth = 0U;
         /// @brief Mapping from flattened hyperparameter indices to leaf index and local parameter offset.
         std::vector<ParameterBinding> bindings;
         /// @brief Deduplicated supplied-distance slot descriptors required by this compiled kernel.
@@ -1908,6 +2057,10 @@ namespace cxxgpr
         Impl(const Impl& other) :
             leaves(other.leaves),
             cached_ls(other.cached_ls),
+            leaf_meta(other.leaf_meta),
+            leaf_dims(other.leaf_dims),
+            ard_leaf_count(other.ard_leaf_count),
+            weighted_depth(other.weighted_depth),
             bindings(other.bindings),
             slots(other.slots),
             num_scalar_slots(other.num_scalar_slots),
@@ -3124,6 +3277,8 @@ namespace cxxgpr
         /// @param[in,out] nested Multi-level workspace for @c CustomKernel distance buffers.
         /// @param[in] level_idx Current nesting depth inside @p nested.
         /// @param[out] err Populated with the error on failure.
+        /// @param[out] ard_s2_buf Optional packed buffer capturing forward ARD $s^2$ values.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-slot capture flags updated on write.
         /// @return True on success, false after writing @p err.
         [[nodiscard]] CXXGPR_NOINLINE bool eval_square_leaf_step(
             const Term& term,
@@ -3133,7 +3288,9 @@ namespace cxxgpr
             Triangle uplo,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
-            std::optional<GprError>& err
+            std::optional<GprError>& err,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
@@ -3143,6 +3300,22 @@ namespace cxxgpr
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
+                const std::size_t n = store.rows();
+                const std::size_t per_dim = (n * (n + 1U)) / 2U;
+                const std::size_t slot = leaf_meta[a->leaf_idx].ard_slot;
+                if (slot < ard_s2_ready.size() && per_dim > 0U && (ard_s2_buf.size() / per_dim) > slot)
+                {
+                    std::span<T> out_s2 = ard_s2_buf.subspan(slot * per_dim, per_dim);
+                    const std::span<const T> packed(store.impl_->ard_data[a->slot_at]);
+                    auto res = detail::leaf_apply_ard_packed(
+                        leaves[a->leaf_idx], cached_ls[a->leaf_idx], packed, n, out, uplo, exp_mode, out_s2
+                    );
+                    if (res.has_value())
+                    {
+                        ard_s2_ready[slot] = 1U;
+                    }
+                    return capture_expected(std::move(res), err);
+                }
                 eval_supplied_ard_square(*a, store, out, uplo);
                 return true;
             }
@@ -3160,9 +3333,20 @@ namespace cxxgpr
                     fill_square_sq_dist(*x, dist_buf);
                     return capture_expected(custom->template term<T>().apply(dist_buf.as_ref(), out, uplo), err);
                 }
-                return capture_expected(
-                    detail::leaf_apply_points(kl, *x, out, uplo, exp_mode, cached_ls[c.leaf_idx]), err
-                );
+                std::span<T> out_s2{};
+                const std::size_t n = x->rows();
+                const std::size_t per_dim = (n * (n + 1U)) / 2U;
+                const std::size_t slot = leaf_meta[c.leaf_idx].ard_slot;
+                if (slot < ard_s2_ready.size() && per_dim > 0U && (ard_s2_buf.size() / per_dim) > slot)
+                {
+                    out_s2 = ard_s2_buf.subspan(slot * per_dim, per_dim);
+                }
+                auto res = detail::leaf_apply_points(kl, *x, out, uplo, exp_mode, cached_ls[c.leaf_idx], out_s2);
+                if (res.has_value() && !out_s2.empty())
+                {
+                    ard_s2_ready[slot] = 1U;
+                }
+                return capture_expected(std::move(res), err);
             }
             if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c.leaf_idx]))
             {
@@ -3189,6 +3373,10 @@ namespace cxxgpr
             Triangle uplo;
             /// @brief Multi-level workspace for nested composite nodes.
             NestedBuffers<T>& nested;
+            /// @brief Optional packed forward ARD $s^2$ storage.
+            std::span<T> ard_s2_buf;
+            /// @brief Optional readiness flags for `ard_s2_buf`.
+            std::span<std::uint8_t> ard_s2_ready;
             /// @brief Out-of-line error slot.
             std::optional<GprError>& err;
         };
@@ -3210,7 +3398,10 @@ namespace cxxgpr
         {
             if (is_leaf_term(term))
             {
-                return eval_square_leaf_step(term, ctx.store, ctx.x, out, ctx.uplo, ctx.nested, level_idx, ctx.err);
+                return eval_square_leaf_step(
+                    term, ctx.store, ctx.x, out, ctx.uplo, ctx.nested, level_idx, ctx.err, ctx.ard_s2_buf,
+                    ctx.ard_s2_ready
+                );
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
@@ -3272,6 +3463,8 @@ namespace cxxgpr
         /// @param[in,out] scratch Leaf scratch matrix.
         /// @param[in,out] nested Multi-level workspace for nested composite nodes.
         /// @param[in] level_idx Current recursion depth into @p nested.
+        /// @param[out] ard_s2_buf Optional packed buffer capturing forward ARD $s^2$ values.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-slot readiness flags updated on write.
         /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
         [[nodiscard]] std::expected<void, GprError> eval_term_square(
             const Term& term,
@@ -3281,15 +3474,23 @@ namespace cxxgpr
             Triangle uplo,
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
-            std::size_t level_idx
+            std::size_t level_idx,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
+            if (!ard_s2_ready.empty())
+            {
+                std::ranges::fill(ard_s2_ready, std::uint8_t{0});
+            }
             std::optional<GprError> err;
             const SquareEvalCtx ctx{
                 .store = store,
                 .x = x,
                 .uplo = uplo,
                 .nested = nested,
+                .ard_s2_buf = ard_s2_buf,
+                .ard_s2_ready = ard_s2_ready,
                 .err = err,
             };
             if (!eval_term_square_rec(term, out, scratch, level_idx, ctx))
@@ -3300,6 +3501,549 @@ namespace cxxgpr
                 );
             }
             return {};
+        }
+
+        /// @brief Computes parameter index range `[begin, end)` for any compiled distance AST node.
+        /// @param[in] term Compiled AST node.
+        /// @return Pair `{param_begin, param_end}`.
+        [[nodiscard]] static std::pair<std::size_t, std::size_t> param_range_of(const Term& term)
+        {
+            return std::visit(
+                [](const auto& n) -> std::pair<std::size_t, std::size_t>
+            {
+                using NodeT = std::decay_t<decltype(n)>;
+                if constexpr (std::is_same_v<NodeT, SumTerm> || std::is_same_v<NodeT, ProductTerm>)
+                {
+                    return {n.param_begin, n.param_end};
+                }
+                else
+                {
+                    return {n.param_begin, n.param_begin + n.param_count};
+                }
+            }, term
+            );
+        }
+
+        /// @brief Populates `leaf_meta`, `leaf_dims`, `ard_leaf_count`, and `weighted_depth` after `compile_node`.
+        void build_leaf_metadata()
+        {
+            leaf_meta.assign(leaves.size(), LeafMeta{});
+            leaf_dims.assign(leaves.size(), 0U);
+            ard_leaf_count = 0U;
+
+            std::vector<const Term*> stack;
+            stack.push_back(&root);
+            while (!stack.empty())
+            {
+                const Term* t = stack.back();
+                stack.pop_back();
+                if (const auto* s = std::get_if<SuppliedScalarRef>(t))
+                {
+                    leaf_meta[s->leaf_idx] = LeafMeta{
+                        .kind = LeafKind::SuppliedScalar,
+                        .slot_at = s->slot_at,
+                        .param_begin = s->param_begin,
+                        .param_count = s->param_count,
+                        .ard_slot = k_no_ard_slot,
+                        .ard_dims = 0U,
+                    };
+                }
+                else if (const auto* a = std::get_if<SuppliedArdRef>(t))
+                {
+                    const std::size_t slot = ard_leaf_count++;
+                    leaf_meta[a->leaf_idx] = LeafMeta{
+                        .kind = LeafKind::SuppliedArd,
+                        .slot_at = a->slot_at,
+                        .param_begin = a->param_begin,
+                        .param_count = a->param_count,
+                        .ard_slot = slot,
+                        .ard_dims = a->dims,
+                    };
+                    leaf_dims[a->leaf_idx] = a->dims;
+                }
+                else if (const auto* c = std::get_if<CoordLeafRef>(t))
+                {
+                    std::size_t slot = k_no_ard_slot;
+                    std::size_t dims = 0U;
+                    if (!cached_ls[c->leaf_idx].empty())
+                    {
+                        slot = ard_leaf_count++;
+                        dims = cached_ls[c->leaf_idx].size();
+                    }
+                    leaf_meta[c->leaf_idx] = LeafMeta{
+                        .kind = LeafKind::Coord,
+                        .slot_at = 0U,
+                        .param_begin = c->param_begin,
+                        .param_count = c->param_count,
+                        .ard_slot = slot,
+                        .ard_dims = dims,
+                    };
+                    leaf_dims[c->leaf_idx] = dims;
+                }
+                else if (const auto* sum = std::get_if<SumTerm>(t))
+                {
+                    for (const auto& child : sum->terms)
+                    {
+                        stack.push_back(&child);
+                    }
+                }
+                else if (const auto* prod = std::get_if<ProductTerm>(t))
+                {
+                    for (const auto& child : prod->terms)
+                    {
+                        stack.push_back(&child);
+                    }
+                }
+            }
+
+            // Compute maximum ProductTerm nesting depth for weighted adjoint buffers.
+            struct DepthFrame
+            {
+                const Term* node;
+                std::size_t depth;
+            };
+
+            std::vector<DepthFrame> dstack;
+            dstack.push_back({&root, 0U});
+            std::size_t mx = 0U;
+            while (!dstack.empty())
+            {
+                const DepthFrame cur = dstack.back();
+                dstack.pop_back();
+                mx = std::max(mx, cur.depth);
+                if (const auto* sum = std::get_if<SumTerm>(cur.node))
+                {
+                    for (const auto& child : sum->terms)
+                    {
+                        dstack.push_back({&child, cur.depth});
+                    }
+                }
+                else if (const auto* prod = std::get_if<ProductTerm>(cur.node))
+                {
+                    const auto [pb, pe] = param_range_of(*cur.node);
+                    const std::size_t next_d = (pe > pb) ? (cur.depth + 1U) : cur.depth;
+                    mx = std::max(mx, next_d);
+                    for (const auto& child : prod->terms)
+                    {
+                        dstack.push_back({&child, next_d});
+                    }
+                }
+            }
+            weighted_depth = mx;
+        }
+
+        /// @brief Evaluates one distance-kernel leaf incrementally with optional non-destructive ARD $s^2$ state.
+        /// @param[in] leaf_idx Zero-based leaf index into `leaves`.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` coordinate leaves.
+        /// @param[out] out Destination square matrix view `(n, n)`.
+        /// @param[in] uplo Active matrix triangle to populate.
+        /// @param[in,out] nested Pre-allocated nested workspace for custom leaves.
+        /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache buffer for `leaf_idx`.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates since last full rebuild.
+        /// @param[in] commit_s2 True to commit updates into `ard_s2_cache`/`prev_ls`; false for trials.
+        /// @return Empty expected on success, or error on invalid inputs or evaluation failure.
+        [[nodiscard]] std::expected<void, GprError> eval_leaf_incremental(
+            std::size_t leaf_idx,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps,
+            bool commit_s2
+        ) const
+        {
+            const LeafMeta& meta = leaf_meta[leaf_idx];
+            const KernelLeaf& kl = leaves[leaf_idx];
+            if (meta.kind == LeafKind::SuppliedArd)
+            {
+                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                return detail::leaf_apply_ard_incremental(
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), out, uplo, exp_mode, ard_s2_cache,
+                    prev_ls, s2_valid, inc_steps, commit_s2
+                );
+            }
+            if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
+            {
+                if (!x.has_value())
+                {
+                    return std::unexpected(GprError::unsupported_kernel_operation("coordinate matrix required"));
+                }
+                return detail::leaf_apply_ard_incremental(
+                    kl, cached_ls[leaf_idx], *x, {}, store.rows(), out, uplo, exp_mode, ard_s2_cache, prev_ls, s2_valid,
+                    inc_steps, commit_s2
+                );
+            }
+            if (meta.kind == LeafKind::SuppliedScalar)
+            {
+                const MatrixRef<T> dist(store.impl_->scalar_tables[meta.slot_at].data(), store.rows(), store.cols());
+                return detail::leaf_apply_dist(kl, dist, out, uplo, exp_mode);
+            }
+            std::optional<GprError> err;
+            const CoordLeafRef ref{
+                .leaf_idx = leaf_idx, .param_begin = meta.param_begin, .param_count = meta.param_count
+            };
+            if (!eval_square_leaf_step(Term(ref), store, x, out, uplo, nested, 0U, err))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err) : GprError::unsupported_kernel_operation("leaf evaluation failed")
+                );
+            }
+            return {};
+        }
+
+        /// @brief Commits accepted lengthscales of `leaf_idx` to its packed ARD $s^2$ cache; no-op for non-ARD leaves.
+        /// @param[in] leaf_idx Zero-based leaf index into `leaves`.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` coordinate leaves.
+        /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache buffer for `leaf_idx`.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates since last full rebuild.
+        /// @return Empty expected on success, or error on invalid inputs or commit failure.
+        [[nodiscard]] std::expected<void, GprError> commit_leaf_ard_s2_impl(
+            std::size_t leaf_idx,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps
+        ) const
+        {
+            const LeafMeta& meta = leaf_meta[leaf_idx];
+            const KernelLeaf& kl = leaves[leaf_idx];
+            if (meta.kind == LeafKind::SuppliedArd)
+            {
+                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                return detail::leaf_commit_ard_s2(
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), ard_s2_cache, prev_ls, s2_valid,
+                    inc_steps
+                );
+            }
+            if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
+            {
+                if (!x.has_value())
+                {
+                    return std::unexpected(GprError::unsupported_kernel_operation("coordinate matrix required"));
+                }
+                return detail::leaf_commit_ard_s2(
+                    kl, cached_ls[leaf_idx], *x, {}, store.rows(), ard_s2_cache, prev_ls, s2_valid, inc_steps
+                );
+            }
+            return {};
+        }
+
+        /// @brief Recursively combines precomputed per-leaf Gram matrices into `out` according to `term`.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] leaf_grams Precomputed leaf Gram matrix views indexed by `leaf_idx`.
+        /// @param[out] out Destination composite Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to combine.
+        /// @param[in,out] scratch Reusable scratch matrix view.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
+        /// @param[in] level_idx Current nesting depth inside `nested`.
+        /// @param[out] err Out-of-line error slot populated on failure.
+        /// @return True on success, false after writing `err`.
+        [[nodiscard]] bool eval_combine_term_rec(
+            const Term& term,
+            std::span<const MatrixRef<T>> leaf_grams,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx,
+            std::optional<GprError>& err
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                const std::size_t idx = std::visit(
+                    [](const auto& n) -> std::size_t
+                {
+                    using NodeT = std::decay_t<decltype(n)>;
+                    if constexpr (std::is_same_v<NodeT, SumTerm> || std::is_same_v<NodeT, ProductTerm>)
+                    {
+                        return 0U;
+                    }
+                    else
+                    {
+                        return n.leaf_idx;
+                    }
+                }, term
+                );
+                copy_triangle(out, leaf_grams[idx], uplo);
+                return true;
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            if (terms.empty())
+            {
+                return fail_empty_composite(err);
+            }
+            if (!eval_combine_term_rec(terms[0], leaf_grams, out, uplo, scratch, nested, level_idx, err))
+            {
+                return false;
+            }
+            for (std::size_t k = 1U; k < terms.size(); ++k)
+            {
+                MatrixMut<T> rhs = scratch;
+                std::size_t sub_level = level_idx;
+                if (!is_leaf_term(terms[k]))
+                {
+                    if (!ensure_nested_ok(nested, level_idx, out.rows(), out.cols(), err))
+                    {
+                        return false;
+                    }
+                    rhs = nested.level(level_idx, out.rows(), out.cols());
+                    sub_level = level_idx + 1U;
+                }
+                if (!eval_combine_term_rec(terms[k], leaf_grams, rhs, uplo, scratch, nested, sub_level, err))
+                {
+                    return false;
+                }
+                if (is_sum)
+                {
+                    add_into(out, rhs.as_ref(), uplo);
+                }
+                else
+                {
+                    mul_into(out, rhs.as_ref(), uplo);
+                }
+            }
+            return true;
+        }
+
+        /// @brief Invariant context for single-pass adjoint contraction across compiled distance ASTs.
+        struct WalkDistCtx
+        {
+            /// @brief Validated supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional coordinate matrix for `WithPoints` trees.
+            std::optional<MatrixRef<T>> x;
+            /// @brief Output gradient vector of length `bindings.size()`.
+            std::span<double> out_grads;
+            /// @brief First reusable `n x n` scratch matrix.
+            MatrixMut<T> scratch_a;
+            /// @brief Second reusable `n x n` scratch matrix.
+            MatrixMut<T> scratch_b;
+            /// @brief Nested buffer pool for sibling factor evaluation.
+            NestedBuffers<T>& nested;
+            /// @brief Work pool for product adjoint effective weights.
+            NestedBuffers<T>& work_bufs;
+            /// @brief Per-column partial sum scratch for deterministic reductions.
+            std::span<double> col_partials;
+            /// @brief Optional forward-captured ARD $s^2$ storage.
+            std::span<const T> ard_s2_buf;
+            /// @brief Optional readiness flags into `ard_s2_buf`.
+            std::span<const std::uint8_t> ard_s2_ready;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Contracts one leaf derivative against `weight` without returning `std::expected` on stack.
+        /// @param[in] term Leaf AST node to contract.
+        /// @param[in] weight Incoming symmetric adjoint matrix `weight` (lower triangle read).
+        /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
+        /// @return True on success, false after recording `ctx.err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_leaf(
+            const Term& term, const MatrixRef<T>& weight, const WalkDistCtx& ctx
+        ) const
+        {
+            const std::size_t n = ctx.store.rows();
+            const std::size_t per_dim = (n * (n + 1U)) / 2U;
+            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            {
+                const KernelLeaf& kl = leaves[s->leaf_idx];
+                const MatrixRef<T> dist(ctx.store.impl_->scalar_tables[s->slot_at].data(), n, n);
+                const std::span<double> out_slice = ctx.out_grads.subspan(s->param_begin, s->param_count);
+                if (std::holds_alternative<CustomKernel>(kl))
+                {
+                    for (std::size_t p = 0U; p < s->param_count; ++p)
+                    {
+                        if (!capture_expected(
+                                detail::leaf_grad_dist(kl, dist, ctx.scratch_a, p, Triangle::Lower, exp_mode), ctx.err
+                            ))
+                        {
+                            return false;
+                        }
+                        out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+                    }
+                    return true;
+                }
+                auto res = detail::leaf_iso_weighted_grads(
+                    kl, MatrixRef<T>{}, dist, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                );
+                if (!res.has_value())
+                {
+                    ctx.err = std::move(res).error();
+                    return false;
+                }
+                return true;
+            }
+            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
+            {
+                const KernelLeaf& kl = leaves[a->leaf_idx];
+                const std::span<const T> packed(ctx.store.impl_->ard_data[a->slot_at]);
+                const std::span<double> out_slice = ctx.out_grads.subspan(a->param_begin, a->param_count);
+                std::span<const T> precomputed_s2{};
+                const std::size_t slot = leaf_meta[a->leaf_idx].ard_slot;
+                if (slot < ctx.ard_s2_ready.size() && ctx.ard_s2_ready[slot] != 0U && per_dim > 0U
+                    && (ctx.ard_s2_buf.size() / per_dim) > slot)
+                {
+                    precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
+                }
+                auto res = detail::leaf_ard_weighted_grads(
+                    kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, packed, weight, ctx.scratch_a, ctx.col_partials,
+                    out_slice, false, exp_mode, precomputed_s2
+                );
+                if (!res.has_value())
+                {
+                    ctx.err = std::move(res).error();
+                    return false;
+                }
+                return true;
+            }
+            const auto& c = std::get<CoordLeafRef>(term);
+            const KernelLeaf& kl = leaves[c.leaf_idx];
+            const std::span<double> out_slice = ctx.out_grads.subspan(c.param_begin, c.param_count);
+            if (const auto* ck = std::get_if<ConstantKernel>(&kl))
+            {
+                out_slice[0] = ck->constant() * lower_sum(weight, ctx.col_partials);
+                return true;
+            }
+            if (const auto* wk = std::get_if<WhiteKernel>(&kl))
+            {
+                out_slice[0] = wk->variance() * lower_diag_sum(weight);
+                return true;
+            }
+            if (!ctx.x.has_value())
+            {
+                ctx.err = GprError::unsupported_kernel_operation("kernel requires point coordinate matrix x");
+                return false;
+            }
+            if (!cached_ls[c.leaf_idx].empty())
+            {
+                std::span<const T> precomputed_s2{};
+                const std::size_t slot = leaf_meta[c.leaf_idx].ard_slot;
+                if (slot < ctx.ard_s2_ready.size() && ctx.ard_s2_ready[slot] != 0U && per_dim > 0U
+                    && (ctx.ard_s2_buf.size() / per_dim) > slot)
+                {
+                    precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
+                }
+                auto res = detail::leaf_ard_weighted_grads(
+                    kl, cached_ls[c.leaf_idx], *ctx.x, {}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false,
+                    exp_mode, precomputed_s2
+                );
+                if (!res.has_value())
+                {
+                    ctx.err = std::move(res).error();
+                    return false;
+                }
+                return true;
+            }
+            if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
+                || std::holds_alternative<PeriodicKernel>(kl) || std::holds_alternative<RationalQuadraticKernel>(kl)
+                || std::holds_alternative<LinearKernel>(kl))
+            {
+                auto res = detail::leaf_iso_weighted_grads(
+                    kl, *ctx.x, MatrixRef<T>{}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                );
+                if (!res.has_value())
+                {
+                    ctx.err = std::move(res).error();
+                    return false;
+                }
+                return true;
+            }
+            const auto& custom = std::get<CustomKernel>(kl);
+            if (!ensure_nested_ok(ctx.nested, 0U, n, n, ctx.err))
+            {
+                return false;
+            }
+            auto dist_buf = ctx.nested.level(0U, n, n);
+            fill_square_sq_dist(*ctx.x, dist_buf);
+            for (std::size_t p = 0U; p < c.param_count; ++p)
+            {
+                if (!capture_expected(
+                        custom.template term<T>().grad(dist_buf.as_ref(), ctx.scratch_a, p, Triangle::Lower), ctx.err
+                    ))
+                {
+                    return false;
+                }
+                out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+            }
+            return true;
+        }
+
+        /// @brief Recursive body of `walk_weighted_dist` propagating effective adjoint weights top-down.
+        /// @param[in] term Compiled AST node being walked.
+        /// @param[in] weight Incoming effective adjoint matrix applied to `term`.
+        /// @param[in] work_cursor Next available level inside `ctx.work_bufs`.
+        /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
+        /// @return True on success, false after recording `ctx.err`.
+        [[nodiscard]] bool walk_weighted_dist_rec(
+            const Term& term, const MatrixRef<T>& weight, std::size_t work_cursor, const WalkDistCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return walk_weighted_leaf(term, weight, ctx);
+            }
+            if (const auto* s = std::get_if<SumTerm>(&term))
+            {
+                return std::ranges::all_of(s->terms, [&](const auto& child) {
+                    return walk_weighted_dist_rec(child, weight, work_cursor, ctx);
+                });
+            }
+            const auto& p = std::get<ProductTerm>(term);
+            const std::size_t n = ctx.store.rows();
+            const SquareEvalCtx sctx{
+                .store = ctx.store,
+                .x = ctx.x,
+                .uplo = Triangle::Lower,
+                .nested = ctx.nested,
+                .ard_s2_buf = {},
+                .ard_s2_ready = {},
+                .err = ctx.err,
+            };
+            for (std::size_t m = 0U; m < p.terms.size(); ++m)
+            {
+                const auto [cb, ce] = param_range_of(p.terms[m]);
+                if (cb == ce)
+                {
+                    continue;
+                }
+                if (work_cursor >= ctx.work_bufs.depth() || ctx.work_bufs.rows() < n || ctx.work_bufs.cols() < n)
+                {
+                    ctx.err = GprError::workspace_too_small();
+                    return false;
+                }
+                auto w_eff = ctx.work_bufs.level(work_cursor, n, n);
+                copy_triangle(w_eff, weight, Triangle::Lower);
+                for (std::size_t k = 0U; k < p.terms.size(); ++k)
+                {
+                    if (k == m)
+                    {
+                        continue;
+                    }
+                    if (!eval_term_square_rec(p.terms[k], ctx.scratch_a, ctx.scratch_b, 0U, sctx))
+                    {
+                        return false;
+                    }
+                    mul_into(w_eff, ctx.scratch_a.as_ref(), Triangle::Lower);
+                }
+                if (!walk_weighted_dist_rec(p.terms[m], w_eff.as_ref(), work_cursor + 1U, ctx))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /// @brief Evaluates one cross leaf term out-of-line so recursive frames stay free of `std::expected`.
@@ -3766,6 +4510,8 @@ namespace cxxgpr
                 .x = ctx.x,
                 .uplo = ctx.uplo,
                 .nested = ctx.nested,
+                .ard_s2_buf = {},
+                .ard_s2_ready = {},
                 .err = ctx.err,
             };
             for (std::size_t m = 0; m < p.terms.size(); ++m)
@@ -3993,6 +4739,8 @@ namespace cxxgpr
                 .x = ctx.x,
                 .uplo = ctx.uplo,
                 .nested = ctx.nested,
+                .ard_s2_buf = {},
+                .ard_s2_ready = {},
                 .err = ctx.err,
             };
             if (owner_i == owner_j)
@@ -4879,6 +5627,323 @@ namespace cxxgpr
             }
             return kernel.impl_->eval_fill_diag(kernel.impl_->root, n, x, out, scratch, 0);
         }
+
+        /// @brief Returns the number of flattened kernel leaves in @p kernel.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @return Flattened leaf count.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::size_t num_leaves(const CompiledDistanceKernel<T>& kernel) noexcept
+        {
+            return kernel.impl_->leaves.size();
+        }
+
+        /// @brief Returns the number of ARD kernel leaves in @p kernel.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @return Count of ARD kernel leaves.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::size_t ard_leaf_count(const CompiledDistanceKernel<T>& kernel) noexcept
+        {
+            return kernel.impl_->ard_leaf_count;
+        }
+
+        /// @brief Returns per-leaf ARD dimension counts (`0` for non-ARD leaves).
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @return Span of per-leaf ARD coordinate/slot counts indexed by leaf index.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::span<const std::size_t> ard_dims_per_leaf(
+            const CompiledDistanceKernel<T>& kernel
+        ) noexcept
+        {
+            return kernel.impl_->leaf_dims;
+        }
+
+        /// @brief Returns the required `NestedBuffers` depth for single-pass adjoint gradient contraction.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @return Peak workspace buffer depth required by product adjoint walks.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::size_t weighted_depth(const CompiledDistanceKernel<T>& kernel) noexcept
+        {
+            return kernel.impl_->weighted_depth;
+        }
+
+        /// @brief Maps global hyperparameter index @p param_idx to its owning leaf index.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] param_idx Zero-based global hyperparameter index.
+        /// @return Zero-based owning leaf index, or index-out-of-range error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<std::size_t, GprError> leaf_index_for_param(
+            const CompiledDistanceKernel<T>& kernel, std::size_t param_idx
+        )
+        {
+            if (param_idx >= kernel.impl_->bindings.size())
+            {
+                return std::unexpected(GprError::index_out_of_range("kernel parameter index out of range"));
+            }
+            return kernel.impl_->bindings[param_idx].leaf_id;
+        }
+
+        /// @brief Evaluates @p kernel while capturing lower-packed ARD $s^2$ buffers into @p ard_s2_buf.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+        /// @param[out] out Destination square composite Gram matrix.
+        /// @param[in] uplo Active matrix region to write.
+        /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n, n)`.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[out] ard_s2_buf Contiguous packed storage receiving forward ARD $s^2$ buffers.
+        /// @param[in,out] ard_s2_ready Per-ARD-slot flags updated to `1` on successful capture.
+        /// @return Empty expected on success, or validation/workspace/evaluation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> apply_capturing_s2(
+            const CompiledDistanceKernel<T>& kernel,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::span<T> ard_s2_buf,
+            std::span<std::uint8_t> ard_s2_ready
+        )
+        {
+            if (out.data() == scratch.data() && !out.is_empty())
+            {
+                return std::unexpected(GprError::invalid_config("scratch buffer aliases out"));
+            }
+            if (auto vs = kernel.impl_->validate_store(store, true, out.as_ref()); !vs.has_value())
+            {
+                return vs;
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, store.rows()); !vp.has_value())
+            {
+                return vp;
+            }
+            return kernel.impl_->eval_term_square(
+                kernel.impl_->root, store, x, out, uplo, scratch, nested, 0U, ard_s2_buf, ard_s2_ready
+            );
+        }
+
+        /// @brief Contracts `<weight_lower, dK/dtheta_p>_F` across all parameters in one adjoint walk.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+        /// @param[in] weight_lower Symmetric adjoint matrix (lower triangle read).
+        /// @param[out] out_grads Destination span receiving parameter gradient inner products.
+        /// @param[in,out] scratch_a First non-aliasing square scratch matrix `(n, n)`.
+        /// @param[in,out] scratch_b Second non-aliasing square scratch matrix `(n, n)`.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool for custom leaves.
+        /// @param[in,out] work_bufs Pre-allocated product adjoint buffer pool.
+        /// @param[in,out] col_partials Per-column partial sum buffer of length `>= n`.
+        /// @param[in] ard_s2_buf Optional forward-captured ARD $s^2$ storage.
+        /// @param[in] ard_s2_ready Optional per-ARD-slot capture readiness flags.
+        /// @return Empty expected on success, or validation/workspace/evaluation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> weighted_grads(
+            const CompiledDistanceKernel<T>& kernel,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixRef<T> weight_lower,
+            std::span<double> out_grads,
+            MatrixMut<T> scratch_a,
+            MatrixMut<T> scratch_b,
+            NestedBuffers<T>& nested,
+            NestedBuffers<T>& work_bufs,
+            std::span<double> col_partials,
+            std::span<const T> ard_s2_buf,
+            std::span<const std::uint8_t> ard_s2_ready
+        )
+        {
+            if (out_grads.size() != kernel.impl_->bindings.size())
+            {
+                return std::unexpected(GprError::length_mismatch("weighted gradient output length mismatch"));
+            }
+            if (auto vs = kernel.impl_->validate_store(store, true, weight_lower); !vs.has_value())
+            {
+                return vs;
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, store.rows()); !vp.has_value())
+            {
+                return vp;
+            }
+            if (scratch_a.rows() != store.rows() || scratch_a.cols() != store.rows() || scratch_b.rows() != store.rows()
+                || scratch_b.cols() != store.rows() || col_partials.size() < store.rows())
+            {
+                return std::unexpected(GprError::workspace_too_small());
+            }
+            if (scratch_a.data() == weight_lower.data() || scratch_b.data() == weight_lower.data()
+                || scratch_a.data() == scratch_b.data())
+            {
+                return std::unexpected(GprError::invalid_config("scratch buffers must not alias"));
+            }
+            std::optional<GprError> err;
+            const typename CompiledDistanceKernel<T>::Impl::WalkDistCtx ctx{
+                .store = store,
+                .x = x,
+                .out_grads = out_grads,
+                .scratch_a = scratch_a,
+                .scratch_b = scratch_b,
+                .nested = nested,
+                .work_bufs = work_bufs,
+                .col_partials = col_partials,
+                .ard_s2_buf = ard_s2_buf,
+                .ard_s2_ready = ard_s2_ready,
+                .err = err,
+            };
+            if (!kernel.impl_->walk_weighted_dist_rec(kernel.impl_->root, weight_lower, 0U, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel gradient contraction failed")
+                );
+            }
+            return {};
+        }
+
+        /// @brief Evaluates one distance-kernel leaf incrementally with optional non-destructive ARD trial state.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] leaf_idx Zero-based leaf index into compiled leaves.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+        /// @param[out] out Destination square matrix view `(n, n)`.
+        /// @param[in] uplo Active matrix region to populate.
+        /// @param[in,out] nested Pre-allocated nested workspace for custom leaves.
+        /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache for `leaf_idx`.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates since last full rebuild.
+        /// @param[in] commit_s2 True to commit updates into `ard_s2_cache`/`prev_ls`; false for trials.
+        /// @return Empty expected on success, or index/validation/store error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> apply_leaf_incremental(
+            const CompiledDistanceKernel<T>& kernel,
+            std::size_t leaf_idx,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps,
+            bool commit_s2
+        )
+        {
+            if (leaf_idx >= kernel.impl_->leaves.size())
+            {
+                return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+            }
+            if (auto vs = kernel.impl_->validate_store(store, true, out.as_ref()); !vs.has_value())
+            {
+                return vs;
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, store.rows()); !vp.has_value())
+            {
+                return vp;
+            }
+            return kernel.impl_->eval_leaf_incremental(
+                leaf_idx, store, x, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2
+            );
+        }
+
+        /// @brief Commits accepted lengthscales of @p leaf_idx to its ARD $s^2$ cache.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] leaf_idx Zero-based leaf index into compiled leaves.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+        /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache for `leaf_idx`.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates since last full rebuild.
+        /// @return Empty expected on success, or index/validation/store error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> commit_leaf_ard_s2(
+            const CompiledDistanceKernel<T>& kernel,
+            std::size_t leaf_idx,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps
+        )
+        {
+            if (leaf_idx >= kernel.impl_->leaves.size())
+            {
+                return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+            }
+            if (store.rows() == 0U || store.cols() == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, store.rows()); !vp.has_value())
+            {
+                return vp;
+            }
+            return kernel.impl_->commit_leaf_ard_s2_impl(
+                leaf_idx, store, x, ard_s2_cache, prev_ls, s2_valid, inc_steps
+            );
+        }
+
+        /// @brief Combines precomputed per-leaf Gram matrices into @p out according to @p kernel AST.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] leaf_grams Precomputed leaf Gram views indexed by `leaf_idx`.
+        /// @param[out] out Destination composite square matrix view `(n, n)`.
+        /// @param[in] uplo Active matrix triangle to combine.
+        /// @param[in,out] scratch Non-aliasing scratch matrix of shape `(n, n)`.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @return Empty expected on success, or empty/shape/workspace error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> combine_from_leaf_grams(
+            const CompiledDistanceKernel<T>& kernel,
+            std::span<const MatrixRef<T>> leaf_grams,
+            MatrixMut<T> out,
+            Triangle uplo,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested
+        )
+        {
+            if (out.is_empty() || out.data() == nullptr)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (out.rows() != out.cols() || leaf_grams.size() != kernel.impl_->leaves.size())
+            {
+                return std::unexpected(GprError::length_mismatch("leaf gram combine shape mismatch"));
+            }
+            if (scratch.data() == out.data() || scratch.rows() < out.rows() || scratch.cols() < out.cols())
+            {
+                return std::unexpected(GprError::workspace_too_small());
+            }
+            for (const auto& g : leaf_grams)
+            {
+                if (g.rows() != out.rows() || g.cols() != out.cols())
+                {
+                    return std::unexpected(GprError::length_mismatch("leaf gram dimension mismatch"));
+                }
+            }
+            std::optional<GprError> err;
+            if (!kernel.impl_->eval_combine_term_rec(
+                    kernel.impl_->root, leaf_grams, out, uplo, scratch, nested, 0U, err
+                ))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("leaf gram combine failed")
+                );
+            }
+            return {};
+        }
     };
 
     // --- CompiledDistanceKernel<T> ---
@@ -4969,6 +6034,7 @@ namespace cxxgpr
         impl->nested_depth =
             CompiledDistanceKernel<T>::Impl::compute_nested_depth(impl->root) + (has_custom_coord ? 1U : 0U);
         impl->refresh_cached_ls();
+        impl->build_leaf_metadata();
         return CompiledDistanceKernel<T>(std::move(impl));
     }
 
@@ -5915,6 +6981,212 @@ namespace cxxgpr
         return DistanceStoreBuilder::fill_diag_into(kernel, n, x, out, scratch);
     }
 
+    /// @brief Returns compiled leaf count; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @return Number of flattened leaves in `kernel`.
+    template <KernelScalarConcept T>
+    std::size_t detail::distance_num_leaves(const CompiledDistanceKernel<T>& kernel) noexcept
+    {
+        return DistanceStoreBuilder::num_leaves(kernel);
+    }
+
+    /// @brief Returns compiled ARD leaf count; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @return Number of ARD leaves in `kernel`.
+    template <KernelScalarConcept T>
+    std::size_t detail::distance_ard_leaf_count(const CompiledDistanceKernel<T>& kernel) noexcept
+    {
+        return DistanceStoreBuilder::ard_leaf_count(kernel);
+    }
+
+    /// @brief Returns per-leaf ARD dim counts; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @return Per-leaf ARD dimension counts (`0` for non-ARD leaves).
+    template <KernelScalarConcept T>
+    std::span<const std::size_t> detail::distance_ard_dims_per_leaf(const CompiledDistanceKernel<T>& kernel) noexcept
+    {
+        return DistanceStoreBuilder::ard_dims_per_leaf(kernel);
+    }
+
+    /// @brief Returns peak product adjoint depth; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @return Number of intermediate Gram matrices needed for adjoint walks.
+    template <KernelScalarConcept T>
+    std::size_t detail::distance_weighted_depth(const CompiledDistanceKernel<T>& kernel) noexcept
+    {
+        return DistanceStoreBuilder::weighted_depth(kernel);
+    }
+
+    /// @brief Maps global hyperparameter index to owning leaf index; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] param_idx Zero-based global hyperparameter index.
+    /// @return Zero-based owning leaf index, or index-out-of-range error.
+    template <KernelScalarConcept T>
+    std::expected<std::size_t, GprError> detail::distance_leaf_index_for_param(
+        const CompiledDistanceKernel<T>& kernel, std::size_t param_idx
+    )
+    {
+        return DistanceStoreBuilder::leaf_index_for_param(kernel, param_idx);
+    }
+
+    /// @brief Evaluates kernel while capturing forward ARD $s^2$; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+    /// @param[out] out Destination square Gram matrix `(n, n)`.
+    /// @param[in] uplo Active matrix region to write.
+    /// @param[in,out] scratch Non-aliasing scratch matrix `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[out] ard_s2_buf Packed destination receiving forward ARD $s^2$ buffers.
+    /// @param[in,out] ard_s2_ready Per-ARD-slot readiness flags updated on capture.
+    /// @return Empty expected on success, or validation/workspace/evaluation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_apply_capturing_s2(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        MatrixMut<T> out,
+        Triangle uplo,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested,
+        std::span<T> ard_s2_buf,
+        std::span<std::uint8_t> ard_s2_ready
+    )
+    {
+        return DistanceStoreBuilder::apply_capturing_s2(
+            kernel, store, x, out, uplo, scratch, nested, ard_s2_buf, ard_s2_ready
+        );
+    }
+
+    /// @brief Contracts kernel gradients in a single tree pass; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+    /// @param[in] weight_lower Symmetric adjoint weight matrix (lower triangle read).
+    /// @param[out] out_grads Destination span receiving parameter gradient inner products.
+    /// @param[in,out] scratch_a First non-aliasing square scratch matrix `(n, n)`.
+    /// @param[in,out] scratch_b Second non-aliasing square scratch matrix `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[in,out] work_bufs Pre-allocated product adjoint buffer pool.
+    /// @param[in,out] col_partials Per-column partial sum buffer of length `>= n`.
+    /// @param[in] ard_s2_buf Optional forward-captured ARD $s^2$ storage.
+    /// @param[in] ard_s2_ready Optional per-ARD-slot capture readiness flags.
+    /// @return Empty expected on success, or validation/workspace/evaluation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_weighted_grads(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        MatrixRef<T> weight_lower,
+        std::span<double> out_grads,
+        MatrixMut<T> scratch_a,
+        MatrixMut<T> scratch_b,
+        NestedBuffers<T>& nested,
+        NestedBuffers<T>& work_bufs,
+        std::span<double> col_partials,
+        std::span<const T> ard_s2_buf,
+        std::span<const std::uint8_t> ard_s2_ready
+    )
+    {
+        return DistanceStoreBuilder::weighted_grads(
+            kernel, store, x, weight_lower, out_grads, scratch_a, scratch_b, nested, work_bufs, col_partials,
+            ard_s2_buf, ard_s2_ready
+        );
+    }
+
+    /// @brief Evaluates one distance-kernel leaf incrementally; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] leaf_idx Zero-based leaf index into compiled leaves.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+    /// @param[out] out Destination square Gram matrix `(n, n)`.
+    /// @param[in] uplo Active matrix region to write.
+    /// @param[in,out] nested Pre-allocated nested workspace for custom leaves.
+    /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache for `leaf_idx`.
+    /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+    /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+    /// @param[in,out] inc_steps Consecutive incremental updates since last rebuild.
+    /// @param[in] commit_s2 True to commit updates into `ard_s2_cache`/`prev_ls`; false for trials.
+    /// @return Empty expected on success, or index/validation/store error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_apply_leaf_incremental(
+        const CompiledDistanceKernel<T>& kernel,
+        std::size_t leaf_idx,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        MatrixMut<T> out,
+        Triangle uplo,
+        NestedBuffers<T>& nested,
+        std::span<T> ard_s2_cache,
+        std::span<double> prev_ls,
+        bool& s2_valid,
+        std::size_t& inc_steps,
+        bool commit_s2
+    )
+    {
+        return DistanceStoreBuilder::apply_leaf_incremental(
+            kernel, leaf_idx, store, x, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2
+        );
+    }
+
+    /// @brief Commits accepted ARD lengthscales to packed baseline; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] leaf_idx Zero-based leaf index into compiled leaves.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional coordinate matrix for `WithPoints` leaves.
+    /// @param[in,out] ard_s2_cache Caller-owned packed ARD $s^2$ cache for `leaf_idx`.
+    /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for `leaf_idx`.
+    /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+    /// @param[in,out] inc_steps Consecutive incremental updates since last rebuild.
+    /// @return Empty expected on success, or index/validation/store error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_commit_leaf_ard_s2(
+        const CompiledDistanceKernel<T>& kernel,
+        std::size_t leaf_idx,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        std::span<T> ard_s2_cache,
+        std::span<double> prev_ls,
+        bool& s2_valid,
+        std::size_t& inc_steps
+    )
+    {
+        return DistanceStoreBuilder::commit_leaf_ard_s2(
+            kernel, leaf_idx, store, x, ard_s2_cache, prev_ls, s2_valid, inc_steps
+        );
+    }
+
+    /// @brief Combines leaf Gram views into composite matrix; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] leaf_grams Precomputed leaf Gram views indexed by `leaf_idx`.
+    /// @param[out] out Destination composite Gram matrix `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to combine.
+    /// @param[in,out] scratch Non-aliasing scratch matrix `(n, n)`.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @return Empty expected on success, or empty/shape/workspace error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_combine_from_leaf_grams(
+        const CompiledDistanceKernel<T>& kernel,
+        std::span<const MatrixRef<T>> leaf_grams,
+        MatrixMut<T> out,
+        Triangle uplo,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested
+    )
+    {
+        return DistanceStoreBuilder::combine_from_leaf_grams(kernel, leaf_grams, out, uplo, scratch, nested);
+    }
+
     template class DistanceKernel<DistanceOnly>;
     template class DistanceKernel<WithPoints>;
     template CompiledDistanceKernel<double> DistanceKernel<DistanceOnly>::compile<double>() const;
@@ -5992,6 +7264,138 @@ namespace cxxgpr
         std::optional<MatrixRef<float>>,
         std::span<float>,
         std::vector<float>&
+    );
+    template std::size_t detail::distance_num_leaves<double>(const CompiledDistanceKernel<double>&) noexcept;
+    template std::size_t detail::distance_num_leaves<float>(const CompiledDistanceKernel<float>&) noexcept;
+    template std::size_t detail::distance_ard_leaf_count<double>(const CompiledDistanceKernel<double>&) noexcept;
+    template std::size_t detail::distance_ard_leaf_count<float>(const CompiledDistanceKernel<float>&) noexcept;
+    template std::span<const std::size_t> detail::distance_ard_dims_per_leaf<double>(
+        const CompiledDistanceKernel<double>&
+    ) noexcept;
+    template std::span<const std::size_t> detail::distance_ard_dims_per_leaf<float>(
+        const CompiledDistanceKernel<float>&
+    ) noexcept;
+    template std::size_t detail::distance_weighted_depth<double>(const CompiledDistanceKernel<double>&) noexcept;
+    template std::size_t detail::distance_weighted_depth<float>(const CompiledDistanceKernel<float>&) noexcept;
+    template std::expected<std::size_t, GprError> detail::distance_leaf_index_for_param<double>(
+        const CompiledDistanceKernel<double>&, std::size_t
+    );
+    template std::expected<std::size_t, GprError> detail::distance_leaf_index_for_param<float>(
+        const CompiledDistanceKernel<float>&, std::size_t
+    );
+    template std::expected<void, GprError> detail::distance_apply_capturing_s2<double>(
+        const CompiledDistanceKernel<double>&,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        MatrixMut<double>,
+        Triangle,
+        MatrixMut<double>,
+        NestedBuffers<double>&,
+        std::span<double>,
+        std::span<std::uint8_t>
+    );
+    template std::expected<void, GprError> detail::distance_apply_capturing_s2<float>(
+        const CompiledDistanceKernel<float>&,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        MatrixMut<float>,
+        Triangle,
+        MatrixMut<float>,
+        NestedBuffers<float>&,
+        std::span<float>,
+        std::span<std::uint8_t>
+    );
+    template std::expected<void, GprError> detail::distance_weighted_grads<double>(
+        const CompiledDistanceKernel<double>&,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        MatrixRef<double>,
+        std::span<double>,
+        MatrixMut<double>,
+        MatrixMut<double>,
+        NestedBuffers<double>&,
+        NestedBuffers<double>&,
+        std::span<double>,
+        std::span<const double>,
+        std::span<const std::uint8_t>
+    );
+    template std::expected<void, GprError> detail::distance_weighted_grads<float>(
+        const CompiledDistanceKernel<float>&,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        MatrixRef<float>,
+        std::span<double>,
+        MatrixMut<float>,
+        MatrixMut<float>,
+        NestedBuffers<float>&,
+        NestedBuffers<float>&,
+        std::span<double>,
+        std::span<const float>,
+        std::span<const std::uint8_t>
+    );
+    template std::expected<void, GprError> detail::distance_apply_leaf_incremental<double>(
+        const CompiledDistanceKernel<double>&,
+        std::size_t,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        MatrixMut<double>,
+        Triangle,
+        NestedBuffers<double>&,
+        std::span<double>,
+        std::span<double>,
+        bool&,
+        std::size_t&,
+        bool
+    );
+    template std::expected<void, GprError> detail::distance_apply_leaf_incremental<float>(
+        const CompiledDistanceKernel<float>&,
+        std::size_t,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        MatrixMut<float>,
+        Triangle,
+        NestedBuffers<float>&,
+        std::span<float>,
+        std::span<double>,
+        bool&,
+        std::size_t&,
+        bool
+    );
+    template std::expected<void, GprError> detail::distance_commit_leaf_ard_s2<double>(
+        const CompiledDistanceKernel<double>&,
+        std::size_t,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        std::span<double>,
+        std::span<double>,
+        bool&,
+        std::size_t&
+    );
+    template std::expected<void, GprError> detail::distance_commit_leaf_ard_s2<float>(
+        const CompiledDistanceKernel<float>&,
+        std::size_t,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        std::span<float>,
+        std::span<double>,
+        bool&,
+        std::size_t&
+    );
+    template std::expected<void, GprError> detail::distance_combine_from_leaf_grams<double>(
+        const CompiledDistanceKernel<double>&,
+        std::span<const MatrixRef<double>>,
+        MatrixMut<double>,
+        Triangle,
+        MatrixMut<double>,
+        NestedBuffers<double>&
+    );
+    template std::expected<void, GprError> detail::distance_combine_from_leaf_grams<float>(
+        const CompiledDistanceKernel<float>&,
+        std::span<const MatrixRef<float>>,
+        MatrixMut<float>,
+        Triangle,
+        MatrixMut<float>,
+        NestedBuffers<float>&
     );
 
 }  // namespace cxxgpr

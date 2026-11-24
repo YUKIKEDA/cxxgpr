@@ -48,22 +48,50 @@ namespace cxxgpr
         return {};
     }
 
-    /// @brief Sizes internal storage for n_leaves square matrices of order n; preserves capacity if unchanged.
-    /// @details Short-circuits when n_leaves, order_, and metadata vectors already match; otherwise checks
-    /// overflow, allocates contiguous storage, populates MatrixRef views, and resets primed_ to false.
+    /// @brief Sizes internal storage for n_leaves square matrices of order n; preserves capacity if sufficient.
+    /// @details Short-circuits when n_leaves, order_, metadata vectors, and per-leaf ARD capacities already suffice;
+    /// otherwise checks overflow, allocates O(n^2) Gram + ARD s^2 slots and O(d) lengthscale snapshots dynamically,
+    /// and resets primed state.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] n_leaves Number of kernel leaves in the flattened CompiledKernel tree.
     /// @param[in] n Training sample count (matrix order).
-    /// @return Empty expected on success, or GprError if element counts overflow std::size_t.
-    /// @retval GprErrorCode::SizeOverflow When n * n or n_leaves * n * n overflows std::size_t.
+    /// @param[in] ard_dims_per_leaf Optional per-leaf ARD dimension counts (`0` for non-ARD leaves).
+    /// @return Empty expected on success, or GprError on overflow or dimension metadata mismatch.
+    /// @retval GprErrorCode::SizeOverflow When buffer element counts overflow std::size_t.
+    /// @retval GprErrorCode::LengthMismatch When ard_dims_per_leaf is non-empty and its size != n_leaves.
     template <KernelScalarConcept T>
-    std::expected<void, GprError> LeafCache<T>::resize(std::size_t n_leaves, std::size_t n)
+    std::expected<void, GprError> LeafCache<T>::resize(
+        std::size_t n_leaves, std::size_t n, std::span<const std::size_t> ard_dims_per_leaf
+    )
     {
-        // Avoid reallocating or invalidating primed state when leaf count and matrix order match.
-        if (n_leaves_ == n_leaves && order_ == n && dirty_.size() == n_leaves && gram_views_.size() == n_leaves
-            && ard_s2_valid_.size() == n_leaves && ard_inc_steps_.size() == n_leaves)
+        if (!ard_dims_per_leaf.empty() && ard_dims_per_leaf.size() != n_leaves)
         {
-            return {};
+            return std::unexpected(GprError::length_mismatch("ARD dimension metadata count mismatch"));
+        }
+
+        // Preserve primed state and existing capacity whenever shape and ARD capacities already suffice.
+        bool can_reuse =
+            (n_leaves_ == n_leaves && order_ == n && dirty_.size() == n_leaves && gram_views_.size() == n_leaves
+                && ard_s2_offsets_.size() == n_leaves && ard_ls_offsets_.size() == n_leaves
+                && ard_ls_capacities_.size() == n_leaves && ard_s2_valid_.size() == n_leaves
+                && ard_inc_steps_.size() == n_leaves && trial_modified_.size() == n_leaves
+                && stale_after_reject_.size() == n_leaves);
+        if (can_reuse)
+        {
+            for (std::size_t i = 0U; i < n_leaves; ++i)
+            {
+                const std::size_t req_dim = ard_dims_per_leaf.empty() ? k_default_ls_cap_ : ard_dims_per_leaf[i];
+                const bool need_s2 = ard_dims_per_leaf.empty() || (req_dim > 0U);
+                if (ard_ls_capacities_[i] < req_dim || (need_s2 && ard_s2_offsets_[i] == k_no_s2_slot_))
+                {
+                    can_reuse = false;
+                    break;
+                }
+            }
+            if (can_reuse)
+            {
+                return {};
+            }
         }
 
         auto mat_len = checked_mul(n, n);
@@ -87,18 +115,41 @@ namespace cxxgpr
             return std::unexpected(std::move(n_np1).error());
         }
         const std::size_t per_dim = *n_np1 / 2U;
-        auto ard_total_len = checked_mul(n_leaves, per_dim);
-        if (!ard_total_len.has_value())
+
+        std::vector<std::size_t> next_ls_caps(n_leaves, 0U);
+        std::vector<std::size_t> next_ls_offsets(n_leaves, 0U);
+        std::vector<std::size_t> next_s2_offsets(n_leaves, k_no_s2_slot_);
+        std::size_t ls_total = 0U;
+        std::size_t ard_total = 0U;
+        for (std::size_t i = 0U; i < n_leaves; ++i)
         {
-            return std::unexpected(std::move(ard_total_len).error());
-        }
-        auto ls_total_len = checked_mul(n_leaves, k_ard_ls_stride_);
-        if (!ls_total_len.has_value())
-        {
-            return std::unexpected(std::move(ls_total_len).error());
+            const std::size_t req_dim = ard_dims_per_leaf.empty() ? k_default_ls_cap_ : ard_dims_per_leaf[i];
+            const std::size_t cap = (n_leaves == n_leaves_ && i < ard_ls_capacities_.size())
+                ? std::max(ard_ls_capacities_[i], req_dim)
+                : req_dim;
+            next_ls_caps[i] = cap;
+            next_ls_offsets[i] = ls_total;
+            auto ls_next = checked_add(ls_total, cap);
+            if (!ls_next.has_value())
+            {
+                return std::unexpected(std::move(ls_next).error());
+            }
+            ls_total = *ls_next;
+
+            const bool need_s2 = ard_dims_per_leaf.empty() || (cap > 0U);
+            if (need_s2)
+            {
+                next_s2_offsets[i] = ard_total;
+                auto ard_next = checked_add(ard_total, per_dim);
+                if (!ard_next.has_value())
+                {
+                    return std::unexpected(std::move(ard_next).error());
+                }
+                ard_total = *ard_next;
+            }
         }
 
-        // Partition contiguous storage into n_leaves column-major n x n MatrixRef views and ARD s^2 slots.
+        // Partition contiguous storage into n_leaves column-major n x n MatrixRef views and O(n^2) ARD s^2 slots.
         n_leaves_ = n_leaves;
         order_ = n;
         ard_per_dim_ = per_dim;
@@ -109,18 +160,24 @@ namespace cxxgpr
             gram_views_[idx] = MatrixRef<T>(storage_.data() + (idx * *mat_len), order_, order_, order_);
         }
         dirty_.assign(n_leaves_, 1U);
-        ard_s2_storage_.assign(*ard_total_len, T{0});
-        ard_prev_ls_.assign(*ls_total_len, 0.0);
+        trial_modified_.assign(n_leaves_, 0U);
+        stale_after_reject_.assign(n_leaves_, 0U);
+        ard_s2_storage_.assign(ard_total, T{0});
+        ard_s2_offsets_ = std::move(next_s2_offsets);
+        ard_prev_ls_.assign(ls_total, 0.0);
+        ard_ls_offsets_ = std::move(next_ls_offsets);
+        ard_ls_capacities_ = std::move(next_ls_caps);
         ard_s2_valid_.assign(n_leaves_, 0U);
         ard_inc_steps_.assign(n_leaves_, 0U);
         primed_ = false;
+        has_pending_ = false;
         return {};
     }
 
     /// @brief Validates params against change_indices using bit-exact comparison and marks dirty leaves.
     /// @details When unprimed or parameter length changed, marks all leaves dirty; when primed, checks
-    /// every parameter outside change_indices via bit_cast<std::uint64_t> equality against last_params_
-    /// and marks only leaves owning changed kernel indices dirty.
+    /// every parameter outside change_indices via bit_cast<std::uint64_t> equality against last_eval_params_
+    /// and marks leaves retained in stale_after_reject_ plus leaves owning changed kernel indices dirty.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] params Candidate full log-space parameter vector.
     /// @param[in] change_indices Non-empty duplicate-free span of changed parameter indices.
@@ -145,27 +202,32 @@ namespace cxxgpr
         {
             return valid;
         }
-        if (dirty_.size() != n_leaves_)
+        if (dirty_.size() != n_leaves_ || trial_modified_.size() != n_leaves_
+            || stale_after_reject_.size() != n_leaves_)
         {
             dirty_.assign(n_leaves_, 1U);
+            trial_modified_.assign(n_leaves_, 0U);
+            stale_after_reject_.assign(n_leaves_, 0U);
             ard_s2_valid_.assign(n_leaves_, 0U);
             ard_inc_steps_.assign(n_leaves_, 0U);
             primed_ = false;
+            has_pending_ = false;
         }
 
         // Force full leaf recomputation on the first step or if parameter dimension changed.
-        if (!primed_ || last_params_.size() != total_params)
+        if (!primed_ || last_eval_params_.size() != total_params)
         {
             std::ranges::fill(dirty_, 1U);
             std::ranges::fill(ard_s2_valid_, 0U);
             std::ranges::fill(ard_inc_steps_, 0U);
+            std::ranges::fill(stale_after_reject_, 0U);
             return {};
         }
 
-        // Enforce bit-exact invariance on all parameters omitted from change_indices.
+        // Enforce bit-exact invariance on all parameters omitted from change_indices against the last evaluated vector.
         for (std::size_t j = 0; j < total_params; ++j)
         {
-            const auto prev_bits = std::bit_cast<std::uint64_t>(last_params_[j]);
+            const auto prev_bits = std::bit_cast<std::uint64_t>(last_eval_params_[j]);
             const auto next_bits = std::bit_cast<std::uint64_t>(params[j]);
             if (prev_bits != next_bits)
             {
@@ -179,8 +241,8 @@ namespace cxxgpr
             }
         }
 
-        // Mark only leaves whose kernel parameter index appears in change_indices; noise-only steps leave all clean.
-        std::ranges::fill(dirty_, 0U);
+        // Keep leaves marked stale by an earlier rejected trial dirty alongside leaves changed in this step.
+        std::ranges::copy(stale_after_reject_, dirty_.begin());
         const std::size_t n_kernel = kernel.num_params();
         for (const std::size_t j : change_indices)
         {
@@ -207,8 +269,11 @@ namespace cxxgpr
     template <KernelScalarConcept T> void LeafCache<T>::mark_all_dirty() noexcept
     {
         std::ranges::fill(dirty_, 1U);
+        std::ranges::fill(trial_modified_, 0U);
+        std::ranges::fill(stale_after_reject_, 0U);
         std::ranges::fill(ard_s2_valid_, 0U);
         std::ranges::fill(ard_inc_steps_, 0U);
+        has_pending_ = false;
     }
 
     /// @brief Invalidates the primed state and marks all leaves dirty without releasing allocated storage.
@@ -222,7 +287,8 @@ namespace cxxgpr
     }
 
     /// @brief Records params as the baseline parameter vector for subsequent bit-exact change checks.
-    /// @details Copies params into last_params_ and marks primed_ = true.
+    /// @details Copies params into last_params_ and last_eval_params_, reserves trial staging capacity, clears stale
+    /// trial flags, and marks primed_ = true.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] params Full log-space parameter vector matching the current cached leaf Grams.
     /// @return Empty expected on completion.
@@ -230,14 +296,21 @@ namespace cxxgpr
     {
         last_params_.resize(params.size());
         std::ranges::copy(params, last_params_.begin());
+        last_eval_params_.resize(params.size());
+        std::ranges::copy(params, last_eval_params_.begin());
+        pending_params_.reserve(params.size());
+        std::ranges::fill(trial_modified_, 0U);
+        std::ranges::fill(stale_after_reject_, 0U);
+        has_pending_ = false;
         primed_ = true;
         return {};
     }
 
     /// @brief Recomputes only dirty leaves and combines all leaf Grams into out without heap allocation.
-    /// @details Resizes cache storage if needed, validates change_indices bit-exactly via prepare_step(),
-    /// evaluates each dirty leaf using dist_cache when available, combines all leaf Grams via
-    /// combine_from_leaf_grams(), and records params upon success (invalidating on any mid-step error).
+    /// @details Sizes storage if needed, runs bit-exact invariance validation via prepare_step(), evaluates each dirty
+    /// leaf via `kernel.apply_leaf_incremental` across both cached `DistanceCache` and uncached coordinate paths,
+    /// combines all leaf Grams via `combine_from_leaf_grams()`, and either commits immediately or stages the candidate
+    /// until `commit_candidate()` runs.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in] kernel Compiled execution-layer kernel tree.
     /// @param[in] x Column-major n x d training coordinate matrix.
@@ -249,6 +322,8 @@ namespace cxxgpr
     /// @param[in] uplo Triangular or full matrix region to populate.
     /// @param[in,out] scratch Non-aliasing n x n scratch matrix view for tree combination.
     /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= kernel.nested_depth() and shape >= n x n.
+    /// @param[in] commit_immediately True to commit ARD $s^2$ and baseline immediately; false for non-destructive
+    /// trial evaluation.
     /// @return Empty expected on success, or GprError if validation, leaf evaluation, or combination fails.
     /// @retval GprErrorCode::EmptyInput When x is empty or null.
     /// @retval GprErrorCode::SizeOverflow When leaf cache sizing overflows std::size_t.
@@ -269,14 +344,15 @@ namespace cxxgpr
         MatrixMut<T> out,
         Triangle uplo,
         MatrixMut<T> scratch,
-        NestedBuffers<T>& nested
+        NestedBuffers<T>& nested,
+        bool commit_immediately
     )
     {
         if (x.is_empty() || x.data() == nullptr)
         {
             return std::unexpected(GprError::empty_input());
         }
-        if (auto sized = resize(kernel.num_leaves(), x.rows()); !sized.has_value())
+        if (auto sized = resize(kernel.num_leaves(), x.rows(), kernel.ard_dims_per_leaf()); !sized.has_value())
         {
             return sized;
         }
@@ -285,7 +361,9 @@ namespace cxxgpr
             return prep;
         }
 
-        // Recompute only leaves marked dirty, clearing each flag once its Gram slot succeeds.
+        std::ranges::fill(trial_modified_, 0U);
+
+        // Recompute only leaves marked dirty, routing both Cached and Uncached ARD leaves incrementally.
         for (std::size_t leaf_idx = 0; leaf_idx < n_leaves_; ++leaf_idx)
         {
             if (dirty_[leaf_idx] == 0U)
@@ -293,39 +371,178 @@ namespace cxxgpr
                 continue;
             }
             MatrixMut<T> slot = leaf_gram_mut(leaf_idx);
-            std::expected<void, GprError> eval_res;
-            if (dist_cache != nullptr)
+            const std::span<T> s2_buf = (ard_s2_offsets_[leaf_idx] != k_no_s2_slot_)
+                ? std::span<T>(ard_s2_storage_.data() + ard_s2_offsets_[leaf_idx], ard_per_dim_)
+                : std::span<T>{};
+            const std::span<double> prev_ls(
+                ard_prev_ls_.data() + ard_ls_offsets_[leaf_idx], ard_ls_capacities_[leaf_idx]
+            );
+            bool s2_valid = ard_s2_valid_[leaf_idx] != 0U;
+            std::size_t inc_steps = ard_inc_steps_[leaf_idx];
+            auto eval_res = kernel.apply_leaf_incremental(
+                leaf_idx, x, dist_cache, slot, uplo, nested, s2_buf, prev_ls, s2_valid, inc_steps, commit_immediately
+            );
+            if (!eval_res.has_value())
             {
-                bool s2_valid = ard_s2_valid_[leaf_idx] != 0U;
-                std::size_t inc_steps = ard_inc_steps_[leaf_idx];
-                std::span<T> s2_buf(ard_s2_storage_.data() + (leaf_idx * ard_per_dim_), ard_per_dim_);
-                std::span<double> prev_ls(ard_prev_ls_.data() + (leaf_idx * k_ard_ls_stride_), k_ard_ls_stride_);
-                eval_res = kernel.apply_leaf_cached_incremental(
-                    leaf_idx, x, *dist_cache, slot, uplo, nested, s2_buf, prev_ls, s2_valid, inc_steps
-                );
+                // Invalidate whole cache on failure because previous clean leaves may belong to an earlier baseline.
+                invalidate();
+                return eval_res;
+            }
+            if (commit_immediately)
+            {
                 ard_s2_valid_[leaf_idx] = s2_valid ? 1U : 0U;
                 ard_inc_steps_[leaf_idx] = inc_steps;
+                stale_after_reject_[leaf_idx] = 0U;
             }
             else
             {
-                eval_res = kernel.apply_leaf_points(leaf_idx, x, slot, uplo, nested);
-            }
-            if (!eval_res.has_value())
-            {
-                // Invalidate whole cache on failure because previous clean leaves remain at old params.
-                invalidate();
-                return eval_res;
+                trial_modified_[leaf_idx] = 1U;
             }
             dirty_[leaf_idx] = 0U;
         }
 
-        // Recombine all leaf Grams according to the sum/product tree and commit params as new baseline.
+        // Recombine all leaf Grams according to the sum/product tree.
+        if (auto comb = kernel.combine_from_leaf_grams(gram_views_, out, uplo, scratch, nested); !comb.has_value())
+        {
+            invalidate();
+            return comb;
+        }
+        if (commit_immediately)
+        {
+            return record(params);
+        }
+        last_eval_params_.resize(params.size());
+        std::ranges::copy(params, last_eval_params_.begin());
+        pending_params_.resize(params.size());
+        std::ranges::copy(params, pending_params_.begin());
+        has_pending_ = true;
+        return {};
+    }
+
+    /// @brief Evaluates all leaf Grams and primes ARD $s^2$ baselines from a full baseline parameter vector.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree.
+    /// @param[in] x Column-major n x d training coordinate matrix.
+    /// @param[in] dist_cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
+    /// @param[in] params Full baseline parameter vector matching kernel.
+    /// @param[out] out Column-major n x n destination composite Gram matrix.
+    /// @param[in] uplo Triangular or full matrix region to populate.
+    /// @param[in,out] scratch Non-aliasing n x n scratch matrix view for tree combination.
+    /// @param[in,out] nested Pre-allocated NestedBuffers with depth >= kernel.nested_depth() and shape >= n x n.
+    /// @return Empty expected on success or GprError if evaluation fails.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> LeafCache<T>::prime(
+        const CompiledKernel<T>& kernel,
+        MatrixRef<T> x,
+        const DistanceCache<T>* dist_cache,
+        std::span<const double> params,
+        MatrixMut<T> out,
+        Triangle uplo,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested
+    )
+    {
+        if (x.is_empty() || x.data() == nullptr)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (auto sized = resize(kernel.num_leaves(), x.rows(), kernel.ard_dims_per_leaf()); !sized.has_value())
+        {
+            return sized;
+        }
+        mark_all_dirty();
+        for (std::size_t leaf_idx = 0; leaf_idx < n_leaves_; ++leaf_idx)
+        {
+            MatrixMut<T> slot = leaf_gram_mut(leaf_idx);
+            const std::span<T> s2_buf = (ard_s2_offsets_[leaf_idx] != k_no_s2_slot_)
+                ? std::span<T>(ard_s2_storage_.data() + ard_s2_offsets_[leaf_idx], ard_per_dim_)
+                : std::span<T>{};
+            const std::span<double> prev_ls(
+                ard_prev_ls_.data() + ard_ls_offsets_[leaf_idx], ard_ls_capacities_[leaf_idx]
+            );
+            bool s2_valid = false;
+            std::size_t inc_steps = 0U;
+            if (auto res = kernel.apply_leaf_incremental(
+                    leaf_idx, x, dist_cache, slot, uplo, nested, s2_buf, prev_ls, s2_valid, inc_steps, true
+                );
+                !res.has_value())
+            {
+                invalidate();
+                return res;
+            }
+            ard_s2_valid_[leaf_idx] = s2_valid ? 1U : 0U;
+            ard_inc_steps_[leaf_idx] = inc_steps;
+            dirty_[leaf_idx] = 0U;
+        }
         if (auto comb = kernel.combine_from_leaf_grams(gram_views_, out, uplo, scratch, nested); !comb.has_value())
         {
             invalidate();
             return comb;
         }
         return record(params);
+    }
+
+    /// @brief Commits or discards the trial candidate staged by `evaluate_incremental(..., false)`.
+    /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
+    /// @param[in] accepted True if accepted by optimizer; false to discard in O(1).
+    /// @param[in] kernel Compiled kernel holding pending candidate parameters.
+    /// @param[in] x Column-major n x d training coordinate matrix.
+    /// @param[in] dist_cache Optional precomputed DistanceCache pointer, or nullptr.
+    /// @return Empty expected on success or GprError if committing ARD $s^2$ fails.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> LeafCache<T>::commit_candidate(
+        bool accepted, const CompiledKernel<T>& kernel, MatrixRef<T> x, const DistanceCache<T>* dist_cache
+    )
+    {
+        if (!has_pending_)
+        {
+            return {};
+        }
+        if (!accepted)
+        {
+            for (std::size_t leaf_idx = 0U; leaf_idx < n_leaves_; ++leaf_idx)
+            {
+                if (trial_modified_[leaf_idx] != 0U)
+                {
+                    stale_after_reject_[leaf_idx] = 1U;
+                    trial_modified_[leaf_idx] = 0U;
+                }
+            }
+            has_pending_ = false;
+            return {};
+        }
+
+        for (std::size_t leaf_idx = 0U; leaf_idx < n_leaves_; ++leaf_idx)
+        {
+            if (trial_modified_[leaf_idx] == 0U)
+            {
+                continue;
+            }
+            if (ard_s2_offsets_[leaf_idx] != k_no_s2_slot_ && ard_ls_capacities_[leaf_idx] > 0U)
+            {
+                const std::span<T> s2_buf(ard_s2_storage_.data() + ard_s2_offsets_[leaf_idx], ard_per_dim_);
+                const std::span<double> prev_ls(
+                    ard_prev_ls_.data() + ard_ls_offsets_[leaf_idx], ard_ls_capacities_[leaf_idx]
+                );
+                bool s2_valid = ard_s2_valid_[leaf_idx] != 0U;
+                std::size_t inc_steps = ard_inc_steps_[leaf_idx];
+                if (auto res = kernel.commit_leaf_ard_s2(leaf_idx, x, dist_cache, s2_buf, prev_ls, s2_valid, inc_steps);
+                    !res.has_value())
+                {
+                    invalidate();
+                    return res;
+                }
+                ard_s2_valid_[leaf_idx] = s2_valid ? 1U : 0U;
+                ard_inc_steps_[leaf_idx] = inc_steps;
+            }
+            trial_modified_[leaf_idx] = 0U;
+            stale_after_reject_[leaf_idx] = 0U;
+        }
+        last_params_.resize(pending_params_.size());
+        std::ranges::copy(pending_params_, last_params_.begin());
+        primed_ = true;
+        has_pending_ = false;
+        return {};
     }
 
     /// @brief Returns true if leaf_idx is marked dirty and needs recomputation.

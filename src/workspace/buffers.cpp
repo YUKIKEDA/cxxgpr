@@ -8,6 +8,7 @@
 
 #include "cxxgpr/core/checked.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace cxxgpr
@@ -251,6 +252,98 @@ namespace cxxgpr
             weighted.resize(n_bufs, order_, order_);
         }
         return {};
+    }
+
+    /// @brief Ensures packed lower-triangular ARD $s^2$ buffers fit `n_ard_leaves` without shrinking.
+    /// @details Grows monotonically so warmed evaluations reuse allocated capacity with zero heap allocations.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] n_ard_leaves Number of ARD leaf slots required by the compiled kernel.
+    /// @return Empty expected on success, or GprError if `order_ == 0` or total size overflows `std::size_t`.
+    /// @retval GprErrorCode::EmptyInput When `order_ == 0`.
+    /// @retval GprErrorCode::SizeOverflow When `n_ard_leaves * order_ * (order_ + 1) / 2` overflows `std::size_t`.
+    template <PrecisionPolicyConcept P>
+    std::expected<void, GprError> WorkspaceCore<P>::ensure_ard_s2(std::size_t n_ard_leaves)
+    {
+        if (order_ == 0U)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (n_ard_leaves == 0U)
+        {
+            ard_s2_ready.clear();
+            return {};
+        }
+        auto np1 = checked_add(order_, std::size_t{1});
+        if (!np1.has_value())
+        {
+            return std::unexpected(std::move(np1).error());
+        }
+        auto n_np1 = checked_mul(order_, *np1);
+        if (!n_np1.has_value())
+        {
+            return std::unexpected(std::move(n_np1).error());
+        }
+        const std::size_t per_dim = *n_np1 / 2U;
+        auto total = checked_mul(n_ard_leaves, per_dim);
+        if (!total.has_value())
+        {
+            return std::unexpected(std::move(total).error());
+        }
+        if (ard_s2_storage.size() < *total)
+        {
+            ard_s2_storage.assign(*total, Storage{0});
+        }
+        if (ard_s2_ready.size() < n_ard_leaves)
+        {
+            ard_s2_ready.assign(n_ard_leaves, std::uint8_t{0});
+        }
+        std::fill_n(ard_s2_ready.begin(), n_ard_leaves, std::uint8_t{0});
+        return {};
+    }
+
+    /// @brief Resets forward ARD $s^2$ readiness flags while preserving backing capacity.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    template <PrecisionPolicyConcept P> void WorkspaceCore<P>::clear_ard_s2_ready() noexcept
+    {
+        std::ranges::fill(ard_s2_ready, std::uint8_t{0});
+    }
+
+    /// @brief Returns a mutable packed lower-triangular $s^2$ view for ARD leaf slot `ard_slot`.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] ard_slot Zero-based ARD leaf slot index.
+    /// @return Mutable packed span or empty span if out of range.
+    template <PrecisionPolicyConcept P>
+    std::span<typename P::Storage> WorkspaceCore<P>::ard_s2_mut(std::size_t ard_slot) noexcept
+    {
+        if (order_ == 0U)
+        {
+            return {};
+        }
+        const std::size_t per_dim = (order_ * (order_ + 1U)) / 2U;
+        if (per_dim == 0U || ard_slot >= (ard_s2_storage.size() / per_dim))
+        {
+            return {};
+        }
+        return std::span<Storage>(ard_s2_storage.data() + (ard_slot * per_dim), per_dim);
+    }
+
+    /// @brief Returns an immutable packed lower-triangular $s^2$ view for ARD leaf slot `ard_slot` when ready.
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] ard_slot Zero-based ARD leaf slot index.
+    /// @return Immutable packed span when ready, or empty span if unready or out of range.
+    template <PrecisionPolicyConcept P>
+    std::span<const typename P::Storage> WorkspaceCore<P>::ard_s2_ref(std::size_t ard_slot) const noexcept
+    {
+        if (order_ == 0U || ard_slot >= ard_s2_ready.size() || ard_s2_ready[ard_slot] == 0U)
+        {
+            return {};
+        }
+        const std::size_t per_dim = (order_ * (order_ + 1U)) / 2U;
+        if (per_dim == 0U || ard_slot >= (ard_s2_storage.size() / per_dim))
+        {
+            return {};
+        }
+        return std::span<const Storage>(ard_s2_storage.data() + (ard_slot * per_dim), per_dim);
     }
 
     /// @brief Allocates training buffers for n points under the given cache and Cholesky buffer policies.

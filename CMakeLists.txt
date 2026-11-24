@@ -5,7 +5,7 @@ cmake_policy(SET CMP0141 NEW)
 project(cxxgpr
     VERSION 0.1.0
     DESCRIPTION "Exact Gaussian Process Regression library in C++23"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(CXXGPR_VERSION "${PROJECT_VERSION}")
 set(CXXGPR_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
@@ -59,10 +59,10 @@ add_library(cxxgpr STATIC
     src/kernel/leaf_eval.cpp
     src/kernel/leaves.cpp
     src/kernel/spec.cpp
+    src/linalg/blas_backend.cpp
     src/linalg/cholesky.cpp
     src/linalg/dense.cpp
     src/linalg/jitter.cpp
-    src/linalg/packed_blas3.cpp
     src/linalg/parallel.cpp
     src/optimizer/bounds.cpp
     src/optimizer/fixed.cpp
@@ -84,6 +84,7 @@ add_library(cxxgpr STATIC
     src/workspace/inference.cpp
     src/workspace/leaf_cache.cpp
     src/workspace/mll.cpp
+    $<TARGET_OBJECTS:cxxgpr_fmath>
 )
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
 add_dependencies(cxxgpr cxxgpr_git_revision)
@@ -97,6 +98,20 @@ target_include_directories(cxxgpr
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CXXGPR_GENERATED_INCLUDE_DIR}
 )
+target_include_directories(cxxgpr
+    SYSTEM PRIVATE
+        "${fmath_SOURCE_DIR}/include"
+        "${fmath_SOURCE_DIR}/src"
+        "${fmath_SOURCE_DIR}/misc"
+)
+
+target_compile_definitions(cxxgpr
+    PRIVATE
+        CXXGPR_HAS_FMATH_ASM=${CXXGPR_HAS_FMATH_ASM}
+        $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},OpenBLAS>:CXXGPR_HAS_OPENBLAS=1>
+        $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},MKL>:CXXGPR_HAS_MKL=1>
+        $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},Eigen>:CXXGPR_HAS_BLAS_EIGEN=1>
+)
 
 target_link_libraries(cxxgpr
     PRIVATE
@@ -104,6 +119,9 @@ target_link_libraries(cxxgpr
         $<INSTALL_INTERFACE:Eigen3::Eigen>
         nlohmann_json::nlohmann_json
 )
+if(NOT "${CXXGPR_BLAS_TARGET}" STREQUAL "")
+    target_link_libraries(cxxgpr PRIVATE "${CXXGPR_BLAS_TARGET}")
+endif()
 if(TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(cxxgpr PRIVATE OpenMP::OpenMP_CXX)
 endif()

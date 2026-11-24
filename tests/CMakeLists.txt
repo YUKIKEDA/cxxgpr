@@ -236,6 +236,8 @@ if(DEFINED CXXGPR_THIRD_PARTY_NOTICES)
             "-DROOT_NOTICE=${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
             "-DTOP_BUILD_TESTING=${BUILD_TESTING}"
             "-DTOP_BUILD_BENCHMARKS=${CXXGPR_BUILD_BENCHMARKS}"
+            "-DFMATH_NOTICE_ORIG=${CXXGPR_FMATH_NOTICE_ORIG}"
+            "-DMKL_NOTICE_ORIG=${CXXGPR_MKL_NOTICE_ORIG}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/toolchain/check_notices.cmake"
     )
     set_tests_properties(toolchain.third_party_notices PROPERTIES
@@ -261,6 +263,7 @@ if(CXXGPR_INSTALL)
             "-DCXXGPR_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
             "-DCXXGPR_VCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}"
             "-DCXXGPR_VCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}"
+            "-DCXXGPR_MKL_DLL_DIR=${CXXGPR_MKL_DLL_DIR}"
             -P "${CMAKE_SOURCE_DIR}/cmake/VerifyPackage.cmake"
     )
     set_tests_properties(integration.package_install PROPERTIES

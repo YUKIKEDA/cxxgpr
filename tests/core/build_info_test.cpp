@@ -79,8 +79,12 @@ namespace
         }
         ASSERT_TRUE(actual_deps.contains("eigen"));
         ASSERT_TRUE(actual_deps.contains("nlohmann_json"));
+        ASSERT_TRUE(actual_deps.contains("blas_backend"));
+        ASSERT_TRUE(actual_deps.contains("fmath"));
         EXPECT_EQ(actual_deps.at("eigen"), overrides.at("eigen3"));
         EXPECT_EQ(actual_deps.at("nlohmann_json"), overrides.at("nlohmann-json"));
+        EXPECT_FALSE(actual_deps.at("blas_backend").empty());
+        EXPECT_EQ(actual_deps.at("fmath"), "a81f8e53e9f007ed5df355bb4a99ff799fd75066");
 
         // Verify the JSON serialization preserves every structured provenance attribute.
         const std::string json_text = cxxgpr::build_info_json();
@@ -91,6 +95,12 @@ namespace
         EXPECT_EQ(parsed.at("uncommitted_changes").get<bool>(), info.uncommitted_changes);
         EXPECT_EQ(parsed.at("platform_key").get<std::string>(), info.platform_key);
         EXPECT_EQ(parsed.at("configuration").get<std::string>(), info.configuration);
+        std::map<std::string, std::string> json_deps;
+        for (const auto& dep : parsed.at("dependencies"))
+        {
+            json_deps.emplace(dep.at("name").get<std::string>(), dep.at("version").get<std::string>());
+        }
+        EXPECT_EQ(json_deps, actual_deps);
     }
 
     /// @brief Verifies NoAllocationScope permits stack-allocated Eigen arithmetic and restores malloc state.

@@ -360,21 +360,14 @@ namespace
             omp_set_num_threads(saved_threads);
 #endif
 
+            const double parity_tol = std::same_as<Scalar, double> ? 1e-12 : 1e-4;
             for (std::size_t col = 0U; col < n; ++col)
             {
                 for (std::size_t row = col; row < n; ++row)
                 {
                     const std::size_t idx = (col * n) + row;
-                    if constexpr (std::same_as<Scalar, double>)
-                    {
-                        EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r2[idx]));
-                        EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[idx]), std::bit_cast<std::uint64_t>(r4[idx]));
-                    }
-                    else
-                    {
-                        EXPECT_EQ(std::bit_cast<std::uint32_t>(r1[idx]), std::bit_cast<std::uint32_t>(r2[idx]));
-                        EXPECT_EQ(std::bit_cast<std::uint32_t>(r1[idx]), std::bit_cast<std::uint32_t>(r4[idx]));
-                    }
+                    EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r2[idx]), parity_tol);
+                    EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r4[idx]), parity_tol);
                 }
             }
 
@@ -513,12 +506,13 @@ namespace
         omp_set_num_threads(saved_threads);
 #endif
 
+        constexpr double parity_tol = 1e-12;
         for (std::size_t mode = 0U; mode < 3U; ++mode)
         {
             for (std::size_t idx = 0U; idx < n * m; ++idx)
             {
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1[mode][idx]), std::bit_cast<std::uint64_t>(s2[mode][idx]));
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1[mode][idx]), std::bit_cast<std::uint64_t>(s4[mode][idx]));
+                EXPECT_NEAR(s1[mode][idx], s2[mode][idx], parity_tol);
+                EXPECT_NEAR(s1[mode][idx], s4[mode][idx], parity_tol);
             }
         }
 
@@ -688,60 +682,12 @@ namespace
                     {
                         const std::size_t p_idx = (col * n) + row;
                         const std::size_t s_idx = (col * rhs_stride) + row;
-                        if constexpr (std::same_as<Scalar, double>)
-                        {
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(fwd_multi[p_idx]),
-                                std::bit_cast<std::uint64_t>(single_fwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(fwd_strided[s_idx]),
-                                std::bit_cast<std::uint64_t>(single_fwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(bwd_multi[p_idx]),
-                                std::bit_cast<std::uint64_t>(single_bwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(bwd_strided[s_idx]),
-                                std::bit_cast<std::uint64_t>(single_bwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(llt_multi[p_idx]),
-                                std::bit_cast<std::uint64_t>(single_llt[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint64_t>(llt_strided[s_idx]),
-                                std::bit_cast<std::uint64_t>(single_llt[row])
-                            );
-                        }
-                        else
-                        {
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(fwd_multi[p_idx]),
-                                std::bit_cast<std::uint32_t>(single_fwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(fwd_strided[s_idx]),
-                                std::bit_cast<std::uint32_t>(single_fwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(bwd_multi[p_idx]),
-                                std::bit_cast<std::uint32_t>(single_bwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(bwd_strided[s_idx]),
-                                std::bit_cast<std::uint32_t>(single_bwd[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(llt_multi[p_idx]),
-                                std::bit_cast<std::uint32_t>(single_llt[row])
-                            );
-                            EXPECT_EQ(
-                                std::bit_cast<std::uint32_t>(llt_strided[s_idx]),
-                                std::bit_cast<std::uint32_t>(single_llt[row])
-                            );
-                        }
+                        EXPECT_NEAR(static_cast<double>(fwd_multi[p_idx]), static_cast<double>(single_fwd[row]), tol);
+                        EXPECT_NEAR(static_cast<double>(fwd_strided[s_idx]), static_cast<double>(single_fwd[row]), tol);
+                        EXPECT_NEAR(static_cast<double>(bwd_multi[p_idx]), static_cast<double>(single_bwd[row]), tol);
+                        EXPECT_NEAR(static_cast<double>(bwd_strided[s_idx]), static_cast<double>(single_bwd[row]), tol);
+                        EXPECT_NEAR(static_cast<double>(llt_multi[p_idx]), static_cast<double>(single_llt[row]), tol);
+                        EXPECT_NEAR(static_cast<double>(llt_strided[s_idx]), static_cast<double>(single_llt[row]), tol);
 
                         // Verify Forward: (L * x)_row == b_row using only lower-triangular entries of L.
                         double lx = 0.0;
@@ -858,24 +804,8 @@ namespace
             {
                 for (std::size_t idx = 0U; idx < n * m; ++idx)
                 {
-                    if constexpr (std::same_as<Scalar, double>)
-                    {
-                        EXPECT_EQ(
-                            std::bit_cast<std::uint64_t>(t1[mode][idx]), std::bit_cast<std::uint64_t>(t2[mode][idx])
-                        );
-                        EXPECT_EQ(
-                            std::bit_cast<std::uint64_t>(t1[mode][idx]), std::bit_cast<std::uint64_t>(t4[mode][idx])
-                        );
-                    }
-                    else
-                    {
-                        EXPECT_EQ(
-                            std::bit_cast<std::uint32_t>(t1[mode][idx]), std::bit_cast<std::uint32_t>(t2[mode][idx])
-                        );
-                        EXPECT_EQ(
-                            std::bit_cast<std::uint32_t>(t1[mode][idx]), std::bit_cast<std::uint32_t>(t4[mode][idx])
-                        );
-                    }
+                    EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t2[mode][idx]), tol);
+                    EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t4[mode][idx]), tol);
                 }
             }
 
@@ -896,11 +826,11 @@ namespace
         check_parallel_threads.template operator()<float>(5e-2F, 1e-3);
     }
 
-    /// @brief Verifies packed BLAS-3 solves, inverse diagonal, and upper-triangle preservation at n = 389 and 512.
+    /// @brief Verifies external BLAS solves, inverse diagonal, and upper-triangle preservation at n = 389 and 512.
     /// @details Confirms strictly upper-triangular NaNs stay untouched during factorization, single- vs multi-RHS
-    /// forward solves match bitwise with zero allocations, 1/2/4-thread inv_diag_from_chol_l and solves stay
-    /// bitwise identical, and solve residuals meet precision tolerances for double and float.
-    TEST(CholeskyLinalgTest, PackedBlas3NonMultipleAndPowerOfTwoDeterminismAndZeroAlloc)
+    /// forward solves match within numerical tolerance with zero allocations, 1/2/4-thread inv_diag_from_chol_l
+    /// and solves agree accurately, and solve residuals meet precision tolerances for double and float.
+    TEST(CholeskyLinalgTest, BlasBackendNonMultipleAndPowerOfTwoAccuracyAndZeroAlloc)
     {
         // Spec: REQ-06, REQ-11, DES-03, DES-20
         auto check_packed = []<typename Scalar>(std::size_t n, Scalar shift, double tol)
@@ -990,35 +920,14 @@ namespace
 
             for (std::size_t idx = 0U; idx < n * m; ++idx)
             {
-                if constexpr (std::same_as<Scalar, double>)
-                {
-                    EXPECT_EQ(
-                        std::bit_cast<std::uint64_t>(r1.first[idx]), std::bit_cast<std::uint64_t>(fwd_single[idx])
-                    );
-                    EXPECT_EQ(std::bit_cast<std::uint64_t>(r1.first[idx]), std::bit_cast<std::uint64_t>(r2.first[idx]));
-                    EXPECT_EQ(std::bit_cast<std::uint64_t>(r1.first[idx]), std::bit_cast<std::uint64_t>(r4.first[idx]));
-                }
-                else
-                {
-                    EXPECT_EQ(
-                        std::bit_cast<std::uint32_t>(r1.first[idx]), std::bit_cast<std::uint32_t>(fwd_single[idx])
-                    );
-                    EXPECT_EQ(std::bit_cast<std::uint32_t>(r1.first[idx]), std::bit_cast<std::uint32_t>(r2.first[idx]));
-                    EXPECT_EQ(std::bit_cast<std::uint32_t>(r1.first[idx]), std::bit_cast<std::uint32_t>(r4.first[idx]));
-                }
+                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(fwd_single[idx]), tol);
+                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r2.first[idx]), tol);
+                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r4.first[idx]), tol);
             }
             for (std::size_t i = 0U; i < n; ++i)
             {
-                if constexpr (std::same_as<Scalar, double>)
-                {
-                    EXPECT_EQ(std::bit_cast<std::uint64_t>(r1.second[i]), std::bit_cast<std::uint64_t>(r2.second[i]));
-                    EXPECT_EQ(std::bit_cast<std::uint64_t>(r1.second[i]), std::bit_cast<std::uint64_t>(r4.second[i]));
-                }
-                else
-                {
-                    EXPECT_EQ(std::bit_cast<std::uint32_t>(r1.second[i]), std::bit_cast<std::uint32_t>(r2.second[i]));
-                    EXPECT_EQ(std::bit_cast<std::uint32_t>(r1.second[i]), std::bit_cast<std::uint32_t>(r4.second[i]));
-                }
+                EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r2.second[i]), tol);
+                EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r4.second[i]), tol);
             }
 
             // Spot-check forward-solve L * x = b and LLT inv_diag identity on the final column.

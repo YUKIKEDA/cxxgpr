@@ -149,6 +149,10 @@ if(WIN32)
     endif()
 endif()
 
+if(WIN32 AND DEFINED CXXGPR_MKL_DLL_DIR AND NOT "${CXXGPR_MKL_DLL_DIR}" STREQUAL "")
+    set(ENV{PATH} "${CXXGPR_MKL_DLL_DIR};$ENV{PATH}")
+endif()
+
 execute_process(
     COMMAND "${_exe}"
     RESULT_VARIABLE _run_rc

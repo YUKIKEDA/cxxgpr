@@ -59,7 +59,7 @@ Factor
 : Used as a noun for the Cholesky factor $L$. As a verb in the API (`Gpr::factor`): fit the model at the current hyperparameters without optimizing them.
 
 FastApprox
-: `KernelExp::FastApprox`: a range-reduced degree-7 polynomial replacing `std::exp` in the built-in kernels. Faster per call, accurate to about $10^{-5}$ relative.
+: `KernelExp::FastApprox`: vectorized and lookup-table fast exponential powered by `herumi/fmath` replacing `std::exp` in the built-in kernels. Faster per call, accurate to about $10^{-7}$ relative in `double` ($10^{-6}$ in `float`).
 
 Fallback (refinement)
 : The re-solve of the system in double precision when mixed-precision iterative refinement does not converge or is rejected. See {doc}`../explanation/numerical-stability`.

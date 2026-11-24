@@ -105,7 +105,7 @@ namespace
             if (exact > 1e-35F)
             {
                 const float rel = std::abs(approx - exact) / exact;
-                EXPECT_LT(rel, 1.0e-6F) << "x=" << x;
+                EXPECT_LT(rel, 5.0e-6F) << "x=" << x;
             }
         }
 

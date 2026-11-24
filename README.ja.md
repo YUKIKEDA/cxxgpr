@@ -14,7 +14,7 @@
 - **エラーは値で返る。** 失敗しうる呼び出しはすべて `std::expected<T, GprError>` を返し、API の境界で例外は飛びません。
 - **再現できる。** 並列計算の結果はスレッド数によらずビット単位で一致し、乱数による標本抽出もシード付きで可搬です。
 - **コストが読める。** 2 回目以降の予測は確保ゼロで、メモリと速度のどちらを優先するかを選べます。
-- **ヘッダがきれい。** Eigen・nlohmann/json・OpenMP は公開ヘッダに現れず、利用側のビルドへ漏れません。
+- **ヘッダがきれい。** Eigen・OpenBLAS/oneMKL・`herumi/fmath`・nlohmann/json・OpenMP は公開ヘッダに現れず、利用側のビルドへ漏れません。
 - **構造で安全にする。** 失敗した呼び出しは対象を変えず、範囲つきのハイパーパラメータは範囲外にできず、学習前と学習後のモデルは別の型です。
 
 ## できること
@@ -99,7 +99,7 @@ find_package(cxxgpr 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-パッケージは、構成時に Eigen、nlohmann/json、（あれば）OpenMP を探します。vcpkg などで導入しておいてください。
+パッケージは、構成時に Eigen、OpenBLAS（または Intel oneMKL）、nlohmann/json、（あれば）OpenMP を探します。vcpkg などで導入しておいてください。
 
 **ソースから `FetchContent` で。**
 

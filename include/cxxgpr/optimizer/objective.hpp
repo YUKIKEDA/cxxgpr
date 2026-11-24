@@ -71,6 +71,12 @@ namespace cxxgpr::optimizer
             return value(params);
         }
 
+        /// @brief Notifies the objective whether the immediately preceding `value_at_changes` proposal was accepted.
+        /// @details Allows incremental caches to commit or discard trial state without mutating the accepted baseline
+        /// on rejected optimizer proposals; default implementation is a no-op.
+        /// @param[in] accepted True if the proposal became the new optimizer state; false if rejected or invalid.
+        virtual void notify_candidate_accepted([[maybe_unused]] bool accepted) noexcept {}
+
         /// @brief Fills out with the open Interval (lo, hi) in user units for each parameter.
         /// @details Optimizer LogBounds transforms each interval via (log(lo), log(hi)) into unconstrained
         /// logit coordinates; implementations must enforce out.size() == dim().

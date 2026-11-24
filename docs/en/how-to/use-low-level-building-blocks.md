@@ -272,6 +272,7 @@ same value and gradient under both policies: 1
 | `theta` | Parameter backup for rollback after a failed factorization |
 | `col_partials` | Per-column partial sums for deterministic reductions (length $3n$) |
 | `nested`, `weighted`, `ensure_weighted(n_bufs)` | `NestedBuffers` for tree evaluation and for the single-pass gradient |
+| `ard_s2_storage`, `ard_s2_ready`, `ensure_ard_s2(n_ard_leaves)`, `clear_ard_s2_ready()`, `ard_s2_mut(slot)`, `ard_s2_ref(slot)` | Pre-allocated per-ARD-leaf packed $s^2$ storage captured on the forward pass and reused in backward `weighted_grads` |
 | `hessian` | The lazily allocated `HessianScratch` |
 | `factor_jitter` | The jitter used by the last successful factorization |
 
@@ -308,9 +309,11 @@ The check is bit-exact: `prepare_step` compares every parameter outside `change_
 | Member | Purpose |
 |---|---|
 | `LeafCache()` | Empty cache; allocates nothing |
-| `resize(n_leaves, n)` | Sizes the storage and marks every leaf dirty |
+| `resize(n_leaves, n, ard_dims_per_leaf = {})` | Sizes the Gram matrices, per-ARD-leaf $s^2$ slots, and dynamic $O(d)$ lengthscale snapshots; marks every leaf dirty |
 | `prepare_step(params, change_indices, kernel, total_params)` | Validates the step and marks the dirty leaves |
-| `evaluate_incremental(kernel, x, dist_cache, params, change_indices, total_params, out, uplo, scratch, nested)` | Recomputes dirty leaves and combines all leaf Grams into `out`; invalidates the cache if anything fails |
+| `prime(kernel, x, dist_cache, params, out, uplo, scratch, nested)` | Evaluates all leaves and primes ARD $s^2$ baselines from `params` |
+| `evaluate_incremental(kernel, x, dist_cache, params, change_indices, total_params, out, uplo, scratch, nested, commit_immediately = true)` | Recomputes dirty leaves (or stages a non-destructive trial when `commit_immediately == false`) and combines all leaf Grams into `out`; invalidates the cache if anything fails |
+| `commit_candidate(accepted, kernel, x, dist_cache)` | Commits staged ARD $s^2$ baselines when `accepted == true`, or discards the trial in $O(1)$ without mutating accepted ARD baselines |
 | `record(params)` | Stores `params` as the new baseline and marks the cache primed |
 | `mark_all_dirty()`, `invalidate()` | Force a full recomputation (the second also clears the primed state) |
 | `is_primed()`, `is_leaf_dirty(leaf)`, `num_leaves()`, `order()`, `last_params()` | State queries |

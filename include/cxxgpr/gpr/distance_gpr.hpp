@@ -20,6 +20,7 @@
 #include "cxxgpr/transform/input.hpp"
 #include "cxxgpr/transform/target.hpp"
 #include "cxxgpr/workspace/buffers.hpp"
+#include "cxxgpr/workspace/leaf_cache.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,9 @@ namespace cxxgpr
             KernelExp kernel_exp;
             /// @brief True to optimize hyperparameters, false to factor at the initial values.
             bool optimize;
+            /// @brief True when the caller's optimizer tracks parameter change indices (enables incremental leaf
+            /// caching).
+            bool use_change_indices = false;
         };
 
         /// @brief Trains or factors a supplied-distance model and returns its fitted payload.
@@ -921,6 +925,7 @@ namespace cxxgpr
                 .target_transform = *target_transform_,
                 .kernel_exp = kernel_exp_,
                 .optimize = optimize && !std::same_as<O, optimizer::Fixed>,
+                .use_change_indices = optimizer_uses_change_indices_v<O>,
             };
             auto cb = [](void* ctx, optimizer::TwiceDifferentiable& obj,
                           std::span<const double> init) -> std::expected<optimizer::OptimizerResult, GprError>

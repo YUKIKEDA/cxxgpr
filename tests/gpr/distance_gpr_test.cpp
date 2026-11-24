@@ -1708,4 +1708,91 @@ namespace
         ASSERT_TRUE(ran);
     }
 
+    /// @brief Verifies supplied-ARD incremental FSA optimization and single-pass forward s^2 gradient reuse.
+    /// @details Confirms: (1) DistanceGpr<FastSimulatedAnnealing> over ArdDistance (DistanceOnly and WithPoints)
+    /// matches coordinate Gpr<FastSimulatedAnnealing> across identical seeds; (2) DistanceObjective allocates zero heap
+    /// memory on warmed value_and_gradient_into() (reusing forward s^2 inside single-pass fill_gradient) and matches
+    /// Lbfgs optimum of the coordinate reference.
+    TEST(DistanceGprTest, ArdDistanceFsaIncrementalAndGradientS2Reuse)
+    {
+        // Spec: REQ-05, DES-11, DES-20, DES-21
+        const Data data = make_data(12, 4, 3);
+        auto ard_slot_res = cxxgpr::ArdDistance::create(data.d);
+        ASSERT_TRUE(ard_slot_res.has_value());
+        const auto ard_slot = *ard_slot_res;
+
+        std::vector<std::vector<double>> dim_train(data.d);
+        std::vector<cxxgpr::MatrixRef<double>> dim_train_views;
+        std::vector<std::vector<double>> dim_cross(data.d);
+        std::vector<cxxgpr::MatrixRef<double>> dim_cross_views;
+        dim_train_views.reserve(data.d);
+        dim_cross_views.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            dim_train[dim] = table(data.x, data.n, data.x, data.n, data.d, dim);
+            dim_train_views.emplace_back(dim_train[dim].data(), data.n, data.n, data.n);
+            dim_cross[dim] = table(data.x, data.n, data.q, data.m, data.d, dim);
+            dim_cross_views.emplace_back(dim_cross[dim].data(), data.n, data.m, data.n);
+        }
+        cxxgpr::DistanceSource train_src;
+        cxxgpr::DistanceSource cross_src;
+        train_src.bind_ard(ard_slot.slot(), dim_train_views);
+        cross_src.bind_ard(ard_slot.slot(), dim_cross_views);
+
+        const std::array<double, 3> ell0{0.8, 1.3, 1.8};
+        const auto rbf_ard = cxxgpr::RbfArdKernel::create(ell0).value();
+        const auto coord_spec =
+            (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value()) * cxxgpr::KernelSpec(rbf_ard))
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.02).value());
+        const auto dist_only_k =
+            (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.2).value())
+                * ard_slot.rbf_ard(rbf_ard).value())
+            + cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.02).value());
+
+        // Part 1: FastSimulatedAnnealing incremental ARD optimization matches coordinate Gpr<FastSimulatedAnnealing>.
+        const auto fsa = cxxgpr::optimizer::FastSimulatedAnnealing().with_max_iterations(25U).with_restarts(0U);
+        const auto dist_fsa = cxxgpr::DistanceGpr<cxxgpr::optimizer::FastSimulatedAnnealing>(dist_only_k, fsa)
+                                  .with_noise_variance(0.05)
+                                  .value()
+                                  .fit(train_src, data.y);
+        const auto coord_fsa = cxxgpr::Gpr<cxxgpr::optimizer::FastSimulatedAnnealing>(coord_spec, fsa)
+                                   .with_noise_variance(0.05)
+                                   .value()
+                                   .fit(data.x, data.n, data.d, data.y);
+        ASSERT_TRUE(dist_fsa.has_value()) << dist_fsa.error().message();
+        ASSERT_TRUE(coord_fsa.has_value()) << coord_fsa.error().message();
+        EXPECT_NEAR(dist_fsa->neg_log_marginal_likelihood(), coord_fsa->neg_log_marginal_likelihood(), 1e-9);
+        EXPECT_LT(rel_diff(dist_fsa->optimizer_result().params, coord_fsa->optimizer_result().params), 1e-9);
+
+        const auto dist_pred = dist_fsa->predict(cross_src);
+        const auto coord_pred = coord_fsa->predict(data.q, data.m, data.d);
+        ASSERT_TRUE(dist_pred.has_value()) << dist_pred.error().message();
+        ASSERT_TRUE(coord_pred.has_value()) << coord_pred.error().message();
+        EXPECT_LT(rel_diff(dist_pred->mean, coord_pred->mean), 1e-9);
+
+        // Part 2: Lbfgs optimization and zero-alloc gradient evaluation reusing forward s^2.
+        const auto lbfgs = cxxgpr::optimizer::Lbfgs().with_max_iterations(15U);
+        const auto dist_lbfgs = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dist_only_k, lbfgs)
+                                    .with_noise_variance(0.05)
+                                    .value()
+                                    .fit(train_src, data.y);
+        const auto coord_lbfgs = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_spec, lbfgs)
+                                     .with_noise_variance(0.05)
+                                     .value()
+                                     .fit(data.x, data.n, data.d, data.y);
+        ASSERT_TRUE(dist_lbfgs.has_value()) << dist_lbfgs.error().message();
+        ASSERT_TRUE(coord_lbfgs.has_value()) << coord_lbfgs.error().message();
+        EXPECT_NEAR(dist_lbfgs->neg_log_marginal_likelihood(), coord_lbfgs->neg_log_marginal_likelihood(), 1e-8);
+        EXPECT_LT(rel_diff(dist_lbfgs->optimizer_result().params, coord_lbfgs->optimizer_result().params), 1e-7);
+
+        std::size_t probe_allocs = 999U;
+        const auto probed =
+            cxxgpr::DistanceGpr<AllocationProbeOptimizer>(dist_only_k, AllocationProbeOptimizer{&probe_allocs})
+                .with_noise_variance(0.05)
+                .value()
+                .fit(train_src, data.y);
+        ASSERT_TRUE(probed.has_value()) << probed.error().message();
+        EXPECT_EQ(probe_allocs, 0U);
+    }
+
 }  // namespace

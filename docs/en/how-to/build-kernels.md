@@ -222,7 +222,7 @@ The same `KernelSpec` compiles to `CompiledKernel<float>`. Hyperparameters stay 
 
 ## Choose the exponential backend
 
-Built-in leaves with an exponential, such as the RBF and Matern leaves, can use an inline polynomial instead of `std::exp`. `CompiledKernel::kernel_exp` returns the current `KernelExp` (default `Accurate`) and `set_kernel_exp` switches to `FastApprox`. On a trainer the same switch is `Gpr::with_kernel_exp`. The approximation has a relative error of a few $10^{-9}$ in `double`, so it is not a drop-in replacement when you need full precision; see {doc}`../explanation/kernels` for the trade-off. The scalar functions are public:
+Built-in leaves with an exponential, such as the RBF and Matern leaves, can switch to `herumi/fmath` vectorized approximations instead of `std::exp`. `CompiledKernel::kernel_exp` returns the current `KernelExp` (default `Accurate`) and `set_kernel_exp` switches to `FastApprox`. On a trainer the same switch is `Gpr::with_kernel_exp`. The approximation has a relative error below $1.2 \times 10^{-7}$ in `double` on $[-100, 0]$, so it is not a drop-in replacement when you need full precision; see {doc}`../explanation/kernels` for the trade-off. The scalar functions are public:
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp
@@ -239,25 +239,16 @@ Built-in leaves with an exponential, such as the RBF and Matern leaves, can use 
 ```
 
 ```{code-block} text
-max relative error of FastApprox on [-100, 0]: double 7.02e-09, float 1.19e-07
-max |Gram(FastApprox) - Gram(Accurate)| = 1.33e-09
-max |dK(FastApprox) - dK(Accurate)|     = 6.12e-08
+max relative error of FastApprox on [-100, 0]: double < 1.2e-07, float < 5.0e-06
 ```
 
-`eval_kernel_exp(x, mode)` returns $e^x$ under the chosen backend. `eval_kernel_exp_jet(x, mode)` returns an `ExpJet` with the value `v` and the first two derivatives `d1` and `d2`. `Accurate` returns the same number three times; `FastApprox` returns the derivatives of its own polynomial:
+`eval_kernel_exp(x, mode)` returns $e^x$ under the chosen backend. `eval_kernel_exp_jet(x, mode)` returns an `ExpJet` with the value `v` and the first two derivatives `d1` and `d2` (both backends set `d1 = d2 = v`):
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp
 :start-after: // [jet]
 :end-before: // [end]
 :dedent: 4
-```
-
-Because of this, a gradient taken from a `FastApprox` kernel is consistent with the `FastApprox` Gram matrix. The example checks it against a central finite difference of the approximate Gram matrix:
-
-```{code-block} text
-finite difference vs FastApprox gradient:  5.35e-11
-finite difference vs Accurate gradient:    6.11e-08
 ```
 
 Parameter transforms, `CustomKernel` leaves and everything outside kernel evaluation always use `std::exp`.
@@ -286,7 +277,7 @@ These members of `CompiledKernel` serve optimizers and custom solvers. Most user
 
 ### Reuse leaf Gram matrices
 
-`apply_leaf_points` evaluates one leaf alone, `apply_leaf_cached` does the same from a `DistanceCache`, and `apply_leaf_cached_incremental` additionally updates a caller-owned packed ARD matrix incrementally when only some length scales changed. `leaf_index_for_param` maps a flat parameter index to its leaf. `combine_from_leaf_grams` rebuilds the composite from the per-leaf matrices without recomputing any leaf, which pays off when an optimizer step changes the parameters of only one leaf.
+`apply_leaf_points` evaluates one leaf alone, `apply_leaf_cached` does the same from a `DistanceCache`, `apply_leaf_cached_incremental` updates a caller-owned packed ARD matrix incrementally when only some length scales changed, and `apply_leaf_incremental` + `commit_leaf_ard_s2` unify cached and uncached incremental ARD updates with non-destructive trial support. `ard_leaf_count` and `ard_dims_per_leaf` report per-leaf ARD sizing metadata, `leaf_index_for_param` maps a flat parameter index to its leaf, and `combine_from_leaf_grams` rebuilds the composite from the per-leaf matrices without recomputing any leaf.
 
 ```{literalinclude} /../examples/kernel_composition.cpp
 :language: cpp
@@ -334,9 +325,9 @@ The result for the white-noise parameter is $0.1 \times 3$ diagonal entries; the
 | `KernelSpec` | Immutable expression tree: `custom`, `sum`, `product`, `operator+`, `operator*`, `num_params`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings`, `coord_mode`, `compile` |
 | `ParameterBinding` | `index`, `leaf_id`, `local_index` |
 | `CoordMode` | `Dist`, `Points`, `Either`, `Mixed` |
-| `CompiledKernel<T>` | Execution tree: `from_spec`, `num_params`, `num_leaves`, `coord_mode`, `nested_depth`, `reads_distances`, `needs_ard_sq_diff`, `kernel_exp`, `set_kernel_exp`, `make_nested_buffers`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings` |
+| `CompiledKernel<T>` | Execution tree: `from_spec`, `num_params`, `num_leaves`, `ard_leaf_count`, `ard_dims_per_leaf`, `coord_mode`, `nested_depth`, `reads_distances`, `needs_ard_sq_diff`, `kernel_exp`, `set_kernel_exp`, `make_nested_buffers`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings` |
 | `CompiledKernel<T>` evaluation | `apply`, `apply_points`, `apply_cross`, `apply_cross_points`, `fill_diag`, `grad`, `grad_points`, `hess`, `hess_points` |
-| `CompiledKernel<T>` cached and leaf-level | `apply_cached`, `grad_cached`, `hess_cached`, `leaf_index_for_param`, `apply_leaf_points`, `apply_leaf_cached`, `apply_leaf_cached_incremental`, `combine_from_leaf_grams`, `kept_products`, `kept_buffers`, `weighted_buffers`, `apply_keeping`, `apply_cached_keeping`, `weighted_grads` |
+| `CompiledKernel<T>` cached and leaf-level | `apply_cached`, `grad_cached`, `hess_cached`, `leaf_index_for_param`, `apply_leaf_points`, `apply_leaf_cached`, `apply_leaf_cached_incremental`, `apply_leaf_incremental`, `commit_leaf_ard_s2`, `combine_from_leaf_grams`, `kept_products`, `kept_buffers`, `weighted_buffers`, `apply_keeping`, `apply_cached_keeping`, `weighted_grads` |
 | `NestedBuffers<T>` | `depth`, `rows`, `cols`, `resize`, `level` |
 | `KernelExp` | `Accurate`, `FastApprox` |
 | `ExpJet<T>` | `v`, `d1`, `d2` |

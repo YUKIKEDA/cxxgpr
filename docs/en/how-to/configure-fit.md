@@ -216,7 +216,7 @@ Restarts guard against poor local minima: the best result over all starts is kep
 
 ## Choose the exponential backend
 
-`with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernels with a range-reduced degree-7 polynomial. It speeds up kernel evaluation at a small cost in accuracy. `KernelExp::Accurate` (the default) uses `std::exp`. The setting does not apply to parameter transforms or to `CustomKernel` leaves. The line using it is part of the next example.
+`with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernels with `herumi/fmath` vectorized/lookup approximations. It speeds up kernel evaluation at a small cost in accuracy. `KernelExp::Accurate` (the default) uses `std::exp`. The setting does not apply to parameter transforms or to `CustomKernel` leaves. The line using it is part of the next example.
 
 ## Trade memory against speed
 

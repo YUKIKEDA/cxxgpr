@@ -21,8 +21,6 @@
 #endif
 
 #include "linalg/factor_validation.hpp"
-#include "linalg/packed_blas3.hpp"
-#include "linalg/simd_blas3.hpp"
 #include "workspace/mll_kernels.hpp"
 
 namespace cxxgpr
@@ -300,10 +298,7 @@ namespace cxxgpr
 
     }  // namespace
 
-    /// @brief Assembles A = K + sigma_n^2 I, factors L, solves alpha, and returns the negative MLL.
-    /// @details Evaluates K into k_matrix (keeping keep_products factor Grams in buffers.core.weighted),
-    /// adds likelihood.noise_variance() to the diagonal, performs jittered lower Cholesky decomposition,
-    /// solves L * L^T * alpha = y into buffers.core.rhs, and returns 0.5 * (y^T * alpha + log|A| + n * log(2*pi)).
+    /// @brief Internal helper implementing `factor_and_mll` with optional forward ARD $s^2$ capture.
     /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
     /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
     /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
@@ -312,22 +307,18 @@ namespace cxxgpr
     /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
     /// @param[in,out] buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
     /// @param[in] keep_products Number of top-level product terms whose factor Grams are kept for gradients.
+    /// @param[in] capture_ard_s2 True to capture forward packed ARD $s^2$ into `buffers.core.ard_s2_storage`.
     /// @return Negative marginal log-likelihood, or GprError on invalid input or factorization failure.
-    /// @retval GprErrorCode::EmptyInput When x or y is empty.
-    /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from buffers.core.order().
-    /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or +/-Inf.
-    /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with an ARD kernel leaf.
-    /// @retval GprErrorCode::SizeOverflow When distance cache or workspace sizing overflows std::size_t.
-    /// @retval GprErrorCode::CholeskyFailed When factorization fails across the full jitter ladder.
     template <PrecisionPolicyConcept P>
-    std::expected<double, GprError> factor_and_mll(
+    std::expected<double, GprError> factor_and_mll_impl(
         const CompiledKernel<typename P::Storage>& kernel,
         const GaussianLikelihood& likelihood,
         MatrixRef<typename P::Storage> x,
         std::span<const typename P::Storage> y,
         const JitterPolicy& jitter,
         FitBuffers<P>& buffers,
-        std::size_t keep_products
+        std::size_t keep_products,
+        bool capture_ard_s2
     )
     {
         using Storage = P::Storage;
@@ -347,6 +338,8 @@ namespace cxxgpr
                 return std::unexpected(GprError::non_finite_input());
             }
         }
+
+        buffers.core.clear_ard_s2_ready();
 
         // Prepare cached distances/ARD differences if policy is Cached, and size tree/kept buffers.
         auto dist_ptr = prepare_fit_dist_cache(kernel, x, buffers);
@@ -370,20 +363,28 @@ namespace cxxgpr
             }
         }
 
+        std::span<Storage> ard_s2_buf{};
+        std::span<std::uint8_t> ard_s2_ready{};
+        if (capture_ard_s2 && !buffers.core.ard_s2_ready.empty())
+        {
+            ard_s2_buf = std::span<Storage>(buffers.core.ard_s2_storage);
+            ard_s2_ready = std::span<std::uint8_t>(buffers.core.ard_s2_ready);
+        }
+
         // Assemble lower triangle of K while saving factor Grams for keep_products product terms.
         std::expected<void, GprError> eval_res;
         if (*dist_ptr != nullptr && ((*dist_ptr)->has_dist() || (*dist_ptr)->has_ard()))
         {
             eval_res = kernel.apply_cached_keeping(
                 x, **dist_ptr, buffers.core.k_mut(), Triangle::Lower, buffers.core.exp_mut(), buffers.core.nested,
-                buffers.core.weighted, keep_products
+                buffers.core.weighted, keep_products, ard_s2_buf, ard_s2_ready
             );
         }
         else
         {
             eval_res = kernel.apply_keeping(
                 x, buffers.core.k_mut(), Triangle::Lower, buffers.core.exp_mut(), buffers.core.nested,
-                buffers.core.weighted, keep_products
+                buffers.core.weighted, keep_products, ard_s2_buf, ard_s2_ready
             );
         }
         if (!eval_res.has_value())
@@ -429,6 +430,39 @@ namespace cxxgpr
         return 0.5 * (*dot_res + *logdet_res + (n_dbl * std::log(2.0 * std::numbers::pi)));
     }
 
+    /// @brief Assembles A = K + sigma_n^2 I, factors L, solves alpha, and returns the negative MLL.
+    /// @details Evaluates K into k_matrix (keeping keep_products factor Grams in buffers.core.weighted),
+    /// adds likelihood.noise_variance() to the diagonal, performs jittered lower Cholesky decomposition,
+    /// solves L * L^T * alpha = y into buffers.core.rhs, and returns 0.5 * (y^T * alpha + log|A| + n * log(2*pi)).
+    /// @tparam P Precision policy type satisfying PrecisionPolicyConcept.
+    /// @param[in] kernel Compiled execution-layer kernel tree in storage precision.
+    /// @param[in] likelihood Observation Gaussian noise likelihood providing sigma_n^2.
+    /// @param[in] x Column-major n x d training coordinate matrix in storage precision.
+    /// @param[in] y Training target vector in storage precision (length n).
+    /// @param[in] jitter Diagonal jitter escalation policy for Cholesky factorization.
+    /// @param[in,out] buffers Pre-allocated FitBuffers receiving L, alpha, factor_jitter, and kept factor Grams.
+    /// @param[in] keep_products Number of top-level product terms whose factor Grams are kept for gradients.
+    /// @return Negative marginal log-likelihood, or GprError on invalid input or factorization failure.
+    /// @retval GprErrorCode::EmptyInput When x or y is empty.
+    /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from buffers.core.order().
+    /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or +/-Inf.
+    /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with an ARD kernel leaf.
+    /// @retval GprErrorCode::SizeOverflow When distance cache or workspace sizing overflows std::size_t.
+    /// @retval GprErrorCode::CholeskyFailed When factorization fails across the full jitter ladder.
+    template <PrecisionPolicyConcept P>
+    std::expected<double, GprError> factor_and_mll(
+        const CompiledKernel<typename P::Storage>& kernel,
+        const GaussianLikelihood& likelihood,
+        MatrixRef<typename P::Storage> x,
+        std::span<const typename P::Storage> y,
+        const JitterPolicy& jitter,
+        FitBuffers<P>& buffers,
+        std::size_t keep_products
+    )
+    {
+        return factor_and_mll_impl(kernel, likelihood, x, y, jitter, buffers, keep_products, false);
+    }
+
     namespace
     {
         /// @brief Computes negative MLL and analytical log-space gradients in a single pass via keep_plan.
@@ -470,7 +504,7 @@ namespace cxxgpr
                 return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
             }
 
-            // Ensure keep_plan walk buffers and leaf gradient scratch are allocated before factoring.
+            // Ensure keep_plan walk buffers, leaf gradient scratch, and ARD s^2 buffers are allocated before factoring.
             const std::size_t products = kernel.kept_products();
             if (auto ok = buffers.core.ensure_weighted(kernel.weighted_buffers(products)); !ok.has_value())
             {
@@ -480,8 +514,12 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(ok).error());
             }
+            if (auto ok = buffers.core.ensure_ard_s2(kernel.ard_leaf_count()); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
 
-            auto mll_res = factor_and_mll(kernel, likelihood, x, y, jitter, buffers, products);
+            auto mll_res = factor_and_mll_impl(kernel, likelihood, x, y, jitter, buffers, products, true);
             if (!mll_res.has_value())
             {
                 return mll_res;
@@ -505,7 +543,8 @@ namespace cxxgpr
             // Contract <W, dK/dtheta_p>_F across all kernel parameters in a single tree walk.
             if (auto wg_ok = kernel.weighted_grads(
                     x, dist_ptr, buffers.w_ref(), out_grad.subspan(0, n_kernel), buffers.core.kernel_scratch_mut(),
-                    buffers.core.nested, buffers.core.weighted, products, std::span<double>(buffers.core.col_partials)
+                    buffers.core.nested, buffers.core.weighted, products, std::span<double>(buffers.core.col_partials),
+                    buffers.core.ard_s2_storage, buffers.core.ard_s2_ready
                 );
                 !wg_ok.has_value())
             {

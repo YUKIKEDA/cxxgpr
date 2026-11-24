@@ -72,7 +72,7 @@ namespace cxxgpr::detail
                 // Preallocate per-leaf kernel caches only when incremental updates can retain matrices across steps.
                 if (enable_leaf_cache_)
                 {
-                    (void)leaf_cache_.resize(kernel_.num_leaves(), x_train_.rows());
+                    (void)leaf_cache_.resize(kernel_.num_leaves(), x_train_.rows(), kernel_.ard_dims_per_leaf());
                 }
             }
 
@@ -124,24 +124,56 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                // Full evaluation discards incremental leaf tracking so future change-based calls recompute cleanly.
-                if (enable_leaf_cache_)
+                if (!enable_leaf_cache_)
                 {
-                    leaf_cache_.invalidate();
+                    auto res = factor_and_mll(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, 0U);
+                    if (res.has_value())
+                    {
+                        record_valid_factor(params, *res);
+                    }
+                    return res;
                 }
-                auto res = factor_and_mll(kernel_, likelihood_, x_train_, y_train_, jitter_, buffers_, 0U);
-                if (res.has_value())
+
+                // Populate DistanceCache (when Cached) and prime LeafCache + ARD s^2 baseline in one pass.
+                const std::size_t n = x_train_.rows();
+                if (buffers_.core.nested.depth() < kernel_.nested_depth() || buffers_.core.nested.rows() < n
+                    || buffers_.core.nested.cols() < n)
                 {
-                    record_valid_factor(params, *res);
+                    buffers_.core.nested.resize(kernel_.nested_depth(), n, n);
                 }
-                return res;
+                if (buffers_.dist.has_value())
+                {
+                    const bool need_dist = kernel_.reads_distances();
+                    const bool need_ard = kernel_.needs_ard_sq_diff();
+                    if ((need_dist || need_ard)
+                        && (buffers_.dist->num_points() != n || buffers_.dist->num_dims() != x_train_.cols()
+                            || (need_dist && !buffers_.dist->has_dist()) || (need_ard && !buffers_.dist->has_ard())))
+                    {
+                        if (auto ok = buffers_.dist->ensure(x_train_, need_dist, need_ard, DistanceCachePolicy::Cached);
+                            !ok.has_value())
+                        {
+                            leaf_cache_.invalidate();
+                            return std::unexpected(std::move(ok).error());
+                        }
+                    }
+                }
+                const DistanceCache<Storage>* dist_ptr = buffers_.dist.has_value() ? &(*buffers_.dist) : nullptr;
+                if (auto primed = leaf_cache_.prime(
+                        kernel_, x_train_, dist_ptr, params, buffers_.core.k_mut(), Triangle::Lower,
+                        buffers_.core.exp_mut(), buffers_.core.nested
+                    );
+                    !primed.has_value())
+                {
+                    return std::unexpected(std::move(primed).error());
+                }
+                return factor_from_assembled_k_and_mll(params);
             }
 
             /// @brief Evaluates negative MLL incrementally when only changed_indices moved since the last step.
-            /// @details Re-evaluates only kernel leaves touched by changed_indices via LeafCache, adds noise
+            /// @details Evaluates only dirty kernel leaves via LeafCache in non-destructive trial mode, adds noise
             /// variance to the diagonal, factors L with jitter, and computes MLL directly.
             /// @param[in] params Full hyperparameter vector of length dim().
-            /// @param[in] changed_indices Parameter indices modified relative to the cached evaluation.
+            /// @param[in] changed_indices Parameter indices modified relative to the last evaluated step.
             /// @return Negative marginal log-likelihood scalar, or GprError on invalid params or factorization failure.
             /// @retval GprErrorCode::LengthMismatch When params.size() != dim().
             /// @retval GprErrorCode::NonFiniteKernelValue When evaluated MLL is non-finite.
@@ -161,59 +193,32 @@ namespace cxxgpr::detail
                     return std::unexpected(std::move(set).error());
                 }
 
-                // Recompute only affected kernel leaves and reassemble lower triangle into buffers_.core.k_mut().
+                // Recompute only affected kernel leaves as a non-destructive trial into buffers_.core.k_mut().
                 const DistanceCache<Storage>* dist_ptr = buffers_.dist.has_value() ? &(*buffers_.dist) : nullptr;
                 auto inc = leaf_cache_.evaluate_incremental(
                     kernel_, x_train_, dist_ptr, params, changed_indices, dim(), buffers_.core.k_mut(), Triangle::Lower,
-                    buffers_.core.exp_mut(), buffers_.core.nested
+                    buffers_.core.exp_mut(), buffers_.core.nested, false
                 );
                 if (!inc.has_value())
                 {
                     return std::unexpected(std::move(inc).error());
                 }
+                return factor_from_assembled_k_and_mll(params);
+            }
 
-                // Add observation noise variance, apply jittered Cholesky, and solve L L^T alpha = y.
-                const std::size_t n = x_train_.rows();
-                const auto noise_var = static_cast<Storage>(likelihood_.noise_variance());
-                if (auto diag = linalg::add_to_diag(buffers_.core.k_mut(), noise_var); !diag.has_value())
+            /// @brief Commits or discards the pending LeafCache trial based on optimizer acceptance.
+            /// @param[in] accepted True if the immediately preceding proposal became the accepted state.
+            void notify_candidate_accepted(bool accepted) noexcept override
+            {
+                if (!enable_leaf_cache_)
                 {
-                    return std::unexpected(std::move(diag).error());
+                    return;
                 }
-                auto jit = linalg::cholesky_lower_with_jitter(
-                    buffers_.core.k_mut(), buffers_.core.exp_mut(), jitter_, CholeskyStage::Fit
-                );
-                if (!jit.has_value())
+                const DistanceCache<Storage>* dist_ptr = buffers_.dist.has_value() ? &(*buffers_.dist) : nullptr;
+                if (auto res = leaf_cache_.commit_candidate(accepted, kernel_, x_train_, dist_ptr); !res.has_value())
                 {
-                    return std::unexpected(std::move(jit).error());
+                    leaf_cache_.invalidate();
                 }
-                buffers_.core.factor_jitter = *jit;
-
-                std::ranges::copy(y_train_, buffers_.core.rhs.begin());
-                if (auto solve =
-                        linalg::solve_llt_in_place(buffers_.core.k_ref(), std::span<Storage>(buffers_.core.rhs));
-                    !solve.has_value())
-                {
-                    return std::unexpected(std::move(solve).error());
-                }
-                auto logdet = linalg::log_det_from_l(buffers_.core.k_ref());
-                if (!logdet.has_value())
-                {
-                    return std::unexpected(std::move(logdet).error());
-                }
-                auto y_alpha = linalg::dot(y_train_, std::span<const Storage>(buffers_.core.rhs));
-                if (!y_alpha.has_value())
-                {
-                    return std::unexpected(std::move(y_alpha).error());
-                }
-                // Assemble negative MLL using the identical formula and parenthesization as factor_and_mll().
-                const double mll =
-                    0.5 * (*y_alpha + *logdet + (static_cast<double>(n) * std::log(2.0 * std::numbers::pi)));
-                if (!std::isfinite(mll))
-                {
-                    return std::unexpected(GprError::non_finite_kernel_value());
-                }
-                record_valid_factor(params, mll);
-                return mll;
             }
 
             /// @brief Writes open optimization bounds for kernel and likelihood hyperparameters into out.
@@ -334,6 +339,55 @@ namespace cxxgpr::detail
             }
 
         private:
+            /// @brief Adds observation noise, factors L with jitter, solves alpha, and computes negative MLL from K.
+            /// @param[in] params Hyperparameter vector corresponding to the lower triangle assembled in `k_mut()`.
+            /// @return Negative marginal log-likelihood scalar, or GprError on factorization or solve failure.
+            [[nodiscard]] std::expected<double, GprError> factor_from_assembled_k_and_mll(
+                std::span<const double> params
+            )
+            {
+                const std::size_t n = x_train_.rows();
+                const auto noise_var = static_cast<Storage>(likelihood_.noise_variance());
+                if (auto diag = linalg::add_to_diag(buffers_.core.k_mut(), noise_var); !diag.has_value())
+                {
+                    return std::unexpected(std::move(diag).error());
+                }
+                auto jit = linalg::cholesky_lower_with_jitter(
+                    buffers_.core.k_mut(), buffers_.core.exp_mut(), jitter_, CholeskyStage::Fit
+                );
+                if (!jit.has_value())
+                {
+                    return std::unexpected(std::move(jit).error());
+                }
+                buffers_.core.factor_jitter = *jit;
+
+                std::ranges::copy(y_train_, buffers_.core.rhs.begin());
+                if (auto solve =
+                        linalg::solve_llt_in_place(buffers_.core.k_ref(), std::span<Storage>(buffers_.core.rhs));
+                    !solve.has_value())
+                {
+                    return std::unexpected(std::move(solve).error());
+                }
+                auto logdet = linalg::log_det_from_l(buffers_.core.k_ref());
+                if (!logdet.has_value())
+                {
+                    return std::unexpected(std::move(logdet).error());
+                }
+                auto y_alpha = linalg::dot(y_train_, std::span<const Storage>(buffers_.core.rhs));
+                if (!y_alpha.has_value())
+                {
+                    return std::unexpected(std::move(y_alpha).error());
+                }
+                const double mll =
+                    0.5 * (*y_alpha + *logdet + (static_cast<double>(n) * std::log(2.0 * std::numbers::pi)));
+                if (!std::isfinite(mll))
+                {
+                    return std::unexpected(GprError::non_finite_kernel_value());
+                }
+                record_valid_factor(params, mll);
+                return mll;
+            }
+
             /// @brief Records parameters and negative MLL paired with the valid live factor in buffers_.
             /// @param[in] params Evaluated hyperparameter vector of length dim().
             /// @param[in] mll Evaluated negative marginal log-likelihood matching params.

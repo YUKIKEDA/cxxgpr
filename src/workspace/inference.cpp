@@ -21,8 +21,7 @@
 #    include <omp.h>
 #endif
 
-#include "linalg/packed_blas3.hpp"
-#include "linalg/simd_blas3.hpp"
+#include "linalg/blas_backend.hpp"
 #include "workspace/predict_diagonal.hpp"
 #include "workspace/sample_draws.hpp"
 
@@ -159,7 +158,7 @@ namespace cxxgpr
             {
                 const auto j = static_cast<std::size_t>(col_idx);
                 const Storage* col_ptr = k_star_ptr + (j * n_local);
-                mean_ptr[j] = detail::dot_mixed_simd<Storage, Refine>(col_ptr, alpha_ptr, n_local);
+                mean_ptr[j] = detail::dot_accum<Refine>(col_ptr, alpha_ptr, n_local);
             }
 
             // Overwrite K_* in place with V = L^-1 * K_* for subsequent variance/covariance projection.
@@ -248,7 +247,7 @@ namespace cxxgpr
         {
             const auto j = static_cast<std::size_t>(col_idx);
             const Storage* v_col = v_ptr + (j * n);
-            const auto sq_norm = detail::sq_norm_mixed_simd<Storage, Refine>(v_col, n);
+            const auto sq_norm = detail::dot_accum<Refine>(v_col, v_col, n);
             const auto prior_var = static_cast<Refine>(kss_ptr[j]);
             var_ptr[j] = prior_var - sq_norm;
         }
@@ -421,228 +420,28 @@ namespace cxxgpr
         const Storage* v_ptr = workspace.query_k_star.data();
         Refine* cov_ptr = out.covariance.data();
 
-        // Compute lower triangle of Sigma_* = K_** - V^T V (+ sigma_n^2 I) with register-blocked 4x2 SIMD kernels
-        // aligned to absolute 4-row multiples so parallel column partitions remain bitwise invariant across threads.
-        auto col_range =
-            [n, m, noise_var, v_ptr, kss_ptr = kss.data(), cov_ptr](std::size_t col_begin, std::size_t col_end) noexcept
+        // Initialize lower triangle of Sigma_* with prior K_** (+ sigma_n^2 I) and subtract V^T V via BLAS-3.
+        for (std::size_t col = 0; col < m; ++col)
         {
-            auto eval_single = [n, m, noise_var, v_ptr, kss_ptr, cov_ptr](std::size_t row, std::size_t col) noexcept
+            const std::size_t col_off = col * m;
+            for (std::size_t row = col; row < m; ++row)
             {
-                const auto dot_val =
-                    detail::dot_storage_to_refine_simd<Storage, Refine>(v_ptr + (row * n), v_ptr + (col * n), n);
-                Refine entry = static_cast<Refine>(kss_ptr[(col * m) + row]) - dot_val;
+                auto entry = static_cast<Refine>(kss[col_off + row]);
                 if (row == col)
                 {
                     entry += noise_var;
                 }
-                cov_ptr[(col * m) + row] = entry;
-            };
-
-            auto eval_4x1 = [n, m, noise_var, v_ptr, kss_ptr, cov_ptr](std::size_t row, std::size_t col) noexcept
-            {
-                const std::size_t i0 = row;
-                const std::size_t i1 = row + 1U;
-                const std::size_t i2 = row + 2U;
-                const std::size_t i3 = row + 3U;
-                std::array<Refine, 4> dots{};
-                detail::dot_4x1_storage_to_refine_simd<Storage, Refine>(
-                    v_ptr + (i0 * n), v_ptr + (i1 * n), v_ptr + (i2 * n), v_ptr + (i3 * n), v_ptr + (col * n), n, dots
-                );
-                const std::size_t col_off = col * m;
-                Refine e0 = static_cast<Refine>(kss_ptr[col_off + i0]) - dots[0];
-                Refine e1 = static_cast<Refine>(kss_ptr[col_off + i1]) - dots[1];
-                Refine e2 = static_cast<Refine>(kss_ptr[col_off + i2]) - dots[2];
-                Refine e3 = static_cast<Refine>(kss_ptr[col_off + i3]) - dots[3];
-                if (i0 == col)
-                {
-                    e0 += noise_var;
-                }
-                if (i1 == col)
-                {
-                    e1 += noise_var;
-                }
-                if (i2 == col)
-                {
-                    e2 += noise_var;
-                }
-                if (i3 == col)
-                {
-                    e3 += noise_var;
-                }
-                cov_ptr[col_off + i0] = e0;
-                cov_ptr[col_off + i1] = e1;
-                cov_ptr[col_off + i2] = e2;
-                cov_ptr[col_off + i3] = e3;
-            };
-
-            std::size_t col = col_begin;
-            for (; col + 2U <= col_end; col += 2U)
-            {
-                const std::size_t c0 = col;
-                const std::size_t c1 = col + 1U;
-                const std::size_t r4_0 = std::min(m, (c0 + 3U) & ~std::size_t{3U});
-                const std::size_t r4_1 = std::min(m, (c1 + 3U) & ~std::size_t{3U});
-
-                for (std::size_t row = c0; row < r4_0; ++row)
-                {
-                    eval_single(row, c0);
-                }
-                std::size_t row_pair_start = r4_1;
-                if (r4_0 < r4_1)
-                {
-                    if (r4_0 + 4U <= m)
-                    {
-                        eval_4x1(r4_0, c0);
-                    }
-                    else
-                    {
-                        for (std::size_t row = r4_0; row < m; ++row)
-                        {
-                            eval_single(row, c0);
-                        }
-                        row_pair_start = m;
-                    }
-                }
-                for (std::size_t row = c1; row < std::min(m, row_pair_start); ++row)
-                {
-                    eval_single(row, c1);
-                }
-
-                const Storage* const v_c0 = v_ptr + (c0 * n);
-                const Storage* const v_c1 = v_ptr + (c1 * n);
-                const std::size_t off0 = c0 * m;
-                const std::size_t off1 = c1 * m;
-
-                std::size_t row = row_pair_start;
-                for (; row + 4U <= m; row += 4U)
-                {
-                    const std::size_t i0 = row;
-                    const std::size_t i1 = row + 1U;
-                    const std::size_t i2 = row + 2U;
-                    const std::size_t i3 = row + 3U;
-                    std::array<std::array<Refine, 2>, 4> dots{};
-                    detail::dot_4x2_storage_to_refine_simd<Storage, Refine>(
-                        v_ptr + (i0 * n), v_ptr + (i1 * n), v_ptr + (i2 * n), v_ptr + (i3 * n), v_c0, v_c1, n, dots
-                    );
-                    cov_ptr[off0 + i0] = static_cast<Refine>(kss_ptr[off0 + i0]) - dots[0][0];
-                    cov_ptr[off0 + i1] = static_cast<Refine>(kss_ptr[off0 + i1]) - dots[1][0];
-                    cov_ptr[off0 + i2] = static_cast<Refine>(kss_ptr[off0 + i2]) - dots[2][0];
-                    cov_ptr[off0 + i3] = static_cast<Refine>(kss_ptr[off0 + i3]) - dots[3][0];
-
-                    Refine e1_0 = static_cast<Refine>(kss_ptr[off1 + i0]) - dots[0][1];
-                    if (i0 == c1)
-                    {
-                        e1_0 += noise_var;
-                    }
-                    cov_ptr[off1 + i0] = e1_0;
-                    cov_ptr[off1 + i1] = static_cast<Refine>(kss_ptr[off1 + i1]) - dots[1][1];
-                    cov_ptr[off1 + i2] = static_cast<Refine>(kss_ptr[off1 + i2]) - dots[2][1];
-                    cov_ptr[off1 + i3] = static_cast<Refine>(kss_ptr[off1 + i3]) - dots[3][1];
-                }
-                for (; row < m; ++row)
-                {
-                    eval_single(row, c0);
-                    eval_single(row, c1);
-                }
-            }
-
-            for (; col < col_end; ++col)
-            {
-                const std::size_t r4 = std::min(m, (col + 3U) & ~std::size_t{3U});
-                for (std::size_t row = col; row < r4; ++row)
-                {
-                    eval_single(row, col);
-                }
-                std::size_t row = r4;
-                for (; row + 4U <= m; row += 4U)
-                {
-                    eval_4x1(row, col);
-                }
-                for (; row < m; ++row)
-                {
-                    eval_single(row, col);
-                }
-            }
-        };
-
-        const double cov_flops = static_cast<double>(n) * static_cast<double>(m) * static_cast<double>(m);
-        if (m >= 64U && n >= 64U)
-        {
-            const std::size_t tile = (m >= 512U) ? detail::k_blas3_mc : 24U;
-            const std::size_t n_blocks = (m + tile - 1U) / tile;
-            const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
-            const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
-#ifdef _OPENMP
-#    pragma omp parallel if (linalg::openmp_max_threads() > 1U && cov_flops >= 262144.0)
-#endif
-            {
-                alignas(64) std::array<Refine, detail::k_blas3_mc * detail::k_blas3_nc> c_tile{};
-                alignas(64) std::array<Refine, detail::k_blas3_pack_a_cap<Refine>> packed_a{};
-                alignas(64) std::array<Refine, detail::k_blas3_pack_b_cap> packed_b{};
-#ifdef _OPENMP
-#    pragma omp for schedule(dynamic, 1)
-#endif
-                for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
-                {
-                    const auto coords = detail::lower_tile_coords(static_cast<std::size_t>(t_s), n_blocks);
-                    const std::size_t bi = coords.row_block;
-                    const std::size_t bj = coords.col_block;
-                    const std::size_t ib = bi * tile;
-                    const std::size_t jb = bj * tile;
-                    const std::size_t rm = std::min(tile, m - ib);
-                    const std::size_t cn = std::min(tile, m - jb);
-                    std::fill_n(c_tile.data(), rm * cn, Refine{0});
-
-                    for (std::size_t kb = 0U; kb < n; kb += detail::k_blas3_kc)
-                    {
-                        const std::size_t bs = std::min(detail::k_blas3_kc, n - kb);
-                        if constexpr (std::same_as<Storage, Refine>)
-                        {
-                            detail::pack_panel_a_transpose(v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data(), 0U);
-                            detail::pack_panel_b_colmajor(v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data(), 0U);
-                        }
-                        else
-                        {
-                            detail::pack_panel_a_transpose_promote_f32_to_f64(
-                                v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data()
-                            );
-                            detail::pack_panel_b_colmajor_promote_f32_to_f64(
-                                v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data()
-                            );
-                        }
-                        detail::gemm_packed_add(rm, cn, bs, packed_a.data(), packed_b.data(), c_tile.data(), rm);
-                    }
-
-                    // Form Sigma_* = K_** - V^T V over the lower tile and add observation noise on the diagonal.
-                    for (std::size_t c = 0U; c < cn; ++c)
-                    {
-                        const std::size_t col = jb + c;
-                        const std::size_t r_start = (bi == bj) ? c : 0U;
-                        const Refine* const tile_col = c_tile.data() + (c * rm);
-                        const std::size_t col_off = col * m;
-                        for (std::size_t r = r_start; r < rm; ++r)
-                        {
-                            const std::size_t row = ib + r;
-                            Refine entry = static_cast<Refine>(kss[col_off + row]) - tile_col[r];
-                            if (row == col)
-                            {
-                                entry += noise_var;
-                            }
-                            cov_ptr[col_off + row] = entry;
-                        }
-                    }
-                }
+                cov_ptr[col_off + row] = entry;
             }
         }
-        else if (m >= 32U && cov_flops >= 262144.0)
+        if constexpr (std::same_as<Storage, Refine>)
         {
-            linalg::parallel_for_lower_blocks(m, 0U, col_range);
+            cxxgpr::detail::blas_syrk_lower(true, m, n, Refine{-1}, v_ptr, n, Refine{1}, cov_ptr, m);
         }
         else
         {
-            col_range(0U, m);
+            cxxgpr::detail::subtract_promoted_gram_lower(n, m, v_ptr, cov_ptr, m);
         }
-
         // Mirror strictly lower triangle into strictly upper triangle for symmetric output.
         for (std::size_t col = 0; col < m; ++col)
         {
@@ -724,6 +523,10 @@ namespace cxxgpr
             return std::vector<Refine>{};
         }
         const std::size_t m = cov.n_points;
+        if (m == 0U)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
         auto total_len = checked_mul(n_draws, m);
         if (!total_len.has_value())
         {

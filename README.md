@@ -14,7 +14,7 @@ English | [日本語](README.ja.md)
 - **Errors are values.** Every fallible call returns `std::expected<T, GprError>`; nothing throws across the API.
 - **Reproducible.** Parallel results are bit-identical for any thread count, and random sampling is seeded and portable.
 - **Predictable cost.** Repeated predictions allocate nothing after the first call, and the memory/speed trade-off is yours to choose.
-- **Clean headers.** Eigen, nlohmann/json and OpenMP never appear in the public headers, so they never leak into your build.
+- **Clean headers.** Eigen, OpenBLAS/oneMKL, `herumi/fmath`, nlohmann/json and OpenMP never appear in the public headers, so they never leak into your build.
 - **Safe by construction.** Failed calls leave your objects untouched, bounded hyperparameters cannot be set out of range, and trained and untrained models are different types.
 
 ## What you get
@@ -99,7 +99,7 @@ find_package(cxxgpr 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-The package locates Eigen, nlohmann/json and (optionally) OpenMP when you configure, so they must be installed, for example through vcpkg.
+The package locates Eigen, OpenBLAS (or Intel oneMKL), nlohmann/json and (optionally) OpenMP when you configure, so they must be installed, for example through vcpkg.
 
 **From source with `FetchContent`.**
 

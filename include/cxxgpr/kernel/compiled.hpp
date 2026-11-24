@@ -16,6 +16,7 @@
 #include "cxxgpr/precision/policy.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <span>
@@ -155,6 +156,15 @@ namespace cxxgpr
         /// RationalQuadraticArdKernel leaves.
         /// @return True when ARD leaves are present.
         [[nodiscard]] bool needs_ard_sq_diff() const noexcept;
+
+        /// @brief Returns the number of ARD kernel leaves in the compiled tree.
+        /// @return Count of RbfArdKernel, MaternArdKernel, and RationalQuadraticArdKernel leaves.
+        [[nodiscard]] std::size_t ard_leaf_count() const noexcept;
+
+        /// @brief Returns per-leaf ARD lengthscale counts in depth-first leaf order.
+        /// @details Entry i equals the feature dimension count when leaf i is an ARD leaf, or 0 otherwise.
+        /// @return Span of length num_leaves() giving ARD dimension counts per leaf.
+        [[nodiscard]] std::span<const std::size_t> ard_dims_per_leaf() const noexcept;
 
         /// @brief Returns the exponential evaluation backend used during kernel evaluation.
         /// @details Defaults to KernelExp::Accurate upon compilation from KernelSpec.
@@ -815,6 +825,7 @@ namespace cxxgpr
         /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
         /// @param[in,out] s2_valid True while ard_s2_cache matches prev_ls.
         /// @param[in,out] inc_steps Consecutive incremental updates applied since the last full rebuild.
+        /// @param[in] commit_s2 True to update `ard_s2_cache`/`prev_ls`; false for non-destructive trials.
         /// @return Empty expected on success or GprError on bad index, inputs, cache mismatch, or buffers.
         /// @retval GprErrorCode::IndexOutOfRange When leaf_idx >= num_leaves().
         /// @retval GprErrorCode::EmptyInput When x is empty.
@@ -829,6 +840,69 @@ namespace cxxgpr
             MatrixMut<T> out,
             Triangle uplo,
             NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps,
+            bool commit_s2 = true
+        ) const;
+
+        /// @brief Evaluates a single leaf kernel incrementally using an optional DistanceCache<T>.
+        /// @details For ARD leaves in either cached (`cache != nullptr && cache->has_ard()`) or uncached coordinate
+        /// mode, fuses $O(n^2)$ delta updates over changed dimensions with radial evaluation in one pass; leaves
+        /// `ard_s2_cache` and `prev_ls` unmodified when `commit_s2` is false for non-destructive proposal trials.
+        /// @param[in] leaf_idx Zero-based leaf index in [0, num_leaves()).
+        /// @param[in] x Column-major n x d training coordinate matrix.
+        /// @param[in] cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
+        /// @param[out] out Column-major n x n destination leaf Gram matrix.
+        /// @param[in] uplo Matrix triangle or full region to populate.
+        /// @param[in,out] nested Pre-allocated NestedBuffers used when falling back for CustomKernel.
+        /// @param[in,out] ard_s2_cache Caller-owned packed s^2 buffer of length n * (n + 1) / 2 for this leaf.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+        /// @param[in,out] s2_valid True while ard_s2_cache matches prev_ls.
+        /// @param[in,out] inc_steps Consecutive incremental updates applied since the last full rebuild.
+        /// @param[in] commit_s2 True to commit baseline cache state; false for non-destructive trial evaluation.
+        /// @return Empty expected on success or GprError on bad index, inputs, cache mismatch, or buffers.
+        /// @retval GprErrorCode::IndexOutOfRange When leaf_idx >= num_leaves().
+        /// @retval GprErrorCode::EmptyInput When x is empty.
+        /// @retval GprErrorCode::LengthMismatch When out or cache shape mismatches x.
+        /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with ARD leaf or cache dims.
+        /// @retval GprErrorCode::NonFiniteInput When any touched entry of x is non-finite.
+        /// @retval GprErrorCode::WorkspaceTooSmall When nested is too small for CustomKernel fallback.
+        [[nodiscard]] std::expected<void, GprError> apply_leaf_incremental(
+            std::size_t leaf_idx,
+            MatrixRef<T> x,
+            const DistanceCache<T>* cache,
+            MatrixMut<T> out,
+            Triangle uplo,
+            NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps,
+            bool commit_s2 = true
+        ) const;
+
+        /// @brief Commits an ARD leaf's current compiled lengthscales into its packed $s^2$ baseline cache.
+        /// @details Applies $O(n^2)$ delta updates while numerically safe, or rebuilds cleanly on step saturation or
+        /// wide scale changes; no-op for non-ARD leaves.
+        /// @param[in] leaf_idx Zero-based leaf index in [0, num_leaves()).
+        /// @param[in] x Column-major n x d training coordinate matrix (used when uncached).
+        /// @param[in] cache Optional precomputed DistanceCache pointer, or nullptr for uncached evaluation.
+        /// @param[in,out] ard_s2_cache Caller-owned packed s^2 buffer of length n * (n + 1) / 2 for this leaf.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+        /// @param[in,out] s2_valid True while ard_s2_cache matches prev_ls.
+        /// @param[in,out] inc_steps Consecutive incremental updates applied since the last full rebuild.
+        /// @return Empty expected on success or GprError on bad index, inputs, or cache shape mismatch.
+        /// @retval GprErrorCode::IndexOutOfRange When leaf_idx >= num_leaves().
+        /// @retval GprErrorCode::EmptyInput When x is empty.
+        /// @retval GprErrorCode::LengthMismatch When baseline buffers or cache shape mismatch.
+        /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with ARD leaf or cache dims.
+        /// @retval GprErrorCode::NonFiniteInput When any touched entry of x is non-finite.
+        [[nodiscard]] std::expected<void, GprError> commit_leaf_ard_s2(
+            std::size_t leaf_idx,
+            MatrixRef<T> x,
+            const DistanceCache<T>* cache,
             std::span<T> ard_s2_cache,
             std::span<double> prev_ls,
             bool& s2_valid,
@@ -885,6 +959,8 @@ namespace cxxgpr
         /// @param[in,out] kept_bufs Pre-allocated NestedBuffers with depth >= kept_buffers(products) and shape >= n x
         /// n.
         /// @param[in] products Number of top-level product terms whose factor Grams to retain.
+        /// @param[out] ard_s2_buf Optional pre-allocated buffer capturing forward packed ARD $s^2$ per ARD leaf.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness bytes set to `1` when captured.
         /// @return Empty expected on success or GprError on invalid inputs, dimensions, or undersized buffers.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch, nested, or kept_bufs is undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -899,7 +975,9 @@ namespace cxxgpr
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
             NestedBuffers<T>& kept_bufs,
-            std::size_t products
+            std::size_t products,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const;
 
         /// @brief Evaluates the training Gram matrix using cached distances while saving kept factor Grams.
@@ -913,6 +991,8 @@ namespace cxxgpr
         /// @param[in,out] kept_bufs Pre-allocated NestedBuffers with depth >= kept_buffers(products) and shape >= n x
         /// n.
         /// @param[in] products Number of top-level product terms whose factor Grams to retain.
+        /// @param[out] ard_s2_buf Optional pre-allocated buffer capturing forward packed ARD $s^2$ per ARD leaf.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness bytes set to `1` when captured.
         /// @return Empty expected on success or GprError on invalid inputs, cache mismatch, or buffers.
         /// @retval GprErrorCode::WorkspaceTooSmall When scratch, nested, or kept_bufs is undersized.
         /// @retval GprErrorCode::InvalidConfig When scratch aliases out.
@@ -928,7 +1008,9 @@ namespace cxxgpr
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
             NestedBuffers<T>& kept_bufs,
-            std::size_t products
+            std::size_t products,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const;
 
         /// @brief Evaluates <weight_lower, dK/dtheta_p>_F for all kernel parameters p in one tree walk.
@@ -947,6 +1029,8 @@ namespace cxxgpr
         /// (depth >= weighted_buffers(products) and shape >= n x n).
         /// @param[in] products Number of top-level product terms pre-populated in weighted_bufs[0..kept-1].
         /// @param[in,out] col_partials Caller-allocated per-column reduction scratch of length >= x.rows().
+        /// @param[in] ard_s2_buf Optional forward-captured ARD $s^2$ storage passed from apply_keeping.
+        /// @param[in] ard_s2_ready Optional readiness bytes identifying valid slices inside ard_s2_buf.
         /// @return Empty expected on success or GprError on length mismatch, cache mismatch, or undersized buffers.
         /// @retval GprErrorCode::LengthMismatch When out_grads.size() != num_params() or matrix shapes mismatch.
         /// @retval GprErrorCode::WorkspaceTooSmall When kernel_scratch, col_partials, or weighted_bufs is undersized.
@@ -963,7 +1047,9 @@ namespace cxxgpr
             NestedBuffers<T>& nested,
             NestedBuffers<T>& weighted_bufs,
             std::size_t products,
-            std::span<double> col_partials
+            std::span<double> col_partials,
+            std::span<const T> ard_s2_buf = {},
+            std::span<const std::uint8_t> ard_s2_ready = {}
         ) const;
 
     private:

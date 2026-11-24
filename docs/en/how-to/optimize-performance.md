@@ -204,7 +204,7 @@ The same switches exist for the low-level buffers: `FitBuffers<P>::create(n, cac
 
 ## Use the fast exponential
 
-`Gpr::with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernel leaves with a range-reduced degree-7 polynomial. It does not affect `exp(log theta)` parameter transforms or `CustomKernel` leaves.
+`Gpr::with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernel leaves with `herumi/fmath` fast exponential evaluation. It does not affect `exp(log theta)` parameter transforms or `CustomKernel` leaves.
 
 In the table above, the `Double + FastApprox` row shows the price: predictions differ by $1.4 \times 10^{-5}$ from the accurate ones, and the weights by $4 \times 10^{-4}$ on this ill-conditioned problem. At `n = 1000` the gradient evaluation was no faster (about 7.5 to 8.4 ms against 7.6 ms), because the Cholesky factorization dominates. `FastApprox` can only help when kernel evaluation is a large share of the work: many prediction points relative to the training size, or low-dimensional problems where the factorization is cheap. Measure before you switch it on, and keep `KernelExp::Accurate` otherwise.
 

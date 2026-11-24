@@ -204,7 +204,7 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 
 ## 高速な指数関数を使う
 
-`Gpr::with_kernel_exp(KernelExp::FastApprox)` は、組込みのカーネル葉の `std::exp` を、範囲縮約つきの 7 次多項式に置き換える。`exp(log theta)` のパラメータ変換と `CustomKernel` の葉には影響しない。
+`Gpr::with_kernel_exp(KernelExp::FastApprox)` は、組込みのカーネル葉の `std::exp` を `herumi/fmath` の高速近似指数計算に置き換える。`exp(log theta)` のパラメータ変換と `CustomKernel` の葉には影響しない。
 
 上の表の `Double + FastApprox` の行が、その代償を示す。予測は正確な値から $1.4 \times 10^{-5}$、重みは $4 \times 10^{-4}$ ずれる（この悪条件の問題での値）。`n = 1000` の勾配計算は速くならなかった（約 7.5〜8.4 ms に対し、正確版は約 7.6 ms）。コレスキー分解が支配的だからである。`FastApprox` が効くのは、カーネル評価が仕事の大きな割合を占める場合だけである。学習点に対して予測点が多い場合や、分解の安い低次元の問題がこれに当たる。切り替える前に測り、そうでなければ `KernelExp::Accurate` のままにする。
 
