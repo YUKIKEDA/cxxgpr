@@ -21,7 +21,7 @@ Three structural issues remained in the internal numeric and build layers of `cx
 ## Decision
 
 1. **Selectable external BLAS/LAPACK backend (`CXXGPR_BLAS_BACKEND`)**:
-   - Add `openblas` (`0.3.34`, `threads` feature, BSD-3-Clause) to `vcpkg.json` as the portable default runtime dependency, and support `CXXGPR_BLAS_BACKEND=AUTO|OpenBLAS|MKL|Eigen` (selecting OpenBLAS when available under `AUTO`, Intel oneMKL when installed/requested, and Eigen as an explicit fallback).
+   - Add `openblas` (`0.3.34`, `threads` feature, plus `dynamic-arch` on `!windows | mingw` for portable runtime CPU dispatch across cached CI runners, BSD-3-Clause) to `vcpkg.json` as the portable default runtime dependency, and support `CXXGPR_BLAS_BACKEND=AUTO|OpenBLAS|MKL|Eigen` (selecting OpenBLAS when available under `AUTO`, Intel oneMKL when installed/requested, and Eigen as an explicit fallback).
    - Isolate `<cblas.h>` / `<mkl.h>` strictly inside `src/linalg/blas_backend.cpp` (plus version reporting in `src/core/build_info.cpp`), removing `src/linalg/packed_blas3.{hpp,cpp}` and `src/linalg/simd_blas3.hpp`.
    - Because vcpkg builds OpenBLAS with `-DBUILD_WITHOUT_LAPACK=ON` (CBLAS-only), implement blocked Cholesky and triangular/symmetric updates using vendor `cblas_?trsm` + `cblas_?syrk` + panel `Eigen::LLT<..., Eigen::Lower>` (or `LAPACKE_?potrf` when MKL is active), keeping the strictly upper triangle untouched and allocating zero heap memory in hot paths (`NoAllocationScope`).
    - Relax cross-thread-count bitwise identity expectations specifically on multi-threaded external BLAS operations while preserving single-configuration determinism and keeping OpenMP coordinate/Frobenius reductions bit-exact across thread counts.
