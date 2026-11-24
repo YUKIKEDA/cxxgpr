@@ -3981,6 +3981,58 @@ namespace cxxgpr
             return true;
         }
 
+        /// @brief Builds the effective product-child adjoint matrix out-of-line to keep recursive frames minimal.
+        /// @details Evaluates all sibling product factors other than @p skip_idx and multiplies them into a
+        /// lower-triangular scratch matrix drawn from @p ctx.work_bufs at @p work_cursor.
+        /// @param[in] p Enclosing product term node.
+        /// @param[in] skip_idx Child index whose effective adjoint matrix is being formed.
+        /// @param[in] weight Incoming effective adjoint matrix applied to @p p.
+        /// @param[in] work_cursor Buffer slot level inside @p ctx.work_bufs for the child adjoint matrix.
+        /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
+        /// @param[out] out_weff Populated immutable view of the built child adjoint matrix.
+        /// @return True on success, false after recording @p ctx.err.
+        [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_dist_build_weff(
+            const ProductTerm& p,
+            std::size_t skip_idx,
+            const MatrixRef<T>& weight,
+            std::size_t work_cursor,
+            const WalkDistCtx& ctx,
+            MatrixRef<T>& out_weff
+        ) const
+        {
+            const std::size_t n = ctx.store.rows();
+            if (work_cursor >= ctx.work_bufs.depth() || ctx.work_bufs.rows() < n || ctx.work_bufs.cols() < n)
+            {
+                ctx.err = GprError::workspace_too_small();
+                return false;
+            }
+            const SquareEvalCtx sctx{
+                .store = ctx.store,
+                .x = ctx.x,
+                .uplo = Triangle::Lower,
+                .nested = ctx.nested,
+                .ard_s2_buf = {},
+                .ard_s2_ready = {},
+                .err = ctx.err,
+            };
+            auto w_eff = ctx.work_bufs.level(work_cursor, n, n);
+            copy_triangle(w_eff, weight, Triangle::Lower);
+            for (std::size_t k = 0U; k < p.terms.size(); ++k)
+            {
+                if (k == skip_idx)
+                {
+                    continue;
+                }
+                if (!eval_term_square_rec(p.terms[k], ctx.scratch_a, ctx.scratch_b, 0U, sctx))
+                {
+                    return false;
+                }
+                mul_into(w_eff, ctx.scratch_a.as_ref(), Triangle::Lower);
+            }
+            out_weff = w_eff.as_ref();
+            return true;
+        }
+
         /// @brief Recursive body of `walk_weighted_dist` propagating effective adjoint weights top-down.
         /// @param[in] term Compiled AST node being walked.
         /// @param[in] weight Incoming effective adjoint matrix applied to `term`.
@@ -3997,21 +4049,16 @@ namespace cxxgpr
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
-                return std::ranges::all_of(s->terms, [&](const auto& child) {
-                    return walk_weighted_dist_rec(child, weight, work_cursor, ctx);
-                });
+                for (std::size_t idx = 0U; idx < s->terms.size(); ++idx)
+                {
+                    if (!walk_weighted_dist_rec(s->terms[idx], weight, work_cursor, ctx))
+                    {
+                        return false;
+                    }
+                }
+                return true;
             }
             const auto& p = std::get<ProductTerm>(term);
-            const std::size_t n = ctx.store.rows();
-            const SquareEvalCtx sctx{
-                .store = ctx.store,
-                .x = ctx.x,
-                .uplo = Triangle::Lower,
-                .nested = ctx.nested,
-                .ard_s2_buf = {},
-                .ard_s2_ready = {},
-                .err = ctx.err,
-            };
             for (std::size_t m = 0U; m < p.terms.size(); ++m)
             {
                 const auto [cb, ce] = param_range_of(p.terms[m]);
@@ -4019,26 +4066,12 @@ namespace cxxgpr
                 {
                     continue;
                 }
-                if (work_cursor >= ctx.work_bufs.depth() || ctx.work_bufs.rows() < n || ctx.work_bufs.cols() < n)
+                MatrixRef<T> w_eff_ref{};
+                if (!walk_weighted_dist_build_weff(p, m, weight, work_cursor, ctx, w_eff_ref))
                 {
-                    ctx.err = GprError::workspace_too_small();
                     return false;
                 }
-                auto w_eff = ctx.work_bufs.level(work_cursor, n, n);
-                copy_triangle(w_eff, weight, Triangle::Lower);
-                for (std::size_t k = 0U; k < p.terms.size(); ++k)
-                {
-                    if (k == m)
-                    {
-                        continue;
-                    }
-                    if (!eval_term_square_rec(p.terms[k], ctx.scratch_a, ctx.scratch_b, 0U, sctx))
-                    {
-                        return false;
-                    }
-                    mul_into(w_eff, ctx.scratch_a.as_ref(), Triangle::Lower);
-                }
-                if (!walk_weighted_dist_rec(p.terms[m], w_eff.as_ref(), work_cursor + 1U, ctx))
+                if (!walk_weighted_dist_rec(p.terms[m], w_eff_ref, work_cursor + 1U, ctx))
                 {
                     return false;
                 }
