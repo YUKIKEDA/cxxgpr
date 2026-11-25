@@ -76,13 +76,12 @@ All dependencies are implementation details. None appears in a public header, an
 |---|---|---|---|
 | Eigen (`eigen3`) | 5.0 (`find_package(Eigen3 5.0 CONFIG REQUIRED)`) | vcpkg `5.0.1` | Dense linear algebra panel fallbacks & transforms. Compiled with `EIGEN_MPL2_ONLY` and `EIGEN_DONT_PARALLELIZE` |
 | OpenBLAS (`openblas`, `threads` feature on non-MSVC) or Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | vcpkg `0.3.34` (OpenBLAS on `!windows \| mingw`) | Dense BLAS (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) and MKL `potrf`/`potri` when selected by `CXXGPR_BLAS_BACKEND` |
-| `herumi/fmath` | Commit `a81f8e53e9f007ed5df355bb4a99ff799fd75066` | `FetchContent` (`GIT_TAG`) | Fast approximate `exp` (`KernelExp::FastApprox`, BSD-3-Clause), compiled privately inside `cxxgpr` |
 | nlohmann/json (`nlohmann-json`) | 3.12 (`find_package(nlohmann_json 3.12 CONFIG REQUIRED)`) | vcpkg `3.12.0` | `config.json` of persisted models |
 | OpenMP (`OpenMP::OpenMP_CXX`) | any that the compiler provides; optional | n/a | Parallel loops. MSVC reports OpenMP 2.0 |
 | GoogleTest (`gtest`) | 1.18.0 | vcpkg `1.18.0` | Tests only, feature `tests` |
 | Google Benchmark (`benchmark`) | 1.9.5 | vcpkg `1.9.5` | Benchmarks only, feature `benchmarks` |
 
-`vcpkg.json` pins the vcpkg registry dependencies with a `builtin-baseline` commit plus explicit `overrides`, and `cmake/Dependencies.cmake` pins `herumi/fmath` to a 40-character Git commit SHA via `FetchContent` so source builds are reproducible. To build explicitly with the built-in SIMD backend (the default on Windows MSVC), pass `-DCXXGPR_BLAS_BACKEND=BuiltIn`, or place your own vendor BLAS packages on `CMAKE_PREFIX_PATH`; the version checks above still apply.
+`vcpkg.json` pins the vcpkg registry dependencies with a `builtin-baseline` commit plus explicit `overrides`. To build explicitly with the built-in SIMD backend (the default on Windows MSVC), pass `-DCXXGPR_BLAS_BACKEND=BuiltIn`, or place your own vendor BLAS packages on `CMAKE_PREFIX_PATH`; the version checks above still apply.
 
 The versions of the dependencies a given library was built with are recorded in `cxxgpr::build_info()` (see below).
 

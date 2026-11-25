@@ -84,7 +84,6 @@ add_library(cxxgpr STATIC
     src/workspace/inference.cpp
     src/workspace/leaf_cache.cpp
     src/workspace/mll.cpp
-    $<TARGET_OBJECTS:cxxgpr_fmath>
 )
 if(CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "BuiltIn" OR CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "MKL")
     target_sources(cxxgpr PRIVATE src/linalg/packed_blas3.cpp)
@@ -101,16 +100,9 @@ target_include_directories(cxxgpr
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CXXGPR_GENERATED_INCLUDE_DIR}
 )
-target_include_directories(cxxgpr
-    SYSTEM PRIVATE
-        "${fmath_SOURCE_DIR}/include"
-        "${fmath_SOURCE_DIR}/src"
-        "${fmath_SOURCE_DIR}/misc"
-)
 
 target_compile_definitions(cxxgpr
     PRIVATE
-        CXXGPR_HAS_FMATH_ASM=${CXXGPR_HAS_FMATH_ASM}
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},OpenBLAS>:CXXGPR_HAS_OPENBLAS=1>
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},MKL>:CXXGPR_HAS_MKL=1>
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},BuiltIn>:CXXGPR_HAS_BLAS_BUILTIN=1>

@@ -74,7 +74,7 @@ stateDiagram-v2
 
 ## 公開ヘッダーにサードパーティの型を含めない
 
-`include/cxxgpr/` のヘッダーは、C++ 標準ライブラリと互いのヘッダーしかインクルードしない。Eigen、外部 BLAS/LAPACK（OpenBLAS または Intel oneMKL）、`herumi/fmath`（近似 `exp`）、nlohmann/json（永続化）、OpenMP（並列化）は静的ライブラリの実装の詳細であり、シグネチャにも型にもマクロにも現れない。
+`include/cxxgpr/` のヘッダーは、C++ 標準ライブラリと互いのヘッダーしかインクルードしない。Eigen、外部 BLAS/LAPACK（OpenBLAS または Intel oneMKL）、nlohmann/json（永続化）、OpenMP（並列化）は静的ライブラリの実装の詳細であり、シグネチャにも型にもマクロにも現れない。
 
 ```{mermaid}
 flowchart LR
@@ -84,7 +84,6 @@ flowchart LR
   subgraph lib ["libcxxgpr (静的)"]
     API["公開 API"] --> IMPL["実装"]
     IMPL --> E["Eigen + OpenBLAS/MKL"]
-    IMPL --> F["herumi/fmath"]
     IMPL --> J["nlohmann/json"]
     IMPL --> O["OpenMP"]
   end

@@ -113,11 +113,11 @@ This split also explains the precision story: a `KernelSpec` is compiled once pe
 
 ## The cost of the exponential
 
-Almost all of the evaluation time of an RBF or Matern Gram matrix is spent on $e^{-x}$ for $n^2/2$ entries, and again for the gradient. `std::exp` is correct to the last bit or two, but it is slower than vectorized lookup-table approximations. The `FastApprox` backend delegates exponential evaluation inside built-in kernels to `herumi/fmath` so contiguous column slices run in vectorized batches.
+Almost all of the evaluation time of an RBF or Matern Gram matrix is spent on $e^{-x}$ for $n^2/2$ entries, and again for the gradient. `std::exp` guarantees 0.5–1 ULP across all edge modes, but serial scalar library calls prevent SIMD register fusion. The `FastApprox` backend evaluates exponentials inside built-in kernels in registers with inline SIMD (AVX-512 / 2x-unrolled AVX2+FMA / SSE2), fused directly into RBF and Matern loops.
 
 ### How the approximation works
 
-Write $x = n\ln 2 + g$. `herumi/fmath` splits the exponent into an integer power of two $2^n$ and a fractional lookup-table plus low-degree polynomial approximation for $2^f$ (`fmath::expd` / 32-byte-aligned `fmath::expd_v` in `double`, and `fmath_expf_v` with AVX2+FMA runtime dispatch and scalar fallback in `float`), while cxxgpr preserves exact `0`, `-inf` (underflow to `0`), `+inf`, and `NaN` boundary behavior around the finite domain.
+Write $x = n\ln 2 + g$. `FastApprox` performs exact Cody-Waite range reduction ($g = (x - n \ln 2_{\text{hi}}) - n \ln 2_{\text{lo}}$), scales by $2^n$ via IEEE-754 exponent bit bias, and evaluates a pinned Chebyshev minimax polynomial in Estrin form (degree 11 for `double`, degree 6 for `float`, giving $\le 2\text{ ULP}$ error) while preserving exact `0`, `-inf` (underflow to `0`), `+inf`, and `NaN` boundary behavior around the finite domain.
 
 ```text
 max relative error of FastApprox on [-100, 0]: double < 1.2e-07, float < 5.0e-06

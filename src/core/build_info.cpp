@@ -51,10 +51,6 @@ namespace cxxgpr
                               .name = "blas_backend",
                               .version = CXXGPR_BLAS_BACKEND_NAME,
                               },
-            DependencyVersion{
-                              .name = "fmath",
-                              .version = CXXGPR_FMATH_GIT_COMMIT,
-                              },
         };
         return info;
     }

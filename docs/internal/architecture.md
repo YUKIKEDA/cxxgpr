@@ -69,14 +69,13 @@ A file that violates any of the following boundaries fails `just arch-check` imm
 
 1. **Public-header non-exposure boundary (`include/cxxgpr/**`)**:
    - Must not `#include` `<Eigen/...>` or types that depend on Eigen-related macros.
-   - Must not `#include` external BLAS/LAPACK headers (`<cblas.h>`, `<openblas/...>`, `<mkl...>`) or `herumi/fmath` headers (`"fmath.h"`, `"old_fmath.hpp"`, `"xbyak_util.h"`).
+   - Must not `#include` external BLAS/LAPACK headers (`<cblas.h>`, `<openblas/...>`, `<mkl...>`).
    - Must not `#include` `<nlohmann/...>`. User-defined persistent state goes through a lightweight JSON string or a dedicated abstraction, and `nlohmann::json` types never appear in the public API.
    - Must not `#include` `<omp.h>`.
    - Must not `#include` non-public headers under `detail/` or files on the `src/` side.
 2. **Internal implementation layer (`src/<module>/**`)**:
    - Only the implementation `.cpp` files of `linalg`, `kernel`, `workspace`, and `gpr` (and private headers inside `src/`) may use Eigen (`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`) and OpenMP. The one exception is `src/core/build_info.cpp`, which may reference the `<Eigen/Core>` version macros to collect dependency version strings for `QA-06`.
    - Only the implementation `.cpp` files of `linalg` (specifically `src/linalg/blas_backend.cpp`) may include `<cblas.h>` / `<mkl.h>` / `<mkl_*.h>`, with `src/core/build_info.cpp` permitted to read BLAS/MKL version macros for `QA-06`.
-   - Only the implementation `.cpp` files of `kernel` (specifically `src/kernel/exp.cpp`) may include `herumi/fmath` headers (`"fmath.h"`, `"old_fmath.hpp"`, `"xbyak_util.h"`).
    - Only the implementation `.cpp` files of `persist` (and private headers inside `src/persist/`) may use `<nlohmann/json.hpp>`. The one exception is `src/core/build_info.cpp`, which is allowed to do so for the provenance JSON output of `QA-06`.
 3. **Tests and benchmarks (`tests/**`, `benchmarks/**`)**:
    - `tests/` exercises the public product API in principle. If Eigen is needed for an independent reference implementation, confine it to a separate test or to `tests/support/`. Files such as `tests/support/allocation_audit.hpp` cooperate with the internal `EIGEN_RUNTIME_NO_MALLOC` mechanism to audit heap allocations.

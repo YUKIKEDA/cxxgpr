@@ -222,7 +222,7 @@ The same `KernelSpec` compiles to `CompiledKernel<float>`. Hyperparameters stay 
 
 ## Choose the exponential backend
 
-Built-in leaves with an exponential, such as the RBF and Matern leaves, can switch to `herumi/fmath` vectorized approximations instead of `std::exp`. `CompiledKernel::kernel_exp` returns the current `KernelExp` (default `Accurate`) and `set_kernel_exp` switches to `FastApprox`. On a trainer the same switch is `Gpr::with_kernel_exp`. The approximation has a relative error below $1.2 \times 10^{-7}$ in `double` on $[-100, 0]$, so it is not a drop-in replacement when you need full precision; see {doc}`../explanation/kernels` for the trade-off. The scalar functions are public:
+Built-in leaves with an exponential, such as the RBF and Matern leaves, can switch to vectorized Estrin minimax SIMD approximations instead of `std::exp`. `CompiledKernel::kernel_exp` returns the current `KernelExp` (default `Accurate`) and `set_kernel_exp` switches to `FastApprox`. On a trainer the same switch is `Gpr::with_kernel_exp`. The approximation maintains 1–2 ULP precision (relative error $< 10^{-14}$ in `double` and $< 5 \times 10^{-7}$ in `float` on $[-100, 0]$) while trading bit-for-bit `std::exp` parity for SIMD speed; see {doc}`../explanation/kernels` for details. The scalar functions are public:
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp

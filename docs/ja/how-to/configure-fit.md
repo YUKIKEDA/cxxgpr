@@ -216,7 +216,7 @@ with 3 restarts: neg-MLL 0.7080
 
 ## 指数関数のバックエンドを選ぶ
 
-`with_kernel_exp(KernelExp::FastApprox)` を使うと、組込みカーネル内の `std::exp` が `herumi/fmath` による近似指数関数に置き換わる。精度をわずかに犠牲にして、カーネル評価が速くなる。既定の `KernelExp::Accurate` は `std::exp` を使う。この設定は、パラメータ変換と `CustomKernel` の葉には効かない。この設定を使う行は、次の例に含まれる。
+`with_kernel_exp(KernelExp::FastApprox)` を使うと、組込みカーネル内の `std::exp` がベクトル化 Estrin minimax 近似（`1–2 ULP`）に置き換わり、カーネル評価が速くなる。既定の `KernelExp::Accurate` は `std::exp` を使う。この設定は、パラメータ変換と `CustomKernel` の葉には効かない。この設定を使う行は、次の例に含まれる。
 
 ## メモリと速度のトレードオフを決める
 

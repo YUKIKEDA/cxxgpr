@@ -42,7 +42,7 @@ int main()
     std::cout << std::scientific << std::setprecision(2);
 
     // [scalar]
-    // Relative error of the fast backend (herumi/fmath) against std::exp over the argument range kernels actually use.
+    // Relative error of the fast backend (range-reduced Estrin minimax) against std::exp over the kernel argument range.
     double worst_double = 0.0;
     float worst_float = 0.0F;
     for (int i = 0; i <= 20000; ++i)
@@ -62,8 +62,8 @@ int main()
     // [end]
     std::cout << "max relative error of FastApprox on [-100, 0]: double " << worst_double << ", float " << worst_float
               << '\n';
-    expect(worst_double < 1.2e-7 && worst_double > 0.0, "double error matches herumi/fmath lookup approximation");
-    expect(worst_float < 5.0e-6F, "float error stays at single precision level");
+    expect(worst_double < 1e-14 && worst_double >= 0.0, "double error stays within 1-2 ULP");
+    expect(worst_float < 5e-7F, "float error stays within 1-2 ULP");
     expect(eval_kernel_exp(-0.5, KernelExp::Accurate) == std::exp(-0.5), "Accurate is std::exp");
 
     // Special values are preserved.
@@ -117,7 +117,7 @@ int main()
     std::cout << "max |Gram(FastApprox) - Gram(Accurate)| = " << gram_diff << '\n';
     std::cout << "max |dK(FastApprox) - dK(Accurate)|     = " << grad_diff << '\n';
     expect(kernel.kernel_exp() == KernelExp::FastApprox, "backend switched");
-    expect(gram_diff < 1e-6 && gram_diff > 0.0, "Gram error is bounded by the fmath approximation error");
+    expect(gram_diff < 1e-13 && gram_diff >= 0.0, "Gram error stays within 1-2 ULP");
 
     // Self-consistency: under FastApprox both the value and derivative use the approximated exponential,
     // so a central finite difference matches the FastApprox analytic gradient closely.
@@ -147,10 +147,10 @@ int main()
     }
     std::cout << "finite difference vs FastApprox gradient:  " << fd_vs_fast << '\n';
     std::cout << "finite difference vs Accurate gradient:    " << fd_vs_accurate << '\n';
-    expect(fd_vs_fast < 1e-5, "FastApprox gradient stays within fmath finite-difference noise");
+    expect(fd_vs_fast < 1e-8, "FastApprox gradient matches finite differences tightly");
 
     // Parameter transforms and custom leaves always use std::exp: only kernel evaluation changes.
-    // Single precision uses fmath vectorized float evaluation when supported.
+    // Single precision uses vectorized Estrin minimax float evaluation.
     const auto kernel_f = spec.compile<float>();
     expect(kernel_f.kernel_exp() == KernelExp::Accurate, "every compiled kernel starts with the accurate backend");
 

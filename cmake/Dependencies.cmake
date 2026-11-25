@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-include(FetchContent)
-
 find_package(Eigen3 5.0 CONFIG REQUIRED)
 find_package(nlohmann_json 3.12 CONFIG REQUIRED)
 find_package(OpenMP COMPONENTS CXX)
@@ -90,53 +88,6 @@ endif()
 
 message(STATUS "cxxgpr BLAS backend: ${CXXGPR_ACTIVE_BLAS_BACKEND}")
 
-set(CXXGPR_FMATH_GIT_COMMIT "a81f8e53e9f007ed5df355bb4a99ff799fd75066")
-FetchContent_Declare(
-    fmath
-    GIT_REPOSITORY https://github.com/herumi/fmath.git
-    GIT_TAG        ${CXXGPR_FMATH_GIT_COMMIT}
-    GIT_SHALLOW    FALSE
-)
-FetchContent_MakeAvailable(fmath)
-
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
-    if(MSVC)
-        enable_language(ASM_MASM)
-        set(_cxxgpr_fmath_asm "${fmath_SOURCE_DIR}/src/fmath.asm")
-    else()
-        enable_language(ASM)
-        set(_cxxgpr_fmath_asm "${fmath_SOURCE_DIR}/src/fmath.S")
-    endif()
-    add_library(cxxgpr_fmath OBJECT
-        "${fmath_SOURCE_DIR}/src/cpu.cpp"
-        "${_cxxgpr_fmath_asm}"
-    )
-    set(CXXGPR_HAS_FMATH_ASM 1)
-else()
-    add_library(cxxgpr_fmath OBJECT
-        "${fmath_SOURCE_DIR}/src/cpu.cpp"
-    )
-    set(CXXGPR_HAS_FMATH_ASM 0)
-endif()
-
-target_include_directories(cxxgpr_fmath SYSTEM PRIVATE
-    "${fmath_SOURCE_DIR}/include"
-    "${fmath_SOURCE_DIR}/src"
-)
-set_target_properties(cxxgpr_fmath PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-    POSITION_INDEPENDENT_CODE ON
-)
-target_compile_definitions(cxxgpr_fmath PRIVATE
-    $<$<BOOL:${MSVC}>:_CRT_SECURE_NO_WARNINGS>
-)
-target_compile_options(cxxgpr_fmath PRIVATE
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<BOOL:${MSVC}>>:/W0>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<BOOL:${MSVC}>>>:-w>
-)
-
 if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
     set(CXXGPR_THIRD_PARTY_SHARE "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share")
     set(CXXGPR_THIRD_PARTY_NOTICES "${CMAKE_BINARY_DIR}/third-party-notices")
@@ -173,9 +124,6 @@ if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
                 "Missing third-party copyright notice for required package '${_pkg}' under ${CXXGPR_THIRD_PARTY_SHARE}")
         endif()
     endforeach()
-
-    set(CXXGPR_FMATH_NOTICE_ORIG "${fmath_SOURCE_DIR}/readme.md")
-    configure_file("${CXXGPR_FMATH_NOTICE_ORIG}" "${CXXGPR_THIRD_PARTY_NOTICES}/fmath.txt" COPYONLY)
 
     set(CXXGPR_MKL_NOTICE_ORIG "")
     if(CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "MKL" AND NOT "${CXXGPR_MKL_ROOT_HINT}" STREQUAL "")

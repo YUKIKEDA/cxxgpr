@@ -59,7 +59,7 @@ Exact GPR（厳密なガウス過程回帰）
 : 名詞では、コレスキー因子 $L$ のこと。API の動詞（`Gpr::factor`）では、ハイパーパラメータを最適化せず、現在の値のままモデルを学習することを指す。
 
 FastApprox
-: `KernelExp::FastApprox`。組込みカーネルの `std::exp` を、`herumi/fmath` による高速な近似指数関数に置き換える設定。1 回あたりは速く、精度は `double` で相対約 $10^{-7}$、`float` で相対約 $10^{-6}$ である。
+: `KernelExp::FastApprox`。組込みカーネルの `std::exp` を、内蔵の `1–2 ULP` Estrin minimax インライン SIMD 近似指数関数に置き換える設定。1 回あたりは速く、精度は `double` で相対 $< 10^{-14}$、`float` で相対 $< 5 \times 10^{-7}$ である。
 
 フォールバック（反復改良の）
 : 混合精度の反復改良が収束しないとき、または結果が拒否されたときに、系を倍精度で解き直すこと。{doc}`../explanation/numerical-stability` を参照。

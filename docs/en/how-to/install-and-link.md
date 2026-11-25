@@ -15,7 +15,7 @@ This guide shows how to build cxxgpr, install it, and use it from a CMake projec
 | nlohmann/json | 3.12 | Used internally, not exposed in public headers |
 | OpenMP | optional | Used for deterministic parallel loops when found |
 
-cxxgpr is a **static library**. Eigen, OpenBLAS/MKL, `herumi/fmath` (fetched automatically during configure), nlohmann/json and OpenMP are implementation details: no public header includes them, so your own code never needs their headers. The installed CMake package still locates the configured libraries with `find_dependency`, so they must be discoverable when you configure your project.
+cxxgpr is a **static library**. Eigen, OpenBLAS/MKL, nlohmann/json and OpenMP are implementation details: no public header includes them, so your own code never needs their headers. The installed CMake package still locates the configured libraries with `find_dependency`, so they must be discoverable when you configure your project.
 
 ## Build and install from source
 

@@ -108,7 +108,7 @@ Dense matrix operations (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) use either cxxgp
 
 On 64-bit Arm the cxxgpr kernels use their portable fallbacks and the option does not exist. There is no run-time ISA tier switch for cxxgpr's own loops: two ISA tiers give results that agree to rounding error but not bit for bit, which is the fourth row of the table at the top. See {doc}`../reference/build-options` to choose. Note also that multi-threaded external BLAS libraries (OpenBLAS/oneMKL) only preserve bitwise invariance within fixed BLAS thread settings, whereas cxxgpr's OpenMP coordinate/Frobenius reductions remain bit-identical across thread counts.
 
-The fast exponential `KernelExp::FastApprox` delegates kernel exponentials to `herumi/fmath` (with AVX2+FMA runtime dispatch for `float` when available) instead of `std::exp`. It trades strict IEEE accuracy for throughput (~$10^{-7}$ relative error in `double`) and is therefore opt-in.
+The fast exponential `KernelExp::FastApprox` replaces `std::exp` inside built-in kernels with vectorized, 2x-unrolled AVX-512 / AVX2+FMA / SSE2 Estrin minimax polynomial evaluation (`1–2 ULP`, $< 10^{-14}$ relative error in `double` and $< 5 \times 10^{-7}$ in `float`). It avoids `std::exp` special-case tails and rounding overhead for throughput and is therefore opt-in.
 
 ## Why exactness costs time
 

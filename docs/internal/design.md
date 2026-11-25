@@ -218,7 +218,7 @@ When `OptimizerTraits<O>::uses_change_indices` (`true` for `FastSimulatedAnneali
 `KernelExp::{Accurate, FastApprox}` is held in each model as a run-time choice (default `Accurate`).
 
 - `Accurate`: uses `std::exp` (storage type `float`/`double`) as is.
-- `FastApprox`: delegates $\exp$ inside built-in kernel evaluation to commit-pinned `herumi/fmath` ([ADR 0004](adr/0004-external-blas-and-fmath.md))—`fmath::expd` / 32-byte-aligned `fmath::expd_v` for `double`, and `fmath_expf_v` (with AVX2+FMA runtime dispatch and scalar fallback) for `float`—keeping `fmath` headers strictly private inside `src/kernel/exp.cpp` with IEEE-754 boundary guards (`0`, underflow, overflow, `NaN`). `ExpJet` returns `{e, e, e}` (`std::exp` for parameter transforms and `Custom` leaves is unchanged).
+- `FastApprox`: evaluates $\exp$ inside built-in kernels via self-contained, 1–2 ULP range-reduced Estrin minimax polynomial inline SIMD evaluation (pinned Chebyshev degree 11 for `double`, degree 6 for `float`, Cody-Waite subtraction, 2x-unrolled AVX2+FMA / AVX-512 / SSE2 fused directly with Matérn evaluation and IEEE-754 boundary guards for `0`, underflow, overflow, and `NaN`, [ADR 0004](adr/0004-external-blas-and-fmath.md)). `ExpJet` returns `{e, e, e}` (`std::exp` for parameter transforms and `Custom` leaves is unchanged).
 
 ---
 

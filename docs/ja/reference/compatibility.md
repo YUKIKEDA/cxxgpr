@@ -39,7 +39,7 @@ cxxgpr は、`MAJOR.MINOR.PATCH` の版番号を使う。現在のリリース�
 - エラーの契約。関数は `std::expected<T, GprError>` を返し、API の境界を越えて例外を投げない。
 - 列優先の入力と、`Gpr` と `FittedGpr` の分離。
 - 永続化フォーマットの版（`persist::FORMAT_VERSION`。現在は 1）。`format_version` が異なるディレクトリを読むと `UnsupportedPersistVersion` を返す。自動的な移行はない。{doc}`file-format` を参照。
-- 公開ヘッダーに、Eigen、BLAS/oneMKL、`herumi/fmath`、nlohmann/json、OpenMP の型を含まない（{doc}`../explanation/design-principles`）。
+- 公開ヘッダーに、Eigen、BLAS/oneMKL、nlohmann/json、OpenMP の型を含まない（{doc}`../explanation/design-principles`）。
 
 ## CMake での版
 
@@ -69,4 +69,4 @@ cxxgpr が実装するのは厳密なガウス過程回帰だけである。疎�
 
 ## ライセンスとサードパーティのコード
 
-cxxgpr は Apache-2.0 でライセンスされる。依存ライブラリはそれぞれのライセンスを保つ（Eigen は `EIGEN_MPL2_ONLY` 下の MPL-2.0、OpenBLAS と `herumi/fmath` は BSD-3-Clause、Intel oneMKL 選択時は ISSL、nlohmann/json は MIT、OpenMP はコンパイラ付属）。ライセンス文と告知は `share/cxxgpr` にインストールされ、`THIRD_PARTY_NOTICES.md` に列挙されている。
+cxxgpr は Apache-2.0 でライセンスされる。依存ライブラリはそれぞれのライセンスを保つ（Eigen は `EIGEN_MPL2_ONLY` 下の MPL-2.0、OpenBLAS は BSD-3-Clause、Intel oneMKL 選択時は ISSL、nlohmann/json は MIT、OpenMP はコンパイラ付属）。ライセンス文と告知は `share/cxxgpr` にインストールされ、`THIRD_PARTY_NOTICES.md` に列挙されている。

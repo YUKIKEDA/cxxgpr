@@ -222,7 +222,7 @@ K(0,0) = 2.1  K(1,0) = 1.60147  K(2,0) = 0.822225
 
 ## 指数関数のバックエンドを選ぶ
 
-RBF や Matern のように指数関数を使う組込みの葉は、`std::exp` の代わりに `herumi/fmath` による高速な近似を使える。`CompiledKernel::kernel_exp` は現在の `KernelExp`（既定は `Accurate`）を返し、`set_kernel_exp` で `FastApprox` に切り替える。トレーナーでは `Gpr::with_kernel_exp` が同じ切り替えである。近似の相対誤差は `[-100, 0]` において `double` で $1.2 \times 10^{-7}$ 未満あり、完全な精度が要る場面の代用品にはならない。トレードオフは {doc}`../explanation/kernels` で述べる。スカラー関数は公開されている。
+RBF や Matern のように指数関数を使う組込みの葉は、`std::exp` の代わりにベクトル化 Estrin minimax インライン SIMD による高速な近似を使える。`CompiledKernel::kernel_exp` は現在の `KernelExp`（既定は `Accurate`）を返し、`set_kernel_exp` で `FastApprox` に切り替える。トレーナーでは `Gpr::with_kernel_exp` が同じ切り替えである。`FastApprox` は `[-100, 0]` において `double` で相対誤差 $1.0 \times 10^{-14}$ 未満・`float` で $5.0 \times 10^{-7}$ 未満（`1–2 ULP`）を保ちつつ、`std::exp` とのビット完全一致の代わりに SIMD スループットを優先する。詳細は {doc}`../explanation/kernels` を参照。スカラー関数は公開されている。
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp

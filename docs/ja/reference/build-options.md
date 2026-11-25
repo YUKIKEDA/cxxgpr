@@ -76,13 +76,12 @@ ctest --preset windows-release
 |---|---|---|---|
 | Eigen（`eigen3`） | 5.0（`find_package(Eigen3 5.0 CONFIG REQUIRED)`） | vcpkg `5.0.1` | 密行列線形代数のパネル計算・変換。`EIGEN_MPL2_ONLY` と `EIGEN_DONT_PARALLELIZE` つきでコンパイルされる |
 | OpenBLAS（非 MSVC で `openblas`）または Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | vcpkg `0.3.34`（`!windows \| mingw` で OpenBLAS） | `CXXGPR_BLAS_BACKEND` に応じた密行列 BLAS（`GEMM` / `SYRK` / `TRSM` / `GEMV` / `DOT`、MKL では `potrf` / `potri`） |
-| `herumi/fmath` | コミット `a81f8e53e9f007ed5df355bb4a99ff799fd75066` | `FetchContent`（`GIT_TAG`） | 高速近似指数 `KernelExp::FastApprox`（BSD-3-Clause）。`cxxgpr` の内部だけに組み込む |
 | nlohmann/json（`nlohmann-json`） | 3.12（`find_package(nlohmann_json 3.12 CONFIG REQUIRED)`） | vcpkg `3.12.0` | 永続化されたモデルの `config.json` |
 | OpenMP（`OpenMP::OpenMP_CXX`） | コンパイラが提供するもの。任意 | 対象外 | 並列ループ。MSVC は OpenMP 2.0 を報告する |
 | GoogleTest（`gtest`） | 1.18.0 | vcpkg `1.18.0` | テストのみ。フィーチャー `tests` |
 | Google Benchmark（`benchmark`） | 1.9.5 | vcpkg `1.9.5` | ベンチマークのみ。フィーチャー `benchmarks` |
 
-`vcpkg.json` は vcpkg レジストリの `builtin-baseline` コミットと明示的な `overrides` でパッケージを固定し、`cmake/Dependencies.cmake` は `herumi/fmath` を 40 文字の Git コミットハッシュ付き `FetchContent` で固定している。内蔵 SIMD バックエンド（Windows MSVC の既定）を明示指定する場合は `-DCXXGPR_BLAS_BACKEND=BuiltIn` を渡すか、`CMAKE_PREFIX_PATH` でベンダー BLAS の場所を指定する。その場合も、上の版の検査は適用される。
+`vcpkg.json` は vcpkg レジストリの `builtin-baseline` コミットと明示的な `overrides` でパッケージを固定している。内蔵 SIMD バックエンド（Windows MSVC の既定）を明示指定する場合は `-DCXXGPR_BLAS_BACKEND=BuiltIn` を渡すか、`CMAKE_PREFIX_PATH` でベンダー BLAS の場所を指定する。その場合も、上の版の検査は適用される。
 
 ライブラリがビルドされたときの依存ライブラリの版は、`cxxgpr::build_info()` に記録される（後述）。
 

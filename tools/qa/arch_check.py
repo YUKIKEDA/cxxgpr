@@ -23,20 +23,14 @@ EIGEN_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
 OPENMP_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
 JSON_MODULES = frozenset({"persist"})
 BLAS_MODULES = frozenset({"linalg"})
-FMATH_MODULES = frozenset({"kernel"})
 
 BLAS_INCLUDE_NAMES = frozenset(
     {"cblas.h", "openblas_config.h", "mkl.h", "mkl_cblas.h", "mkl_lapacke.h", "mkl_version.h"}
 )
-FMATH_INCLUDE_NAMES = frozenset({"fmath.h", "old_fmath.hpp", "xbyak_util.h"})
 
 
 def _is_blas_include(target: str) -> bool:
     return target in BLAS_INCLUDE_NAMES or target.startswith(("openblas/", "mkl"))
-
-
-def _is_fmath_include(target: str) -> bool:
-    return target in FMATH_INCLUDE_NAMES
 
 
 def parse_allowed_deps(doc_path: Path) -> tuple[dict[str, set[str]], list[str]]:
@@ -102,7 +96,6 @@ def check_repository(
                     target.startswith(("Eigen/", "eigen3/", "nlohmann/"))
                     or target == "omp.h"
                     or _is_blas_include(target)
-                    or _is_fmath_include(target)
                 ):
                     errors.append(
                         f"{rel_posix}:{line_no}: forbidden third-party include "
@@ -173,10 +166,6 @@ def check_repository(
                 ):
                     errors.append(
                         f"{rel_posix}:{line_no}: BLAS/MKL include not permitted in module '{mod}'"
-                    )
-                if _is_fmath_include(target) and mod not in FMATH_MODULES:
-                    errors.append(
-                        f"{rel_posix}:{line_no}: fmath include not permitted in module '{mod}'"
                     )
 
     for consumer_root, kind in ((tests_root, "tests"), (benchmarks_root, "benchmarks")):

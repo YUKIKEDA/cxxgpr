@@ -74,7 +74,7 @@ The cost falls on code that stores samples as rows (a `std::vector<std::array<do
 
 ## No third-party types in public headers
 
-The headers under `include/cxxgpr/` include only the C++ standard library and each other. Eigen, external BLAS/LAPACK (OpenBLAS or Intel oneMKL), `herumi/fmath` (approximate `exp`), nlohmann/json (persistence), and OpenMP (parallelism) are implementation details of the static library and appear in no signature, type or macro.
+The headers under `include/cxxgpr/` include only the C++ standard library and each other. Eigen, external BLAS/LAPACK (OpenBLAS or Intel oneMKL), nlohmann/json (persistence), and OpenMP (parallelism) are implementation details of the static library and appear in no signature, type or macro.
 
 ```{mermaid}
 flowchart LR
@@ -84,7 +84,6 @@ flowchart LR
   subgraph lib ["libcxxgpr (static)"]
     API["Public API"] --> IMPL["Implementation"]
     IMPL --> E["Eigen + OpenBLAS/MKL"]
-    IMPL --> F["herumi/fmath"]
     IMPL --> J["nlohmann/json"]
     IMPL --> O["OpenMP"]
   end

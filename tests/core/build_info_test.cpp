@@ -80,11 +80,9 @@ namespace
         ASSERT_TRUE(actual_deps.contains("eigen"));
         ASSERT_TRUE(actual_deps.contains("nlohmann_json"));
         ASSERT_TRUE(actual_deps.contains("blas_backend"));
-        ASSERT_TRUE(actual_deps.contains("fmath"));
         EXPECT_EQ(actual_deps.at("eigen"), overrides.at("eigen3"));
         EXPECT_EQ(actual_deps.at("nlohmann_json"), overrides.at("nlohmann-json"));
         EXPECT_FALSE(actual_deps.at("blas_backend").empty());
-        EXPECT_EQ(actual_deps.at("fmath"), "a81f8e53e9f007ed5df355bb4a99ff799fd75066");
 
         // Verify the JSON serialization preserves every structured provenance attribute.
         const std::string json_text = cxxgpr::build_info_json();
