@@ -2661,7 +2661,7 @@ namespace cxxgpr::detail
         {
             return std::numeric_limits<std::size_t>::max();
         }
-        const MklLocalThreadsGuard mkl_guard(n <= 256U);
+        const MklLocalThreadsGuard mkl_guard(n < 192U || (n <= 256U && linalg::openmp_max_threads() <= 1U));
         const lapack_int info =
             LAPACKE_spotrf(LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), a, static_cast<lapack_int>(lda));
         if (info != 0)
