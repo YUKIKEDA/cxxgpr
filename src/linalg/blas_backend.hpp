@@ -299,14 +299,61 @@ namespace cxxgpr::detail
     /// @return Zero on success, or the 1-based failing pivot index on non-SPD failure.
     [[nodiscard]] std::size_t blas_cholesky_lower(std::size_t n, float* a, std::size_t lda) noexcept;
 
-    /// @brief Subtracts promoted V^T * V from the lower triangle of double covariance buffer C without heap allocation.
-    /// @param[in] n Inner dimension (number of rows of n x m matrix V).
-    /// @param[in] m Covariance order (number of columns of V and order of C).
-    /// @param[in] v_ptr Single-precision column-major matrix V of size n x m (leading dimension n).
-    /// @param[in,out] cov_ptr Double-precision m x m matrix updated in its lower triangle: C -= V^T * V.
-    /// @param[in] ldc Column stride of cov_ptr.
-    void subtract_promoted_gram_lower(
-        std::size_t n, std::size_t m, const float* v_ptr, double* cov_ptr, std::size_t ldc
+    /// @brief Forms lower triangle of posterior covariance `kss + noise_var * I - V^T * V` in double precision.
+    /// @details Executes a fused parallel tile pass on `BuiltIn` (`m >= 64 && n >= 64`) or initializes `cov_ptr` from
+    /// `kss_ptr` plus diagonal `noise_var` followed by `blas_syrk_lower`.
+    /// @param[in] n Training point count (number of rows of `n x m` matrix `V`).
+    /// @param[in] m Query point count (order of square matrices `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Double-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Double-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Non-negative diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Double-precision `m x m` output matrix receiving lower-triangular posterior covariance.
+    /// @param[in] ldc Column stride of `cov_ptr`.
+    void blas_posterior_cov_lower(
+        std::size_t n,
+        std::size_t m,
+        const double* v_ptr,
+        const double* kss_ptr,
+        double noise_var,
+        double* cov_ptr,
+        std::size_t ldc
+    ) noexcept;
+
+    /// @brief Single-precision overload of `blas_posterior_cov_lower`.
+    /// @param[in] n Training point count (number of rows of `n x m` matrix `V`).
+    /// @param[in] m Query point count (order of square matrices `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Single-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Single-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Non-negative diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Single-precision `m x m` output matrix receiving lower-triangular posterior covariance.
+    /// @param[in] ldc Column stride of `cov_ptr`.
+    void blas_posterior_cov_lower(
+        std::size_t n,
+        std::size_t m,
+        const float* v_ptr,
+        const float* kss_ptr,
+        float noise_var,
+        float* cov_ptr,
+        std::size_t ldc
+    ) noexcept;
+
+    /// @brief Mixed-precision overload forming double posterior covariance `kss + noise_var * I - V^T * V` from float
+    /// `V` and `kss_ptr` without heap allocation.
+    /// @param[in] n Training point count (number of rows of `n x m` matrix `V`).
+    /// @param[in] m Query point count (order of square matrices `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Single-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Single-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Non-negative double-precision diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Double-precision `m x m` output matrix receiving lower-triangular posterior covariance.
+    /// @param[in] ldc Column stride of `cov_ptr`.
+    void blas_posterior_cov_lower(
+        std::size_t n,
+        std::size_t m,
+        const float* v_ptr,
+        const float* kss_ptr,
+        double noise_var,
+        double* cov_ptr,
+        std::size_t ldc
     ) noexcept;
 
     /// @brief Computes lower triangle of W = alpha * alpha^T - (L L^T)^-1 from lower Cholesky factor L.

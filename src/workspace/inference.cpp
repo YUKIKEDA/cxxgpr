@@ -420,28 +420,8 @@ namespace cxxgpr
         const Storage* v_ptr = workspace.query_k_star.data();
         Refine* cov_ptr = out.covariance.data();
 
-        // Initialize lower triangle of Sigma_* with prior K_** (+ sigma_n^2 I) and subtract V^T V via BLAS-3.
-        for (std::size_t col = 0; col < m; ++col)
-        {
-            const std::size_t col_off = col * m;
-            for (std::size_t row = col; row < m; ++row)
-            {
-                auto entry = static_cast<Refine>(kss[col_off + row]);
-                if (row == col)
-                {
-                    entry += noise_var;
-                }
-                cov_ptr[col_off + row] = entry;
-            }
-        }
-        if constexpr (std::same_as<Storage, Refine>)
-        {
-            cxxgpr::detail::blas_syrk_lower(true, m, n, Refine{-1}, v_ptr, n, Refine{1}, cov_ptr, m);
-        }
-        else
-        {
-            cxxgpr::detail::subtract_promoted_gram_lower(n, m, v_ptr, cov_ptr, m);
-        }
+        // Form lower triangle of Sigma_* = K_** + sigma_n^2 I - V^T V (fused single-pass on BuiltIn / promoted SIMD).
+        cxxgpr::detail::blas_posterior_cov_lower(n, m, v_ptr, kss.data(), noise_var, cov_ptr, m);
         // Mirror strictly lower triangle into strictly upper triangle for symmetric output.
         for (std::size_t col = 0; col < m; ++col)
         {

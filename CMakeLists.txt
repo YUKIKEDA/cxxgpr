@@ -86,7 +86,7 @@ add_library(cxxgpr STATIC
     src/workspace/mll.cpp
     $<TARGET_OBJECTS:cxxgpr_fmath>
 )
-if(CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "BuiltIn")
+if(CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "BuiltIn" OR CXXGPR_ACTIVE_BLAS_BACKEND STREQUAL "MKL")
     target_sources(cxxgpr PRIVATE src/linalg/packed_blas3.cpp)
 endif()
 add_library(cxxgpr::cxxgpr ALIAS cxxgpr)
@@ -114,6 +114,7 @@ target_compile_definitions(cxxgpr
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},OpenBLAS>:CXXGPR_HAS_OPENBLAS=1>
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},MKL>:CXXGPR_HAS_MKL=1>
         $<$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},BuiltIn>:CXXGPR_HAS_BLAS_BUILTIN=1>
+        $<$<OR:$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},BuiltIn>,$<STREQUAL:${CXXGPR_ACTIVE_BLAS_BACKEND},MKL>>:CXXGPR_HAS_BUILTIN_SIMD_KERNELS=1>
 )
 
 target_link_libraries(cxxgpr

@@ -35,7 +35,7 @@
 #    endif
 #endif
 
-#ifdef CXXGPR_HAS_BLAS_BUILTIN
+#ifdef CXXGPR_HAS_BUILTIN_SIMD_KERNELS
 #    include "linalg/packed_blas3.hpp"
 #    include "linalg/simd_blas3.hpp"
 #endif
@@ -477,13 +477,10 @@ namespace cxxgpr::detail
             }
         }
 
-#ifdef CXXGPR_HAS_BLAS_BUILTIN
+#ifdef CXXGPR_HAS_BUILTIN_SIMD_KERNELS
 
         /// @brief Column count shared by direct Cholesky panels and their scratch arrays.
         constexpr std::size_t k_direct_panel_block = 32U;
-
-        /// @brief Smallest RHS batch handled by the packed forward solver.
-        constexpr std::size_t k_min_packed_rhs = 6U;
 
         /// @brief Factors diagonal submatrix `a[k:k+bs, k:k+bs]` in place via Eigen::LLT and validates diagonal pivots.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
@@ -862,6 +859,11 @@ namespace cxxgpr::detail
             return factor_subblock_eigen(a, 0U, n);
         }
 
+#    ifdef CXXGPR_HAS_BLAS_BUILTIN
+
+        /// @brief Smallest RHS batch handled by the packed forward solver.
+        constexpr std::size_t k_min_packed_rhs = 6U;
+
         /// @brief Solves `L * X = B` across RHS columns `[col_begin, col_end)` via blocked SIMD updates.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
         /// @param[in] l Square lower Cholesky factor view.
@@ -1124,7 +1126,7 @@ namespace cxxgpr::detail
 
             if (!trans_a)
             {
-#    ifdef _OPENMP
+#        ifdef _OPENMP
                 if (n >= 8U && approx_flops >= 4194304.0)
                 {
                     if (n > 24U && linalg::openmp_max_threads() == 1U)
@@ -1142,7 +1144,7 @@ namespace cxxgpr::detail
                     const std::size_t col_block = (n >= 512U) ? 24U : ((n >= 192U) ? 12U : 4U);
                     const std::size_t n_blocks = (n + col_block - 1U) / col_block;
                     const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
-#        pragma omp parallel for schedule(dynamic, 1) if (linalg::openmp_max_threads() > 1U)
+#            pragma omp parallel for schedule(dynamic, 1) if (linalg::openmp_max_threads() > 1U)
                     for (std::ptrdiff_t blk = 0; blk < n_blocks_s; ++blk)
                     {
                         const std::size_t col_begin = static_cast<std::size_t>(blk) * col_block;
@@ -1151,21 +1153,21 @@ namespace cxxgpr::detail
                     }
                     return;
                 }
-#    else
+#        else
                 (void)approx_flops;
-#    endif
+#        endif
                 solve_lower_cols(l, rhs, 0U, n);
                 return;
             }
 
-#    ifdef _OPENMP
+#        ifdef _OPENMP
             if (n >= 4U && linalg::openmp_max_threads() > 1U && approx_flops >= 4194304.0)
             {
                 const std::size_t small_block = (n <= 12U) ? 2U : 4U;
                 const std::size_t col_block = (n >= 64U) ? 16U : small_block;
                 const std::size_t n_blocks = (n + col_block - 1U) / col_block;
                 const auto n_blocks_s = static_cast<std::ptrdiff_t>(n_blocks);
-#        pragma omp parallel for schedule(dynamic, 1)
+#            pragma omp parallel for schedule(dynamic, 1)
                 for (std::ptrdiff_t blk = 0; blk < n_blocks_s; ++blk)
                 {
                     const std::size_t col_begin = static_cast<std::size_t>(blk) * col_block;
@@ -1174,7 +1176,7 @@ namespace cxxgpr::detail
                 }
                 return;
             }
-#    endif
+#        endif
             solve_lower_transpose_cols(l, rhs, 0U, n);
         }
 
@@ -1213,16 +1215,16 @@ namespace cxxgpr::detail
             const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
             const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
             const double flops = static_cast<double>(k) * static_cast<double>(n) * static_cast<double>(n);
-#    ifdef _OPENMP
-#        pragma omp parallel if (linalg::openmp_max_threads() > 1U && flops >= 262144.0)
-#    endif
+#        ifdef _OPENMP
+#            pragma omp parallel if (linalg::openmp_max_threads() > 1U && flops >= 262144.0)
+#        endif
             {
                 alignas(64) std::array<T, k_blas3_mc * k_blas3_nc> c_tile{};
                 alignas(64) std::array<T, k_blas3_pack_a_cap<T>> packed_a{};
                 alignas(64) std::array<T, k_blas3_pack_b_cap> packed_b{};
-#    ifdef _OPENMP
-#        pragma omp for schedule(dynamic, 1)
-#    endif
+#        ifdef _OPENMP
+#            pragma omp for schedule(dynamic, 1)
+#        endif
                 for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
                 {
                     const auto coords = lower_tile_coords(static_cast<std::size_t>(t_s), n_blocks);
@@ -1282,6 +1284,8 @@ namespace cxxgpr::detail
             }
             (void)flops;
         }
+
+#    endif  // CXXGPR_HAS_BLAS_BUILTIN
 
         /// @brief BuiltIn parallel 2-stage SIMD implementation of `blas_compute_w_lower`.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
@@ -1676,7 +1680,9 @@ namespace cxxgpr::detail
             }
         }
 
-#elifdef CXXGPR_HAS_MKL
+#endif  // CXXGPR_HAS_BUILTIN_SIMD_KERNELS
+
+#ifdef CXXGPR_HAS_MKL
 
         /// @brief Computes lower-triangular W = alpha * alpha^T - A^-1 using MKL LAPACKE potri in 2/3 n^3 FLOPs.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
@@ -1732,7 +1738,9 @@ namespace cxxgpr::detail
             }
         }
 
-#else
+#endif  // CXXGPR_HAS_MKL
+
+#ifdef CXXGPR_HAS_OPENBLAS
 
         /// @brief Computes lower-triangular W = alpha * alpha^T - A^-1 via blocked trtri + lauum in 2/3 n^3 FLOPs.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
@@ -1794,7 +1802,172 @@ namespace cxxgpr::detail
             blas_syr_lower(n, T{1}, alpha, w_out, ldw);
         }
 
+#endif  // CXXGPR_HAS_OPENBLAS
+
+        /// @brief Initializes lower triangle of `cov_ptr` to `kss_ptr + noise_var * I`.
+        /// @tparam Storage Input prior matrix scalar type (`double` or `float`).
+        /// @tparam Refine Output covariance scalar type (`double` or `float`).
+        /// @param[in] m Order of square matrices `kss_ptr` and `cov_ptr`.
+        /// @param[in] kss_ptr Column-major `m x m` prior covariance matrix (stride `m`).
+        /// @param[in] noise_var Diagonal observation noise variance added when `row == col`.
+        /// @param[out] cov_ptr Column-major `m x m` output covariance matrix (stride `ldc`).
+        /// @param[in] ldc Column stride of `cov_ptr`.
+        template <typename Storage, typename Refine>
+        void init_posterior_cov_lower(
+            const std::size_t m,
+            const Storage* const kss_ptr,
+            const Refine noise_var,
+            Refine* const cov_ptr,
+            const std::size_t ldc
+        ) noexcept
+        {
+            for (std::size_t col = 0U; col < m; ++col)
+            {
+                const Storage* const kss_col = kss_ptr + (col * m);
+                Refine* const dst_col = cov_ptr + (col * ldc);
+                for (std::size_t row = col; row < m; ++row)
+                {
+                    auto entry = static_cast<Refine>(kss_col[row]);
+                    if (row == col)
+                    {
+                        entry += noise_var;
+                    }
+                    dst_col[row] = entry;
+                }
+            }
+        }
+
+#ifdef CXXGPR_HAS_BUILTIN_SIMD_KERNELS
+
+        /// @brief Computes lower-triangular `kss_ptr + noise_var * I - V^T * V` in one parallel SIMD tile pass.
+        /// @tparam Storage Scalar type of `v_ptr` and `kss_ptr` (`double` or `float`).
+        /// @tparam Refine Output covariance scalar type (`double` or `float`).
+        /// @param[in] n Inner contraction dimension (rows of `n x m` matrix `V`).
+        /// @param[in] m Query point count (order of `kss_ptr` and `cov_ptr`).
+        /// @param[in] v_ptr Column-major `n x m` matrix `V` (stride `n`).
+        /// @param[in] kss_ptr Column-major `m x m` prior covariance matrix (stride `m`).
+        /// @param[in] noise_var Diagonal observation noise variance added when `row == col`.
+        /// @param[out] cov_ptr Column-major `m x m` output covariance matrix (stride `ldc`).
+        /// @param[in] ldc Column stride of `cov_ptr`.
+        template <typename Storage, typename Refine>
+        void fused_builtin_posterior_cov_lower(
+            const std::size_t n,
+            const std::size_t m,
+            const Storage* const v_ptr,
+            const Storage* const kss_ptr,
+            const Refine noise_var,
+            Refine* const cov_ptr,
+            const std::size_t ldc
+        ) noexcept
+        {
+            const std::size_t tile = (m >= 512U) ? k_blas3_mc : 24U;
+            const std::size_t n_blocks = (m + tile - 1U) / tile;
+            const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
+            const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
+            const double cov_flops = static_cast<double>(n) * static_cast<double>(m) * static_cast<double>(m);
+#    ifdef _OPENMP
+#        pragma omp parallel if (linalg::openmp_max_threads() > 1U && cov_flops >= 262144.0)
+#    endif
+            {
+                alignas(64) std::array<Refine, k_blas3_mc * k_blas3_nc> c_tile{};
+                alignas(64) std::array<Refine, k_blas3_pack_a_cap<Refine>> packed_a{};
+                alignas(64) std::array<Refine, k_blas3_pack_b_cap> packed_b{};
+#    ifdef _OPENMP
+#        pragma omp for schedule(dynamic, 1)
+#    endif
+                for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
+                {
+                    const auto coords = lower_tile_coords(static_cast<std::size_t>(t_s), n_blocks);
+                    const std::size_t bi = coords.row_block;
+                    const std::size_t bj = coords.col_block;
+                    const std::size_t ib = bi * tile;
+                    const std::size_t jb = bj * tile;
+                    const std::size_t rm = std::min(tile, m - ib);
+                    const std::size_t cn = std::min(tile, m - jb);
+                    std::fill_n(c_tile.data(), rm * cn, Refine{0});
+
+                    for (std::size_t kb = 0U; kb < n; kb += k_blas3_kc)
+                    {
+                        const std::size_t bs = std::min(k_blas3_kc, n - kb);
+                        if constexpr (std::same_as<Storage, Refine>)
+                        {
+                            pack_panel_a_transpose(v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data(), 0U);
+                            pack_panel_b_colmajor(v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data(), 0U);
+                        }
+                        else
+                        {
+                            pack_panel_a_transpose_promote_f32_to_f64(
+                                v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data()
+                            );
+                            pack_panel_b_colmajor_promote_f32_to_f64(v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data());
+                        }
+                        gemm_packed_add(rm, cn, bs, packed_a.data(), packed_b.data(), c_tile.data(), rm);
+                    }
+
+                    for (std::size_t c = 0U; c < cn; ++c)
+                    {
+                        const std::size_t col = jb + c;
+                        const std::size_t r_start = (bi == bj) ? c : 0U;
+                        const Refine* const tile_col = c_tile.data() + (c * rm);
+                        const Storage* const kss_col = kss_ptr + (col * m);
+                        Refine* const dst_col = cov_ptr + (col * ldc);
+                        for (std::size_t r = r_start; r < rm; ++r)
+                        {
+                            const std::size_t row = ib + r;
+                            Refine entry = static_cast<Refine>(kss_col[row]) - tile_col[r];
+                            if (row == col)
+                            {
+                                entry += noise_var;
+                            }
+                            dst_col[row] = entry;
+                        }
+                    }
+                }
+            }
+            (void)cov_flops;
+        }
+
+#endif  // CXXGPR_HAS_BUILTIN_SIMD_KERNELS
+
+        /// @brief Same-precision helper forming lower-triangular `kss_ptr + noise_var * I - V^T * V`.
+        /// @tparam T Floating-point scalar type (`double` or `float`).
+        /// @param[in] n Inner contraction dimension (rows of `n x m` matrix `V`).
+        /// @param[in] m Query point count (order of `kss_ptr` and `cov_ptr`).
+        /// @param[in] v_ptr Column-major `n x m` matrix `V` (stride `n`).
+        /// @param[in] kss_ptr Column-major `m x m` prior covariance matrix (stride `m`).
+        /// @param[in] noise_var Diagonal observation noise variance added when `row == col`.
+        /// @param[out] cov_ptr Column-major `m x m` output covariance matrix (stride `ldc`).
+        /// @param[in] ldc Column stride of `cov_ptr`.
+        template <typename T>
+        void blas_posterior_cov_lower_same_precision_impl(
+            const std::size_t n,
+            const std::size_t m,
+            const T* const v_ptr,
+            const T* const kss_ptr,
+            const T noise_var,
+            T* const cov_ptr,
+            const std::size_t ldc
+        ) noexcept
+        {
+            if (m == 0U)
+            {
+                return;
+            }
+            if (n == 0U)
+            {
+                init_posterior_cov_lower(m, kss_ptr, noise_var, cov_ptr, ldc);
+                return;
+            }
+#ifdef CXXGPR_HAS_BLAS_BUILTIN
+            if (m >= 64U && n >= 64U)
+            {
+                fused_builtin_posterior_cov_lower<T, T>(n, m, v_ptr, kss_ptr, noise_var, cov_ptr, ldc);
+                return;
+            }
 #endif
+            init_posterior_cov_lower(m, kss_ptr, noise_var, cov_ptr, ldc);
+            blas_syrk_lower(true, m, n, T{-1}, v_ptr, n, T{1}, cov_ptr, ldc);
+        }
 
     }  // namespace
 
@@ -2420,6 +2593,10 @@ namespace cxxgpr::detail
             return 0U;
         }
 #ifdef CXXGPR_HAS_MKL
+        if (n <= 256U && linalg::openmp_max_threads() > 1U)
+        {
+            return builtin_cholesky_lower_impl(n, a, lda);
+        }
         const MklLocalThreadsGuard mkl_guard(n < 192U);
         const lapack_int info =
             LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), a, static_cast<lapack_int>(lda));
@@ -2454,74 +2631,84 @@ namespace cxxgpr::detail
 #endif
     }
 
-    /// @brief Subtracts promoted V^T * V from lower triangle of double matrix C using fixed stack tiles.
-    /// @param[in] n Inner contraction dimension (rows of n x m matrix V).
-    /// @param[in] m Covariance order (columns of V and order of C).
-    /// @param[in] v_ptr Single-precision column-major matrix V of size n x m (stride n).
-    /// @param[in,out] cov_ptr Double-precision m x m matrix updated in lower triangle: C -= V^T * V.
+    /// @brief Forms lower triangle of posterior covariance `kss + noise_var * I - V^T * V` in double precision.
+    /// @param[in] n Inner contraction dimension (rows of `n x m` matrix `V`).
+    /// @param[in] m Query covariance order (columns of `V` and order of `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Double-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Double-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Double-precision `m x m` matrix receiving lower-triangular posterior covariance.
     /// @param[in] ldc Leading dimension of `cov_ptr`.
-    void subtract_promoted_gram_lower(
-        const std::size_t n, const std::size_t m, const float* const v_ptr, double* const cov_ptr, const std::size_t ldc
+    void blas_posterior_cov_lower(
+        const std::size_t n,
+        const std::size_t m,
+        const double* const v_ptr,
+        const double* const kss_ptr,
+        const double noise_var,
+        double* const cov_ptr,
+        const std::size_t ldc
     ) noexcept
     {
-        if (m == 0U || n == 0U)
+        blas_posterior_cov_lower_same_precision_impl(n, m, v_ptr, kss_ptr, noise_var, cov_ptr, ldc);
+    }
+
+    /// @brief Single-precision overload of `blas_posterior_cov_lower`.
+    /// @param[in] n Inner contraction dimension (rows of `n x m` matrix `V`).
+    /// @param[in] m Query covariance order (columns of `V` and order of `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Single-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Single-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Single-precision `m x m` matrix receiving lower-triangular posterior covariance.
+    /// @param[in] ldc Leading dimension of `cov_ptr`.
+    void blas_posterior_cov_lower(
+        const std::size_t n,
+        const std::size_t m,
+        const float* const v_ptr,
+        const float* const kss_ptr,
+        const float noise_var,
+        float* const cov_ptr,
+        const std::size_t ldc
+    ) noexcept
+    {
+        blas_posterior_cov_lower_same_precision_impl(n, m, v_ptr, kss_ptr, noise_var, cov_ptr, ldc);
+    }
+
+    /// @brief Mixed-precision overload forming double posterior covariance `kss + noise_var * I - V^T * V` from float
+    /// `V` and `kss_ptr` using fixed stack tiles.
+    /// @param[in] n Inner contraction dimension (rows of `n x m` matrix `V`).
+    /// @param[in] m Covariance order (columns of `V` and order of `kss_ptr` and `cov_ptr`).
+    /// @param[in] v_ptr Single-precision column-major matrix `V` of size `n x m` (stride `n`).
+    /// @param[in] kss_ptr Single-precision column-major prior matrix `K_**` of size `m x m` (stride `m`).
+    /// @param[in] noise_var Double-precision diagonal observation noise variance added when `row == col`.
+    /// @param[out] cov_ptr Double-precision `m x m` matrix receiving lower-triangular posterior covariance.
+    /// @param[in] ldc Leading dimension of `cov_ptr`.
+    void blas_posterior_cov_lower(
+        const std::size_t n,
+        const std::size_t m,
+        const float* const v_ptr,
+        const float* const kss_ptr,
+        const double noise_var,
+        double* const cov_ptr,
+        const std::size_t ldc
+    ) noexcept
+    {
+        if (m == 0U)
         {
             return;
         }
-#ifdef CXXGPR_HAS_BLAS_BUILTIN
+        if (n == 0U)
+        {
+            init_posterior_cov_lower<float, double>(m, kss_ptr, noise_var, cov_ptr, ldc);
+            return;
+        }
+#ifdef CXXGPR_HAS_BUILTIN_SIMD_KERNELS
         if (m >= 64U && n >= 64U)
         {
-            const std::size_t tile = (m >= 512U) ? k_blas3_mc : 24U;
-            const std::size_t n_blocks = (m + tile - 1U) / tile;
-            const std::size_t total_tiles = (n_blocks * (n_blocks + 1U)) / 2U;
-            const auto total_tiles_s = static_cast<std::ptrdiff_t>(total_tiles);
-            const double flops = static_cast<double>(n) * static_cast<double>(m) * static_cast<double>(m);
-#    ifdef _OPENMP
-#        pragma omp parallel if (linalg::openmp_max_threads() > 1U && flops >= 262144.0)
-#    endif
-            {
-                alignas(64) std::array<double, k_blas3_mc * k_blas3_nc> c_tile{};
-                alignas(64) std::array<double, k_blas3_pack_a_cap<double>> packed_a{};
-                alignas(64) std::array<double, k_blas3_pack_b_cap> packed_b{};
-#    ifdef _OPENMP
-#        pragma omp for schedule(dynamic, 1)
-#    endif
-                for (std::ptrdiff_t t_s = 0; t_s < total_tiles_s; ++t_s)
-                {
-                    const auto coords = lower_tile_coords(static_cast<std::size_t>(t_s), n_blocks);
-                    const std::size_t bi = coords.row_block;
-                    const std::size_t bj = coords.col_block;
-                    const std::size_t ib = bi * tile;
-                    const std::size_t jb = bj * tile;
-                    const std::size_t rm = std::min(tile, m - ib);
-                    const std::size_t cn = std::min(tile, m - jb);
-                    std::fill_n(c_tile.data(), rm * cn, 0.0);
-
-                    for (std::size_t kb = 0U; kb < n; kb += k_blas3_kc)
-                    {
-                        const std::size_t bs = std::min(k_blas3_kc, n - kb);
-                        pack_panel_a_transpose_promote_f32_to_f64(v_ptr + (ib * n) + kb, n, rm, bs, packed_a.data());
-                        pack_panel_b_colmajor_promote_f32_to_f64(v_ptr + (jb * n) + kb, n, bs, cn, packed_b.data());
-                        gemm_packed_add(rm, cn, bs, packed_a.data(), packed_b.data(), c_tile.data(), rm);
-                    }
-
-                    for (std::size_t c = 0U; c < cn; ++c)
-                    {
-                        const std::size_t col = jb + c;
-                        const std::size_t r_start = (bi == bj) ? c : 0U;
-                        const double* const tile_col = c_tile.data() + (c * rm);
-                        double* const dst_col = cov_ptr + (col * ldc);
-                        for (std::size_t r = r_start; r < rm; ++r)
-                        {
-                            dst_col[ib + r] -= tile_col[r];
-                        }
-                    }
-                }
-            }
-            (void)flops;
+            fused_builtin_posterior_cov_lower<float, double>(n, m, v_ptr, kss_ptr, noise_var, cov_ptr, ldc);
             return;
         }
 #endif
+        init_posterior_cov_lower<float, double>(m, kss_ptr, noise_var, cov_ptr, ldc);
         // Accumulate lower-triangular tiles of V^T * V in promoted double precision with zero heap allocation.
         constexpr std::size_t k_tile = 64U;
         std::array<double, k_tile * k_tile> a_tile{};
@@ -2600,6 +2787,11 @@ namespace cxxgpr::detail
 #ifdef CXXGPR_HAS_BLAS_BUILTIN
         builtin_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
 #elifdef CXXGPR_HAS_MKL
+        if (n <= 384U && linalg::openmp_max_threads() > 1U)
+        {
+            builtin_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
+            return;
+        }
         (void)z_scratch;
         (void)ldz;
         mkl_compute_w_lower_impl(n, l, ldl, alpha, w_out, ldw);
