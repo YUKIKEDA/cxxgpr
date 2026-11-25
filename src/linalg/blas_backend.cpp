@@ -306,7 +306,7 @@ namespace cxxgpr::detail
             }
         }
 
-        /// @brief Generic Eigen fallback implementation of `blas_symv_lower`.
+        /// @brief Pure column-major fallback implementation of `blas_symv_lower`.
         /// @tparam T Scalar floating-point element type (`double` or `float`).
         /// @param[in] n Order of A, x, and y.
         /// @param[in] alpha Multiplier for A * x.
@@ -320,27 +320,34 @@ namespace cxxgpr::detail
             std::size_t n, T alpha, const T* a, std::size_t lda, const T* x, T beta, T* y
         ) noexcept
         {
-            ConstColMap<T> a_mat(
-                a, static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(n),
-                Eigen::OuterStride<>(static_cast<Eigen::Index>(lda))
-            );
-            const Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>> x_vec(x, static_cast<Eigen::Index>(n));
-            Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> y_vec(y, static_cast<Eigen::Index>(n));
             if (beta == T{0})
             {
-                y_vec.noalias() = a_mat.template selfadjointView<Eigen::Lower>() * x_vec;
-                if (alpha != T{1})
+                std::fill_n(y, n, T{0});
+            }
+            else if (beta != T{1})
+            {
+                for (std::size_t i = 0U; i < n; ++i)
                 {
-                    y_vec *= alpha;
+                    y[i] *= beta;
                 }
             }
-            else
+            if (alpha == T{0})
             {
-                if (beta != T{1})
+                return;
+            }
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                const T* const a_col = a + (col * lda);
+                const T ax = alpha * x[col];
+                y[col] += a_col[col] * ax;
+                T acc = T{0};
+                for (std::size_t row = col + 1U; row < n; ++row)
                 {
-                    y_vec *= beta;
+                    const T v = a_col[row];
+                    y[row] += v * ax;
+                    acc += v * x[row];
                 }
-                y_vec.noalias() += alpha * (a_mat.template selfadjointView<Eigen::Lower>() * x_vec);
+                y[col] += alpha * acc;
             }
         }
 
@@ -455,8 +462,8 @@ namespace cxxgpr::detail
                 a, static_cast<Eigen::Index>(m), static_cast<Eigen::Index>(n),
                 Eigen::OuterStride<>(static_cast<Eigen::Index>(lda))
             );
-            const Eigen::Index len_x = static_cast<Eigen::Index>(trans_a ? m : n);
-            const Eigen::Index len_y = static_cast<Eigen::Index>(trans_a ? n : m);
+            const auto len_x = static_cast<Eigen::Index>(trans_a ? m : n);
+            const auto len_y = static_cast<Eigen::Index>(trans_a ? n : m);
             const Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>> x_vec(x, len_x);
             Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> y_vec(y, len_y);
             if (beta == T{0})
