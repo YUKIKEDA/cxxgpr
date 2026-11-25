@@ -22,7 +22,7 @@ CMake checks the compiler at configure time. It stops with a fatal error if the 
 | `CXXGPR_BUILD_BENCHMARKS` | `OFF` | Builds the Google Benchmark programs (needs the vcpkg feature `benchmarks`) |
 | `CXXGPR_BUILD_EXAMPLES` | `OFF` | Builds the example programs under `docs/examples`, each registered as a CTest test |
 | `CXXGPR_INSTALL` | `ON` when top-level, otherwise `OFF` | Generates the `install` rules and the CMake package files |
-| `CXXGPR_BLAS_BACKEND` | `AUTO` | Dense BLAS/LAPACK backend: `AUTO` (OpenBLAS, then MKL, then Eigen), `OpenBLAS`, `MKL`, or `Eigen`. Any other value is a configure error |
+| `CXXGPR_BLAS_BACKEND` | `AUTO` | Dense BLAS/LAPACK backend: `AUTO` (`BuiltIn` on Windows MSVC; OpenBLAS, then MKL, then `BuiltIn` elsewhere), `OpenBLAS`, `MKL`, or `BuiltIn`. Any other value is a configure error |
 | `CXXGPR_X86_ISA` | `AVX2` | x86-64 only. SIMD tier of the library: `AVX512`, `AVX2` or `SSE2`. Any other value is a configure error |
 
 When cxxgpr is included with `FetchContent` or `add_subdirectory`, it is not the top-level project, so tests, canary and install rules are off unless you switch them on.
@@ -75,14 +75,14 @@ All dependencies are implementation details. None appears in a public header, an
 | Dependency | Required version | Source / pin | Used for |
 |---|---|---|---|
 | Eigen (`eigen3`) | 5.0 (`find_package(Eigen3 5.0 CONFIG REQUIRED)`) | vcpkg `5.0.1` | Dense linear algebra panel fallbacks & transforms. Compiled with `EIGEN_MPL2_ONLY` and `EIGEN_DONT_PARALLELIZE` |
-| OpenBLAS (`openblas`, `threads` feature) or Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | vcpkg `0.3.34` (OpenBLAS) | Dense BLAS (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) and MKL `potrf` when selected by `CXXGPR_BLAS_BACKEND` |
+| OpenBLAS (`openblas`, `threads` feature on non-MSVC) or Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | vcpkg `0.3.34` (OpenBLAS on `!windows \| mingw`) | Dense BLAS (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) and MKL `potrf`/`potri` when selected by `CXXGPR_BLAS_BACKEND` |
 | `herumi/fmath` | Commit `a81f8e53e9f007ed5df355bb4a99ff799fd75066` | `FetchContent` (`GIT_TAG`) | Fast approximate `exp` (`KernelExp::FastApprox`, BSD-3-Clause), compiled privately inside `cxxgpr` |
 | nlohmann/json (`nlohmann-json`) | 3.12 (`find_package(nlohmann_json 3.12 CONFIG REQUIRED)`) | vcpkg `3.12.0` | `config.json` of persisted models |
 | OpenMP (`OpenMP::OpenMP_CXX`) | any that the compiler provides; optional | n/a | Parallel loops. MSVC reports OpenMP 2.0 |
 | GoogleTest (`gtest`) | 1.18.0 | vcpkg `1.18.0` | Tests only, feature `tests` |
 | Google Benchmark (`benchmark`) | 1.9.5 | vcpkg `1.9.5` | Benchmarks only, feature `benchmarks` |
 
-`vcpkg.json` pins the vcpkg registry dependencies with a `builtin-baseline` commit plus explicit `overrides`, and `cmake/Dependencies.cmake` pins `herumi/fmath` to a 40-character Git commit SHA via `FetchContent` so source builds are reproducible. To build without OpenBLAS or oneMKL, pass `-DCXXGPR_BLAS_BACKEND=Eigen`, or place your own packages on `CMAKE_PREFIX_PATH`; the version checks above still apply.
+`vcpkg.json` pins the vcpkg registry dependencies with a `builtin-baseline` commit plus explicit `overrides`, and `cmake/Dependencies.cmake` pins `herumi/fmath` to a 40-character Git commit SHA via `FetchContent` so source builds are reproducible. To build explicitly with the built-in SIMD backend (the default on Windows MSVC), pass `-DCXXGPR_BLAS_BACKEND=BuiltIn`, or place your own vendor BLAS packages on `CMAKE_PREFIX_PATH`; the version checks above still apply.
 
 The versions of the dependencies a given library was built with are recorded in `cxxgpr::build_info()` (see below).
 

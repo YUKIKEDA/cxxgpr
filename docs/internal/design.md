@@ -78,12 +78,12 @@ There is no `NotFitted`. All failures of numerical computation, input, and persi
 
 ## 3. Linear algebra, noise, Jitter, and precision (DES-03 to DES-05)
 
-### DES-03 Linear algebra backend (OpenBLAS / oneMKL / Eigen + OpenMP)
+### DES-03 Linear algebra backend (BuiltIn SIMD / OpenBLAS / oneMKL + OpenMP)
 
-Internal linear algebra delegates dense BLAS/LAPACK operations (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`, and MKL `potrf` when Intel oneMKL is selected) to an external vendor library via `CXXGPR_BLAS_BACKEND=AUTO|OpenBLAS|MKL|Eigen` (default `AUTO`, preferring OpenBLAS 0.3.34 pinned in vcpkg, then Intel oneMKL, then Eigen), while retaining Eigen 5.0.1 pinned by vcpkg (`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`) for panel fallbacks and auxiliary transforms ([ADR 0004](adr/0004-external-blas-and-fmath.md)).
+Internal linear algebra supports selectable backends via `CXXGPR_BLAS_BACKEND=AUTO|OpenBLAS|MKL|BuiltIn` (default `AUTO`: `BuiltIn` cache-packed SIMD+OpenMP on Windows MSVC to avoid MSVC generic-C OpenBLAS kernels and thread contention; OpenBLAS 0.3.34 on Linux/MinGW, falling back to Intel oneMKL then `BuiltIn`), while retaining Eigen 5.0.1 pinned by vcpkg (`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`) for small panel factorizations and auxiliary transforms ([ADR 0004](adr/0004-external-blas-and-fmath.md)).
 
 - **Storage order**: all dense matrices are column-major (`Eigen::Matrix<S, Eigen::Dynamic, Eigen::Dynamic, Eigen::ColMajor>`). The input data `x` ($n \times d$), the kernel matrices, and the factor $L$ are all held column-major.
-- **Cholesky factorization**: only `uplo = Lower` is built and referenced. With MKL, `LAPACKE_?potrf` factors in place; with OpenBLAS (CBLAS-only) or Eigen, blocked left/right-looking Cholesky combines panel `Eigen::LLT<..., Eigen::Lower>` with `cblas_?trsm` and `cblas_?syrk` (keeping the upper triangle untouched) on pre-allocated buffers.
+- **Cholesky factorization and inverse gram $W$**: only `uplo = Lower` is built and referenced. With MKL, `LAPACKE_?potrf` factors in place and `LAPACKE_?potri` computes $A^{-1}$ in $\frac{2}{3} n^3$ FLOPs; with OpenBLAS (CBLAS-only), blocked right-looking Cholesky and blocked `trtri + lauum` combine unrolled continuous panels with `cblas_?trsm`, `cblas_?syrk`, and `cblas_?gemm` ($\frac{2}{3} n^3$ FLOPs); with `BuiltIn`, 3-tier SIMD+OpenMP blocked Cholesky and 2-stage SIMD inversion+contraction preserve bitwise thread-count invariance. All backends keep the strictly upper triangle untouched and allocate zero heap memory.
 - **Header isolation & allocation detection**: `<cblas.h>` and `<mkl.h>` remain strictly inside `src/linalg/blas_backend.cpp` (plus version metadata in `src/core/build_info.cpp`). `EIGEN_RUNTIME_NO_MALLOC` is combined with global `operator new` auditing in `NoAllocationScope` to enforce zero hot-path allocations.
 - **Floating-point and SIMD policy**: MSVC `/fp:precise` and GCC/Clang `-fno-fast-math` are imposed, keeping IEEE 754 `NaN`/`Inf` checks valid while allowing vectorized kernels under `CXXGPR_X86_ISA` (default `AVX2`; `AVX512` / `AVX2` / `SSE2`).
 

@@ -42,7 +42,7 @@ namespace
 {
 
     /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
-    /// @return True if `build_info().dependencies` reports a non-Eigen `blas_backend`, false otherwise.
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
     [[nodiscard]] bool has_external_blas_backend() noexcept
     {
         const auto info = cxxgpr::build_info();
@@ -50,7 +50,7 @@ namespace
         {
             if (dep.name == "blas_backend")
             {
-                return dep.version != "Eigen";
+                return dep.version != "BuiltIn";
             }
         }
         return false;

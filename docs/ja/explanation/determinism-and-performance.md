@@ -98,7 +98,7 @@ flowchart LR
 
 ## ベクトル化カーネル・BLAS バックエンド・命令セット
 
-密行列演算（`GEMM`、`SYRK`、`TRSM`、`GEMV`、`DOT`）は OpenBLAS または Intel oneMKL（`CXXGPR_BLAS_BACKEND` で選択、既定外では Eigen フォールバック）に委譲し、cxxgpr 自身はカーネル変換・非有限検査・距離計算を 3 つの x86-64 ISA 段階でベクトル化する。
+密行列演算（`GEMM`、`SYRK`、`TRSM`、`GEMV`、`DOT`）には、内蔵のキャッシュパック SIMD+OpenMP 実装（`BuiltIn`、Windows MSVC の既定）または OpenBLAS / Intel oneMKL などの外部 BLAS/LAPACK（`CXXGPR_BLAS_BACKEND` で選択）を使い、cxxgpr 自身はカーネル変換・非有限検査・距離計算を 3 つの x86-64 ISA 段階でベクトル化する。
 
 | 段階 | 選択方法 | 典型的なハードウェア |
 |---|---|---|

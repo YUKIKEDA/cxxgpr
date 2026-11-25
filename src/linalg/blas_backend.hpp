@@ -309,6 +309,47 @@ namespace cxxgpr::detail
         std::size_t n, std::size_t m, const float* v_ptr, double* cov_ptr, std::size_t ldc
     ) noexcept;
 
+    /// @brief Computes lower triangle of W = alpha * alpha^T - (L L^T)^-1 from lower Cholesky factor L.
+    /// @details Uses preallocated n x n scratch matrix z_scratch for Z = L^-1; w_out may safely alias l.
+    /// @param[in] n Order of matrices L, Z, and W.
+    /// @param[in] l Square n x n lower Cholesky factor column-major pointer.
+    /// @param[in] ldl Leading dimension of L.
+    /// @param[in] alpha Solved weight vector A^-1 y of length n.
+    /// @param[out] z_scratch Preallocated n x n scratch matrix overwritten with Z = L^-1.
+    /// @param[in] ldz Leading dimension of z_scratch.
+    /// @param[out] w_out Preallocated n x n matrix receiving lower-triangular W (may alias l).
+    /// @param[in] ldw Leading dimension of w_out.
+    void blas_compute_w_lower(
+        std::size_t n,
+        const double* l,
+        std::size_t ldl,
+        const double* alpha,
+        double* z_scratch,
+        std::size_t ldz,
+        double* w_out,
+        std::size_t ldw
+    ) noexcept;
+
+    /// @brief Single-precision overload of `blas_compute_w_lower`.
+    /// @param[in] n Order of matrices L, Z, and W.
+    /// @param[in] l Square n x n lower Cholesky factor column-major pointer.
+    /// @param[in] ldl Leading dimension of L.
+    /// @param[in] alpha Solved weight vector A^-1 y of length n.
+    /// @param[out] z_scratch Preallocated n x n scratch matrix overwritten with Z = L^-1.
+    /// @param[in] ldz Leading dimension of z_scratch.
+    /// @param[out] w_out Preallocated n x n matrix receiving lower-triangular W (may alias l).
+    /// @param[in] ldw Leading dimension of w_out.
+    void blas_compute_w_lower(
+        std::size_t n,
+        const float* l,
+        std::size_t ldl,
+        const float* alpha,
+        float* z_scratch,
+        std::size_t ldz,
+        float* w_out,
+        std::size_t ldw
+    ) noexcept;
+
     /// @brief Accumulates the inner product sum_k static_cast<Accum>(a[k]) * static_cast<Accum>(b[k]).
     /// @details Safe inside OpenMP regions and bitwise deterministic across thread counts via fixed index order.
     /// @tparam Accum Accumulator scalar type.

@@ -22,7 +22,7 @@ cxxgpr をソースからビルドするときに設定できる項目の一覧�
 | `CXXGPR_BUILD_BENCHMARKS` | `OFF` | Google Benchmark のプログラムをビルドする（vcpkg のフィーチャー `benchmarks` が必要） |
 | `CXXGPR_BUILD_EXAMPLES` | `OFF` | `docs/examples` のサンプルプログラムをビルドし、それぞれを CTest のテストとして登録する |
 | `CXXGPR_INSTALL` | トップレベルなら `ON`、それ以外は `OFF` | `install` の規則と CMake パッケージファイルを生成する |
-| `CXXGPR_BLAS_BACKEND` | `AUTO` | 密行列 BLAS/LAPACK バックエンド。`AUTO`（OpenBLAS → MKL → Eigen の順）、`OpenBLAS`、`MKL`、`Eigen` のいずれか。ほかの値は構成エラー |
+| `CXXGPR_BLAS_BACKEND` | `AUTO` | 密行列 BLAS/LAPACK バックエンド。`AUTO`（Windows MSVC では `BuiltIn`、それ以外では OpenBLAS → MKL → `BuiltIn` の順）、`OpenBLAS`、`MKL`、`BuiltIn` のいずれか。ほかの値は構成エラー |
 | `CXXGPR_X86_ISA` | `AVX2` | x86-64 のみ。ライブラリの SIMD 段階。`AVX512`、`AVX2`、`SSE2` のいずれか。ほかの値は構成エラー |
 
 `FetchContent` や `add_subdirectory` で取り込むと、cxxgpr はトップレベルのプロジェクトではない。そのため、テスト、カナリア、インストール規則は、明示的に有効にしない限りオフである。
@@ -75,14 +75,14 @@ ctest --preset windows-release
 | 依存ライブラリ | 要求される版 | 取得元 / 固定版 | 用途 |
 |---|---|---|---|
 | Eigen（`eigen3`） | 5.0（`find_package(Eigen3 5.0 CONFIG REQUIRED)`） | vcpkg `5.0.1` | 密行列線形代数のパネル計算・変換。`EIGEN_MPL2_ONLY` と `EIGEN_DONT_PARALLELIZE` つきでコンパイルされる |
-| OpenBLAS（`openblas`、`threads` 機能）または Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | vcpkg `0.3.34`（OpenBLAS） | `CXXGPR_BLAS_BACKEND` に応じた密行列 BLAS（`GEMM` / `SYRK` / `TRSM` / `GEMV` / `DOT`、MKL では `potrf`） |
+| OpenBLAS（非 MSVC で `openblas`）または Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | vcpkg `0.3.34`（`!windows \| mingw` で OpenBLAS） | `CXXGPR_BLAS_BACKEND` に応じた密行列 BLAS（`GEMM` / `SYRK` / `TRSM` / `GEMV` / `DOT`、MKL では `potrf` / `potri`） |
 | `herumi/fmath` | コミット `a81f8e53e9f007ed5df355bb4a99ff799fd75066` | `FetchContent`（`GIT_TAG`） | 高速近似指数 `KernelExp::FastApprox`（BSD-3-Clause）。`cxxgpr` の内部だけに組み込む |
 | nlohmann/json（`nlohmann-json`） | 3.12（`find_package(nlohmann_json 3.12 CONFIG REQUIRED)`） | vcpkg `3.12.0` | 永続化されたモデルの `config.json` |
 | OpenMP（`OpenMP::OpenMP_CXX`） | コンパイラが提供するもの。任意 | 対象外 | 並列ループ。MSVC は OpenMP 2.0 を報告する |
 | GoogleTest（`gtest`） | 1.18.0 | vcpkg `1.18.0` | テストのみ。フィーチャー `tests` |
 | Google Benchmark（`benchmark`） | 1.9.5 | vcpkg `1.9.5` | ベンチマークのみ。フィーチャー `benchmarks` |
 
-`vcpkg.json` は vcpkg レジストリの `builtin-baseline` コミットと明示的な `overrides` でパッケージを固定し、`cmake/Dependencies.cmake` は `herumi/fmath` を 40 文字の Git コミットハッシュ付き `FetchContent` で固定している。OpenBLAS や oneMKL なしでビルドする場合は `-DCXXGPR_BLAS_BACKEND=Eigen` を指定するか、`CMAKE_PREFIX_PATH` で各パッケージの場所を渡す。その場合も、上の版の検査は適用される。
+`vcpkg.json` は vcpkg レジストリの `builtin-baseline` コミットと明示的な `overrides` でパッケージを固定し、`cmake/Dependencies.cmake` は `herumi/fmath` を 40 文字の Git コミットハッシュ付き `FetchContent` で固定している。内蔵 SIMD バックエンド（Windows MSVC の既定）を明示指定する場合は `-DCXXGPR_BLAS_BACKEND=BuiltIn` を渡すか、`CMAKE_PREFIX_PATH` でベンダー BLAS の場所を指定する。その場合も、上の版の検査は適用される。
 
 ライブラリがビルドされたときの依存ライブラリの版は、`cxxgpr::build_info()` に記録される（後述）。
 

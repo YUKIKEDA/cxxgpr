@@ -11,7 +11,7 @@ This guide shows how to build cxxgpr, install it, and use it from a CMake projec
 | Ninja | any recent | The presets use Ninja (Ninja Multi-Config on Windows) |
 | vcpkg | with `VCPKG_ROOT` set | Provides the pinned dependencies |
 | Eigen | 5.0 | Used internally, not exposed in public headers |
-| OpenBLAS / Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | Optional/default BLAS backend (`CXXGPR_BLAS_BACKEND`); not exposed in public headers |
+| OpenBLAS / Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | Optional vendor BLAS backend (`CXXGPR_BLAS_BACKEND`; `BuiltIn` SIMD is default on Windows MSVC, OpenBLAS on Linux/MinGW); not exposed in public headers |
 | nlohmann/json | 3.12 | Used internally, not exposed in public headers |
 | OpenMP | optional | Used for deterministic parallel loops when found |
 

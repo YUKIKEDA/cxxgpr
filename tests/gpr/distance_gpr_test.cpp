@@ -9,6 +9,7 @@
 
 #include "cxxgpr/gpr/distance_gpr.hpp"
 
+#include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/core/rng.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -37,6 +38,21 @@
 
 namespace
 {
+
+    /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
+    [[nodiscard]] bool has_external_blas_backend() noexcept
+    {
+        const auto info = cxxgpr::build_info();
+        for (const auto& dep : info.dependencies)
+        {
+            if (dep.name == "blas_backend")
+            {
+                return dep.version != "BuiltIn";
+            }
+        }
+        return false;
+    }
 
     /// @brief Synthetic regression dataset with n points in d dimensions.
     struct Data
@@ -741,26 +757,66 @@ namespace
         {
             FAIL() << "single-thread covariance failed";
         }
+        // Under an external BLAS backend, verify fixed-thread repeatability (4 threads repeated == 4 threads) and
+        // tight cross-thread agreement; under BuiltIn, verify exact bitwise invariance across 1, 2, and 4 threads.
+        const auto rep4 = run(4);
+        const auto rep4_repeat = run(4);
+        ASSERT_TRUE(rep4.has_value());
+        ASSERT_TRUE(rep4_repeat.has_value());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(rep4->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(rep4_repeat->neg_log_marginal_likelihood())
+        );
+        ASSERT_EQ(rep4->alpha().size(), data.n);
+        ASSERT_EQ(rep4_repeat->alpha().size(), data.n);
+        for (std::size_t i = 0; i < data.n; ++i)
+        {
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(rep4->alpha()[i]), std::bit_cast<std::uint64_t>(rep4_repeat->alpha()[i])
+            ) << "repeat index "
+              << i;
+        }
+
+        const bool ext_blas = has_external_blas_backend();
         for (const int threads : {2, 4})
         {
-            auto other = run(threads);
+            auto other = (threads == 4) ? rep4 : run(threads);
             if (!other.has_value())
             {
                 FAIL() << "fit failed for threads " << threads;
             }
-            EXPECT_EQ(other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood());
             ASSERT_EQ(other->alpha().size(), reference->alpha().size());
-            for (std::size_t i = 0; i < data.n; ++i)
-            {
-                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
-            }
             auto pred = other->predict_covariance(cross, query);
             if (!pred.has_value())
             {
                 FAIL() << "covariance failed for threads " << threads;
             }
-            EXPECT_EQ(pred->mean, ref_pred->mean);
-            EXPECT_EQ(pred->covariance, ref_pred->covariance);
+            if (!ext_blas)
+            {
+                EXPECT_EQ(other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood());
+                for (std::size_t i = 0; i < data.n; ++i)
+                {
+                    EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+                }
+                EXPECT_EQ(pred->mean, ref_pred->mean);
+                EXPECT_EQ(pred->covariance, ref_pred->covariance);
+            }
+            else
+            {
+                EXPECT_NEAR(
+                    other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood(),
+                    1e-11 * std::max(1.0, std::abs(reference->neg_log_marginal_likelihood()))
+                );
+                for (std::size_t i = 0; i < data.n; ++i)
+                {
+                    EXPECT_NEAR(
+                        other->alpha()[i], reference->alpha()[i], 1e-9 * std::max(1.0, std::abs(reference->alpha()[i]))
+                    ) << "threads "
+                      << threads << " index " << i;
+                }
+                EXPECT_LT(rel_diff(pred->mean, ref_pred->mean), 1e-10);
+                EXPECT_LT(rel_diff(pred->covariance, ref_pred->covariance), 1e-10);
+            }
         }
 #ifdef _OPENMP
         omp_set_num_threads(saved_threads);
@@ -1050,9 +1106,12 @@ namespace
             ASSERT_TRUE(reference.has_value());
             ASSERT_TRUE(model.has_value()) << model.error().message();
             EXPECT_LT(rel_diff(model->alpha(), reference->alpha()), tol);
+            // Under ReevaluateKernel, alpha is refined in double while log|A| still reflects the float factor L;
+            // allow float factorization order differences under vendor BLAS up to 5e-5 for the scalar NLL.
+            const double nll_tol = std::max(tol, 5e-5);
             EXPECT_NEAR(
                 model->neg_log_marginal_likelihood(), reference->optimizer_result().value,
-                tol * std::max(1.0, std::abs(reference->optimizer_result().value))
+                nll_tol * std::max(1.0, std::abs(reference->optimizer_result().value))
             );
             auto p_ref = reference->predict(data.q, data.m, data.d);
             auto p_dist = model->predict(cross);

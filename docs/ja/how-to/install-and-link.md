@@ -11,7 +11,7 @@ cxxgpr をビルドしてインストールし、CMake プロジェクトから�
 | Ninja | 最近のもの | プリセットは Ninja を使う（Windows は Ninja Multi-Config） |
 | vcpkg | `VCPKG_ROOT` を設定済み | 版を固定した依存ライブラリを提供する |
 | Eigen | 5.0 | 内部でのみ使い、公開ヘッダには現れない |
-| OpenBLAS / Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | `CXXGPR_BLAS_BACKEND` に応じた BLAS バックエンド。公開ヘッダには現れない |
+| OpenBLAS / Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | `CXXGPR_BLAS_BACKEND` で選ぶ任意の外部 BLAS バックエンド（Windows MSVC の既定は内蔵 SIMD の `BuiltIn`、Linux / MinGW は OpenBLAS）。公開ヘッダには現れない |
 | nlohmann/json | 3.12 | 内部でのみ使い、公開ヘッダには現れない |
 | OpenMP | 任意 | 見つかれば、決定的な並列ループに使う |
 

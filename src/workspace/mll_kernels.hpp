@@ -28,8 +28,7 @@ namespace cxxgpr::mll_kernels
 {
 
     /// @brief Computes lower triangle of W = alpha * alpha^T - (L L^T)^-1 with zero heap allocations.
-    /// @details Initializes z_scratch to I_n, solves L * Z = I_n via BLAS-3 TRSM to obtain Z = L^-1, evaluates
-    /// -Z^T * Z into lower triangle via BLAS-3 SYRK, and applies the rank-1 update +alpha * alpha^T via BLAS SYR.
+    /// @details Delegates to `blas_compute_w_lower` across BuiltIn SIMD, MKL LAPACKE potri, or blocked OpenBLAS.
     /// @tparam T Storage floating-point scalar type satisfying KernelScalarConcept.
     /// @param[in] l Square n x n lower Cholesky factor view with strictly positive finite diagonal.
     /// @param[in] alpha Precomputed solve vector A^-1 y of length n.
@@ -69,21 +68,10 @@ namespace cxxgpr::mll_kernels
             }
         }
 
-        // Seed z_scratch = I_n so solving L * Z = I_n yields full L^-1 cleanly without upper garbage.
-        for (std::size_t col = 0; col < n; ++col)
-        {
-            T* const z_col = z_scratch.col(col).data();
-            std::fill_n(z_col, n, T{0});
-            z_col[col] = T{1};
-        }
-
-        cxxgpr::detail::blas_trsm_lower(
-            false, false, false, n, n, T{1}, l.data(), l.col_stride(), z_scratch.data(), z_scratch.col_stride()
+        cxxgpr::detail::blas_compute_w_lower(
+            n, l.data(), l.col_stride(), alpha.data(), z_scratch.data(), z_scratch.col_stride(), w_out.data(),
+            w_out.col_stride()
         );
-        cxxgpr::detail::blas_syrk_lower(
-            true, n, n, T{-1}, z_scratch.data(), z_scratch.col_stride(), T{0}, w_out.data(), w_out.col_stride()
-        );
-        cxxgpr::detail::blas_syr_lower(n, T{1}, alpha.data(), w_out.data(), w_out.col_stride());
         return {};
     }
 

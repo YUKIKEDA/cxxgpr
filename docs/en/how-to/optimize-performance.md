@@ -126,6 +126,8 @@ checksum of the 64-point prediction: edb08ca7add4082b
 
 How this is achieved is explained in {doc}`../explanation/determinism-and-performance`. If you call cxxgpr from your own parallel loop, give each thread its own `FittedGpr` copy and make sure the OpenMP runtime does not run nested parallel regions with `OMP_NUM_THREADS` threads each; otherwise you oversubscribe the machine.
 
+When using Intel oneMKL (`-DCXXGPR_BLAS_BACKEND=MKL`) on hybrid P-core / E-core processors or alongside MSVC OpenMP loops, note that Windows oneMKL (`libiomp5md.dll`) defaults to `KMP_BLOCKTIME=0` (passive wait). For dedicated workloads executing rapid kernel evaluations or small-to-medium optimization iterations, setting `KMP_BLOCKTIME=200` with `KMP_AFFINITY=disabled` and pinning threads to physical performance cores (`OMP_NUM_THREADS` / `MKL_NUM_THREADS` matching P-core count) avoids repeated thread wake-up latency and E-core spill; leave `KMP_BLOCKTIME=0` when sharing the machine with other processes or independent worker pools.
+
 ## Choose a precision policy
 
 `Gpr` and `FittedGpr` take the precision as their second template argument: `Gpr<optimizer::Lbfgs, SinglePrecision>`. The four policies are `DoublePrecision`, `SinglePrecision`, `MixedPrecision<PromoteStorage>` and `MixedPrecision<ReevaluateKernel>`.

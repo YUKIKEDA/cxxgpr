@@ -609,4 +609,77 @@ namespace
         }
     }
 
+    /// @brief Verifies vectorized FastApprox RBF and Matern slices across lengths 1..33 and underflow bounds.
+    /// @details Covers unaligned lower-triangular column slices, exact diagonal 0 -> 1.0, moderate arguments,
+    /// and extreme separations yielding exp(-88.5) == 0.0f (float) and exp(-800) == 0.0 (double).
+    TEST(KernelExpTest, FastApproxVectorSlicesAndUnderflowAcrossLengths)
+    {
+        const std::vector<cxxgpr::KernelSpec> specs{
+            cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::OneHalf).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::ThreeHalves).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::FiveHalves).value()),
+        };
+
+        auto run_precision = [&specs]<typename T>(T far_x, T rel_tol)
+        {
+            for (const auto& spec : specs)
+            {
+                auto ck_acc = spec.compile<T>();
+                auto ck_fast = spec.compile<T>();
+                ck_fast.set_kernel_exp(cxxgpr::KernelExp::FastApprox);
+
+                for (std::size_t n = 1U; n <= 33U; ++n)
+                {
+                    std::vector<T> x(n);
+                    for (std::size_t i = 0U; i < n; ++i)
+                    {
+                        // Place last point far away to trigger deep exponential underflow inside the same slice.
+                        x[i] = (i + 1U == n && n > 1U) ? far_x : (static_cast<T>(0.15) * static_cast<T>(i));
+                    }
+                    const cxxgpr::MatrixRef<T> x_ref(x.data(), n, 1U, n);
+                    std::vector<T> k_acc(n * n, T{0});
+                    std::vector<T> k_fast(n * n, T{0});
+                    std::vector<T> scratch(n * n, T{0});
+                    ASSERT_TRUE(ck_acc
+                            .apply_points(
+                                x_ref, cxxgpr::MatrixMut<T>(k_acc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<T>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+                    ASSERT_TRUE(ck_fast
+                            .apply_points(
+                                x_ref, cxxgpr::MatrixMut<T>(k_fast.data(), n, n, n), cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<T>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+
+                    for (std::size_t col = 0U; col < n; ++col)
+                    {
+                        EXPECT_EQ(k_fast[(col * n) + col], T{1}) << "n=" << n << " col=" << col;
+                        for (std::size_t row = col + 1U; row < n; ++row)
+                        {
+                            const T ref_val = k_acc[(col * n) + row];
+                            const T fast_val = k_fast[(col * n) + row];
+                            EXPECT_TRUE(std::isfinite(fast_val)) << "n=" << n << " row=" << row << " col=" << col;
+                            EXPECT_GE(fast_val, T{0}) << "n=" << n << " row=" << row << " col=" << col;
+                            if (ref_val == T{0})
+                            {
+                                EXPECT_EQ(fast_val, T{0}) << "n=" << n << " row=" << row << " col=" << col;
+                            }
+                            else
+                            {
+                                EXPECT_NEAR(fast_val, ref_val, rel_tol * std::max(T{1}, ref_val))
+                                    << "n=" << n << " row=" << row << " col=" << col;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        run_precision(60.0, 5e-7);
+        run_precision(150.0F, 5e-6F);
+    }
+
 }  // namespace

@@ -8,7 +8,7 @@ alwaysApply: true
 依存は原則として vcpkg manifest モード（`vcpkg.json`）と `builtin-baseline` + `overrides` で全ての版を固定する（[ADR 0001](../../docs/internal/adr/0001-exact-gpr-cpp23-scope.md)）。vcpkg に存在しない依存に限り、フル 40 文字のコミット SHA（`GIT_TAG`）で固定した CMake `FetchContent` を認める（[ADR 0004](../../docs/internal/adr/0004-external-blas-and-fmath.md)）。新しい依存追加・版更新は設計判断（`design` Issue / ADR）が先。
 
 - **採用済み固定依存**：
-  - 製品ランタイム：`eigen3`（5.0.1、`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`）、`openblas`（0.3.34、`threads` feature、および `!windows | mingw` での `dynamic-arch` feature による異種 CPU 間の実行時ディスパッチ。任意で `-DCXXGPR_BLAS_BACKEND=MKL` による Intel oneMKL 切替に対応）、`nlohmann-json`（3.12.0）、`herumi/fmath`（`FetchContent`、`GIT_TAG a81f8e53e9f007ed5df355bb4a99ff799fd75066`、BSD-3-Clause）、ツールチェーン OpenMP。いずれも `cxxgpr` 静的ライブラリの `PRIVATE` 依存とし、`include/cxxgpr/` から参照・露出させない。
+  - 製品ランタイム：`eigen3`（5.0.1、`EIGEN_MPL2_ONLY` + `EIGEN_DONT_PARALLELIZE`）、`openblas`（0.3.34、`!windows | mingw` にて `threads` + `dynamic-arch` feature を使用。Windows MSVC は `AUTO` で内蔵 SIMD+OpenMP バックエンド `BuiltIn` を選び、両環境とも任意で `-DCXXGPR_BLAS_BACKEND=MKL` による Intel oneMKL 切替に対応）、`nlohmann-json`（3.12.0）、`herumi/fmath`（`FetchContent`、`GIT_TAG a81f8e53e9f007ed5df355bb4a99ff799fd75066`、BSD-3-Clause）、ツールチェーン OpenMP。いずれも `cxxgpr` 静的ライブラリの `PRIVATE` 依存とし、`include/cxxgpr/` から参照・露出させない。
   - feature `tests`：`gtest`（1.18.0）。
   - feature `benchmarks`：`benchmark`（1.9.5）。
 - **禁止**：版固定のない `FetchContent`（ブランチ・タグ名のみ）、git submodule、手置きサードパーティヘッダによる依存持ち込み。

@@ -126,6 +126,8 @@ checksum of the 64-point prediction: edb08ca7add4082b
 
 この性質を実現する仕組みは {doc}`../explanation/determinism-and-performance` で説明する。自分の並列ループから cxxgpr を呼ぶ場合は、スレッドごとに `FittedGpr` のコピーを持たせる。また、入れ子の並列領域がそれぞれ `OMP_NUM_THREADS` 個のスレッドを起こさないように、OpenMP ランタイムの設定を確かめる。そうしないと、マシンの能力を超えてスレッドを走らせてしまう。
 
+ハイブリッド構成の CPU（P コアと E コアの混在環境）や MSVC OpenMP との併用環境で Intel oneMKL（`-DCXXGPR_BLAS_BACKEND=MKL`）を使う場合、Windows 版 Intel oneMKL（`libiomp5md.dll`）の既定値は `KMP_BLOCKTIME=0`（passive wait）である。短いカーネル評価や小〜中規模の最適化反復を連続実行する専用ワークロードでは、`KMP_BLOCKTIME=200` および `KMP_AFFINITY=disabled` を設定し、`OMP_NUM_THREADS` / `MKL_NUM_THREADS` を物理 P コア数に合わせて P コアへ固定すると、スレッド起床オーバーヘッドと E コアへのスピルを抑えられる。他プロセスや別スレッド群と CPU を共有する場合は、既定の `KMP_BLOCKTIME=0` のまま運用する。
+
 ## 精度ポリシーを選ぶ
 
 `Gpr` と `FittedGpr` は、精度を第 2 テンプレート引数で受け取る（`Gpr<optimizer::Lbfgs, SinglePrecision>`）。ポリシーは 4 つある。`DoublePrecision`、`SinglePrecision`、`MixedPrecision<PromoteStorage>`、`MixedPrecision<ReevaluateKernel>` である。

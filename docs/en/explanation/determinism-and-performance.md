@@ -98,7 +98,7 @@ Preallocation means memory is committed for the largest problem even if an itera
 
 ## Vectorized kernels, BLAS backends, and instruction sets
 
-Dense matrix operations (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) delegate to OpenBLAS or Intel oneMKL (configurable via `CXXGPR_BLAS_BACKEND`, with Eigen as fallback), while cxxgpr provides vectorized kernels for kernel transforms, non-finite checks, and distance evaluation across three x86-64 tiers:
+Dense matrix operations (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) use either cxxgpr's built-in cache-packed SIMD+OpenMP kernels (`BuiltIn`, default on Windows MSVC) or vendor BLAS/LAPACK libraries such as OpenBLAS or Intel oneMKL (`CXXGPR_BLAS_BACKEND`), while cxxgpr provides vectorized kernels for kernel transforms, non-finite checks, and distance evaluation across three x86-64 tiers:
 
 | Tier | Selected by | Typical hardware |
 |---|---|---|

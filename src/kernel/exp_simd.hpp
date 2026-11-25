@@ -562,19 +562,35 @@ namespace cxxgpr::detail
         axpy_slice(dst, x, x_ref, len);
     }
 
-    /// @brief Evaluates `buf[k] = fast_exp(buf[k])` across a non-positive contiguous binary64 slice via herumi/fmath.
-    /// @param[in,out] buf Mutable binary64 buffer of non-positive inputs overwritten with exponentials.
-    /// @param[in] len Number of contiguous elements in `buf`.
-    void fast_exp_nonpos_slice_f64(double* buf, std::size_t len) noexcept;
+    /// @brief Evaluates `out[k] = exp(neg_scale * max(out[k], 0))` in place via herumi/fmath for FastApprox binary64.
+    /// @param[in,out] buf Buffer containing non-negative values overwritten with kernel exponentials.
+    /// @param[in] len Number of contiguous entries to transform.
+    /// @param[in] neg_scale Non-positive multiplier applied before exponentiation (e.g., `-0.5 / ell^2`).
+    void fast_exp_scaled_nonpos_in_place(double* buf, std::size_t len, double neg_scale) noexcept;
 
-    /// @brief Evaluates `buf[k] = fast_exp(buf[k])` across a non-positive contiguous binary32 slice via herumi/fmath.
-    /// @param[in,out] buf Mutable binary32 buffer of non-positive inputs overwritten with exponentials.
+    /// @brief Evaluates `out[k] = exp(neg_scale * max(out[k], 0))` in place via herumi/fmath for FastApprox binary32.
+    /// @param[in,out] buf Buffer containing non-negative values overwritten with kernel exponentials.
+    /// @param[in] len Number of contiguous entries to transform.
+    /// @param[in] neg_scale Non-positive multiplier applied before exponentiation (e.g., `-0.5 / ell^2`).
+    void fast_exp_scaled_nonpos_in_place(float* buf, std::size_t len, float neg_scale) noexcept;
+
+    /// @brief Evaluates radial Matern correlation `k(u)` in place via herumi/fmath for FastApprox binary64.
+    /// @param[in,out] buf Buffer containing non-negative `s^2` entries overwritten with Matern values.
     /// @param[in] len Number of contiguous elements in `buf`.
-    void fast_exp_nonpos_slice_f32(float* buf, std::size_t len) noexcept;
+    /// @param[in] scale_sq Positive Matern factor `2 * nu` (`1`, `3`, or `5`).
+    /// @param[in] nu Matern smoothness parameter (`OneHalf`, `ThreeHalves`, or `FiveHalves`).
+    void fast_matern_s2_in_place(double* buf, std::size_t len, double scale_sq, MaternNu nu) noexcept;
+
+    /// @brief Evaluates radial Matern correlation `k(u)` in place via herumi/fmath for FastApprox binary32.
+    /// @param[in,out] buf Buffer containing non-negative `s^2` entries overwritten with Matern values.
+    /// @param[in] len Number of contiguous elements in `buf`.
+    /// @param[in] scale_sq Positive Matern factor `2 * nu` (`1`, `3`, or `5`).
+    /// @param[in] nu Matern smoothness parameter (`OneHalf`, `ThreeHalves`, or `FiveHalves`).
+    void fast_matern_s2_in_place(float* buf, std::size_t len, float scale_sq, MaternNu nu) noexcept;
 
     /// @brief Evaluates `out[k] = exp(neg_scale * max(out[k], 0))` in place across a contiguous slice.
-    /// @details Dispatches outside the inner loop on `exp_mode`: under `KernelExp::FastApprox`, scales
-    /// clamped non-negative distances by `neg_scale` and invokes herumi/fmath vectorized routines.
+    /// @details Dispatches outside the inner loop on `exp_mode`: under `KernelExp::FastApprox`, delegates to
+    /// vectorized AVX2 + herumi/fmath L1-chunked evaluation in `exp.cpp`.
     /// @tparam T Storage floating-point scalar type (`double` or `float`).
     /// @param[in,out] buf Buffer containing non-negative values overwritten with kernel exponentials.
     /// @param[in] len Number of contiguous entries to transform.
@@ -592,25 +608,12 @@ namespace cxxgpr::detail
             }
             return;
         }
-
-        for (std::size_t k = 0U; k < len; ++k)
-        {
-            const T d = buf[k] < T{0} ? T{0} : buf[k];
-            buf[k] = d * neg_scale;
-        }
-        if constexpr (std::same_as<T, double>)
-        {
-            fast_exp_nonpos_slice_f64(buf, len);
-        }
-        else
-        {
-            fast_exp_nonpos_slice_f32(buf, len);
-        }
+        fast_exp_scaled_nonpos_in_place(buf, len, neg_scale);
     }
 
     /// @brief Evaluates the radial Matern correlation `k(u)` over a squared-distance buffer `buf` in place.
     /// @details Overwrites `buf[k]` (containing `s^2 >= 0`) with Matern `nu` evaluated at `u = sqrt(scale_sq * s^2)`,
-    /// using `std::exp` under `Accurate` and herumi/fmath L1-blocked evaluation under `FastApprox`.
+    /// using `std::exp` under `Accurate` and vectorized AVX2 + herumi/fmath evaluation under `FastApprox`.
     /// @tparam T Storage floating-point scalar type (`double` or `float`).
     /// @param[in,out] buf Buffer containing non-negative `s^2` entries overwritten with Matern kernel values.
     /// @param[in] len Number of contiguous elements in `buf`.
@@ -643,64 +646,7 @@ namespace cxxgpr::detail
             }
             return;
         }
-
-        if (nu == MaternNu::OneHalf)
-        {
-            for (std::size_t k = 0U; k < len; ++k)
-            {
-                const T raw = buf[k] < T{0} ? T{0} : buf[k];
-                buf[k] = -std::sqrt(raw * scale_sq);
-            }
-            if constexpr (std::same_as<T, double>)
-            {
-                fast_exp_nonpos_slice_f64(buf, len);
-            }
-            else
-            {
-                fast_exp_nonpos_slice_f32(buf, len);
-            }
-            return;
-        }
-
-        constexpr std::size_t kChunk = 256U;
-        alignas(32) std::array<T, kChunk> u_buf{};
-        alignas(32) std::array<T, kChunk> e_buf{};
-        for (std::size_t base = 0U; base < len; base += kChunk)
-        {
-            const std::size_t count = std::min(kChunk, len - base);
-            for (std::size_t i = 0U; i < count; ++i)
-            {
-                const T raw = buf[base + i] < T{0} ? T{0} : buf[base + i];
-                const T u = std::sqrt(raw * scale_sq);
-                u_buf[i] = u;
-                e_buf[i] = -u;
-            }
-            if constexpr (std::same_as<T, double>)
-            {
-                fast_exp_nonpos_slice_f64(e_buf.data(), count);
-            }
-            else
-            {
-                fast_exp_nonpos_slice_f32(e_buf.data(), count);
-            }
-            if (nu == MaternNu::ThreeHalves)
-            {
-                for (std::size_t i = 0U; i < count; ++i)
-                {
-                    const T e = e_buf[i];
-                    buf[base + i] = std::isnan(e) ? e : ((e > T{0}) ? ((T{1} + u_buf[i]) * e) : T{0});
-                }
-            }
-            else
-            {
-                for (std::size_t i = 0U; i < count; ++i)
-                {
-                    const T e = e_buf[i];
-                    const T u = u_buf[i];
-                    buf[base + i] = std::isnan(e) ? e : ((e > T{0}) ? ((T{1} + u + ((u * u) / T{3})) * e) : T{0});
-                }
-            }
-        }
+        fast_matern_s2_in_place(buf, len, scale_sq, nu);
     }
 
 }  // namespace cxxgpr::detail

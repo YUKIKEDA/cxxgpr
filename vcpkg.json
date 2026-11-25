@@ -13,13 +13,6 @@
         "dynamic-arch"
       ],
       "platform": "!windows | mingw"
-    },
-    {
-      "name": "openblas",
-      "features": [
-        "threads"
-      ],
-      "platform": "windows & !mingw"
     }
   ],
   "features": {
