@@ -68,10 +68,13 @@ namespace cxxgpr::mll_kernels
             }
         }
 
-        cxxgpr::detail::blas_compute_w_lower(
-            n, l.data(), l.col_stride(), alpha.data(), z_scratch.data(), z_scratch.col_stride(), w_out.data(),
-            w_out.col_stride()
-        );
+        if (!cxxgpr::detail::blas_compute_w_lower(
+                n, l.data(), l.col_stride(), alpha.data(), z_scratch.data(), z_scratch.col_stride(), w_out.data(),
+                w_out.col_stride()
+            ))
+        {
+            return std::unexpected(GprError::non_positive_definite_matrix());
+        }
         return {};
     }
 

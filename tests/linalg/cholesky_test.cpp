@@ -8,6 +8,7 @@
 
 #include "cxxgpr/linalg/cholesky.hpp"
 
+#include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/linalg/dense.hpp"
 
 #include <gtest/gtest.h>
@@ -44,6 +45,37 @@ namespace
     using cxxgpr::test_support::AuditMode;
     /// @brief Brings RAII NoAllocationScope guard into the anonymous test namespace.
     using cxxgpr::test_support::NoAllocationScope;
+
+    /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
+    [[nodiscard]] bool has_external_blas_backend() noexcept
+    {
+        const auto info = cxxgpr::build_info();
+        for (const auto& dep : info.dependencies)
+        {
+            if (dep.name == "blas_backend")
+            {
+                return dep.version != "BuiltIn";
+            }
+        }
+        return false;
+    }
+
+    /// @brief Returns the raw IEEE-754 bit pattern of a `double` scalar.
+    /// @param[in] value Input scalar.
+    /// @return Unsigned 64-bit representation.
+    [[nodiscard]] std::uint64_t bit_pattern(double value) noexcept
+    {
+        return std::bit_cast<std::uint64_t>(value);
+    }
+
+    /// @brief Returns the raw IEEE-754 bit pattern of a `float` scalar.
+    /// @param[in] value Input scalar.
+    /// @return Unsigned 32-bit representation.
+    [[nodiscard]] std::uint32_t bit_pattern(float value) noexcept
+    {
+        return std::bit_cast<std::uint32_t>(value);
+    }
 
     /// @brief Constructs an n x n symmetric RBF Gram matrix with an explicit diagonal shift.
     /// @details Evaluates exp(-0.5 * ((i - j) * 0.35)^2) across all pairs and adds diag_offset to
@@ -356,18 +388,29 @@ namespace
             const auto r1 = run_factor(1);
             const auto r2 = run_factor(2);
             const auto r4 = run_factor(4);
+            const auto r4_repeat = run_factor(4);
 #ifdef _OPENMP
             omp_set_num_threads(saved_threads);
 #endif
 
+            const bool ext_blas = has_external_blas_backend();
             const double parity_tol = std::same_as<Scalar, double> ? 1e-12 : 1e-4;
             for (std::size_t col = 0U; col < n; ++col)
             {
                 for (std::size_t row = col; row < n; ++row)
                 {
                     const std::size_t idx = (col * n) + row;
-                    EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r2[idx]), parity_tol);
-                    EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r4[idx]), parity_tol);
+                    EXPECT_EQ(bit_pattern(r4[idx]), bit_pattern(r4_repeat[idx]));
+                    if (!ext_blas)
+                    {
+                        EXPECT_EQ(bit_pattern(r1[idx]), bit_pattern(r2[idx]));
+                        EXPECT_EQ(bit_pattern(r1[idx]), bit_pattern(r4[idx]));
+                    }
+                    else
+                    {
+                        EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r2[idx]), parity_tol);
+                        EXPECT_NEAR(static_cast<double>(r1[idx]), static_cast<double>(r4[idx]), parity_tol);
+                    }
                 }
             }
 
@@ -502,17 +545,28 @@ namespace
         const auto s1 = run_solves(1);
         const auto s2 = run_solves(2);
         const auto s4 = run_solves(4);
+        const auto s4_repeat = run_solves(4);
 #ifdef _OPENMP
         omp_set_num_threads(saved_threads);
 #endif
 
+        const bool ext_blas = has_external_blas_backend();
         constexpr double parity_tol = 1e-12;
         for (std::size_t mode = 0U; mode < 3U; ++mode)
         {
             for (std::size_t idx = 0U; idx < n * m; ++idx)
             {
-                EXPECT_NEAR(s1[mode][idx], s2[mode][idx], parity_tol);
-                EXPECT_NEAR(s1[mode][idx], s4[mode][idx], parity_tol);
+                EXPECT_EQ(bit_pattern(s4[mode][idx]), bit_pattern(s4_repeat[mode][idx]));
+                if (!ext_blas)
+                {
+                    EXPECT_EQ(bit_pattern(s1[mode][idx]), bit_pattern(s2[mode][idx]));
+                    EXPECT_EQ(bit_pattern(s1[mode][idx]), bit_pattern(s4[mode][idx]));
+                }
+                else
+                {
+                    EXPECT_NEAR(s1[mode][idx], s2[mode][idx], parity_tol);
+                    EXPECT_NEAR(s1[mode][idx], s4[mode][idx], parity_tol);
+                }
             }
         }
 
@@ -678,16 +732,41 @@ namespace
                         EXPECT_EQ(audit.delta_allocations(), 0U);
                     }
 
+                    const bool ext_blas = has_external_blas_backend();
                     for (std::size_t row = 0U; row < n; ++row)
                     {
                         const std::size_t p_idx = (col * n) + row;
                         const std::size_t s_idx = (col * rhs_stride) + row;
-                        EXPECT_NEAR(static_cast<double>(fwd_multi[p_idx]), static_cast<double>(single_fwd[row]), tol);
-                        EXPECT_NEAR(static_cast<double>(fwd_strided[s_idx]), static_cast<double>(single_fwd[row]), tol);
-                        EXPECT_NEAR(static_cast<double>(bwd_multi[p_idx]), static_cast<double>(single_bwd[row]), tol);
-                        EXPECT_NEAR(static_cast<double>(bwd_strided[s_idx]), static_cast<double>(single_bwd[row]), tol);
-                        EXPECT_NEAR(static_cast<double>(llt_multi[p_idx]), static_cast<double>(single_llt[row]), tol);
-                        EXPECT_NEAR(static_cast<double>(llt_strided[s_idx]), static_cast<double>(single_llt[row]), tol);
+                        if (!ext_blas)
+                        {
+                            EXPECT_EQ(bit_pattern(fwd_multi[p_idx]), bit_pattern(single_fwd[row]));
+                            EXPECT_EQ(bit_pattern(fwd_strided[s_idx]), bit_pattern(single_fwd[row]));
+                            EXPECT_EQ(bit_pattern(bwd_multi[p_idx]), bit_pattern(single_bwd[row]));
+                            EXPECT_EQ(bit_pattern(bwd_strided[s_idx]), bit_pattern(single_bwd[row]));
+                            EXPECT_EQ(bit_pattern(llt_multi[p_idx]), bit_pattern(single_llt[row]));
+                            EXPECT_EQ(bit_pattern(llt_strided[s_idx]), bit_pattern(single_llt[row]));
+                        }
+                        else
+                        {
+                            EXPECT_NEAR(
+                                static_cast<double>(fwd_multi[p_idx]), static_cast<double>(single_fwd[row]), tol
+                            );
+                            EXPECT_NEAR(
+                                static_cast<double>(fwd_strided[s_idx]), static_cast<double>(single_fwd[row]), tol
+                            );
+                            EXPECT_NEAR(
+                                static_cast<double>(bwd_multi[p_idx]), static_cast<double>(single_bwd[row]), tol
+                            );
+                            EXPECT_NEAR(
+                                static_cast<double>(bwd_strided[s_idx]), static_cast<double>(single_bwd[row]), tol
+                            );
+                            EXPECT_NEAR(
+                                static_cast<double>(llt_multi[p_idx]), static_cast<double>(single_llt[row]), tol
+                            );
+                            EXPECT_NEAR(
+                                static_cast<double>(llt_strided[s_idx]), static_cast<double>(single_llt[row]), tol
+                            );
+                        }
 
                         // Verify Forward: (L * x)_row == b_row using only lower-triangular entries of L.
                         double lx = 0.0;
@@ -796,16 +875,27 @@ namespace
             const auto t1 = run_all(1);
             const auto t2 = run_all(2);
             const auto t4 = run_all(4);
+            const auto t4_repeat = run_all(4);
 #ifdef _OPENMP
             omp_set_num_threads(saved_threads);
 #endif
 
+            const bool ext_blas = has_external_blas_backend();
             for (std::size_t mode = 0U; mode < 3U; ++mode)
             {
                 for (std::size_t idx = 0U; idx < n * m; ++idx)
                 {
-                    EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t2[mode][idx]), tol);
-                    EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t4[mode][idx]), tol);
+                    EXPECT_EQ(bit_pattern(t4[mode][idx]), bit_pattern(t4_repeat[mode][idx]));
+                    if (!ext_blas)
+                    {
+                        EXPECT_EQ(bit_pattern(t1[mode][idx]), bit_pattern(t2[mode][idx]));
+                        EXPECT_EQ(bit_pattern(t1[mode][idx]), bit_pattern(t4[mode][idx]));
+                    }
+                    else
+                    {
+                        EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t2[mode][idx]), tol);
+                        EXPECT_NEAR(static_cast<double>(t1[mode][idx]), static_cast<double>(t4[mode][idx]), tol);
+                    }
                 }
             }
 
@@ -914,20 +1004,41 @@ namespace
             const auto r1 = run_threads(1);
             const auto r2 = run_threads(2);
             const auto r4 = run_threads(4);
+            const auto r4_repeat = run_threads(4);
 #ifdef _OPENMP
             omp_set_num_threads(saved_threads);
 #endif
 
+            const bool ext_blas = has_external_blas_backend();
             for (std::size_t idx = 0U; idx < n * m; ++idx)
             {
-                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(fwd_single[idx]), tol);
-                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r2.first[idx]), tol);
-                EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r4.first[idx]), tol);
+                EXPECT_EQ(bit_pattern(r4.first[idx]), bit_pattern(r4_repeat.first[idx]));
+                if (!ext_blas)
+                {
+                    EXPECT_EQ(bit_pattern(r1.first[idx]), bit_pattern(fwd_single[idx]));
+                    EXPECT_EQ(bit_pattern(r1.first[idx]), bit_pattern(r2.first[idx]));
+                    EXPECT_EQ(bit_pattern(r1.first[idx]), bit_pattern(r4.first[idx]));
+                }
+                else
+                {
+                    EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(fwd_single[idx]), tol);
+                    EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r2.first[idx]), tol);
+                    EXPECT_NEAR(static_cast<double>(r1.first[idx]), static_cast<double>(r4.first[idx]), tol);
+                }
             }
             for (std::size_t i = 0U; i < n; ++i)
             {
-                EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r2.second[i]), tol);
-                EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r4.second[i]), tol);
+                EXPECT_EQ(bit_pattern(r4.second[i]), bit_pattern(r4_repeat.second[i]));
+                if (!ext_blas)
+                {
+                    EXPECT_EQ(bit_pattern(r1.second[i]), bit_pattern(r2.second[i]));
+                    EXPECT_EQ(bit_pattern(r1.second[i]), bit_pattern(r4.second[i]));
+                }
+                else
+                {
+                    EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r2.second[i]), tol);
+                    EXPECT_NEAR(static_cast<double>(r1.second[i]), static_cast<double>(r4.second[i]), tol);
+                }
             }
 
             // Spot-check forward-solve L * x = b and LLT inv_diag identity on the final column.

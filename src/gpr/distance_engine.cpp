@@ -516,11 +516,21 @@ namespace cxxgpr
                     const std::size_t d = ard_dims[i];
                     ard_ls_caps_[i] = d;
                     ard_ls_offsets_[i] = ls_total;
-                    ls_total += d;
+                    auto ls_next = checked_add(ls_total, d);
+                    if (!ls_next.has_value())
+                    {
+                        return std::unexpected(std::move(ls_next).error());
+                    }
+                    ls_total = *ls_next;
                     if (d > 0U)
                     {
                         ard_s2_offsets_[i] = s2_total;
-                        s2_total += per_dim;
+                        auto s2_next = checked_add(s2_total, per_dim);
+                        if (!s2_next.has_value())
+                        {
+                            return std::unexpected(std::move(s2_next).error());
+                        }
+                        s2_total = *s2_next;
                     }
                 }
                 ard_s2_storage_.assign(s2_total, Storage{0});

@@ -410,13 +410,9 @@ namespace
 #endif
     };
 
-    /// @brief Verifies mixed-precision refinement weights are bit-identical for any OpenMP thread count.
-    /// @details The float factorization and the kernel evaluations run on OpenMP threads, and the blocked
-    /// double-precision residual sums every row over its columns in ascending order. None of them may change a single
-    /// bit of the refined weights or the summary when the thread count changes.
     /// @brief Verifies MixedPrecision iterative refinement is deterministic and consistent across OpenMP threads.
     /// @details Confirms repeated 4-thread fits produce bit-identical `alpha` and summaries, while 1/2/4-thread fits
-    /// match bitwise under internal Eigen linear algebra or within 1e-8 relative tolerance under external vendor BLAS.
+    /// match bitwise under BuiltIn SIMD linear algebra or within 1e-8 relative tolerance under external vendor BLAS.
     TEST(GprModelsTest, MixedPrecisionRefinementIsBitwiseIdenticalAcrossThreadCounts)
     {
         // Spec: DES-05, DES-20

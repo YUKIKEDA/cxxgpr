@@ -243,7 +243,7 @@ namespace
 
     /// @brief Verifies MLL and analytical gradients stay deterministic on same-thread repeats and agree across threads.
     /// @details Compares std::bit_cast<uint64_t> bit patterns for repeated 4-thread runs (and 1 vs 4 threads under
-    /// internal Eigen linear algebra, or scaled rounding tolerance when an external vendor BLAS is linked).
+    /// BuiltIn SIMD linear algebra, or scaled rounding tolerance when an external vendor BLAS is linked).
     TEST(WorkspaceMllTest, MllAndGradientAreBitwiseDeterministicAcrossOpenMpThreads)
     {
         // Construct an n = 72 2D synthetic dataset exercising OpenMP column reductions.
@@ -432,7 +432,7 @@ namespace
 
     /// @brief Verifies analytical MLL Hessian entries stay deterministic on repeats and agree across threads.
     /// @details Compares std::bit_cast<uint64_t> bit patterns for repeated 4-thread runs (and 1 vs 4 threads under
-    /// internal Eigen linear algebra, or scaled rounding tolerance when external vendor BLAS is linked) on n = 72.
+    /// BuiltIn SIMD linear algebra, or scaled rounding tolerance when external vendor BLAS is linked) on n = 72.
     TEST(WorkspaceMllTest, AnalyticalHessianIsBitwiseDeterministicAcrossOpenMpThreads)
     {
         // Evaluate full Hessian on n = 72 points under 1 and 4 threads and compare raw bits.

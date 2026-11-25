@@ -500,7 +500,7 @@ namespace
 
     /// @brief Verifies predict() outputs are deterministic on repeats and agree across OpenMP thread counts.
     /// @details Compares std::bit_cast<uint64_t> representations on repeated 4-thread runs (and 1 vs 4 threads under
-    /// internal Eigen linear algebra, or tight tolerance when an external vendor BLAS is linked) on an m = 32 grid.
+    /// BuiltIn SIMD linear algebra, or tight tolerance when an external vendor BLAS is linked) on an m = 32 grid.
     TEST(WorkspaceInferenceTest, OpenMpThreadCountBitwiseDeterminism)
     {
         // Spec: REQ-11, DES-20
@@ -723,7 +723,7 @@ namespace
     /// @brief Verifies parallel predict_covariance_into() stays deterministic on repeats and agrees across threads.
     /// @details Evaluates DoublePrecision, SinglePrecision, and MixedPrecision<PromoteStorage> full covariance at
     /// n = 128, m = 67 and m = 200 under 1, 2, and 4 OpenMP threads, verifies exact bitwise equality on repeated
-    /// 4-thread calls (and across thread counts under internal Eigen linear algebra, or scaled tolerance under external
+    /// 4-thread calls (and across thread counts under BuiltIn SIMD linear algebra, or scaled tolerance under external
     /// vendor BLAS), and checks accuracy against an independent naive K_** - V^T V reference.
     TEST(WorkspaceInferenceTest, PredictCovarianceBitwiseDeterministicAcrossThreads)
     {

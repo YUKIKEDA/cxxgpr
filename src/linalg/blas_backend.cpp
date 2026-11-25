@@ -15,6 +15,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <limits>
 
 #ifdef _OPENMP
 #    include <omp.h>
@@ -97,6 +98,14 @@ namespace cxxgpr::detail
             /// @brief Saved thread-local MKL thread count restored on destruction.
             int prev_{0};
         };
+
+        /// @brief Returns true when a matrix extent fits safely into `lapack_int`.
+        /// @param[in] value Non-negative matrix dimension or stride.
+        /// @return True when `value <= std::numeric_limits<lapack_int>::max()`.
+        [[nodiscard]] bool fits_lapack_int(std::size_t value) noexcept
+        {
+            return value <= static_cast<std::size_t>(std::numeric_limits<lapack_int>::max());
+        }
 #elifdef CXXGPR_HAS_OPENBLAS
         /// @brief Vendor BLAS integer type matching OpenBLAS CBLAS signatures.
         using BlasInt = blasint;
@@ -1699,11 +1708,16 @@ namespace cxxgpr::detail
         /// @param[in] alpha Solved weight vector A^-1 y of length n.
         /// @param[out] w_out Preallocated n x n matrix receiving lower-triangular W (may alias L).
         /// @param[in] ldw Leading dimension of W.
+        /// @return True on success, or false if `LAPACKE_?potri` fails or extents overflow `lapack_int`.
         template <typename T>
-        void mkl_compute_w_lower_impl(
+        [[nodiscard]] bool mkl_compute_w_lower_impl(
             std::size_t n, const T* l, std::size_t ldl, const T* alpha, T* w_out, std::size_t ldw
         ) noexcept
         {
+            if (!fits_lapack_int(n) || !fits_lapack_int(ldw))
+            {
+                return false;
+            }
             if (w_out != l)
             {
                 for (std::size_t col = 0U; col < n; ++col)
@@ -1713,20 +1727,25 @@ namespace cxxgpr::detail
                     std::copy(src_col + col, src_col + n, dst_col + col);
                 }
             }
+            lapack_int info = 0;
             {
                 const MklLocalThreadsGuard mkl_guard(n <= 384U);
                 if constexpr (std::same_as<T, double>)
                 {
-                    (void)LAPACKE_dpotri(
+                    info = LAPACKE_dpotri(
                         LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), w_out, static_cast<lapack_int>(ldw)
                     );
                 }
                 else
                 {
-                    (void)LAPACKE_spotri(
+                    info = LAPACKE_spotri(
                         LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), w_out, static_cast<lapack_int>(ldw)
                     );
                 }
+            }
+            if (info != 0)
+            {
+                return false;
             }
 
             const auto n_s = static_cast<std::ptrdiff_t>(n);
@@ -1743,6 +1762,7 @@ namespace cxxgpr::detail
                     w_col[row] = (alpha[row] * alpha_j) - w_col[row];
                 }
             }
+            return true;
         }
 
 #endif  // CXXGPR_HAS_MKL
@@ -2592,7 +2612,8 @@ namespace cxxgpr::detail
     /// @param[in] n Order of symmetric matrix A.
     /// @param[in,out] a Column-major symmetric matrix overwritten in lower triangle with L.
     /// @param[in] lda Leading dimension of A.
-    /// @return Zero on success, or the 1-based failing pivot index on non-SPD failure.
+    /// @return Zero on success, the 1-based failing pivot index on non-SPD failure, or
+    /// std::numeric_limits<std::size_t>::max() on backend argument/size error.
     std::size_t blas_cholesky_lower(const std::size_t n, double* const a, const std::size_t lda) noexcept
     {
         if (n == 0U)
@@ -2604,10 +2625,18 @@ namespace cxxgpr::detail
         {
             return builtin_cholesky_lower_impl(n, a, lda);
         }
-        const MklLocalThreadsGuard mkl_guard(n < 192U);
+        if (!fits_lapack_int(n) || !fits_lapack_int(lda))
+        {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        const MklLocalThreadsGuard mkl_guard(n <= 256U);
         const lapack_int info =
             LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), a, static_cast<lapack_int>(lda));
-        return info > 0 ? static_cast<std::size_t>(info) : 0U;
+        if (info != 0)
+        {
+            return info > 0 ? static_cast<std::size_t>(info) : std::numeric_limits<std::size_t>::max();
+        }
+        return 0U;
 #elifdef CXXGPR_HAS_BLAS_BUILTIN
         return builtin_cholesky_lower_impl(n, a, lda);
 #else
@@ -2619,7 +2648,8 @@ namespace cxxgpr::detail
     /// @param[in] n Order of symmetric matrix A.
     /// @param[in,out] a Column-major symmetric matrix overwritten in lower triangle with L.
     /// @param[in] lda Leading dimension of A.
-    /// @return Zero on success, or the 1-based failing pivot index on non-SPD failure.
+    /// @return Zero on success, the 1-based failing pivot index on non-SPD failure, or
+    /// std::numeric_limits<std::size_t>::max() on backend argument/size error.
     std::size_t blas_cholesky_lower(const std::size_t n, float* const a, const std::size_t lda) noexcept
     {
         if (n == 0U)
@@ -2627,10 +2657,18 @@ namespace cxxgpr::detail
             return 0U;
         }
 #ifdef CXXGPR_HAS_MKL
-        const MklLocalThreadsGuard mkl_guard(n < 192U);
+        if (!fits_lapack_int(n) || !fits_lapack_int(lda))
+        {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        const MklLocalThreadsGuard mkl_guard(n <= 256U);
         const lapack_int info =
             LAPACKE_spotrf(LAPACK_COL_MAJOR, 'L', static_cast<lapack_int>(n), a, static_cast<lapack_int>(lda));
-        return info > 0 ? static_cast<std::size_t>(info) : 0U;
+        if (info != 0)
+        {
+            return info > 0 ? static_cast<std::size_t>(info) : std::numeric_limits<std::size_t>::max();
+        }
+        return 0U;
 #elifdef CXXGPR_HAS_BLAS_BUILTIN
         return builtin_cholesky_lower_impl(n, a, lda);
 #else
@@ -2776,7 +2814,8 @@ namespace cxxgpr::detail
     /// @param[in] ldz Leading dimension of z_scratch.
     /// @param[out] w_out Preallocated n x n output matrix receiving lower-triangular W (may alias L).
     /// @param[in] ldw Leading dimension of w_out.
-    void blas_compute_w_lower(
+    /// @return True on success, or false if the backend inversion fails or extents overflow.
+    bool blas_compute_w_lower(
         const std::size_t n,
         const double* const l,
         const std::size_t ldl,
@@ -2789,21 +2828,23 @@ namespace cxxgpr::detail
     {
         if (n == 0U)
         {
-            return;
+            return true;
         }
 #ifdef CXXGPR_HAS_BLAS_BUILTIN
         builtin_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
+        return true;
 #elifdef CXXGPR_HAS_MKL
         if (n <= 384U && linalg::openmp_max_threads() > 1U)
         {
             builtin_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
-            return;
+            return true;
         }
         (void)z_scratch;
         (void)ldz;
-        mkl_compute_w_lower_impl(n, l, ldl, alpha, w_out, ldw);
+        return mkl_compute_w_lower_impl(n, l, ldl, alpha, w_out, ldw);
 #else
         openblas_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
+        return true;
 #endif
     }
 
@@ -2816,7 +2857,8 @@ namespace cxxgpr::detail
     /// @param[in] ldz Leading dimension of z_scratch.
     /// @param[out] w_out Preallocated n x n output matrix receiving lower-triangular W (may alias L).
     /// @param[in] ldw Leading dimension of w_out.
-    void blas_compute_w_lower(
+    /// @return True on success, or false if the backend inversion fails or extents overflow.
+    bool blas_compute_w_lower(
         const std::size_t n,
         const float* const l,
         const std::size_t ldl,
@@ -2829,16 +2871,18 @@ namespace cxxgpr::detail
     {
         if (n == 0U)
         {
-            return;
+            return true;
         }
 #ifdef CXXGPR_HAS_BLAS_BUILTIN
         builtin_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
+        return true;
 #elifdef CXXGPR_HAS_MKL
         (void)z_scratch;
         (void)ldz;
-        mkl_compute_w_lower_impl(n, l, ldl, alpha, w_out, ldw);
+        return mkl_compute_w_lower_impl(n, l, ldl, alpha, w_out, ldw);
 #else
         openblas_compute_w_lower_impl(n, l, ldl, alpha, z_scratch, ldz, w_out, ldw);
+        return true;
 #endif
     }
 

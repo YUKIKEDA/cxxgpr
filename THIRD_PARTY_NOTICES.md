@@ -5,7 +5,7 @@ cxxgpr 自身のソースのライセンスは、ルートの `LICENSE` にあ�
 | 依存 | 固定版 | ライセンス | 用途 |
 |---|---|---|---|
 | Eigen | 5.0.1 | MPL-2.0、および同梱の互換ライセンス | 内部パネル線形代数・前処理・次元検査。`EIGEN_MPL2_ONLY` を定義し、公開ヘッダに露出しない |
-| OpenBLAS | 0.3.34 | BSD-3-Clause | 既定の内部 BLAS（`GEMM` / `SYRK` / `TRSM` / `GEMV` / `DOT`）。公開ヘッダに露出しない |
+| OpenBLAS | 0.3.34 | BSD-3-Clause | 非 Windows MSVC 環境の既定外部 BLAS（任意切替で選択可、`GEMM` / `SYRK` / `TRSM` / `GEMV` / `DOT`）。Windows MSVC の既定は依存ゼロの自前 `BuiltIn` SIMD バックエンド。公開ヘッダに露出しない |
 | Intel oneMKL（任意切替） | 導入環境準拠 | Intel Simplified Software License | `-DCXXGPR_BLAS_BACKEND=MKL` 指定時の BLAS / LAPACKE 実装。公開ヘッダに露出しない |
 | nlohmann/json | 3.12.0 | MIT | 永続化 `config.json` と safetensors ヘッダの解析。公開ヘッダに露出しない |
 | GoogleTest | 1.18.0 | BSD-3-Clause | `tests` feature、試験専用。製品ライブラリへリンクしない |

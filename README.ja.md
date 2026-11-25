@@ -2,7 +2,7 @@
 
 # cxxgpr
 
-**C++23 のための厳密ガウス過程回帰ライブラリ。** データにモデルを当てはめ、校正された不確かさつきで予測できます。数値・メモリ・スレッドを自分で制御できます。例外は投げず、ホットパスで確保せず、スレッド数が違っても結果はビット単位で一致します。
+**C++23 のための厳密ガウス過程回帰ライブラリ。** データにモデルを当てはめ、校正された不確かさつきで予測できます。数値・メモリ・スレッドを自分で制御できます。例外は投げず、ホットパスで確保せず、内蔵バックエンドではスレッド数が違っても（外部 BLAS 利用時は BLAS スレッド設定固定下で）結果はビット単位で一致します。
 
 [![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -12,7 +12,7 @@
 ## 特長
 
 - **エラーは値で返る。** 失敗しうる呼び出しはすべて `std::expected<T, GprError>` を返し、API の境界で例外は飛びません。
-- **再現できる。** 並列計算の結果はスレッド数によらずビット単位で一致し、乱数による標本抽出もシード付きで可搬です。
+- **再現できる。** 内蔵バックエンドでは並列計算の結果がスレッド数によらず（外部 BLAS 利用時は BLAS スレッド設定固定下で）ビット単位で一致し、乱数による標本抽出もシード付きで可搬です。
 - **コストが読める。** 2 回目以降の予測は確保ゼロで、メモリと速度のどちらを優先するかを選べます。
 - **ヘッダがきれい。** Eigen・OpenBLAS/oneMKL・nlohmann/json・OpenMP は公開ヘッダに現れず、利用側のビルドへ漏れません。
 - **構造で安全にする。** 失敗した呼び出しは対象を変えず、範囲つきのハイパーパラメータは範囲外にできず、学習前と学習後のモデルは別の型です。
@@ -99,7 +99,7 @@ find_package(cxxgpr 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-パッケージは、構成時に Eigen、OpenBLAS（または Intel oneMKL）、nlohmann/json、（あれば）OpenMP を探します。vcpkg などで導入しておいてください。
+パッケージは、構成時に Eigen、nlohmann/json、外部 BLAS バックエンド有効時の OpenBLAS（または Intel oneMKL、`BuiltIn` バックエンド〔Windows MSVC 既定〕では不要）、および（あれば）OpenMP を探します。必要な依存は vcpkg などで導入しておいてください。
 
 **ソースから `FetchContent` で。**
 

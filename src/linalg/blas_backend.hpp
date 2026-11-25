@@ -2,7 +2,7 @@
 /// @file blas_backend.hpp
 /// @brief Internal CBLAS/LAPACKE facade isolating third-party BLAS/MKL headers from the codebase.
 /// @details Declares zero-allocation dense linear algebra wrappers implemented against OpenBLAS,
-/// Intel oneMKL, or Eigen fallback in blas_backend.cpp, plus a deterministic promoted dot helper.
+/// Intel oneMKL, or BuiltIn SIMD+OpenMP kernels in blas_backend.cpp, plus a deterministic promoted dot helper.
 
 #pragma once
 
@@ -289,14 +289,16 @@ namespace cxxgpr::detail
     /// @param[in] n Order of symmetric matrix A.
     /// @param[in,out] a Column-major symmetric matrix overwritten in lower triangle with L.
     /// @param[in] lda Leading dimension of A.
-    /// @return Zero on success, or the 1-based failing pivot index on non-SPD failure.
+    /// @return Zero on success, the 1-based failing pivot index on non-SPD failure, or
+    /// std::numeric_limits<std::size_t>::max() on backend argument/size error.
     [[nodiscard]] std::size_t blas_cholesky_lower(std::size_t n, double* a, std::size_t lda) noexcept;
 
     /// @brief Single-precision overload of `blas_cholesky_lower`.
     /// @param[in] n Order of symmetric matrix A.
     /// @param[in,out] a Column-major symmetric matrix overwritten in lower triangle with L.
     /// @param[in] lda Leading dimension of A.
-    /// @return Zero on success, or the 1-based failing pivot index on non-SPD failure.
+    /// @return Zero on success, the 1-based failing pivot index on non-SPD failure, or
+    /// std::numeric_limits<std::size_t>::max() on backend argument/size error.
     [[nodiscard]] std::size_t blas_cholesky_lower(std::size_t n, float* a, std::size_t lda) noexcept;
 
     /// @brief Forms lower triangle of posterior covariance `kss + noise_var * I - V^T * V` in double precision.
@@ -366,7 +368,8 @@ namespace cxxgpr::detail
     /// @param[in] ldz Leading dimension of z_scratch.
     /// @param[out] w_out Preallocated n x n matrix receiving lower-triangular W (may alias l).
     /// @param[in] ldw Leading dimension of w_out.
-    void blas_compute_w_lower(
+    /// @return True on success, or false if the backend inversion fails or extents overflow.
+    [[nodiscard]] bool blas_compute_w_lower(
         std::size_t n,
         const double* l,
         std::size_t ldl,
@@ -386,7 +389,8 @@ namespace cxxgpr::detail
     /// @param[in] ldz Leading dimension of z_scratch.
     /// @param[out] w_out Preallocated n x n matrix receiving lower-triangular W (may alias l).
     /// @param[in] ldw Leading dimension of w_out.
-    void blas_compute_w_lower(
+    /// @return True on success, or false if the backend inversion fails or extents overflow.
+    [[nodiscard]] bool blas_compute_w_lower(
         std::size_t n,
         const float* l,
         std::size_t ldl,

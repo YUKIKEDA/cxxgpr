@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /// @file cholesky.cpp
 /// @brief Implementations of in-place Cholesky factorization, jitter retries, solves, and log-determinants.
-/// @details Wraps Eigen in-place LLT decomposition and deterministic SIMD triangular solvers over column-major
-/// MatrixRef/MatrixMut views, with backup-restoring jitter escalation and Neumaier compensated log-determinant
-/// summation.
+/// @details Wraps the active BLAS/LAPACKE or BuiltIn SIMD Cholesky decomposition and triangular solvers over
+/// column-major MatrixRef/MatrixMut views, with backup-restoring jitter escalation and Neumaier compensated
+/// log-determinant summation.
 
 #include "cxxgpr/linalg/cholesky.hpp"
 
@@ -186,7 +186,8 @@ namespace cxxgpr::linalg
     }  // namespace
 
     /// @brief Factors a symmetric positive-definite matrix A in place into its lower Cholesky factor L.
-    /// @details Validates square matrix geometry and lower-triangle finiteness before invoking Eigen in-place LLT.
+    /// @details Validates square matrix geometry and lower-triangle finiteness before invoking in-place Cholesky
+    /// factorization.
     /// @tparam T Floating-point kernel scalar type satisfying KernelScalarConcept.
     /// @param[in,out] a Square mutable matrix view containing the lower triangle of A on entry and L on success.
     /// @param[in] stage Factorization call site recorded in CholeskyFailed diagnostics.
