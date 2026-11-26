@@ -11,4 +11,4 @@ alwaysApply: false
 - **公開ヘッダの非漏洩**：`include/cxxgpr/**/*.hpp` が Eigen・`nlohmann/json`・OpenMP（`<omp.h>` / `Eigen/` / `nlohmann/`）および内部詳細ヘッダを含まないこと（`just arch-check`）。
 - **英語／日本語の入り口**：`README.md`（英語）と `README.ja.md`（日本語）が現在の対応範囲・ビルド方法・未実装注記と一致していること。
 - **個人情報・ローカルパスの非混入**：利用者のローカルユーザー名やホームディレクトリ絶対パスを CMake・生成物・公開文書へハードコードしない。
-- エージェントは単独で公開タグ打ちやリリース確定を行わない。
+- エージェントは所有者の明示的な指示なしに単独で公開タグ打ちやリリース確定を行わない（通常のドラフト作成は `release` ワークフローの `workflow_dispatch`〔`create_draft_release: true` on `main`〕で全検査通過後に自動タグ付けできる）。
