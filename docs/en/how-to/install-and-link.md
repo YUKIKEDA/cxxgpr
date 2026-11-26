@@ -45,7 +45,7 @@ cmake --install out/build/windows-msvc --config Release --prefix C:\path\to\pref
 
 ::::
 
-The install step copies the library, all headers under `include/cxxgpr/`, a CMake package (`cxxgprConfig.cmake`, its version file and the exported targets), the license and the third-party notices. The package version file uses `SameMinorVersion` compatibility: while the major version is 0, `find_package(cxxgpr 0.2.0)` accepts any `0.2.x` release.
+The install step copies the library, all headers under `include/cxxgpr/`, a CMake package (`cxxgprConfig.cmake`, its version file and the exported targets), the license and the third-party notices. The package version file uses `SameMinorVersion` compatibility: while the major version is 0, `find_package(cxxgpr 0.3.0)` accepts any `0.3.x` release.
 
 The available CMake options are listed in {doc}`../reference/build-options`.
 
@@ -57,7 +57,7 @@ In your project's `CMakeLists.txt`:
 cmake_minimum_required(VERSION 3.25)
 project(my_app LANGUAGES CXX)
 
-find_package(cxxgpr 0.2.0 CONFIG REQUIRED)
+find_package(cxxgpr 0.3.0 CONFIG REQUIRED)
 
 add_executable(my_app main.cpp)
 target_compile_features(my_app PRIVATE cxx_std_23)
@@ -87,7 +87,7 @@ include(FetchContent)
 FetchContent_Declare(
     cxxgpr
     GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.2.0
+    GIT_TAG v0.3.0
 )
 FetchContent_MakeAvailable(cxxgpr)
 
@@ -126,7 +126,7 @@ On one Windows machine this prints:
 
 ```{code-block} text
 schema:        cxxgpr.build-info/1
-version:       0.2.0
+version:       0.3.0
 git commit:    21f7f5a1be7b1d1b0aab71d49b2d73e4e3711507 (dirty)
 compiler:      MSVC 19.51.36260.0
 platform:      Windows AMD64
@@ -152,7 +152,7 @@ Your values will differ. The fields of `BuildInfo` are described in {doc}`prepar
 : Your compiler or language standard is too old. Use GCC 14 or MSVC 19.44 and set `CMAKE_CXX_STANDARD 23`, or `target_compile_features(... cxx_std_23)`.
 
 `find_package(cxxgpr)` fails with a version error
-: The package version file accepts only releases of the same minor version. Ask for the version you installed, for example `0.2.0`.
+: The package version file accepts only releases of the same minor version. Ask for the version you installed, for example `0.3.0`.
 
 ## Where next
 

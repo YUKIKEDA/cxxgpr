@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 cmake_policy(SET CMP0141 NEW)
 
 project(cxxgpr
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Exact Gaussian Process Regression library in C++23"
     LANGUAGES C CXX)
 
