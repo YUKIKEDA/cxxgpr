@@ -1592,8 +1592,12 @@ namespace
             cxxgpr::GprErrorCode::UnsupportedKernelOperation
         );
 
-        // O(1) copy shares the validated tables cleanly with independent lifetimes.
+        // O(1) copy construction and assignment share validated tables cleanly with independent lifetimes.
         cxxgpr::CheckedDistanceStore<double> copied = moved_to;
+        cxxgpr::CheckedDistanceStore<double> assigned = *builtin_store;
+        assigned = copied;
+        moved_to = *builtin_store;
+        copied = assigned;
         std::vector<double> k_copied(n * n, 0.0);
         ASSERT_TRUE(custom_comp
                 .apply(
@@ -1602,12 +1606,14 @@ namespace
                 )
                 .has_value());
         EXPECT_EQ(k_copied, k_custom);
-        EXPECT_TRUE(custom_comp
+        std::vector<double> k_assigned(n * n, 0.0);
+        ASSERT_TRUE(custom_comp
                 .apply(
-                    moved_to, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n), cxxgpr::Triangle::Full,
+                    assigned, std::nullopt, cxxgpr::MatrixMut<double>(k_assigned.data(), n, n), cxxgpr::Triangle::Full,
                     cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
                 )
                 .has_value());
+        EXPECT_EQ(k_assigned, k_custom);
 
         // Null-data MatrixRef with non-zero dims must return EmptyInput in both strict and assume_valid modes.
         for (const bool assume : {false, true})

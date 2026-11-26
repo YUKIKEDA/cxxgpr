@@ -6388,7 +6388,7 @@ namespace cxxgpr
                 return std::unexpected(GprError::unsupported_kernel_operation("kernel has no supplied distance slots"));
             }
 
-            const auto mat_shape = [](const auto& var) noexcept
+            const auto mat_shape = [](const auto& var)
             {
                 return std::visit(
                     [](const auto& mat) noexcept
@@ -6399,20 +6399,11 @@ namespace cxxgpr
                 }, var
                 );
             };
-            const auto check_non_empty_ard = [](const auto& vec) noexcept
+            const auto check_non_empty_ard = [](const auto& vec)
             {
-                if (vec.empty())
-                {
-                    return false;
-                }
-                for (const auto& blk : vec)
-                {
-                    if (blk.data() == nullptr || blk.rows() == 0U || blk.cols() == 0U)
-                    {
-                        return false;
-                    }
-                }
-                return true;
+                return !vec.empty() && std::ranges::all_of(vec, [](const auto& blk) noexcept {
+                    return blk.data() != nullptr && blk.rows() > 0U && blk.cols() > 0U;
+                });
             };
 
             // Every table must be non-empty before any shape comparison.
@@ -6476,16 +6467,11 @@ namespace cxxgpr
             for (const auto& entry : source.ards_)
             {
                 const bool matched = std::visit(
-                    [&shape](const auto& vec) noexcept
+                    [&shape](const auto& vec)
                 {
-                    for (const auto& blk : vec)
-                    {
-                        if (blk.rows() != shape.rows || blk.cols() != shape.cols)
-                        {
-                            return false;
-                        }
-                    }
-                    return true;
+                    return std::ranges::all_of(vec, [&shape](const auto& blk) noexcept {
+                        return blk.rows() == shape.rows && blk.cols() == shape.cols;
+                    });
                 }, entry.d2_per_dim
                 );
                 if (!matched)
@@ -6621,7 +6607,7 @@ namespace cxxgpr
                 std::visit(
                     [&](const auto& vec)
                 {
-                    using VecMat = typename std::decay_t<decltype(vec)>::value_type;
+                    using VecMat = std::decay_t<decltype(vec)>::value_type;
                     using SrcT = std::remove_const_t<std::remove_pointer_t<decltype(vec[0].data())>>;
                     const std::size_t dims = vec.size();
                     impl.ard_dims[at] = dims;
@@ -6845,7 +6831,7 @@ namespace cxxgpr
             }
             const std::size_t n = src.n_rows;
             const std::size_t cols = src.n_cols;
-            auto impl = std::make_shared<typename CheckedDistanceStore<double>::Impl>();
+            auto impl = std::make_shared<CheckedDistanceStore<double>::Impl>();
             impl->kernel_slots = src.kernel_slots;
             impl->n_rows = n;
             impl->n_cols = cols;
