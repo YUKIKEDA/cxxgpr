@@ -5708,6 +5708,14 @@ namespace cxxgpr
             return std::max(0.0, mean);
         }
 
+        /// @brief Sequentially determines the canonical first `GprError` for a failing square distance matrix.
+        /// @tparam SrcT Source input scalar type (`double` or `float`).
+        /// @tparam DstT Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input square squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
         template <typename SrcT, KernelScalarConcept DstT>
         [[nodiscard]] static GprError diagnose_square_block_error(
             MatrixRef<SrcT> src,

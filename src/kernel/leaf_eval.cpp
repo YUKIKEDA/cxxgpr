@@ -5213,6 +5213,7 @@ namespace cxxgpr::detail
     /// @param[in] need_value True when $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ is requested back.
     /// @param[in] exp_mode Exponential evaluation backend (`Accurate` or `FastApprox`).
     /// @param[in] precomputed_ard_s2 Optional lower-packed $s^2$ cache from forward evaluation.
+    /// @param[in] ard_borrowed Optional span of `d` borrowed `n x n` column-major `(dx_d)^2` views.
     /// @return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ if `need_value` is true (else `0.0`), or error.
     /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not an ARD leaf.
     /// @retval GprErrorCode::EmptyInput When `ls`, `weight`, or uncached `x` is empty.
