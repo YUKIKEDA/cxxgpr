@@ -131,7 +131,7 @@ With `CXXGPR_INSTALL=ON`, `cmake --install <build-dir> --prefix <prefix>` instal
 | `lib/cmake/cxxgpr/` | `cxxgprConfig.cmake`, `cxxgprConfigVersion.cmake`, `cxxgprTargets.cmake` |
 | `share/cxxgpr/` | `LICENSE` and `THIRD_PARTY_NOTICES.md` |
 
-The package exports the target `cxxgpr::cxxgpr`. Its version file uses the `SameMinorVersion` compatibility mode: `find_package(cxxgpr 0.1.0 CONFIG REQUIRED)` accepts an installed `0.1.x`, and rejects `0.2.0` and `1.0.0`. {doc}`compatibility` explains the version policy.
+The package exports the target `cxxgpr::cxxgpr`. Its version file uses the `SameMinorVersion` compatibility mode: `find_package(cxxgpr 0.2.0 CONFIG REQUIRED)` accepts an installed `0.2.x`, and rejects `0.3.0` and `1.0.0`. {doc}`compatibility` explains the version policy.
 
 ## Check what you built
 

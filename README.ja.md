@@ -7,7 +7,7 @@
 [![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **状態：`0.1.0`。** 機能は揃い、検証も済んでいます。1.0 までは API が変わる可能性があります。
+> **状態：`0.2.0`。** 機能は揃い、検証も済んでいます。1.0 までは API が変わる可能性があります。
 
 ## 特長
 
@@ -95,7 +95,7 @@ int main()
 **ビルド済みパッケージ。** [GitHub Release](https://github.com/YUKIKEDA/cxxgpr/releases) に、Windows（MSVC）と Linux（GCC 14）の利用可能なパッケージ、文書、SHA-256 の一覧を置きます。展開して、CMake から指すだけで使えます。
 
 ```cmake
-find_package(cxxgpr 0.1 CONFIG REQUIRED)
+find_package(cxxgpr 0.2 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
@@ -108,7 +108,7 @@ include(FetchContent)
 FetchContent_Declare(
     cxxgpr
     GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.2.0
 )
 FetchContent_MakeAvailable(cxxgpr)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)

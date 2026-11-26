@@ -18,7 +18,7 @@ The test matrix is: GCC 14 on Linux with Debug, Release and an AddressSanitizer 
 
 ## Stability of the API
 
-cxxgpr follows the version scheme `MAJOR.MINOR.PATCH`. The current release series is `0.1`.
+cxxgpr follows the version scheme `MAJOR.MINOR.PATCH`. The current release series is `0.2`.
 
 :::{important}
 Versions before 1.0 are pre-1.0 releases. The project explicitly keeps the right to revise the public API until version 1.0, including default template arguments and auxiliary diagnostic fields. Pin an exact version and read the change log before upgrading.
@@ -43,7 +43,7 @@ What is stable by design, even before 1.0:
 
 ## Versions in CMake
 
-`find_package(cxxgpr 0.1.0 CONFIG REQUIRED)` uses the `SameMinorVersion` rule: it accepts an installed `0.1.x` that is not older than the requested version, and rejects `0.2.0` or `1.0.0`. Because minor versions can still change the API before 1.0, this is the intended behaviour.
+`find_package(cxxgpr 0.2.0 CONFIG REQUIRED)` uses the `SameMinorVersion` rule: it accepts an installed `0.2.x` that is not older than the requested version, and rejects `0.3.0` or `1.0.0`. Because minor versions can still change the API before 1.0, this is the intended behaviour.
 
 `cxxgpr::build_info()` reports the version and the exact git commit of the library you linked.
 

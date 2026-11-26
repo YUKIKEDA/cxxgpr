@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+### 追加
+
+- 選択可能な密線形代数バックエンド `CXXGPR_BLAS_BACKEND`（`AUTO` / `OpenBLAS` / `MKL` / `BuiltIn`）を追加。
+- `LeafCache` の固定 64 次元上限を撤廃し、記憶量 $O(n^2)$ + $O(d)$ のまま任意次元 $d$ で ARD 差分更新と `DistanceCachePolicy::Uncached` 列座標直接更新に対応。
+- `FastSimulatedAnnealing` の棄却ステップで採用済み $s^2$ ベースラインを汚染しない非破壊 trial 隔離（`LeafCache::prime` / `commit_candidate`、`TwiceDifferentiable::notify_candidate_accepted`）と、差分更新・放射カーネル評価の 1 パス融合を追加。
+- `DistanceGpr` / `CompiledDistanceKernel`（`ArdDistance`）の `value_at_changes` へ ARD 差分更新を追加し、`mll_and_gradient_into` で `factor_and_mll` が計算した ARD $s^2$ を `leaf_ard_weighted_grads` へ再利用する経路（`WorkspaceCore::ensure_ard_s2`）を追加。
+
+### 変更
+
+- `KernelExp::FastApprox` を依存ゼロの 1–2 ULP Estrin ミニマックス インライン SIMD 実装（倍精度 11 次・単精度 6 次固定端点チェビシェフ＋正確 Cody-Waite、Matérn 1/2・3/2・5/2 との 1 パスレジスタ融合、倍精度誤差 $< 10^{-14}$・単精度誤差 $< 5\times 10^{-7}$）へ刷新。
+- Windows MSVC 既定の密線形代数バックエンドを依存ゼロの `BuiltIn`（AVX-512 / AVX2 / SSE2 + OpenMP）、Linux / MinGW 既定を OpenBLAS（`0.3.34`）とし、`DES-20` のスレッド数間ビット一致契約へ外部マルチスレッド BLAS 利用時のスレッド固定条件を明記。
+
+### 修正
+
+- `MKL` 構成における小行列並列競合を抑制（`MklLocalThreadsGuard`、多スレッド時の小行列 `double` 経路への `BuiltIn` フォールバック、および `LAPACKE_?potrf` / `LAPACKE_?potri` の負のエラーコード・`lapack_int` 溢れ検査）。
+- インストール済み `cxxgprConfig.cmake` へのビルド環境ローカル MKL パス非埋め込み化と `VerifyPackage.cmake` での漏洩検査、`BuiltIn` 構成の事後共分散 1 パス融合による性能回復。
+
 ## [0.1.0] - 2026-11-22
 
 ### 追加

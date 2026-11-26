@@ -45,7 +45,7 @@ cmake --install out/build/windows-msvc --config Release --prefix C:\path\to\pref
 
 ::::
 
-インストールすると、ライブラリ、`include/cxxgpr/` 以下のすべてのヘッダ、CMake パッケージ（`cxxgprConfig.cmake`、バージョンファイル、エクスポートしたターゲット）、ライセンス、第三者通知がコピーされる。パッケージのバージョンファイルは `SameMinorVersion` 互換を使う。メジャーバージョンが 0 の間は、`find_package(cxxgpr 0.1.0)` が `0.1.x` のどのリリースも受け付ける。
+インストールすると、ライブラリ、`include/cxxgpr/` 以下のすべてのヘッダ、CMake パッケージ（`cxxgprConfig.cmake`、バージョンファイル、エクスポートしたターゲット）、ライセンス、第三者通知がコピーされる。パッケージのバージョンファイルは `SameMinorVersion` 互換を使う。メジャーバージョンが 0 の間は、`find_package(cxxgpr 0.2.0)` が `0.2.x` のどのリリースも受け付ける。
 
 CMake のオプションは {doc}`../reference/build-options` に一覧がある。
 
@@ -57,7 +57,7 @@ CMake のオプションは {doc}`../reference/build-options` に一覧がある
 cmake_minimum_required(VERSION 3.25)
 project(my_app LANGUAGES CXX)
 
-find_package(cxxgpr 0.1.0 CONFIG REQUIRED)
+find_package(cxxgpr 0.2.0 CONFIG REQUIRED)
 
 add_executable(my_app main.cpp)
 target_compile_features(my_app PRIVATE cxx_std_23)
@@ -87,7 +87,7 @@ include(FetchContent)
 FetchContent_Declare(
     cxxgpr
     GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.2.0
 )
 FetchContent_MakeAvailable(cxxgpr)
 
@@ -126,7 +126,7 @@ cxxgpr がサブプロジェクトのとき、テスト、カナリア、ベン�
 
 ```{code-block} text
 schema:        cxxgpr.build-info/1
-version:       0.1.0
+version:       0.2.0
 git commit:    21f7f5a1be7b1d1b0aab71d49b2d73e4e3711507 (dirty)
 compiler:      MSVC 19.51.36260.0
 platform:      Windows AMD64
@@ -152,7 +152,7 @@ dependency:    nlohmann_json 3.12.0
 : コンパイラか言語標準が古い。GCC 14 または MSVC 19.44 を使い、`CMAKE_CXX_STANDARD 23` または `target_compile_features(... cxx_std_23)` を設定する。
 
 `find_package(cxxgpr)` がバージョンのエラーで失敗する
-: パッケージのバージョンファイルは、同じマイナーバージョンのリリースしか受け付けない。インストールしたバージョン（たとえば `0.1.0`）を指定する。
+: パッケージのバージョンファイルは、同じマイナーバージョンのリリースしか受け付けない。インストールしたバージョン（たとえば `0.2.0`）を指定する。
 
 ## 次に読むもの
 

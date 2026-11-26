@@ -7,7 +7,7 @@ English | [日本語](README.ja.md)
 [![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **Status: `0.1.0`.** The library is feature-complete and verified; the API may still change before 1.0.
+> **Status: `0.2.0`.** The library is feature-complete and verified; the API may still change before 1.0.
 
 ## Why cxxgpr
 
@@ -95,7 +95,7 @@ This fits a noisy sine curve and prints the predicted mean and standard deviatio
 **Prebuilt packages.** Each [GitHub Release](https://github.com/YUKIKEDA/cxxgpr/releases) provides ready-to-use packages for Windows (MSVC) and Linux (GCC 14), the documentation, and SHA-256 checksums. Unpack one and point CMake at it:
 
 ```cmake
-find_package(cxxgpr 0.1 CONFIG REQUIRED)
+find_package(cxxgpr 0.2 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
@@ -108,7 +108,7 @@ include(FetchContent)
 FetchContent_Declare(
     cxxgpr
     GIT_REPOSITORY https://github.com/YUKIKEDA/cxxgpr.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.2.0
 )
 FetchContent_MakeAvailable(cxxgpr)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
