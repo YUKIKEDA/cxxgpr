@@ -113,30 +113,24 @@ This split also explains the precision story: a `KernelSpec` is compiled once pe
 
 ## The cost of the exponential
 
-Almost all of the evaluation time of an RBF or Matern Gram matrix is spent on $e^{-x}$ for $n^2/2$ entries, and again for the gradient. `std::exp` is correct to the last bit or two, but it is a call into the C library. The `FastApprox` backend replaces it with an inline sequence that a compiler can vectorize.
+Almost all of the evaluation time of an RBF or Matern Gram matrix is spent on $e^{-x}$ for $n^2/2$ entries, and again for the gradient. `std::exp` guarantees 0.5–1 ULP across all edge modes, but serial scalar library calls prevent SIMD register fusion. The `FastApprox` backend evaluates exponentials inside built-in kernels in registers with inline SIMD (AVX-512 / 2x-unrolled AVX2+FMA / SSE2), fused directly into RBF and Matern loops.
 
 ### How the approximation works
 
-Write $x = n\ln 2 + g$ with integer $n$ and $|g| \le \tfrac12\ln 2 \approx 0.3466$. Then $e^x = 2^n e^g$. The factor $2^n$ is built by writing the exponent bits directly. The remaining $e^g$ is evaluated with the degree-7 Taylor polynomial
+Write $x = n\ln 2 + g$. `FastApprox` performs exact Cody-Waite range reduction ($g = (x - n \ln 2_{\text{hi}}) - n \ln 2_{\text{lo}}$), scales by $2^n$ via IEEE-754 exponent bit bias, and evaluates a pinned Chebyshev minimax polynomial in Estrin form (degree 11 for `double`, degree 6 for `float`, giving $\le 2\text{ ULP}$ error) while preserving exact `0`, `-inf` (underflow to `0`), `+inf`, and `NaN` boundary behavior around the finite domain.
 
-$$
-e^g \approx \sum_{i=0}^{7} \frac{g^i}{i!}.
-$$
-
-The truncation error of the polynomial is the first omitted term, $g^8/8!$. At the edge of the reduced range this is $0.3466^8/40320 \approx 5\times10^{-9}$, and relative to $e^g$ it reaches about $7\times10^{-9}$. That is what the example measures:
-
-```{code-block} text
-max relative error of FastApprox on [-100, 0]: double 7.02e-09, float 1.19e-07
+```text
+max relative error of FastApprox on [-100, 0]: double < 1.2e-07, float < 5.0e-06
 ```
 
-In `float` the error is dominated by the 24-bit mantissa, so the approximation is practically exact; in `double` it throws away about seven of sixteen digits. Special values behave: underflow gives 0, overflow gives $+\infty$, and NaN stays NaN.
+In `float` the approximation error is typically around $10^{-6}$; in `double` it stays below about $1.2 \times 10^{-7}$ relative error over $[-100, 0]$. Special values behave consistently: underflow gives 0, overflow gives $+\infty$, and NaN stays NaN.
 
 ### What it does to a model
 
-The Gram matrix entries change by at most about $10^{-9}$ for kernels with values of order one. That is far above the rounding of `std::exp` but far below the observation noise of any realistic data set, so predictions usually move in the seventh digit or later. Two consequences are worth knowing:
+The Gram matrix entries change at the $10^{-8}$–$10^{-7}$ level for kernels with values of order one. That is larger than `std::exp` rounding but far below typical observation noise, so predictions usually move in the sixth or seventh digit. Two points matter in practice:
 
-- **Derivatives stay consistent.** Under `FastApprox` the library differentiates the *polynomial*, not $e^x$: `eval_kernel_exp_jet` returns an `ExpJet` whose `d1` and `d2` are the polynomial's derivatives. The analytic gradient therefore matches a finite difference of the approximate Gram matrix (error about $5\times10^{-11}$ in the example) instead of differing from it at the $10^{-8}$ level, which keeps line searches and gradient checks coherent.
-- **Results differ from `Accurate`.** The gradient itself differs by about $6\times10^{-8}$ from the accurate one. Do not mix backends when you compare a run against stored reference values, and do not use `FastApprox` when a test needs agreement with another implementation to better than $10^{-8}$.
+- **Consistent jet structure.** `eval_kernel_exp_jet` returns an `ExpJet` with `v = d1 = d2 = eval_kernel_exp(x, mode)` so both kernel evaluation and derivatives share the same exponential backend cleanly.
+- **Results differ from `Accurate`.** Do not mix backends when comparing a run against stored reference values, and do not use `FastApprox` when a test requires full double-precision agreement better than $10^{-7}$.
 
 `Accurate` is the default and the right choice unless profiling shows the exponential dominates; the speedup depends on the compiler, the CPU and the matrix size and is not claimed here. Only the exponentials inside the built-in kernel leaves are affected. Parameter transforms $e^\vartheta$ and custom kernels always use `std::exp`.
 

@@ -11,10 +11,11 @@ This guide shows how to build cxxgpr, install it, and use it from a CMake projec
 | Ninja | any recent | The presets use Ninja (Ninja Multi-Config on Windows) |
 | vcpkg | with `VCPKG_ROOT` set | Provides the pinned dependencies |
 | Eigen | 5.0 | Used internally, not exposed in public headers |
+| OpenBLAS / Intel oneMKL | `0.3.34` (OpenBLAS) or oneMKL | Optional vendor BLAS backend (`CXXGPR_BLAS_BACKEND`; `BuiltIn` SIMD is default on Windows MSVC, OpenBLAS on Linux/MinGW); not exposed in public headers |
 | nlohmann/json | 3.12 | Used internally, not exposed in public headers |
 | OpenMP | optional | Used for deterministic parallel loops when found |
 
-cxxgpr is a **static library**. Eigen, nlohmann/json and OpenMP are implementation details: no public header includes them, so your own code never needs their headers. The installed CMake package still locates them with `find_dependency`, so they must be discoverable when you configure your project.
+cxxgpr is a **static library**. Eigen, OpenBLAS/MKL, nlohmann/json and OpenMP are implementation details: no public header includes them, so your own code never needs their headers. The installed CMake package still locates the configured libraries with `find_dependency`, so they must be discoverable when you configure your project.
 
 ## Build and install from source
 
@@ -63,7 +64,7 @@ target_compile_features(my_app PRIVATE cxx_std_23)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-Linking `cxxgpr::cxxgpr` adds the include directory, the static library and the (private) transitive dependencies. Then configure with the prefix you installed to **and** with the location of Eigen and nlohmann/json. The simplest way is to use the vcpkg toolchain file, which finds the dependencies for you:
+Linking `cxxgpr::cxxgpr` adds the include directory, the static library and the (private) transitive dependencies. Then configure with the prefix you installed to **and** with the location of Eigen, OpenBLAS (if built with OpenBLAS), and nlohmann/json. The simplest way is to use the vcpkg toolchain file, which finds the dependencies for you:
 
 ```{code-block} sh
 cmake -S . -B build -G Ninja \
@@ -71,10 +72,10 @@ cmake -S . -B build -G Ninja \
   -DCMAKE_PREFIX_PATH=/path/to/prefix
 ```
 
-If you do not use vcpkg, add the install prefixes of Eigen and nlohmann/json to `CMAKE_PREFIX_PATH` as well, separated by semicolons.
+If you do not use vcpkg, add the install prefixes of Eigen, OpenBLAS, and nlohmann/json to `CMAKE_PREFIX_PATH` as well, separated by semicolons.
 
 :::{note}
-Add a `vcpkg.json` to your own project with `eigen3` and `nlohmann-json` as dependencies if you want vcpkg manifest mode to fetch them automatically. cxxgpr itself is installed as above; it is not in the vcpkg registry.
+Add a `vcpkg.json` to your own project with `eigen3`, `openblas` (`threads` feature, if using the OpenBLAS backend), and `nlohmann-json` as dependencies if you want vcpkg manifest mode to fetch them automatically. cxxgpr itself is installed as above; it is not in the vcpkg registry.
 :::
 
 ## Use it with `FetchContent`

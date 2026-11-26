@@ -143,7 +143,7 @@ restarts with the same seed give bit-identical results: yes
 
 | クラス | 実装するもの | 受け付ける最適化器 |
 |---|---|---|
-| `Objective` | `dim`、`value`、`fill_intervals`。任意で `value_at_changes` | `NelderMead`、`FastSimulatedAnnealing`、`Fixed` |
+| `Objective` | `dim`、`value`、`fill_intervals`。任意で `value_at_changes`、`notify_candidate_accepted` | `NelderMead`、`FastSimulatedAnnealing`、`Fixed` |
 | `Differentiable` | 加えて `gradient_into`、`value_and_gradient_into` | 上記と `Lbfgs` |
 | `TwiceDifferentiable` | 加えて `hessian_into`。任意で `value_gradient_hessian_into` | 上記すべてと `TrustRegion` |
 
@@ -272,7 +272,7 @@ two evaluations at the same point cost 1 objective call(s)
 | `FastSimulatedAnnealing` | 焼きなまし。`with_max_iterations`、`with_initial_temperature`、`with_cooling_rate`、`with_seed`、`with_boundary_policy`、`with_restarts`、アクセサ、`optimize`、`operator==` |
 | `BoundaryPolicy` | 焼きなましの範囲外の提案を扱う `Clamp` と `Reflect` |
 | `Fixed` | 1 回だけ評価する。`optimize`、`operator==` |
-| `Objective`、`Differentiable`、`TwiceDifferentiable` | 目的関数のインターフェース。`dim`、`value`、`value_at_changes`、`fill_intervals`、`gradient_into`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
+| `Objective`、`Differentiable`、`TwiceDifferentiable` | 目的関数のインターフェース。`dim`、`value`、`value_at_changes`、`notify_candidate_accepted`、`fill_intervals`、`gradient_into`、`value_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
 | `OptimizerResult` | `params`、`value`、`iterations`、`converged`、`operator==` |
 | `RestartConfig` | `count`、`seed`、`operator==` |
 | `cxxgpr::OptimizerTraits`、`cxxgpr::optimizer_uses_change_indices_v` | 最適化器の型の `uses_change_indices`。このメンバーを持たない型では `false`。宣言は `cxxgpr/workspace/leaf_cache.hpp` にあり、`optimizer` 名前空間や `cxxgpr/optimizer/optimizer.hpp` には含まれない |

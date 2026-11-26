@@ -126,6 +126,8 @@ checksum of the 64-point prediction: edb08ca7add4082b
 
 この性質を実現する仕組みは {doc}`../explanation/determinism-and-performance` で説明する。自分の並列ループから cxxgpr を呼ぶ場合は、スレッドごとに `FittedGpr` のコピーを持たせる。また、入れ子の並列領域がそれぞれ `OMP_NUM_THREADS` 個のスレッドを起こさないように、OpenMP ランタイムの設定を確かめる。そうしないと、マシンの能力を超えてスレッドを走らせてしまう。
 
+ハイブリッド構成の CPU（P コアと E コアの混在環境）や MSVC OpenMP との併用環境で Intel oneMKL（`-DCXXGPR_BLAS_BACKEND=MKL`）を使う場合、Windows 版 Intel oneMKL（`libiomp5md.dll`）の既定値は `KMP_BLOCKTIME=0`（passive wait）である。短いカーネル評価や小〜中規模の最適化反復を連続実行する専用ワークロードでは、`KMP_BLOCKTIME=200` および `KMP_AFFINITY=disabled` を設定し、`OMP_NUM_THREADS` / `MKL_NUM_THREADS` を物理 P コア数に合わせて P コアへ固定すると、スレッド起床オーバーヘッドと E コアへのスピルを抑えられる。他プロセスや別スレッド群と CPU を共有する場合は、既定の `KMP_BLOCKTIME=0` のまま運用する。
+
 ## 精度ポリシーを選ぶ
 
 `Gpr` と `FittedGpr` は、精度を第 2 テンプレート引数で受け取る（`Gpr<optimizer::Lbfgs, SinglePrecision>`）。ポリシーは 4 つある。`DoublePrecision`、`SinglePrecision`、`MixedPrecision<PromoteStorage>`、`MixedPrecision<ReevaluateKernel>` である。
@@ -204,7 +206,7 @@ Double + FastApprox             320000      4.03e-04    1.37e-05    2.25e-10  no
 
 ## 高速な指数関数を使う
 
-`Gpr::with_kernel_exp(KernelExp::FastApprox)` は、組込みのカーネル葉の `std::exp` を、範囲縮約つきの 7 次多項式に置き換える。`exp(log theta)` のパラメータ変換と `CustomKernel` の葉には影響しない。
+`Gpr::with_kernel_exp(KernelExp::FastApprox)` は、組込みのカーネル葉の `std::exp` を内蔵の `1–2 ULP` Estrin minimax 高速近似指数計算に置き換える。`exp(log theta)` のパラメータ変換と `CustomKernel` の葉には影響しない。
 
 上の表の `Double + FastApprox` の行が、その代償を示す。予測は正確な値から $1.4 \times 10^{-5}$、重みは $4 \times 10^{-4}$ ずれる（この悪条件の問題での値）。`n = 1000` の勾配計算は速くならなかった（約 7.5〜8.4 ms に対し、正確版は約 7.6 ms）。コレスキー分解が支配的だからである。`FastApprox` が効くのは、カーネル評価が仕事の大きな割合を占める場合だけである。学習点に対して予測点が多い場合や、分解の安い低次元の問題がこれに当たる。切り替える前に測り、そうでなければ `KernelExp::Accurate` のままにする。
 

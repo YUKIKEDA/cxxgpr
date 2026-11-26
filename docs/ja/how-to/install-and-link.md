@@ -11,10 +11,11 @@ cxxgpr をビルドしてインストールし、CMake プロジェクトから�
 | Ninja | 最近のもの | プリセットは Ninja を使う（Windows は Ninja Multi-Config） |
 | vcpkg | `VCPKG_ROOT` を設定済み | 版を固定した依存ライブラリを提供する |
 | Eigen | 5.0 | 内部でのみ使い、公開ヘッダには現れない |
+| OpenBLAS / Intel oneMKL | `0.3.34`（OpenBLAS）または oneMKL | `CXXGPR_BLAS_BACKEND` で選ぶ任意の外部 BLAS バックエンド（Windows MSVC の既定は内蔵 SIMD の `BuiltIn`、Linux / MinGW は OpenBLAS）。公開ヘッダには現れない |
 | nlohmann/json | 3.12 | 内部でのみ使い、公開ヘッダには現れない |
 | OpenMP | 任意 | 見つかれば、決定的な並列ループに使う |
 
-cxxgpr は**静的ライブラリ**である。Eigen、nlohmann/json、OpenMP は実装の詳細で、公開ヘッダのどれもこれらをインクルードしない。そのため自分のコードがそれらのヘッダを必要とすることはない。ただし、インストールされた CMake パッケージは `find_dependency` でそれらを探す。プロジェクトを構成するときには、見つけられる状態にしておく必要がある。
+cxxgpr は**静的ライブラリ**である。Eigen、OpenBLAS/MKL、nlohmann/json、OpenMP は実装の詳細で、公開ヘッダのどれもこれらをインクルードしない。そのため自分のコードがそれらのヘッダを必要とすることはない。ただし、インストールされた CMake パッケージは構成時に選んだ依存ライブラリを `find_dependency` で探す。プロジェクトを構成するときには、見つけられる状態にしておく必要がある。
 
 ## ソースからビルドしてインストールする
 
@@ -63,7 +64,7 @@ target_compile_features(my_app PRIVATE cxx_std_23)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-`cxxgpr::cxxgpr` にリンクすると、インクルードディレクトリ、静的ライブラリ、（非公開の）推移的な依存が加わる。構成のときには、インストール先のプレフィックスと、Eigen・nlohmann/json の場所の**両方**を指定する。vcpkg のツールチェーンファイルを使うと、依存ライブラリは自動で見つかるので、いちばん簡単である。
+`cxxgpr::cxxgpr` にリンクすると、インクルードディレクトリ、静的ライブラリ、（非公開の）推移的な依存が加わる。構成のときには、インストール先のプレフィックスと、Eigen・OpenBLAS（OpenBLAS バックエンド利用時）・nlohmann/json の場所を指定する。vcpkg のツールチェーンファイルを使うと、依存ライブラリは自動で見つかるので、いちばん簡単である。
 
 ```{code-block} sh
 cmake -S . -B build -G Ninja \
@@ -71,10 +72,10 @@ cmake -S . -B build -G Ninja \
   -DCMAKE_PREFIX_PATH=/path/to/prefix
 ```
 
-vcpkg を使わない場合は、Eigen と nlohmann/json のインストール先も `CMAKE_PREFIX_PATH` にセミコロン区切りで加える。
+vcpkg を使わない場合は、Eigen、OpenBLAS、nlohmann/json のインストール先も `CMAKE_PREFIX_PATH` にセミコロン区切りで加える。
 
 :::{note}
-vcpkg のマニフェストモードで自動取得したいなら、自分のプロジェクトの `vcpkg.json` に `eigen3` と `nlohmann-json` を依存として書く。cxxgpr 自体は上の手順でインストールする。vcpkg のレジストリには登録されていない。
+vcpkg のマニフェストモードで自動取得したいなら、自分のプロジェクトの `vcpkg.json` に `eigen3`、`openblas`（`threads` 機能、OpenBLAS 利用時）、`nlohmann-json` を依存として書く。cxxgpr 自体は上の手順でインストールする。vcpkg のレジストリには登録されていない。
 :::
 
 ## `FetchContent` で使う

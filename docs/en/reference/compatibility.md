@@ -39,7 +39,7 @@ What is stable by design, even before 1.0:
 - The error contract. Functions return `std::expected<T, GprError>` and never throw across the API boundary.
 - Column-major input and the `Gpr` / `FittedGpr` split.
 - The persistence format version (`persist::FORMAT_VERSION`, currently 1). Loading a directory with another `format_version` returns `UnsupportedPersistVersion`; there is no automatic migration. See {doc}`file-format`.
-- Public headers contain no Eigen, nlohmann/json or OpenMP types ({doc}`../explanation/design-principles`).
+- Public headers contain no Eigen, BLAS/oneMKL, nlohmann/json or OpenMP types ({doc}`../explanation/design-principles`).
 
 ## Versions in CMake
 
@@ -59,7 +59,7 @@ cxxgpr is a C++ static library with a C++ interface. It makes no ABI promise acr
 
 ## Numerical compatibility
 
-Results are reproducible under the rules in {doc}`../explanation/determinism-and-performance`: bit for bit across thread counts within one build; equal to rounding error across compilers, operating systems and `CXXGPR_X86_ISA` tiers. The random stream of `Xoshiro256PlusPlus` is the same integer sequence everywhere.
+Results are reproducible under the rules in {doc}`../explanation/determinism-and-performance`: bit for bit across thread counts within one build (when external BLAS thread counts are fixed); equal to rounding error across compilers, operating systems and `CXXGPR_X86_ISA` tiers. The random stream of `Xoshiro256PlusPlus` is the same integer sequence everywhere.
 
 A saved model is intended to be portable across platforms: the on-disk format is the safetensors layout with little-endian headers and column-major matrices ({doc}`file-format`), and a model loaded on another platform is expected to predict to within rounding error of the original.
 
@@ -69,4 +69,4 @@ cxxgpr implements exact Gaussian process regression only. Sparse approximations 
 
 ## License and third-party code
 
-cxxgpr is licensed under Apache-2.0. Its dependencies keep their own licenses (Eigen under MPL-2.0, restricted to its MPL-2 parts by `EIGEN_MPL2_ONLY`; nlohmann/json under MIT; OpenMP belongs to your compiler). The texts and notices are installed under `share/cxxgpr` and listed in `THIRD_PARTY_NOTICES.md`.
+cxxgpr is licensed under Apache-2.0. Its dependencies keep their own licenses (Eigen under MPL-2.0, restricted to its MPL-2 parts by `EIGEN_MPL2_ONLY`; OpenBLAS under BSD-3-Clause; Intel oneMKL under ISSL when selected; nlohmann/json under MIT; OpenMP belongs to your compiler). The texts and notices are installed under `share/cxxgpr` and listed in `THIRD_PARTY_NOTICES.md`.

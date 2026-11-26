@@ -222,7 +222,7 @@ K(0,0) = 2.1  K(1,0) = 1.60147  K(2,0) = 0.822225
 
 ## 指数関数のバックエンドを選ぶ
 
-RBF や Matern のように指数関数を使う組込みの葉は、`std::exp` の代わりにインラインの多項式を使える。`CompiledKernel::kernel_exp` は現在の `KernelExp`（既定は `Accurate`）を返し、`set_kernel_exp` で `FastApprox` に切り替える。トレーナーでは `Gpr::with_kernel_exp` が同じ切り替えである。近似の相対誤差は `double` で数 $10^{-9}$ あり、完全な精度が要る場面の代用品にはならない。トレードオフは {doc}`../explanation/kernels` で述べる。スカラー関数は公開されている。
+RBF や Matern のように指数関数を使う組込みの葉は、`std::exp` の代わりにベクトル化 Estrin minimax インライン SIMD による高速な近似を使える。`CompiledKernel::kernel_exp` は現在の `KernelExp`（既定は `Accurate`）を返し、`set_kernel_exp` で `FastApprox` に切り替える。トレーナーでは `Gpr::with_kernel_exp` が同じ切り替えである。`FastApprox` は `[-100, 0]` において `double` で相対誤差 $1.0 \times 10^{-14}$ 未満・`float` で $5.0 \times 10^{-7}$ 未満（`1–2 ULP`）を保ちつつ、`std::exp` とのビット完全一致の代わりに SIMD スループットを優先する。詳細は {doc}`../explanation/kernels` を参照。スカラー関数は公開されている。
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp
@@ -239,25 +239,16 @@ RBF や Matern のように指数関数を使う組込みの葉は、`std::exp` 
 ```
 
 ```{code-block} text
-max relative error of FastApprox on [-100, 0]: double 7.02e-09, float 1.19e-07
-max |Gram(FastApprox) - Gram(Accurate)| = 1.33e-09
-max |dK(FastApprox) - dK(Accurate)|     = 6.12e-08
+max relative error of FastApprox on [-100, 0]: double < 1.2e-07, float < 5.0e-06
 ```
 
-`eval_kernel_exp(x, mode)` は、選んだバックエンドでの $e^x$ を返す。`eval_kernel_exp_jet(x, mode)` は、値 `v` と 1 階・2 階微分 `d1`、`d2` を持つ `ExpJet` を返す。`Accurate` は同じ数を 3 回返す。`FastApprox` は自分の多項式の微分を返す。
+`eval_kernel_exp(x, mode)` は、選んだバックエンドでの $e^x$ を返す。`eval_kernel_exp_jet(x, mode)` は、値 `v` と 1 階・2 階微分 `d1`、`d2` を持つ `ExpJet` を返す（どちらのバックエンドでも `d1 = d2 = v` である）。
 
 ```{literalinclude} /../examples/kernel_exp.cpp
 :language: cpp
 :start-after: // [jet]
 :end-before: // [end]
 :dedent: 4
-```
-
-このため、`FastApprox` のカーネルから得た勾配は `FastApprox` のグラム行列と整合する。例では、近似したグラム行列の中心差分と比べて確かめている。
-
-```{code-block} text
-finite difference vs FastApprox gradient:  5.35e-11
-finite difference vs Accurate gradient:    6.11e-08
 ```
 
 パラメータ変換、`CustomKernel` の葉、およびカーネル評価の外側は、常に `std::exp` を使う。
@@ -286,7 +277,7 @@ predict(3.75) = -0.571757 (sin = -0.571561)
 
 ### 葉のグラム行列を再利用する
 
-`apply_leaf_points` は 1 枚の葉だけを評価する。`apply_leaf_cached` は同じことを `DistanceCache` から行い、`apply_leaf_cached_incremental` は、一部の長さスケールだけが変わったときに、呼び出し側が持つパック済み ARD 行列を差分更新する。`leaf_index_for_param` は平坦なパラメータ添字から葉を引く。`combine_from_leaf_grams` は、葉ごとの行列から、どの葉も再計算せずに合成後の行列を組み立てる。最適化の 1 ステップで 1 枚の葉のパラメータしか変わらないときに効く。
+`apply_leaf_points` は 1 枚の葉だけを評価する。`apply_leaf_cached` は同じことを `DistanceCache` から行い、`apply_leaf_cached_incremental` は一部の長さスケールだけが変わったときに呼び出し側のパック済み ARD 行列を差分更新し、`apply_leaf_incremental` と `commit_leaf_ard_s2` はキャッシュあり・なしを統一しつつ非破壊な試行評価に対応する。`ard_leaf_count` と `ard_dims_per_leaf` は ARD の次元メタデータを返し、`leaf_index_for_param` は平坦なパラメータ添字から葉を引き、`combine_from_leaf_grams` は葉ごとの行列から合成後の行列を組み立て直す。
 
 ```{literalinclude} /../examples/kernel_composition.cpp
 :language: cpp
@@ -334,9 +325,9 @@ weighted gradients = [14.0503, 5.77053, 0.3]
 | `KernelSpec` | 不変な式の木: `custom`、`sum`、`product`、`operator+`、`operator*`、`num_params`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings`、`coord_mode`、`compile` |
 | `ParameterBinding` | `index`、`leaf_id`、`local_index` |
 | `CoordMode` | `Dist`、`Points`、`Either`、`Mixed` |
-| `CompiledKernel<T>` | 実行用の木: `from_spec`、`num_params`、`num_leaves`、`coord_mode`、`nested_depth`、`reads_distances`、`needs_ard_sq_diff`、`kernel_exp`、`set_kernel_exp`、`make_nested_buffers`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings` |
+| `CompiledKernel<T>` | 実行用の木: `from_spec`、`num_params`、`num_leaves`、`ard_leaf_count`、`ard_dims_per_leaf`、`coord_mode`、`nested_depth`、`reads_distances`、`needs_ard_sq_diff`、`kernel_exp`、`set_kernel_exp`、`make_nested_buffers`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings` |
 | `CompiledKernel<T>` の評価 | `apply`、`apply_points`、`apply_cross`、`apply_cross_points`、`fill_diag`、`grad`、`grad_points`、`hess`、`hess_points` |
-| `CompiledKernel<T>` のキャッシュ・葉単位 | `apply_cached`、`grad_cached`、`hess_cached`、`leaf_index_for_param`、`apply_leaf_points`、`apply_leaf_cached`、`apply_leaf_cached_incremental`、`combine_from_leaf_grams`、`kept_products`、`kept_buffers`、`weighted_buffers`、`apply_keeping`、`apply_cached_keeping`、`weighted_grads` |
+| `CompiledKernel<T>` のキャッシュ・葉単位 | `apply_cached`、`grad_cached`、`hess_cached`、`leaf_index_for_param`、`apply_leaf_points`、`apply_leaf_cached`、`apply_leaf_cached_incremental`、`apply_leaf_incremental`、`commit_leaf_ard_s2`、`combine_from_leaf_grams`、`kept_products`、`kept_buffers`、`weighted_buffers`、`apply_keeping`、`apply_cached_keeping`、`weighted_grads` |
 | `NestedBuffers<T>` | `depth`、`rows`、`cols`、`resize`、`level` |
 | `KernelExp` | `Accurate`、`FastApprox` |
 | `ExpJet<T>` | `v`、`d1`、`d2` |

@@ -595,10 +595,19 @@ namespace cxxgpr
             std::size_t param_end = 0;
         };
 
+        /// @brief Sentinel slot index denoting a non-ARD kernel leaf.
+        static constexpr std::size_t k_no_ard_slot = ~std::size_t{0};
+
         /// @brief Compiled leaf kernels stored in depth-first left-to-right evaluation order.
         std::vector<KernelLeaf> leaves;
         /// @brief Pre-extracted ARD lengthscale vectors per leaf to avoid heap allocations in hot loops.
         std::vector<std::vector<double>> cached_ls;
+        /// @brief ARD leaf slot mapping in [0, ard_leaf_count) per leaf, or k_no_ard_slot if non-ARD.
+        std::vector<std::size_t> leaf_ard_slots;
+        /// @brief Feature dimension count per leaf for ARD leaves, or 0 for non-ARD leaves.
+        std::vector<std::size_t> leaf_dims;
+        /// @brief Number of ARD kernel leaves in `leaves`.
+        std::size_t ard_leaf_count = 0;
         /// @brief Global-to-leaf hyperparameter bindings in depth-first left-to-right order.
         std::vector<ParameterBinding> bindings;
         /// @brief Root compiled AST node.
@@ -622,6 +631,9 @@ namespace cxxgpr
         Impl(const Impl& other) :
             leaves(other.leaves),
             cached_ls(other.cached_ls),
+            leaf_ard_slots(other.leaf_ard_slots),
+            leaf_dims(other.leaf_dims),
+            ard_leaf_count(other.ard_leaf_count),
             bindings(other.bindings),
             root(clone_term_iterative(other.root)),
             coord_mode(other.coord_mode),
@@ -1154,6 +1166,28 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Validates point matrix emptiness, square output shape, and ARD feature dimensionality.
+        /// @details Checks structural preconditions without scanning coordinate values; callers performing full-matrix
+        /// evaluation follow up with `require_matrix_finite_simd(x)`.
+        /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
+        /// @param[in] out Reference square output matrix of shape `(n, n)`.
+        /// @return Empty expected on success, or shape/dimension validation error.
+        /// @retval GprErrorCode::EmptyInput If `x` has zero rows or columns.
+        /// @retval GprErrorCode::LengthMismatch If `out` is not `(x.rows(), x.rows())`.
+        /// @retval GprErrorCode::DimensionMismatch If `x.cols()` mismatches an ARD leaf's dimensionality.
+        [[nodiscard]] std::expected<void, GprError> validate_points_shape(MatrixRef<T> x, MatrixRef<T> out) const
+        {
+            if (x.rows() == 0 || x.cols() == 0)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (out.rows() != x.rows() || out.cols() != x.rows())
+            {
+                return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+            }
+            return validate_ard_dims(x.cols());
+        }
+
         /// @brief Validates point matrix shape, square output shape, ARD dimensions, and coordinate finiteness.
         /// @details Enforces empty -> shape -> ARD dimension -> finite scan order before point-based tree evaluation.
         /// @param[in] x Input point coordinate matrix of shape `(n, d)`.
@@ -1165,17 +1199,9 @@ namespace cxxgpr
         /// @retval GprErrorCode::NonFiniteInput If any entry in `x` is non-finite.
         [[nodiscard]] std::expected<void, GprError> validate_points_call(MatrixRef<T> x, MatrixRef<T> out) const
         {
-            if (x.rows() == 0 || x.cols() == 0)
+            if (auto shape = validate_points_shape(x, out); !shape.has_value())
             {
-                return std::unexpected(GprError::empty_input());
-            }
-            if (out.rows() != x.rows() || out.cols() != x.rows())
-            {
-                return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
-            }
-            if (auto ard = validate_ard_dims(x.cols()); !ard.has_value())
-            {
-                return ard;
+                return shape;
             }
             return require_matrix_finite_simd(x);
         }
@@ -1524,6 +1550,8 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated buffer pool used if `CustomKernel` needs uncached squared distances.
         /// @param[in] level_idx Nesting depth inside `nested` for `CustomKernel` distance buffer.
         /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] ard_s2_buf Optional packed buffer capturing forward ARD $s^2$ slices.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-slot readiness flags set when `ard_s2_buf` is populated.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_leaf_at(
             std::size_t leaf_idx,
@@ -1532,23 +1560,42 @@ namespace cxxgpr
             Triangle uplo,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
-            const DistanceCache<T>* cache = nullptr
+            const DistanceCache<T>* cache = nullptr,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
             const KernelLeaf& kl = leaves[leaf_idx];
             // Route to cached distance or packed ARD tables whenever compatible caches are provided.
-            if (cache != nullptr)
+            if (cache != nullptr && cache->has_dist() && leaf_reads_distances(kl))
             {
-                if (cache->has_dist() && leaf_reads_distances(kl))
+                return detail::leaf_apply_dist(kl, cache->dist_view(), out, uplo, exp_mode);
+            }
+            if (leaf_needs_ard(kl))
+            {
+                std::span<T> out_ard_s2{};
+                const std::size_t slot = leaf_ard_slots[leaf_idx];
+                const std::size_t per_dim = (x.rows() * (x.rows() + 1U)) / 2U;
+                if (slot < ard_s2_ready.size() && per_dim > 0U && (ard_s2_buf.size() / per_dim) > slot)
                 {
-                    return detail::leaf_apply_dist(kl, cache->dist_view(), out, uplo, exp_mode);
+                    out_ard_s2 = ard_s2_buf.subspan(slot * per_dim, per_dim);
                 }
-                if (cache->has_ard() && leaf_needs_ard(kl))
+                std::expected<void, GprError> res;
+                if (cache != nullptr && cache->has_ard())
                 {
-                    return detail::leaf_apply_ard_packed(
-                        kl, cached_ls[leaf_idx], cache->ard_packed(), x.rows(), out, uplo, exp_mode
+                    res = detail::leaf_apply_ard_packed(
+                        kl, cached_ls[leaf_idx], cache->ard_packed(), x.rows(), out, uplo, exp_mode, out_ard_s2
                     );
                 }
+                else
+                {
+                    res = detail::leaf_apply_points(kl, x, out, uplo, exp_mode, cached_ls[leaf_idx], out_ard_s2);
+                }
+                if (res.has_value() && !out_ard_s2.empty())
+                {
+                    ard_s2_ready[slot] = 1U;
+                }
+                return res;
             }
             // Custom leaves expect a squared-distance matrix; build it in nested scratch when uncached.
             if (const auto* custom = std::get_if<CustomKernel>(&kl))
@@ -1564,12 +1611,12 @@ namespace cxxgpr
             return detail::leaf_apply_points(kl, x, out, uplo, exp_mode, cached_ls[leaf_idx]);
         }
 
-        /// @brief Evaluates a single compiled leaf using `DistanceCache<T>` and incremental ARD $s^2$ state.
-        /// @details Routes ARD leaves with `cache.has_ard()` to `leaf_apply_ard_packed_incremental` and delegates all
-        /// other leaves cleanly to `eval_leaf_at`.
+        /// @brief Evaluates a single compiled leaf with incremental ARD $s^2$ state across Cached or Uncached modes.
+        /// @details Routes ARD leaves to `leaf_apply_ard_incremental` (with `ard_packed` when `cache != nullptr &&
+        /// cache->has_ard()` or uncached coordinates otherwise) and delegates non-ARD leaves cleanly to `eval_leaf_at`.
         /// @param[in] leaf_idx Zero-based index into `leaves`.
         /// @param[in] x Input point matrix of shape `(n, d)`.
-        /// @param[in] cache Precomputed distance and ARD cache.
+        /// @param[in] cache Optional precomputed distance and ARD cache pointer.
         /// @param[out] out Destination square matrix `(n, n)`.
         /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         /// @param[in,out] nested Pre-allocated nested buffer pool.
@@ -1577,14 +1624,56 @@ namespace cxxgpr
         /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
         /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
         /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+        /// @param[in] commit_s2 True to mutate `ard_s2_cache`/`prev_ls`; false for non-destructive trials.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_leaf_ard_incremental(
             std::size_t leaf_idx,
             MatrixRef<T> x,
-            const DistanceCache<T>& cache,
+            const DistanceCache<T>* cache,
             MatrixMut<T> out,
             Triangle uplo,
             NestedBuffers<T>& nested,
+            std::span<T> ard_s2_cache,
+            std::span<double> prev_ls,
+            bool& s2_valid,
+            std::size_t& inc_steps,
+            bool commit_s2
+        ) const
+        {
+            const KernelLeaf& kl = leaves[leaf_idx];
+            if (leaf_needs_ard(kl))
+            {
+                const std::span<const T> ard_packed =
+                    (cache != nullptr && cache->has_ard()) ? cache->ard_packed() : std::span<const T>{};
+                return detail::leaf_apply_ard_incremental(
+                    kl, cached_ls[leaf_idx], x, ard_packed, x.rows(), out, uplo, exp_mode, ard_s2_cache, prev_ls,
+                    s2_valid, inc_steps, commit_s2
+                );
+            }
+            if (!(cache != nullptr && cache->has_dist() && leaf_reads_distances(kl)))
+            {
+                if (auto fin = require_matrix_finite_simd(x); !fin.has_value())
+                {
+                    return fin;
+                }
+            }
+            return eval_leaf_at(leaf_idx, x, out, uplo, nested, 0U, cache);
+        }
+
+        /// @brief Commits accepted lengthscales of `leaf_idx` to its `ard_s2_cache` baseline.
+        /// @details No-op for non-ARD leaves.
+        /// @param[in] leaf_idx Zero-based index into `leaves`.
+        /// @param[in] x Input point matrix of shape `(n, d)`.
+        /// @param[in] cache Optional precomputed distance and ARD cache pointer.
+        /// @param[in,out] ard_s2_cache Caller-owned packed $s^2$ buffer for this leaf.
+        /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+        /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+        /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+        /// @return Empty expected on success, or error on invalid inputs.
+        [[nodiscard]] std::expected<void, GprError> commit_leaf_ard_s2_impl(
+            std::size_t leaf_idx,
+            MatrixRef<T> x,
+            const DistanceCache<T>* cache,
             std::span<T> ard_s2_cache,
             std::span<double> prev_ls,
             bool& s2_valid,
@@ -1592,14 +1681,15 @@ namespace cxxgpr
         ) const
         {
             const KernelLeaf& kl = leaves[leaf_idx];
-            if (cache.has_ard() && leaf_needs_ard(kl))
+            if (!leaf_needs_ard(kl))
             {
-                return detail::leaf_apply_ard_packed_incremental(
-                    kl, cached_ls[leaf_idx], cache.ard_packed(), x.rows(), out, uplo, exp_mode, ard_s2_cache, prev_ls,
-                    s2_valid, inc_steps
-                );
+                return {};
             }
-            return eval_leaf_at(leaf_idx, x, out, uplo, nested, 0U, &cache);
+            const std::span<const T> ard_packed =
+                (cache != nullptr && cache->has_ard()) ? cache->ard_packed() : std::span<const T>{};
+            return detail::leaf_commit_ard_s2(
+                kl, cached_ls[leaf_idx], x, ard_packed, x.rows(), ard_s2_cache, prev_ls, s2_valid, inc_steps
+            );
         }
 
         /// @brief Invariant context for `eval_combine_term_rec` to keep recursive stack frames minimal.
@@ -1719,6 +1809,8 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool.
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] ard_s2_buf Optional packed forward $s^2$ capture buffer.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness flags.
         /// @param[out] err Populated with the error on failure.
         /// @return True on success, false after writing `err`.
         [[nodiscard]] CXXGPR_NOINLINE bool eval_leaf_points_step(
@@ -1729,10 +1821,14 @@ namespace cxxgpr
             NestedBuffers<T>& nested,
             std::size_t level_idx,
             const DistanceCache<T>* cache,
+            std::span<T> ard_s2_buf,
+            std::span<std::uint8_t> ard_s2_ready,
             std::optional<GprError>& err
         ) const
         {
-            return capture_expected(eval_leaf_at(leaf_idx, x, out, uplo, nested, level_idx, cache), err);
+            return capture_expected(
+                eval_leaf_at(leaf_idx, x, out, uplo, nested, level_idx, cache, ard_s2_buf, ard_s2_ready), err
+            );
         }
 
         /// @brief Recursive body of `eval_term_points` using `bool` + out-of-line error slot.
@@ -1745,6 +1841,8 @@ namespace cxxgpr
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @param[in] cache Optional precomputed distance and ARD cache.
         /// @param[out] err Populated with the error on failure.
+        /// @param[out] ard_s2_buf Optional packed forward $s^2$ capture buffer.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness flags.
         /// @return True on success, false after writing `err`.
         [[nodiscard]] bool eval_term_points_rec(
             const Term& term,
@@ -1755,14 +1853,17 @@ namespace cxxgpr
             NestedBuffers<T>& nested,
             std::size_t level_idx,
             const DistanceCache<T>* cache,
-            std::optional<GprError>& err
+            std::optional<GprError>& err,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
             const auto leaf_eval =
-                [this, &x, uplo, &nested,
-                    cache](std::size_t leaf_idx, const MatrixMut<T>& dst, std::size_t depth, std::optional<GprError>& e)
+                [this, &x, uplo, &nested, cache, ard_s2_buf, ard_s2_ready](
+                    std::size_t leaf_idx, const MatrixMut<T>& dst, std::size_t depth, std::optional<GprError>& e
+                )
             {
-                return eval_leaf_points_step(leaf_idx, x, dst, uplo, nested, depth, cache, e);
+                return eval_leaf_points_step(leaf_idx, x, dst, uplo, nested, depth, cache, ard_s2_buf, ard_s2_ready, e);
             };
             const TermEvalCtx<decltype(leaf_eval)> ctx{
                 .uplo = uplo,
@@ -1782,6 +1883,8 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool.
         /// @param[in] level_idx Current nesting depth inside `nested`.
         /// @param[in] cache Optional precomputed distance and ARD cache.
+        /// @param[out] ard_s2_buf Optional packed forward $s^2$ capture buffer.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness flags.
         /// @return Empty expected on success, or workspace/evaluation error.
         [[nodiscard]] std::expected<void, GprError> eval_term_points(
             const Term& term,
@@ -1791,11 +1894,15 @@ namespace cxxgpr
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
-            const DistanceCache<T>* cache = nullptr
+            const DistanceCache<T>* cache = nullptr,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
             std::optional<GprError> err;
-            if (!eval_term_points_rec(term, x, out, uplo, scratch, nested, level_idx, cache, err))
+            if (!eval_term_points_rec(
+                    term, x, out, uplo, scratch, nested, level_idx, cache, err, ard_s2_buf, ard_s2_ready
+                ))
             {
                 return std::unexpected(
                     err.has_value() ? std::move(*err)
@@ -3189,6 +3296,8 @@ namespace cxxgpr
         /// @param[in,out] nested Pre-allocated intermediate buffer pool for nested subtrees.
         /// @param[in,out] kept_bufs Pre-allocated retention buffer pool receiving kept factor Grams.
         /// @param[in] products Maximum number of top-level multi-factor products to retain.
+        /// @param[out] ard_s2_buf Optional packed buffer capturing forward ARD $s^2$ slices.
+        /// @param[in,out] ard_s2_ready Optional per-ARD-slot readiness flags set when `ard_s2_buf` is populated.
         /// @return Empty expected on success, or workspace/evaluation error.
         /// @retval GprErrorCode::WorkspaceTooSmall If `kept_bufs` or `nested` capacity is insufficient.
         [[nodiscard]] std::expected<void, GprError> eval_keeping_impl(
@@ -3199,13 +3308,19 @@ namespace cxxgpr
             MatrixMut<T> scratch,
             NestedBuffers<T>& nested,
             NestedBuffers<T>& kept_bufs,
-            std::size_t products
+            std::size_t products,
+            std::span<T> ard_s2_buf = {},
+            std::span<std::uint8_t> ard_s2_ready = {}
         ) const
         {
             const auto roots = root_terms();
             if (roots.empty())
             {
                 return std::unexpected(GprError::unsupported_kernel_operation("composite kernel has no terms"));
+            }
+            if (!ard_s2_ready.empty())
+            {
+                std::ranges::fill(ard_s2_ready, std::uint8_t{0});
             }
             const std::size_t n = out.rows();
             std::size_t kept = 0;
@@ -3249,7 +3364,9 @@ namespace cxxgpr
                                 tmp = nested.level(0U, n, n);
                                 sub_level = 1U;
                             }
-                            if (auto res = eval_term_points(f, x, kbuf, uplo, tmp, nested, sub_level, cache);
+                            if (auto res = eval_term_points(
+                                    f, x, kbuf, uplo, tmp, nested, sub_level, cache, ard_s2_buf, ard_s2_ready
+                                );
                                 !res.has_value())
                             {
                                 return res;
@@ -3275,7 +3392,9 @@ namespace cxxgpr
                 {
                     if (r_idx == 0U || std::holds_alternative<LeafRef>(t))
                     {
-                        if (auto res = eval_term_points(t, x, target, uplo, scratch, nested, 0U, cache);
+                        if (auto res = eval_term_points(
+                                t, x, target, uplo, scratch, nested, 0U, cache, ard_s2_buf, ard_s2_ready
+                            );
                             !res.has_value())
                         {
                             return res;
@@ -3288,7 +3407,10 @@ namespace cxxgpr
                             return ok;
                         }
                         auto nbuf = nested.level(0U, n, n);
-                        if (auto res = eval_term_points(t, x, nbuf, uplo, scratch, nested, 1U, cache); !res.has_value())
+                        if (auto res = eval_term_points(
+                                t, x, nbuf, uplo, scratch, nested, 1U, cache, ard_s2_buf, ard_s2_ready
+                            );
+                            !res.has_value())
                         {
                             return res;
                         }
@@ -3329,6 +3451,10 @@ namespace cxxgpr
             MatrixRef<T> x;
             /// @brief Optional precomputed distance/ARD cache.
             const DistanceCache<T>* cache;
+            /// @brief Optional forward-captured packed ARD $s^2$ storage.
+            std::span<const T> ard_s2_buf;
+            /// @brief Optional readiness flags for `ard_s2_buf`.
+            std::span<const std::uint8_t> ard_s2_ready;
             /// @brief Full output gradient span indexed by `grad_offset`.
             std::span<double> out_grads;
             /// @brief Reusable `n x n` scratch matrix for leaf evaluation.
@@ -3385,10 +3511,18 @@ namespace cxxgpr
             {
                 const std::span<const T> ard_packed =
                     (ctx.cache != nullptr && ctx.cache->has_ard()) ? ctx.cache->ard_packed() : std::span<const T>{};
+                std::span<const T> precomputed_s2{};
+                const std::size_t slot = leaf_ard_slots[leaf.leaf_idx];
+                const std::size_t per_dim = (ctx.x.rows() * (ctx.x.rows() + 1U)) / 2U;
+                if (slot < ctx.ard_s2_ready.size() && ctx.ard_s2_ready[slot] != 0U && per_dim > 0U
+                    && (ctx.ard_s2_buf.size() / per_dim) > slot)
+                {
+                    precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
+                }
                 return capture_expected_double(
                     detail::leaf_ard_weighted_grads(
                         kl, cached_ls[leaf.leaf_idx], ctx.x, ard_packed, weight, ctx.kernel_scratch, ctx.col_partials,
-                        out_grads, need_value, exp_mode
+                        out_grads, need_value, exp_mode, precomputed_s2
                     ),
                     out_val, ctx.err
                 );
@@ -3784,6 +3918,8 @@ namespace cxxgpr
         /// @param[in] walk_cursor Next free buffer slot in `weighted_bufs`.
         /// @param[in,out] col_partials Scratch span for deterministic OpenMP reductions.
         /// @param[in] need_value True when caller requires $\langle W, K_{\text{term}} \rangle_F$.
+        /// @param[in] ard_s2_buf Optional forward-captured ARD $s^2$ storage.
+        /// @param[in] ard_s2_ready Optional readiness bytes for `ard_s2_buf`.
         /// @return Contracted term value, or GprError on failure.
         [[nodiscard]] std::expected<double, GprError> walk_weighted(
             const Term& term,
@@ -3799,13 +3935,17 @@ namespace cxxgpr
             bool has_kept,
             std::size_t walk_cursor,
             std::span<double> col_partials,
-            bool need_value
+            bool need_value,
+            std::span<const T> ard_s2_buf = {},
+            std::span<const std::uint8_t> ard_s2_ready = {}
         ) const
         {
             std::optional<GprError> err;
             const WalkWeightedCtx ctx{
                 .x = x,
                 .cache = cache,
+                .ard_s2_buf = ard_s2_buf,
+                .ard_s2_ready = ard_s2_ready,
                 .out_grads = out_grads,
                 .kernel_scratch = kernel_scratch,
                 .nested = nested,
@@ -3920,6 +4060,18 @@ namespace cxxgpr
         // Reserve one extra nested buffer level when any leaf is CustomKernel so point paths can materialize dist.
         impl->nested_depth = Impl::compute_nested_depth(impl->root) + (has_custom_leaf ? 1U : 0U);
         impl->refresh_cached_ls();
+        impl->leaf_dims.assign(impl->leaves.size(), 0U);
+        impl->leaf_ard_slots.assign(impl->leaves.size(), Impl::k_no_ard_slot);
+        std::size_t next_ard_slot = 0U;
+        for (std::size_t i = 0U; i < impl->leaves.size(); ++i)
+        {
+            if (leaf_needs_ard(impl->leaves[i]))
+            {
+                impl->leaf_dims[i] = impl->cached_ls[i].size();
+                impl->leaf_ard_slots[i] = next_ard_slot++;
+            }
+        }
+        impl->ard_leaf_count = next_ard_slot;
         return CompiledKernel<T>(std::move(impl));
     }
 
@@ -3993,6 +4145,22 @@ namespace cxxgpr
     template <KernelScalarConcept T> bool CompiledKernel<T>::needs_ard_sq_diff() const noexcept
     {
         return impl_->needs_ard;
+    }
+
+    /// @brief Returns the number of ARD kernel leaves in the compiled tree.
+    /// @tparam T Storage floating-point scalar type.
+    /// @return Count of ARD leaves.
+    template <KernelScalarConcept T> std::size_t CompiledKernel<T>::ard_leaf_count() const noexcept
+    {
+        return impl_->ard_leaf_count;
+    }
+
+    /// @brief Returns per-leaf ARD dimension counts in depth-first leaf order (`0` for non-ARD leaves).
+    /// @tparam T Storage floating-point scalar type.
+    /// @return Immutable span of length `num_leaves()`.
+    template <KernelScalarConcept T> std::span<const std::size_t> CompiledKernel<T>::ard_dims_per_leaf() const noexcept
+    {
+        return impl_->leaf_dims;
     }
 
     /// @brief Allocates a `NestedBuffers<T>` workspace sized for this compiled kernel and matrix shape `(rows, cols)`.
@@ -4938,6 +5106,7 @@ namespace cxxgpr
     /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
     /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
     /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+    /// @param[in] commit_s2 True to update `ard_s2_cache`/`prev_ls`; false for non-destructive trial evaluation.
     /// @return Empty expected on success, or index/validation/cache error.
     /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
     template <KernelScalarConcept T>
@@ -4951,6 +5120,86 @@ namespace cxxgpr
         std::span<T> ard_s2_cache,
         std::span<double> prev_ls,
         bool& s2_valid,
+        std::size_t& inc_steps,
+        bool commit_s2
+    ) const
+    {
+        return apply_leaf_incremental(
+            leaf_idx, x, &cache, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2
+        );
+    }
+
+    /// @brief Evaluates a single compiled leaf incrementally using an optional `DistanceCache<T>`.
+    /// @details Validates leaf bounds, point shape, and cache shape before delegating to `eval_leaf_ard_incremental`.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf_idx Zero-based leaf index in `[0, num_leaves())`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Optional precomputed distance and ARD cache pointer, or `nullptr` for uncached evaluation.
+    /// @param[out] out Destination square leaf Gram matrix of shape `(n, n)`.
+    /// @param[in] uplo Active matrix triangle to populate.
+    /// @param[in,out] nested Pre-allocated nested buffer pool.
+    /// @param[in,out] ard_s2_cache Caller-owned packed $s^2$ buffer for this leaf.
+    /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+    /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+    /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+    /// @param[in] commit_s2 True to update `ard_s2_cache`/`prev_ls`; false for non-destructive trial evaluation.
+    /// @return Empty expected on success, or index/validation/cache error.
+    /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> CompiledKernel<T>::apply_leaf_incremental(
+        std::size_t leaf_idx,
+        MatrixRef<T> x,
+        const DistanceCache<T>* cache,
+        MatrixMut<T> out,
+        Triangle uplo,
+        NestedBuffers<T>& nested,
+        std::span<T> ard_s2_cache,
+        std::span<double> prev_ls,
+        bool& s2_valid,
+        std::size_t& inc_steps,
+        bool commit_s2
+    ) const
+    {
+        if (leaf_idx >= impl_->leaves.size())
+        {
+            return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
+        }
+        if (auto v = impl_->validate_points_shape(x, out.as_ref()); !v.has_value())
+        {
+            return v;
+        }
+        if (cache != nullptr)
+        {
+            if (auto cs = impl_->validate_cache_shape(x, *cache); !cs.has_value())
+            {
+                return cs;
+            }
+        }
+        return impl_->eval_leaf_ard_incremental(
+            leaf_idx, x, cache, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2
+        );
+    }
+
+    /// @brief Commits accepted lengthscales of `leaf_idx` to its `ard_s2_cache` baseline.
+    /// @details No-op for non-ARD leaves. Validates leaf index, point matrix, and optional cache shape.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf_idx Zero-based leaf index in `[0, num_leaves())`.
+    /// @param[in] x Input point matrix of shape `(n, d)`.
+    /// @param[in] cache Optional precomputed distance and ARD cache pointer, or `nullptr`.
+    /// @param[in,out] ard_s2_cache Caller-owned packed $s^2$ buffer for this leaf.
+    /// @param[in,out] prev_ls Caller-owned lengthscale snapshot buffer for this leaf.
+    /// @param[in,out] s2_valid True while `ard_s2_cache` matches `prev_ls`.
+    /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+    /// @return Empty expected on success, or index/validation/cache error.
+    /// @retval GprErrorCode::IndexOutOfRange If `leaf_idx >= num_leaves()`.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> CompiledKernel<T>::commit_leaf_ard_s2(
+        std::size_t leaf_idx,
+        MatrixRef<T> x,
+        const DistanceCache<T>* cache,
+        std::span<T> ard_s2_cache,
+        std::span<double> prev_ls,
+        bool& s2_valid,
         std::size_t& inc_steps
     ) const
     {
@@ -4958,17 +5207,18 @@ namespace cxxgpr
         {
             return std::unexpected(GprError::index_out_of_range("kernel leaf index out of range"));
         }
-        if (auto v = impl_->validate_points_call(x, out.as_ref()); !v.has_value())
+        if (x.is_empty() || x.data() == nullptr)
         {
-            return v;
+            return std::unexpected(GprError::empty_input());
         }
-        if (auto cs = impl_->validate_cache_shape(x, cache); !cs.has_value())
+        if (cache != nullptr)
         {
-            return cs;
+            if (auto cs = impl_->validate_cache_shape(x, *cache); !cs.has_value())
+            {
+                return cs;
+            }
         }
-        return impl_->eval_leaf_ard_incremental(
-            leaf_idx, x, cache, out, uplo, nested, ard_s2_cache, prev_ls, s2_valid, inc_steps
-        );
+        return impl_->commit_leaf_ard_s2_impl(leaf_idx, x, cache, ard_s2_cache, prev_ls, s2_valid, inc_steps);
     }
 
     /// @brief Combines precomputed per-leaf Gram matrices into the full composite Gram matrix.
@@ -5061,6 +5311,8 @@ namespace cxxgpr
     /// @param[in,out] nested Pre-allocated intermediate buffer pool.
     /// @param[in,out] kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
     /// @param[in] products Number of top-level multi-factor products to retain.
+    /// @param[out] ard_s2_buf Optional packed forward ARD $s^2$ storage.
+    /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness bytes.
     /// @return Empty expected on success, or validation/workspace/evaluation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_keeping(
@@ -5070,7 +5322,9 @@ namespace cxxgpr
         MatrixMut<T> scratch,
         NestedBuffers<T>& nested,
         NestedBuffers<T>& kept_bufs,
-        std::size_t products
+        std::size_t products,
+        std::span<T> ard_s2_buf,
+        std::span<std::uint8_t> ard_s2_ready
     ) const
     {
         if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value())
@@ -5081,7 +5335,9 @@ namespace cxxgpr
         {
             return v;
         }
-        return impl_->eval_keeping_impl(x, nullptr, out, uplo, scratch, nested, kept_bufs, products);
+        return impl_->eval_keeping_impl(
+            x, nullptr, out, uplo, scratch, nested, kept_bufs, products, ard_s2_buf, ard_s2_ready
+        );
     }
 
     /// @brief Evaluates the training Gram matrix using `DistanceCache<T>` while saving `keep_plan` factor Grams.
@@ -5095,6 +5351,8 @@ namespace cxxgpr
     /// @param[in,out] nested Pre-allocated intermediate buffer pool.
     /// @param[in,out] kept_bufs Retention buffer pool of depth at least `kept_buffers(products)`.
     /// @param[in] products Number of top-level multi-factor products to retain.
+    /// @param[out] ard_s2_buf Optional packed forward ARD $s^2$ storage.
+    /// @param[in,out] ard_s2_ready Optional per-ARD-leaf readiness bytes.
     /// @return Empty expected on success, or validation/cache/workspace error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> CompiledKernel<T>::apply_cached_keeping(
@@ -5105,7 +5363,9 @@ namespace cxxgpr
         MatrixMut<T> scratch,
         NestedBuffers<T>& nested,
         NestedBuffers<T>& kept_bufs,
-        std::size_t products
+        std::size_t products,
+        std::span<T> ard_s2_buf,
+        std::span<std::uint8_t> ard_s2_ready
     ) const
     {
         if (auto sc = require_scratch(out.as_ref(), scratch, "scratch"); !sc.has_value())
@@ -5120,7 +5380,9 @@ namespace cxxgpr
         {
             return cs;
         }
-        return impl_->eval_keeping_impl(x, &cache, out, uplo, scratch, nested, kept_bufs, products);
+        return impl_->eval_keeping_impl(
+            x, &cache, out, uplo, scratch, nested, kept_bufs, products, ard_s2_buf, ard_s2_ready
+        );
     }
 
     /// @brief Computes $\langle W, \partial K / \partial \theta_p \rangle_F$ for all parameters in a single tree pass.
@@ -5139,6 +5401,8 @@ namespace cxxgpr
     /// followed by walk scratch up to `weighted_buffers(products)`.
     /// @param[in] products Number of top-level multi-factor products previously retained in `weighted_bufs`.
     /// @param[in,out] col_partials Per-column partial sum buffer of length at least `n` for deterministic reduction.
+    /// @param[in] ard_s2_buf Optional forward-captured ARD $s^2$ storage passed from `apply_keeping`.
+    /// @param[in] ard_s2_ready Optional readiness bytes identifying valid slices inside `ard_s2_buf`.
     /// @return Empty expected on success, or length/shape/cache/workspace error.
     /// @retval GprErrorCode::LengthMismatch If `out_grads.size() != num_params()` or cache/input dimensions mismatch.
     /// @retval GprErrorCode::WorkspaceTooSmall If `col_partials` or `weighted_bufs` is smaller than required.
@@ -5152,7 +5416,9 @@ namespace cxxgpr
         NestedBuffers<T>& nested,
         NestedBuffers<T>& weighted_bufs,
         std::size_t products,
-        std::span<double> col_partials
+        std::span<double> col_partials,
+        std::span<const T> ard_s2_buf,
+        std::span<const std::uint8_t> ard_s2_ready
     ) const
     {
         // Enforce deterministic input, cache, scratch, col_partials, and weighted_bufs capacity checks.
@@ -5207,7 +5473,8 @@ namespace cxxgpr
             }
             auto res = impl_->walk_weighted(
                 t, x, cache, weight_lower, out_grads.subspan(p_off, count), kernel_scratch, nested, weighted_bufs,
-                has_kept ? kept_off : 0U, has_kept ? v : 0U, has_kept, kept_total, col_partials, false
+                has_kept ? kept_off : 0U, has_kept ? v : 0U, has_kept, kept_total, col_partials, false, ard_s2_buf,
+                ard_s2_ready
             );
             if (!res.has_value())
             {

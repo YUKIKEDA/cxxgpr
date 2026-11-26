@@ -2,7 +2,7 @@ English | [日本語](README.ja.md)
 
 # cxxgpr
 
-**Exact Gaussian process regression for C++23.** Fit a model to your data, get predictions with calibrated uncertainty, and keep full control over numerics, memory and threads. No exceptions, no hidden allocation in the hot paths, and bit-identical results regardless of thread count.
+**Exact Gaussian process regression for C++23.** Fit a model to your data, get predictions with calibrated uncertainty, and keep full control over numerics, memory and threads. No exceptions, no hidden allocation in the hot paths, and bit-identical results across thread counts with the built-in backend (and within fixed vendor BLAS thread settings).
 
 [![CI](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml/badge.svg)](https://github.com/YUKIKEDA/cxxgpr/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -12,9 +12,9 @@ English | [日本語](README.ja.md)
 ## Why cxxgpr
 
 - **Errors are values.** Every fallible call returns `std::expected<T, GprError>`; nothing throws across the API.
-- **Reproducible.** Parallel results are bit-identical for any thread count, and random sampling is seeded and portable.
+- **Reproducible.** With the built-in backend, parallel results are bit-identical for any thread count (and with fixed thread settings under external BLAS); random sampling is seeded and portable.
 - **Predictable cost.** Repeated predictions allocate nothing after the first call, and the memory/speed trade-off is yours to choose.
-- **Clean headers.** Eigen, nlohmann/json and OpenMP never appear in the public headers, so they never leak into your build.
+- **Clean headers.** Eigen, OpenBLAS/oneMKL, nlohmann/json and OpenMP never appear in the public headers, so they never leak into your build.
 - **Safe by construction.** Failed calls leave your objects untouched, bounded hyperparameters cannot be set out of range, and trained and untrained models are different types.
 
 ## What you get
@@ -99,7 +99,7 @@ find_package(cxxgpr 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE cxxgpr::cxxgpr)
 ```
 
-The package locates Eigen, nlohmann/json and (optionally) OpenMP when you configure, so they must be installed, for example through vcpkg.
+The package locates Eigen, nlohmann/json, optional external BLAS (OpenBLAS or Intel oneMKL when built with an external BLAS backend; not needed for the `BuiltIn` backend, default on Windows MSVC), and (optionally) OpenMP when you configure, so required dependencies must be installed, for example through vcpkg.
 
 **From source with `FetchContent`.**
 

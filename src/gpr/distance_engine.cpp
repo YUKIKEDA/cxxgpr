@@ -11,6 +11,7 @@
 #include "cxxgpr/linalg/dense.hpp"
 #include "cxxgpr/linalg/jitter.hpp"
 #include "cxxgpr/workspace/inference.hpp"
+#include "cxxgpr/workspace/leaf_cache.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -78,7 +79,7 @@ namespace cxxgpr
         {
         public:
             /// @brief Storage scalar type.
-            using Storage = typename P::Storage;
+            using Storage = P::Storage;
 
             /// @brief Binds the borrowed training state; nothing is evaluated until a method is called.
             /// @param[in,out] kernel Compiled kernel whose parameters the objective sets.
@@ -88,6 +89,7 @@ namespace cxxgpr
             /// @param[in] y Transformed training targets.
             /// @param[in] jitter Jitter policy.
             /// @param[in,out] buffers Dense buffers sized for n.
+            /// @param[in] enable_leaf_cache True when optimizer supplies incremental change indices.
             DistanceObjective(
                 CompiledDistanceKernel<Storage>& kernel,
                 GaussianLikelihood& likelihood,
@@ -95,7 +97,8 @@ namespace cxxgpr
                 std::optional<MatrixRef<Storage>> x,
                 std::span<const Storage> y,
                 const JitterPolicy& jitter,
-                FitBuffers<P>& buffers
+                FitBuffers<P>& buffers,
+                bool enable_leaf_cache = false
             ) :
                 kernel_(kernel),
                 likelihood_(likelihood),
@@ -104,8 +107,16 @@ namespace cxxgpr
                 y_(y),
                 jitter_(jitter),
                 buffers_(buffers),
+                enable_leaf_cache_(enable_leaf_cache),
                 last_params_(kernel.num_params() + likelihood.num_params(), 0.0)
             {
+                if (enable_leaf_cache_)
+                {
+                    if (!init_leaf_cache().has_value())
+                    {
+                        enable_leaf_cache_ = false;
+                    }
+                }
             }
 
             /// @brief Returns the number of optimized parameters (kernel parameters plus log noise variance).
@@ -148,7 +159,24 @@ namespace cxxgpr
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                auto mll = factor_and_mll();
+                if (!enable_leaf_cache_)
+                {
+                    auto mll = factor_and_mll(false);
+                    if (mll.has_value())
+                    {
+                        record(params, *mll);
+                    }
+                    return mll;
+                }
+                if (auto ok = ensure_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto pr = prime_leaf_cache(params); !pr.has_value())
+                {
+                    return std::unexpected(std::move(pr).error());
+                }
+                auto mll = factor_from_assembled_k_and_mll();
                 if (mll.has_value())
                 {
                     record(params, *mll);
@@ -156,15 +184,91 @@ namespace cxxgpr
                 return mll;
             }
 
-            /// @brief Evaluates the objective for changed coordinates; distance leaves are rebuilt in full.
+            /// @brief Evaluates the objective incrementally when only changed_indices moved since the last step.
             /// @param[in] params Log-space parameters.
-            /// @param[in] changed_indices Ignored.
+            /// @param[in] changed_indices Indices modified relative to the last evaluated parameter vector.
             /// @return Objective value, or GprError.
             [[nodiscard]] std::expected<double, GprError> value_at_changes(
-                std::span<const double> params, std::span<const std::size_t> /*changed_indices*/
+                std::span<const double> params, std::span<const std::size_t> changed_indices
             ) override
             {
-                return value(params);
+                if (!enable_leaf_cache_)
+                {
+                    return value(params);
+                }
+                valid_ = false;
+                if (auto set = apply_params(params); !set.has_value())
+                {
+                    return std::unexpected(std::move(set).error());
+                }
+                if (auto ok = ensure_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto inc = evaluate_leaves_incremental(params, changed_indices); !inc.has_value())
+                {
+                    return std::unexpected(std::move(inc).error());
+                }
+                auto mll = factor_from_assembled_k_and_mll();
+                if (mll.has_value())
+                {
+                    record(params, *mll);
+                }
+                return mll;
+            }
+
+            /// @brief Commits or discards pending non-destructive leaf-cache ARD trials upon optimizer acceptance.
+            /// @param[in] accepted True when the preceding trial step was accepted.
+            void notify_candidate_accepted(bool accepted) noexcept override
+            {
+                if (!enable_leaf_cache_ || !has_pending_)
+                {
+                    return;
+                }
+                if (!accepted)
+                {
+                    for (std::size_t i = 0U; i < n_leaves_; ++i)
+                    {
+                        if (trial_modified_[i] != 0U)
+                        {
+                            stale_after_reject_[i] = 1U;
+                            trial_modified_[i] = 0U;
+                        }
+                    }
+                    has_pending_ = false;
+                    return;
+                }
+                const std::size_t n = buffers_.core.order();
+                const std::size_t per_dim = (n * (n + 1U)) / 2U;
+                for (std::size_t i = 0U; i < n_leaves_; ++i)
+                {
+                    if (trial_modified_[i] == 0U)
+                    {
+                        continue;
+                    }
+                    if (ard_s2_offsets_[i] != k_no_slot && ard_ls_caps_[i] > 0U)
+                    {
+                        std::span<Storage> s2_buf(ard_s2_storage_.data() + ard_s2_offsets_[i], per_dim);
+                        std::span<double> prev_ls(ard_ls_prev_.data() + ard_ls_offsets_[i], ard_ls_caps_[i]);
+                        bool s2_valid = ard_s2_valid_[i] != 0U;
+                        std::size_t inc_steps = ard_inc_steps_[i];
+                        if (auto res = detail::distance_commit_leaf_ard_s2(
+                                kernel_, i, store_, x_, s2_buf, prev_ls, s2_valid, inc_steps
+                            );
+                            !res.has_value())
+                        {
+                            invalidate_leaf_cache();
+                            return;
+                        }
+                        ard_s2_valid_[i] = s2_valid ? 1U : 0U;
+                        ard_inc_steps_[i] = inc_steps;
+                    }
+                    trial_modified_[i] = 0U;
+                    stale_after_reject_[i] = 0U;
+                }
+                std::ranges::copy(pending_params_, baseline_params_.begin());
+                leaf_primed_ = true;
+                has_pending_ = false;
             }
 
             /// @brief Writes the parameter intervals (kernel parameters then noise variance).
@@ -211,11 +315,12 @@ namespace cxxgpr
             ) override
             {
                 valid_ = false;
+                invalidate_leaf_cache();
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                auto mll = factor_and_mll();
+                auto mll = factor_and_mll(true);
                 if (!mll.has_value())
                 {
                     return mll;
@@ -241,11 +346,12 @@ namespace cxxgpr
             ) override
             {
                 valid_ = false;
+                invalidate_leaf_cache();
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return set;
                 }
-                auto mll = factor_and_mll();
+                auto mll = factor_and_mll(false);
                 if (!mll.has_value())
                 {
                     return std::unexpected(std::move(mll).error());
@@ -267,11 +373,12 @@ namespace cxxgpr
             ) override
             {
                 valid_ = false;
+                invalidate_leaf_cache();
                 if (auto set = apply_params(params); !set.has_value())
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                auto mll = factor_and_mll();
+                auto mll = factor_and_mll(true);
                 if (!mll.has_value())
                 {
                     return mll;
@@ -340,6 +447,18 @@ namespace cxxgpr
                 {
                     scratch_b_.assign(n * n, Storage{0});
                 }
+                const std::size_t wdepth = detail::distance_weighted_depth(kernel_);
+                if (wdepth > 0U)
+                {
+                    if (auto ok = core.ensure_weighted(wdepth); !ok.has_value())
+                    {
+                        return ok;
+                    }
+                }
+                if (auto ok = core.ensure_ard_s2(detail::distance_ard_leaf_count(kernel_)); !ok.has_value())
+                {
+                    return ok;
+                }
                 return {};
             }
 
@@ -351,23 +470,257 @@ namespace cxxgpr
                 return MatrixMut<Storage>(scratch_b_.data(), n, n, n);
             }
 
-            /// @brief Assembles K + noise I, factors it with jitter, solves for alpha, and returns the objective.
-            /// @return Negative log marginal likelihood, or GprError when the factorization or objective fails.
-            [[nodiscard]] std::expected<double, GprError> factor_and_mll()
+            /// @brief Pre-allocates incremental per-leaf Gram and ARD $s^2$ buffers when leaf caching is active.
+            /// @return Empty expected on completion, or overflow error from buffer size checks.
+            [[nodiscard]] std::expected<void, GprError> init_leaf_cache()
+            {
+                const std::size_t n = buffers_.core.order();
+                const std::size_t total_params = dim();
+                n_leaves_ = detail::distance_num_leaves(kernel_);
+                const auto ard_dims = detail::distance_ard_dims_per_leaf(kernel_);
+                auto mat_len = checked_mul(n, n);
+                if (!mat_len.has_value())
+                {
+                    return std::unexpected(std::move(mat_len).error());
+                }
+                auto total_mat = checked_mul(n_leaves_, *mat_len);
+                if (!total_mat.has_value())
+                {
+                    return std::unexpected(std::move(total_mat).error());
+                }
+                auto np1 = checked_add(n, std::size_t{1});
+                if (!np1.has_value())
+                {
+                    return std::unexpected(std::move(np1).error());
+                }
+                auto n_np1 = checked_mul(n, *np1);
+                if (!n_np1.has_value())
+                {
+                    return std::unexpected(std::move(n_np1).error());
+                }
+                const std::size_t per_dim = *n_np1 / 2U;
+
+                leaf_storage_.assign(*total_mat, Storage{0});
+                leaf_gram_views_.resize(n_leaves_);
+                for (std::size_t i = 0U; i < n_leaves_; ++i)
+                {
+                    leaf_gram_views_[i] = MatrixRef<Storage>(leaf_storage_.data() + (i * *mat_len), n, n, n);
+                }
+                ard_ls_caps_.assign(n_leaves_, 0U);
+                ard_ls_offsets_.assign(n_leaves_, 0U);
+                ard_s2_offsets_.assign(n_leaves_, k_no_slot);
+                std::size_t ls_total = 0U;
+                std::size_t s2_total = 0U;
+                for (std::size_t i = 0U; i < n_leaves_; ++i)
+                {
+                    const std::size_t d = ard_dims[i];
+                    ard_ls_caps_[i] = d;
+                    ard_ls_offsets_[i] = ls_total;
+                    auto ls_next = checked_add(ls_total, d);
+                    if (!ls_next.has_value())
+                    {
+                        return std::unexpected(std::move(ls_next).error());
+                    }
+                    ls_total = *ls_next;
+                    if (d > 0U)
+                    {
+                        ard_s2_offsets_[i] = s2_total;
+                        auto s2_next = checked_add(s2_total, per_dim);
+                        if (!s2_next.has_value())
+                        {
+                            return std::unexpected(std::move(s2_next).error());
+                        }
+                        s2_total = *s2_next;
+                    }
+                }
+                ard_s2_storage_.assign(s2_total, Storage{0});
+                ard_ls_prev_.assign(ls_total, 0.0);
+                dirty_.assign(n_leaves_, 1U);
+                trial_modified_.assign(n_leaves_, 0U);
+                stale_after_reject_.assign(n_leaves_, 0U);
+                ard_s2_valid_.assign(n_leaves_, 0U);
+                ard_inc_steps_.assign(n_leaves_, 0U);
+                baseline_params_.assign(total_params, 0.0);
+                last_eval_params_.assign(total_params, 0.0);
+                pending_params_.assign(total_params, 0.0);
+                leaf_primed_ = false;
+                has_pending_ = false;
+                return {};
+            }
+
+            /// @brief Marks cached incremental leaf state invalid without freeing buffers.
+            void invalidate_leaf_cache() noexcept
+            {
+                if (!enable_leaf_cache_)
+                {
+                    return;
+                }
+                leaf_primed_ = false;
+                has_pending_ = false;
+                std::ranges::fill(dirty_, 1U);
+                std::ranges::fill(trial_modified_, 0U);
+                std::ranges::fill(stale_after_reject_, 0U);
+                std::ranges::fill(ard_s2_valid_, 0U);
+                std::ranges::fill(ard_inc_steps_, 0U);
+            }
+
+            /// @brief Evaluates all leaves and primes incremental ARD $s^2$ baselines from `params`.
+            /// @param[in] params Full baseline hyperparameter vector matching `dim()`.
+            /// @return Empty expected on completion, or GprError if evaluation or combination fails.
+            [[nodiscard]] std::expected<void, GprError> prime_leaf_cache(std::span<const double> params)
             {
                 auto& core = buffers_.core;
                 const std::size_t n = core.order();
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                const std::size_t per_dim = (n * (n + 1U)) / 2U;
+                std::ranges::fill(dirty_, 1U);
+                std::ranges::fill(trial_modified_, 0U);
+                std::ranges::fill(stale_after_reject_, 0U);
+                std::ranges::fill(ard_s2_valid_, 0U);
+                std::ranges::fill(ard_inc_steps_, 0U);
+                has_pending_ = false;
+                for (std::size_t i = 0U; i < n_leaves_; ++i)
                 {
-                    return std::unexpected(std::move(ok).error());
+                    MatrixMut<Storage> slot(leaf_storage_.data() + (i * n * n), n, n, n);
+                    std::span<Storage> s2_buf = (ard_s2_offsets_[i] != k_no_slot)
+                        ? std::span<Storage>(ard_s2_storage_.data() + ard_s2_offsets_[i], per_dim)
+                        : std::span<Storage>{};
+                    std::span<double> prev_ls(ard_ls_prev_.data() + ard_ls_offsets_[i], ard_ls_caps_[i]);
+                    bool s2_valid = false;
+                    std::size_t inc_steps = 0U;
+                    if (auto res = detail::distance_apply_leaf_incremental(
+                            kernel_, i, store_, x_, slot, Triangle::Lower, core.nested, s2_buf, prev_ls, s2_valid,
+                            inc_steps, true
+                        );
+                        !res.has_value())
+                    {
+                        invalidate_leaf_cache();
+                        return res;
+                    }
+                    ard_s2_valid_[i] = s2_valid ? 1U : 0U;
+                    ard_inc_steps_[i] = inc_steps;
+                    dirty_[i] = 0U;
                 }
-                if (auto ap = kernel_.apply(
-                        store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested
+                if (auto comb = detail::distance_combine_from_leaf_grams(
+                        kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
+                        core.kernel_scratch_mut(), core.nested
                     );
-                    !ap.has_value())
+                    !comb.has_value())
                 {
-                    return std::unexpected(std::move(ap).error());
+                    invalidate_leaf_cache();
+                    return comb;
                 }
+                std::ranges::copy(params, baseline_params_.begin());
+                std::ranges::copy(params, last_eval_params_.begin());
+                leaf_primed_ = true;
+                return {};
+            }
+
+            /// @brief Evaluates only dirty leaves as a non-destructive trial before acceptance notification.
+            /// @param[in] params Full candidate hyperparameter vector matching `dim()`.
+            /// @param[in] changed_indices Non-empty duplicate-free span of parameter indices that changed.
+            /// @return Empty expected on completion, or validation/evaluation/combination error.
+            [[nodiscard]] std::expected<void, GprError> evaluate_leaves_incremental(
+                std::span<const double> params, std::span<const std::size_t> changed_indices
+            )
+            {
+                const std::size_t total_params = dim();
+                if (params.size() != total_params)
+                {
+                    return std::unexpected(GprError::length_mismatch("parameter vector length mismatch"));
+                }
+                if (auto valid = require_change_indices(changed_indices, total_params); !valid.has_value())
+                {
+                    return valid;
+                }
+                auto& core = buffers_.core;
+                const std::size_t n = core.order();
+                const std::size_t per_dim = (n * (n + 1U)) / 2U;
+
+                if (!leaf_primed_ || last_eval_params_.size() != total_params)
+                {
+                    std::ranges::fill(dirty_, 1U);
+                    std::ranges::fill(ard_s2_valid_, 0U);
+                    std::ranges::fill(ard_inc_steps_, 0U);
+                    std::ranges::fill(stale_after_reject_, 0U);
+                }
+                else
+                {
+                    for (std::size_t j = 0U; j < total_params; ++j)
+                    {
+                        if (std::bit_cast<std::uint64_t>(last_eval_params_[j])
+                            != std::bit_cast<std::uint64_t>(params[j]))
+                        {
+                            if (std::ranges::find(changed_indices, j) == changed_indices.end())
+                            {
+                                return std::unexpected(
+                                    GprError::index_out_of_range("parameter changed outside declared change indices")
+                                );
+                            }
+                        }
+                    }
+                    std::ranges::copy(stale_after_reject_, dirty_.begin());
+                    const std::size_t nk = kernel_.num_params();
+                    for (const std::size_t j : changed_indices)
+                    {
+                        if (j < nk)
+                        {
+                            auto leaf_idx = detail::distance_leaf_index_for_param(kernel_, j);
+                            if (!leaf_idx.has_value())
+                            {
+                                return std::unexpected(std::move(leaf_idx).error());
+                            }
+                            dirty_[*leaf_idx] = 1U;
+                        }
+                    }
+                }
+
+                std::ranges::fill(trial_modified_, 0U);
+                for (std::size_t i = 0U; i < n_leaves_; ++i)
+                {
+                    if (dirty_[i] == 0U)
+                    {
+                        continue;
+                    }
+                    MatrixMut<Storage> slot(leaf_storage_.data() + (i * n * n), n, n, n);
+                    std::span<Storage> s2_buf = (ard_s2_offsets_[i] != k_no_slot)
+                        ? std::span<Storage>(ard_s2_storage_.data() + ard_s2_offsets_[i], per_dim)
+                        : std::span<Storage>{};
+                    std::span<double> prev_ls(ard_ls_prev_.data() + ard_ls_offsets_[i], ard_ls_caps_[i]);
+                    bool s2_valid = ard_s2_valid_[i] != 0U;
+                    std::size_t inc_steps = ard_inc_steps_[i];
+                    if (auto res = detail::distance_apply_leaf_incremental(
+                            kernel_, i, store_, x_, slot, Triangle::Lower, core.nested, s2_buf, prev_ls, s2_valid,
+                            inc_steps, false
+                        );
+                        !res.has_value())
+                    {
+                        invalidate_leaf_cache();
+                        return res;
+                    }
+                    trial_modified_[i] = 1U;
+                    dirty_[i] = 0U;
+                }
+                if (auto comb = detail::distance_combine_from_leaf_grams(
+                        kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
+                        core.kernel_scratch_mut(), core.nested
+                    );
+                    !comb.has_value())
+                {
+                    invalidate_leaf_cache();
+                    return comb;
+                }
+                std::ranges::copy(params, last_eval_params_.begin());
+                std::ranges::copy(params, pending_params_.begin());
+                has_pending_ = true;
+                return {};
+            }
+
+            /// @brief Adds observation noise, factors L with jitter, solves alpha, and returns negative MLL.
+            /// @return Negative log marginal likelihood on success, or Cholesky/solve error.
+            [[nodiscard]] std::expected<double, GprError> factor_from_assembled_k_and_mll()
+            {
+                auto& core = buffers_.core;
+                const std::size_t n = core.order();
                 const auto noise = static_cast<Storage>(likelihood_.noise_variance());
                 if (auto dg = linalg::add_to_diag(core.k_mut(), noise); !dg.has_value())
                 {
@@ -405,6 +758,39 @@ namespace cxxgpr
                 return mll;
             }
 
+            /// @brief Assembles K + noise I, factors it with jitter, solves for alpha, and returns the objective.
+            /// @param[in] capture_ard_s2 True when forward packed ARD $s^2$ buffers should be captured for gradient
+            /// reuse.
+            /// @return Negative log marginal likelihood, or GprError when the factorization or objective fails.
+            [[nodiscard]] std::expected<double, GprError> factor_and_mll(bool capture_ard_s2)
+            {
+                auto& core = buffers_.core;
+                if (auto ok = ensure_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                core.clear_ard_s2_ready();
+                std::expected<void, GprError> ap;
+                if (capture_ard_s2 && !core.ard_s2_ready.empty())
+                {
+                    ap = detail::distance_apply_capturing_s2(
+                        kernel_, store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested,
+                        std::span<Storage>(core.ard_s2_storage), std::span<std::uint8_t>(core.ard_s2_ready)
+                    );
+                }
+                else
+                {
+                    ap = kernel_.apply(
+                        store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested
+                    );
+                }
+                if (!ap.has_value())
+                {
+                    return std::unexpected(std::move(ap).error());
+                }
+                return factor_from_assembled_k_and_mll();
+            }
+
             /// @brief Builds the lower triangle of W = alpha alpha^T - A^-1 from the live factor.
             /// @return Success, or GprError when the computation fails.
             [[nodiscard]] std::expected<void, GprError> build_w()
@@ -427,19 +813,18 @@ namespace cxxgpr
                 {
                     return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
                 }
+                if (auto wg = detail::distance_weighted_grads(
+                        kernel_, store_, x_, buffers_.w_ref(), out_grad.subspan(0, nk), core.kernel_scratch_mut(),
+                        scratch_b_mut(), core.nested, core.weighted, std::span<double>(core.col_partials),
+                        std::span<const Storage>(core.ard_s2_storage), std::span<const std::uint8_t>(core.ard_s2_ready)
+                    );
+                    !wg.has_value())
+                {
+                    return wg;
+                }
                 for (std::size_t p = 0; p < nk; ++p)
                 {
-                    if (auto gr = kernel_.grad(
-                            store_, x_, core.exp_mut(), p, Triangle::Lower, core.kernel_scratch_mut(), scratch_b_mut(),
-                            core.nested
-                        );
-                        !gr.has_value())
-                    {
-                        return gr;
-                    }
-                    const double inner =
-                        frobenius_lower_det(buffers_.w_ref(), core.exp_ref(), std::span<double>(core.col_partials));
-                    out_grad[p] = -0.5 * inner;
+                    out_grad[p] *= -0.5;
                 }
                 const auto w_ref = buffers_.w_ref();
                 double trace_w = 0.0;
@@ -597,8 +982,49 @@ namespace cxxgpr
             const JitterPolicy& jitter_;
             /// @brief Shared fit buffers.
             FitBuffers<P>& buffers_;
+            /// @brief Sentinel indicating a leaf does not own an ARD $s^2$ cache slot.
+            static constexpr std::size_t k_no_slot = ~std::size_t{0};
+
+            /// @brief True when incremental per-leaf Gram & ARD caching is enabled.
+            bool enable_leaf_cache_{false};
             /// @brief Second scratch matrix for kernel gradients and Hessian terms.
             std::vector<Storage> scratch_b_;
+            /// @brief Number of flattened leaves tracked in the incremental cache.
+            std::size_t n_leaves_{0};
+            /// @brief Contiguous storage for per-leaf square Gram matrices.
+            std::vector<Storage> leaf_storage_;
+            /// @brief Immutable views into `leaf_storage_` per leaf.
+            std::vector<MatrixRef<Storage>> leaf_gram_views_;
+            /// @brief Packed lower-triangular ARD $s^2$ baseline storage for ARD leaves.
+            std::vector<Storage> ard_s2_storage_;
+            /// @brief Offsets into `ard_s2_storage_` per leaf (`k_no_slot` for non-ARD leaves).
+            std::vector<std::size_t> ard_s2_offsets_;
+            /// @brief Accepted baseline lengthscales packed per ARD leaf (`O(d)`).
+            std::vector<double> ard_ls_prev_;
+            /// @brief Offsets into `ard_ls_prev_` per leaf.
+            std::vector<std::size_t> ard_ls_offsets_;
+            /// @brief Allocated double capacity per leaf in `ard_ls_prev_`.
+            std::vector<std::size_t> ard_ls_caps_;
+            /// @brief Per-leaf dirty flags for incremental updates.
+            std::vector<std::uint8_t> dirty_;
+            /// @brief Per-leaf flags tracking slots modified during an uncommitted trial.
+            std::vector<std::uint8_t> trial_modified_;
+            /// @brief Per-leaf flags keeping Gram slots overwritten by a rejected trial dirty.
+            std::vector<std::uint8_t> stale_after_reject_;
+            /// @brief Per-leaf validity flags for `ard_s2_storage_`.
+            std::vector<std::uint8_t> ard_s2_valid_;
+            /// @brief Per-leaf consecutive incremental delta update counters.
+            std::vector<std::size_t> ard_inc_steps_;
+            /// @brief Accepted parameter baseline vector.
+            std::vector<double> baseline_params_;
+            /// @brief Last evaluated parameter vector (committed or trial) for bit-exact diffs.
+            std::vector<double> last_eval_params_;
+            /// @brief Pending trial parameter vector awaiting acceptance notification.
+            std::vector<double> pending_params_;
+            /// @brief True once at least one baseline has been primed into `leaf_storage_`.
+            bool leaf_primed_{false};
+            /// @brief True when a non-destructive trial awaits `notify_candidate_accepted()`.
+            bool has_pending_{false};
             /// @brief Parameters of the latest successful evaluation.
             std::vector<double> last_params_;
             /// @brief Objective value of the latest successful evaluation.
@@ -832,8 +1258,8 @@ namespace cxxgpr
         void* optimize_ctx
     )
     {
-        using Storage = typename P::Storage;
-        using Refine = typename P::Refine;
+        using Storage = P::Storage;
+        using Refine = P::Refine;
         constexpr bool with_points = std::same_as<C, WithPoints>;
 
         // Validation order (each phase in the order of the error-code contract): empty arguments, structure of the
@@ -975,7 +1401,9 @@ namespace cxxgpr
             x_ref = MatrixRef<Storage>(payload.x_train.data(), n, d, n);
         }
         GaussianLikelihood likelihood = cfg.likelihood;
-        DistanceObjective<P> obj(*compiled, likelihood, *store, x_ref, y_storage, cfg.jitter, *buffers);
+        DistanceObjective<P> obj(
+            *compiled, likelihood, *store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
+        );
 
         const std::size_t nk = compiled->num_params();
         std::vector<double> init_params(obj.dim());
@@ -1218,7 +1646,7 @@ namespace cxxgpr
             std::size_t m
         )
         {
-            using Storage = typename P::Storage;
+            using Storage = P::Storage;
             if constexpr (std::same_as<C, WithPoints>)
             {
                 if (auto cp = copy_points(xq.value_or(MatrixRef<double>{}), scratch.xq_double); !cp.has_value())
@@ -1270,8 +1698,8 @@ namespace cxxgpr
             std::vector<typename P::Refine>& mean_t
         )
         {
-            using Storage = typename P::Storage;
-            using Refine = typename P::Refine;
+            using Storage = P::Storage;
+            using Refine = P::Refine;
             const std::size_t n = payload.n_train;
             const std::size_t m = cross_shape.cols;
 
@@ -1403,8 +1831,8 @@ namespace cxxgpr
             const PredictOptions& options
         )
         {
-            using Storage = typename P::Storage;
-            using Refine = typename P::Refine;
+            using Storage = P::Storage;
+            using Refine = P::Refine;
             const std::size_t n = payload.n_train;
 
             auto shapes = check_query_shapes<P, C>(payload, cross, &query, xq);
@@ -1505,8 +1933,8 @@ namespace cxxgpr
         Prediction<typename P::Refine>& out
     )
     {
-        using Storage = typename P::Storage;
-        using Refine = typename P::Refine;
+        using Storage = P::Storage;
+        using Refine = P::Refine;
         const std::size_t n = payload.n_train;
 
         // Shapes of every input first, then the coordinates, then the table values (see check_query_shapes()).
@@ -1600,7 +2028,7 @@ namespace cxxgpr
         const PredictOptions& options
     )
     {
-        using Refine = typename P::Refine;
+        using Refine = P::Refine;
         auto cov = covariance_transformed<P, C>(payload, scratch, cross, query, xq, options);
         if (!cov.has_value())
         {
@@ -1646,7 +2074,7 @@ namespace cxxgpr
         const PredictOptions& options
     )
     {
-        using Refine = typename P::Refine;
+        using Refine = P::Refine;
         auto cov = covariance_transformed<P, C>(payload, scratch, cross, query, xq, options);
         if (!cov.has_value())
         {
@@ -1684,8 +2112,8 @@ namespace cxxgpr
         const DistanceFittedPayload<P, C>& payload, const PredictOptions& options
     )
     {
-        using Storage = typename P::Storage;
-        using Refine = typename P::Refine;
+        using Storage = P::Storage;
+        using Refine = P::Refine;
         const std::size_t n = payload.n_train;
         std::vector<Storage> scratch_matrix(n * n);
         std::vector<Storage> scratch_diag(n);
@@ -1751,8 +2179,8 @@ namespace cxxgpr
         std::shared_ptr<const void> l_keepalive
     )
     {
-        using Storage = typename P::Storage;
-        using Refine = typename P::Refine;
+        using Storage = P::Storage;
+        using Refine = P::Refine;
         constexpr bool with_points = std::same_as<C, WithPoints>;
         const std::size_t n = y_raw.size();
         if (n == 0U)

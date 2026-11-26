@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <vector>
 
 /// @brief Root namespace of the cxxgpr Gaussian Process Regression library.
@@ -190,6 +191,28 @@ namespace cxxgpr
         /// @retval GprErrorCode::EmptyInput When order_ == 0.
         [[nodiscard]] std::expected<void, GprError> ensure_weighted(std::size_t n_bufs);
 
+        /// @brief Ensures packed lower-triangular ARD $s^2$ storage fits n_ard_leaves without shrinking.
+        /// @details Allocates at least n_ard_leaves * order_ * (order_ + 1) / 2 elements lazily and resets ready
+        /// flags to zero so subsequent forward evaluations capture fresh per-leaf $s^2$ buffers.
+        /// @param[in] n_ard_leaves Number of ARD leaf slots required by the compiled kernel.
+        /// @return Empty expected on success, or GprError if workspace order is zero or size overflows.
+        /// @retval GprErrorCode::EmptyInput When order_ == 0.
+        /// @retval GprErrorCode::SizeOverflow When total packed storage count overflows std::size_t.
+        [[nodiscard]] std::expected<void, GprError> ensure_ard_s2(std::size_t n_ard_leaves);
+
+        /// @brief Clears forward ARD $s^2$ readiness flags while retaining allocated backing storage.
+        void clear_ard_s2_ready() noexcept;
+
+        /// @brief Returns a mutable packed lower-triangular $s^2$ view for ARD leaf slot ard_slot.
+        /// @param[in] ard_slot Zero-based ARD leaf slot in [0, n_ard_leaves).
+        /// @return Mutable packed span of length order_ * (order_ + 1) / 2, or empty span if unallocated.
+        [[nodiscard]] std::span<Storage> ard_s2_mut(std::size_t ard_slot) noexcept;
+
+        /// @brief Returns an immutable packed lower-triangular $s^2$ view for ARD leaf slot ard_slot if ready.
+        /// @param[in] ard_slot Zero-based ARD leaf slot in [0, n_ard_leaves).
+        /// @return Immutable packed span when ready, or empty span when absent or stale.
+        [[nodiscard]] std::span<const Storage> ard_s2_ref(std::size_t ard_slot) const noexcept;
+
         /// @brief Training order n.
         std::size_t order_ = 0;
         /// @brief System matrix A = K + sigma_n^2 I, then lower Cholesky factor L.
@@ -208,6 +231,10 @@ namespace cxxgpr
         NestedBuffers<Storage> nested;
         /// @brief Pre-allocated buffers for keep_plan and weighted_grads walks.
         NestedBuffers<Storage> weighted;
+        /// @brief Contiguous packed lower-triangular ARD $s^2$ buffers captured during forward eval.
+        std::vector<Storage> ard_s2_storage;
+        /// @brief Readiness flags per ARD leaf slot (`1` when forward $s^2$ matches current parameters).
+        std::vector<std::uint8_t> ard_s2_ready;
         /// @brief On-demand analytical Hessian scratch buffers (empty until first Hessian evaluation).
         HessianScratch<Storage> hessian;
         /// @brief Diagonal jitter added during the last successful Cholesky factorization.

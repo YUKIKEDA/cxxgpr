@@ -15,6 +15,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <numbers>
+#include <numeric>
 #include <vector>
 
 #include "allocation_audit.hpp"
@@ -428,8 +431,9 @@ namespace
             }
         }
 
-        // Case 2: High dimensions d = 65 (> 64 incremental ARD cutoff) and d = 257 (> 256 stack weight buffer)
-        // both fall back cleanly with zero heap allocations.
+        // Case 2: High dimensions d = 65 and d = 257 (> 256 stack weight buffer) both size dynamically O(d)
+        // snapshot storage, run incrementally on single-dim changes, and allocate zero heap memory under
+        // NoAllocationScope after warm-up.
         for (const std::size_t d : {std::size_t{65U}, std::size_t{257U}})
         {
             constexpr std::size_t n = 6U;
@@ -451,12 +455,10 @@ namespace
             std::vector<double> theta(total_params, std::log(1.5));
             theta.back() = -1.0;
             std::vector<std::size_t> all_idx(total_params);
-            for (std::size_t k = 0U; k < total_params; ++k)
-            {
-                all_idx[k] = k;
-            }
+            std::ranges::iota(all_idx, std::size_t{0U});
 
             cxxgpr::LeafCache<double> lcache;
+            ASSERT_TRUE(lcache.resize(compiled.num_leaves(), n, compiled.ard_dims_per_leaf()).has_value());
             std::vector<double> out_inc(n * n);
             std::vector<double> out_ref(n * n);
             std::vector<double> scratch(n * n);
@@ -469,7 +471,7 @@ namespace
                     )
                     .has_value());
 
-            // Single-dimension change at d = 65 must fall back cleanly with zero heap allocations.
+            // Single-dimension change at d = 65 and d = 257 must evaluate incrementally with zero heap allocations.
             theta[0] = std::log(1.7);
             ASSERT_TRUE(compiled.set_params(std::span<const double>(theta.data(), d)).has_value());
             const std::array<std::size_t, 1> only_0{0U};
@@ -486,6 +488,191 @@ namespace
             ASSERT_TRUE(compiled
                     .apply_points(
                         x, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-13);
+                }
+            }
+        }
+    }
+
+    /// @brief Verifies Uncached ARD incremental O(n^2) updates at d > 64 and trial isolation on rejected FSA steps.
+    /// @details Confirms: (1) for d = 80 with dist_cache == nullptr, single-dim updates never read untouched x columns
+    /// (proven by NaN-poisoning columns 1..79 after prime) and allocate zero heap memory; (2) for d = 2, a rejected
+    /// non-destructive trial leaves the baseline ARD s^2 and prev_ls intact so switching to the other dimension still
+    /// executes incrementally without a full rebuild or reading the poisoned first column.
+    TEST(LeafCacheTest, UncachedHighDimAndRejectedTrialIsolationArdIncremental)
+    {
+        // Spec: REQ-01, REQ-02, REQ-08, DES-11
+        // Part 1: Uncached d = 80 > 64 single-dim incremental update never touches untouched coordinates.
+        {
+            constexpr std::size_t n = 10U;
+            constexpr std::size_t d = 80U;
+            std::vector<double> x_orig(n * d);
+            for (std::size_t col = 0U; col < d; ++col)
+            {
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    x_orig[(col * n) + row] =
+                        (0.12 * static_cast<double>(row)) - (0.03 * static_cast<double>(col % 11U));
+                }
+            }
+            std::vector<double> x_work = x_orig;
+            const cxxgpr::MatrixRef<double> x_orig_ref(x_orig.data(), n, d, n);
+            const cxxgpr::MatrixRef<double> x_work_ref(x_work.data(), n, d, n);
+
+            const std::vector<double> ell(d, 1.3);
+            const auto spec = cxxgpr::KernelSpec(cxxgpr::RationalQuadraticArdKernel::create(ell, 2.0).value());
+            auto compiled = spec.compile<double>();
+            const std::size_t nk = compiled.num_params();
+            const std::size_t total_params = nk + 1U;
+            std::vector<double> theta(total_params, std::log(1.3));
+            theta[d] = std::numbers::ln2;
+            theta[nk] = -0.8;
+
+            cxxgpr::LeafCache<double> lcache;
+            ASSERT_TRUE(lcache.resize(compiled.num_leaves(), n, compiled.ard_dims_per_leaf()).has_value());
+            std::vector<double> out_inc(n * n);
+            std::vector<double> out_ref(n * n);
+            std::vector<double> scratch(n * n);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(lcache
+                    .prime(
+                        compiled, x_work_ref, nullptr, theta, cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n),
+                        cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+
+            // Poison untouched columns 1..79 with NaN; an incremental update on dim 0 must never inspect them.
+            for (std::size_t col = 1U; col < d; ++col)
+            {
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    x_work[(col * n) + row] = std::numeric_limits<double>::quiet_NaN();
+                }
+            }
+
+            theta[0] = std::log(1.85);
+            ASSERT_TRUE(compiled.set_params(std::span<const double>(theta.data(), nk)).has_value());
+            const std::array<std::size_t, 1> only_0{0U};
+            {
+                const cxxgpr::test_support::NoAllocationScope audit;
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x_work_ref, nullptr, theta, only_0, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                        )
+                        .has_value());
+            }
+            ASSERT_TRUE(compiled
+                    .apply_points(
+                        x_orig_ref, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
+                        cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = col; row < n; ++row)
+                {
+                    EXPECT_NEAR(out_inc[(col * n) + row], out_ref[(col * n) + row], 1e-12);
+                }
+            }
+        }
+
+        // Part 2: Non-destructive rejected trial does not corrupt ard_prev_ls_ or force 2-dim rebuilds at d = 2.
+        {
+            constexpr std::size_t n = 8U;
+            constexpr std::size_t d = 2U;
+            std::vector<double> x_orig{
+                0.0,
+                0.3,
+                0.7,
+                1.1,
+                1.5,
+                1.9,
+                2.2,
+                2.6,
+                1.0,
+                0.4,
+                0.9,
+                1.6,
+                0.2,
+                1.3,
+                0.6,
+                2.0,
+            };
+            std::vector<double> x_work = x_orig;
+            const cxxgpr::MatrixRef<double> x_orig_ref(x_orig.data(), n, d, n);
+            const cxxgpr::MatrixRef<double> x_work_ref(x_work.data(), n, d, n);
+
+            const auto spec = cxxgpr::KernelSpec(
+                cxxgpr::MaternArdKernel::create(std::array<double, 2>{1.2, 1.5}, cxxgpr::MaternNu::FiveHalves).value()
+            );
+            auto compiled = spec.compile<double>();
+            const std::size_t total_params = 3U;
+            std::vector<double> base_theta{std::log(1.2), std::log(1.5), -1.0};
+
+            cxxgpr::LeafCache<double> lcache;
+            ASSERT_TRUE(lcache.resize(compiled.num_leaves(), n, compiled.ard_dims_per_leaf()).has_value());
+            std::vector<double> out_inc(n * n);
+            std::vector<double> out_ref(n * n);
+            std::vector<double> scratch(n * n);
+            auto nested = compiled.make_nested_buffers(n, n);
+            ASSERT_TRUE(lcache
+                    .prime(
+                        compiled, x_work_ref, nullptr, base_theta, cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n),
+                        cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
+                    )
+                    .has_value());
+
+            // Stage a trial changing dim 0 with commit_immediately == false, then reject it.
+            std::vector<double> cand0 = base_theta;
+            cand0[0] = std::log(2.4);
+            ASSERT_TRUE(compiled.set_params(std::span<const double>(cand0.data(), d)).has_value());
+            const std::array<std::size_t, 1> only_0{0U};
+            {
+                const cxxgpr::test_support::NoAllocationScope audit;
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x_work_ref, nullptr, cand0, only_0, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested, false
+                        )
+                        .has_value());
+                ASSERT_TRUE(lcache.commit_candidate(false, compiled, x_work_ref, nullptr).has_value());
+            }
+
+            // Poison column 0 of x_work with NaN. When cand1 reverts dim 0 back to base_theta[0] and perturbs
+            // dim 1, the accepted baseline in ard_prev_ls_ still has dim 0 == base_theta[0], so only dim 1 changed
+            // (1 * 2 <= 2) and column 0 must NOT be read.
+            for (std::size_t row = 0U; row < n; ++row)
+            {
+                x_work[row] = std::numeric_limits<double>::quiet_NaN();
+            }
+            std::vector<double> cand1 = base_theta;
+            cand1[1] = std::log(1.9);
+            ASSERT_TRUE(compiled.set_params(std::span<const double>(cand1.data(), d)).has_value());
+            const std::array<std::size_t, 2> both_vs_last_eval{0U, 1U};
+            {
+                const cxxgpr::test_support::NoAllocationScope audit;
+                ASSERT_TRUE(lcache
+                        .evaluate_incremental(
+                            compiled, x_work_ref, nullptr, cand1, both_vs_last_eval, total_params,
+                            cxxgpr::MatrixMut<double>(out_inc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested, false
+                        )
+                        .has_value());
+                ASSERT_TRUE(lcache.commit_candidate(true, compiled, x_work_ref, nullptr).has_value());
+            }
+            ASSERT_TRUE(compiled
+                    .apply_points(
+                        x_orig_ref, cxxgpr::MatrixMut<double>(out_ref.data(), n, n, n), cxxgpr::Triangle::Lower,
                         cxxgpr::MatrixMut<double>(scratch.data(), n, n, n), nested
                     )
                     .has_value());

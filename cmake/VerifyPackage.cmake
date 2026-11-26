@@ -40,6 +40,15 @@ file(GLOB _config_files
 if(NOT _config_files)
     message(FATAL_ERROR "Missing installed cxxgprConfig.cmake under ${_install_dir}")
 endif()
+if(DEFINED CXXGPR_MKL_ROOT AND NOT "${CXXGPR_MKL_ROOT}" STREQUAL "")
+    foreach(_cfg_file IN LISTS _config_files)
+        file(READ "${_cfg_file}" _cfg_contents)
+        string(FIND "${_cfg_contents}" "${CXXGPR_MKL_ROOT}" _leak_pos)
+        if(NOT _leak_pos EQUAL -1)
+            message(FATAL_ERROR "Installed cxxgprConfig.cmake leaked build-machine MKL path '${CXXGPR_MKL_ROOT}'")
+        endif()
+    endforeach()
+endif()
 
 file(WRITE "${_consumer_src}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.25)
@@ -108,6 +117,9 @@ endif()
 if(DEFINED CXXGPR_CXX_FLAGS AND NOT "${CXXGPR_CXX_FLAGS}" STREQUAL "")
     list(APPEND _cfg_args "-DCMAKE_CXX_FLAGS=${CXXGPR_CXX_FLAGS}")
 endif()
+if(DEFINED CXXGPR_MKL_ROOT AND NOT "${CXXGPR_MKL_ROOT}" STREQUAL "")
+    list(APPEND _cfg_args "-DMKL_ROOT=${CXXGPR_MKL_ROOT}")
+endif()
 if(DEFINED CXXGPR_TOOLCHAIN_FILE AND NOT "${CXXGPR_TOOLCHAIN_FILE}" STREQUAL "")
     list(APPEND _cfg_args
         "-DCMAKE_TOOLCHAIN_FILE=${CXXGPR_TOOLCHAIN_FILE}"
@@ -147,6 +159,10 @@ if(WIN32)
     else()
         set(_exe "${_consumer_bld}/consumer.exe")
     endif()
+endif()
+
+if(WIN32 AND DEFINED CXXGPR_MKL_DLL_DIR AND NOT "${CXXGPR_MKL_DLL_DIR}" STREQUAL "")
+    set(ENV{PATH} "${CXXGPR_MKL_DLL_DIR};$ENV{PATH}")
 endif()
 
 execute_process(

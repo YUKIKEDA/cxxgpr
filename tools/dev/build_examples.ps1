@@ -29,6 +29,11 @@ if (-not $SkipInstall) {
 }
 
 $deps = Join-Path $buildDir 'vcpkg_installed\x64-windows'
+# Ensure OpenBLAS / dependency DLLs are discoverable when running standalone example executables on Windows.
+$depsBin = if ($Config -eq 'Debug') { Join-Path $deps 'debug\bin' } else { Join-Path $deps 'bin' }
+if (Test-Path $depsBin) {
+    $env:PATH = "$depsBin;$env:PATH"
+}
 # Passed through the environment: a "-D...=C:" argument is parsed as a named parameter by pwsh -File.
 $env:CMAKE_PREFIX_PATH = "$prefix;$deps"
 Invoke-Msvc cmake -S (Join-Path $root 'docs\examples') -B $exBuild -G 'Ninja Multi-Config' `

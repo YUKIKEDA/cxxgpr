@@ -22,6 +22,15 @@ CXXGPR_INCLUDE_RE = re.compile(r"^cxxgpr/([a-z_]+)/")
 EIGEN_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
 OPENMP_MODULES = frozenset({"linalg", "kernel", "workspace", "gpr"})
 JSON_MODULES = frozenset({"persist"})
+BLAS_MODULES = frozenset({"linalg"})
+
+BLAS_INCLUDE_NAMES = frozenset(
+    {"cblas.h", "openblas_config.h", "mkl.h", "mkl_cblas.h", "mkl_lapacke.h", "mkl_version.h"}
+)
+
+
+def _is_blas_include(target: str) -> bool:
+    return target in BLAS_INCLUDE_NAMES or target.startswith(("openblas/", "mkl"))
 
 
 def parse_allowed_deps(doc_path: Path) -> tuple[dict[str, set[str]], list[str]]:
@@ -83,7 +92,11 @@ def check_repository(
                 if not inc_match:
                     continue
                 target = inc_match.group(2)
-                if target.startswith(("Eigen/", "eigen3/", "nlohmann/")) or target == "omp.h":
+                if (
+                    target.startswith(("Eigen/", "eigen3/", "nlohmann/"))
+                    or target == "omp.h"
+                    or _is_blas_include(target)
+                ):
                     errors.append(
                         f"{rel_posix}:{line_no}: forbidden third-party include "
                         f"'<{target}>' in public header"
@@ -145,6 +158,14 @@ def check_repository(
                     errors.append(
                         f"{rel_posix}:{line_no}: nlohmann/json include "
                         f"not permitted in module '{mod}'"
+                    )
+                if (
+                    _is_blas_include(target)
+                    and mod not in BLAS_MODULES
+                    and rel_under_src != "core/build_info.cpp"
+                ):
+                    errors.append(
+                        f"{rel_posix}:{line_no}: BLAS/MKL include not permitted in module '{mod}'"
                     )
 
     for consumer_root, kind in ((tests_root, "tests"), (benchmarks_root, "benchmarks")):

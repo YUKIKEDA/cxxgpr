@@ -40,13 +40,17 @@ namespace cxxgpr
         info.dependencies = {
             DependencyVersion{
                               .name = "eigen",
-                              .version = std::format("{}.{}.{}",         EIGEN_MAJOR_VERSION,         EIGEN_MINOR_VERSION, EIGEN_PATCH_VERSION),
+                              .version = std::format("{}.{}.{}", EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION, EIGEN_PATCH_VERSION),
                               },
             DependencyVersion{
                               .name = "nlohmann_json",
                               .version = std::format(
-                              "{}.{}.{}", NLOHMANN_JSON_VERSION_MAJOR, NLOHMANN_JSON_VERSION_MINOR,     NLOHMANN_JSON_VERSION_PATCH
-     ), },
+                    "{}.{}.{}", NLOHMANN_JSON_VERSION_MAJOR, NLOHMANN_JSON_VERSION_MINOR, NLOHMANN_JSON_VERSION_PATCH
+                ), },
+            DependencyVersion{
+                              .name = "blas_backend",
+                              .version = CXXGPR_BLAS_BACKEND_NAME,
+                              },
         };
         return info;
     }

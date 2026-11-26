@@ -143,7 +143,7 @@ The optimizers are not tied to Gaussian processes. They minimize any function th
 
 | Class | You implement | Optimizers that accept it |
 |---|---|---|
-| `Objective` | `dim`, `value`, `fill_intervals`; optionally `value_at_changes` | `NelderMead`, `FastSimulatedAnnealing`, `Fixed` |
+| `Objective` | `dim`, `value`, `fill_intervals`; optionally `value_at_changes`, `notify_candidate_accepted` | `NelderMead`, `FastSimulatedAnnealing`, `Fixed` |
 | `Differentiable` | also `gradient_into`, `value_and_gradient_into` | the above and `Lbfgs` |
 | `TwiceDifferentiable` | also `hessian_into`; optionally `value_gradient_hessian_into` | all of the above and `TrustRegion` |
 
@@ -272,7 +272,7 @@ Check the points your optimizer proposes with `LogBounds::validate_log_params` (
 | `FastSimulatedAnnealing` | annealing; `with_max_iterations`, `with_initial_temperature`, `with_cooling_rate`, `with_seed`, `with_boundary_policy`, `with_restarts`, accessors, `optimize`, `operator==` |
 | `BoundaryPolicy` | `Clamp` or `Reflect` for out-of-bounds annealing proposals |
 | `Fixed` | evaluates once; `optimize`, `operator==` |
-| `Objective`, `Differentiable`, `TwiceDifferentiable` | objective interfaces: `dim`, `value`, `value_at_changes`, `fill_intervals`, `gradient_into`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
+| `Objective`, `Differentiable`, `TwiceDifferentiable` | objective interfaces: `dim`, `value`, `value_at_changes`, `notify_candidate_accepted`, `fill_intervals`, `gradient_into`, `value_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
 | `OptimizerResult` | `params`, `value`, `iterations`, `converged`, `operator==` |
 | `RestartConfig` | `count`, `seed`, `operator==` |
 | `OptimizerTraits` | `uses_change_indices` of an optimizer type |

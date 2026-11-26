@@ -272,6 +272,7 @@ same value and gradient under both policies: 1
 | `theta` | 因子分解の失敗後にパラメータを戻すためのバックアップ |
 | `col_partials` | 決定的な縮約のための、列ごとの部分和（長さ $3n$） |
 | `nested`、`weighted`、`ensure_weighted(n_bufs)` | 木の評価用と、1 パス勾配用の `NestedBuffers` |
+| `ard_s2_storage`、`ard_s2_ready`、`ensure_ard_s2(n_ard_leaves)`、`clear_ard_s2_ready()`、`ard_s2_mut(slot)`、`ard_s2_ref(slot)` | 順方向の評価で保存し、逆方向の `weighted_grads` で再利用する ARD 葉ごとのパック済み $s^2$ 記憶域 |
 | `hessian` | 遅延確保される `HessianScratch` |
 | `factor_jitter` | 直近に成功した因子分解で使ったジッター |
 
@@ -308,9 +309,11 @@ undeclared change rejected: 1
 | メンバ | 用途 |
 |---|---|
 | `LeafCache()` | 空のキャッシュ。何も確保しない |
-| `resize(n_leaves, n)` | 記憶領域の大きさを決め、すべての葉を汚れた状態にする |
+| `resize(n_leaves, n, ard_dims_per_leaf = {})` | グラム行列、ARD 葉ごとの $s^2$ スロット、動的な $O(d)$ 長さスケールスナップショットを確保し、すべての葉を汚れた状態にする |
 | `prepare_step(params, change_indices, kernel, total_params)` | ステップを検証し、汚れた葉に印をつける |
-| `evaluate_incremental(kernel, x, dist_cache, params, change_indices, total_params, out, uplo, scratch, nested)` | 汚れた葉を再計算し、すべての葉のグラム行列を合成して `out` に書く。途中で失敗するとキャッシュを無効にする |
+| `prime(kernel, x, dist_cache, params, out, uplo, scratch, nested)` | すべての葉を評価し、`params` から ARD の $s^2$ 基準を初期化する |
+| `evaluate_incremental(kernel, x, dist_cache, params, change_indices, total_params, out, uplo, scratch, nested, commit_immediately = true)` | 汚れた葉だけを再計算して合成後のグラム行列を `out` に書く（`commit_immediately == false` では非破壊の試行評価として保持）。失敗時はキャッシュを無効化する |
+| `commit_candidate(accepted, kernel, x, dist_cache)` | `accepted == true` のとき試行した ARD $s^2$ 基準を確定し、`false` なら受理済みの基準を壊さず $O(1)$ で破棄する |
 | `record(params)` | `params` を新しい基準として保存し、キャッシュを初期化済みにする |
 | `mark_all_dirty()`、`invalidate()` | 全再計算を強制する（後者は初期化済みの状態も解除する） |
 | `is_primed()`、`is_leaf_dirty(leaf)`、`num_leaves()`、`order()`、`last_params()` | 状態の問い合わせ |

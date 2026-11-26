@@ -140,6 +140,10 @@ namespace cxxgpr::optimizer
                 }
                 if (!cand_res.has_value() || !std::isfinite(*cand_res))
                 {
+                    if (!changed_indices.empty())
+                    {
+                        obj.notify_candidate_accepted(false);
+                    }
                     continue;
                 }
 
@@ -147,6 +151,10 @@ namespace cxxgpr::optimizer
                 const double cand_val = *cand_res;
                 const double delta = cand_val - current_val;
                 const bool accept = (delta <= 0.0) || (temp > 0.0 && rng.unit() < std::exp(-delta / temp));
+                if (!changed_indices.empty())
+                {
+                    obj.notify_candidate_accepted(accept);
+                }
                 if (accept)
                 {
                     current = candidate;

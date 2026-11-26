@@ -9,6 +9,7 @@
 
 #include "cxxgpr/gpr/distance_gpr.hpp"
 
+#include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/core/rng.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
@@ -37,6 +38,21 @@
 
 namespace
 {
+
+    /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
+    [[nodiscard]] bool has_external_blas_backend() noexcept
+    {
+        const auto info = cxxgpr::build_info();
+        for (const auto& dep : info.dependencies)
+        {
+            if (dep.name == "blas_backend")
+            {
+                return dep.version != "BuiltIn";
+            }
+        }
+        return false;
+    }
 
     /// @brief Synthetic regression dataset with n points in d dimensions.
     struct Data
@@ -741,26 +757,66 @@ namespace
         {
             FAIL() << "single-thread covariance failed";
         }
+        // Under an external BLAS backend, verify fixed-thread repeatability (4 threads repeated == 4 threads) and
+        // tight cross-thread agreement; under BuiltIn, verify exact bitwise invariance across 1, 2, and 4 threads.
+        const auto rep4 = run(4);
+        const auto rep4_repeat = run(4);
+        ASSERT_TRUE(rep4.has_value());
+        ASSERT_TRUE(rep4_repeat.has_value());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(rep4->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(rep4_repeat->neg_log_marginal_likelihood())
+        );
+        ASSERT_EQ(rep4->alpha().size(), data.n);
+        ASSERT_EQ(rep4_repeat->alpha().size(), data.n);
+        for (std::size_t i = 0; i < data.n; ++i)
+        {
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(rep4->alpha()[i]), std::bit_cast<std::uint64_t>(rep4_repeat->alpha()[i])
+            ) << "repeat index "
+              << i;
+        }
+
+        const bool ext_blas = has_external_blas_backend();
         for (const int threads : {2, 4})
         {
-            auto other = run(threads);
+            auto other = (threads == 4) ? rep4 : run(threads);
             if (!other.has_value())
             {
                 FAIL() << "fit failed for threads " << threads;
             }
-            EXPECT_EQ(other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood());
             ASSERT_EQ(other->alpha().size(), reference->alpha().size());
-            for (std::size_t i = 0; i < data.n; ++i)
-            {
-                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
-            }
             auto pred = other->predict_covariance(cross, query);
             if (!pred.has_value())
             {
                 FAIL() << "covariance failed for threads " << threads;
             }
-            EXPECT_EQ(pred->mean, ref_pred->mean);
-            EXPECT_EQ(pred->covariance, ref_pred->covariance);
+            if (!ext_blas)
+            {
+                EXPECT_EQ(other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood());
+                for (std::size_t i = 0; i < data.n; ++i)
+                {
+                    EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+                }
+                EXPECT_EQ(pred->mean, ref_pred->mean);
+                EXPECT_EQ(pred->covariance, ref_pred->covariance);
+            }
+            else
+            {
+                EXPECT_NEAR(
+                    other->neg_log_marginal_likelihood(), reference->neg_log_marginal_likelihood(),
+                    1e-11 * std::max(1.0, std::abs(reference->neg_log_marginal_likelihood()))
+                );
+                for (std::size_t i = 0; i < data.n; ++i)
+                {
+                    EXPECT_NEAR(
+                        other->alpha()[i], reference->alpha()[i], 1e-9 * std::max(1.0, std::abs(reference->alpha()[i]))
+                    ) << "threads "
+                      << threads << " index " << i;
+                }
+                EXPECT_LT(rel_diff(pred->mean, ref_pred->mean), 1e-10);
+                EXPECT_LT(rel_diff(pred->covariance, ref_pred->covariance), 1e-10);
+            }
         }
 #ifdef _OPENMP
         omp_set_num_threads(saved_threads);
@@ -1050,9 +1106,12 @@ namespace
             ASSERT_TRUE(reference.has_value());
             ASSERT_TRUE(model.has_value()) << model.error().message();
             EXPECT_LT(rel_diff(model->alpha(), reference->alpha()), tol);
+            // Under ReevaluateKernel, alpha is refined in double while log|A| still reflects the float factor L;
+            // allow float factorization order differences under vendor BLAS up to 5e-5 for the scalar NLL.
+            const double nll_tol = std::max(tol, 5e-5);
             EXPECT_NEAR(
                 model->neg_log_marginal_likelihood(), reference->optimizer_result().value,
-                tol * std::max(1.0, std::abs(reference->optimizer_result().value))
+                nll_tol * std::max(1.0, std::abs(reference->optimizer_result().value))
             );
             auto p_ref = reference->predict(data.q, data.m, data.d);
             auto p_dist = model->predict(cross);
@@ -1706,6 +1765,93 @@ namespace
         }
         );
         ASSERT_TRUE(ran);
+    }
+
+    /// @brief Verifies supplied-ARD incremental FSA optimization and single-pass forward s^2 gradient reuse.
+    /// @details Confirms: (1) DistanceGpr<FastSimulatedAnnealing> over ArdDistance (DistanceOnly and WithPoints)
+    /// matches coordinate Gpr<FastSimulatedAnnealing> across identical seeds; (2) DistanceObjective allocates zero heap
+    /// memory on warmed value_and_gradient_into() (reusing forward s^2 inside single-pass fill_gradient) and matches
+    /// Lbfgs optimum of the coordinate reference.
+    TEST(DistanceGprTest, ArdDistanceFsaIncrementalAndGradientS2Reuse)
+    {
+        // Spec: REQ-05, DES-11, DES-20, DES-21
+        const Data data = make_data(12, 4, 3);
+        auto ard_slot_res = cxxgpr::ArdDistance::create(data.d);
+        ASSERT_TRUE(ard_slot_res.has_value());
+        const auto ard_slot = *ard_slot_res;
+
+        std::vector<std::vector<double>> dim_train(data.d);
+        std::vector<cxxgpr::MatrixRef<double>> dim_train_views;
+        std::vector<std::vector<double>> dim_cross(data.d);
+        std::vector<cxxgpr::MatrixRef<double>> dim_cross_views;
+        dim_train_views.reserve(data.d);
+        dim_cross_views.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            dim_train[dim] = table(data.x, data.n, data.x, data.n, data.d, dim);
+            dim_train_views.emplace_back(dim_train[dim].data(), data.n, data.n, data.n);
+            dim_cross[dim] = table(data.x, data.n, data.q, data.m, data.d, dim);
+            dim_cross_views.emplace_back(dim_cross[dim].data(), data.n, data.m, data.n);
+        }
+        cxxgpr::DistanceSource train_src;
+        cxxgpr::DistanceSource cross_src;
+        train_src.bind_ard(ard_slot.slot(), dim_train_views);
+        cross_src.bind_ard(ard_slot.slot(), dim_cross_views);
+
+        const std::array<double, 3> ell0{0.8, 1.3, 1.8};
+        const auto rbf_ard = cxxgpr::RbfArdKernel::create(ell0).value();
+        const auto coord_spec =
+            (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value()) * cxxgpr::KernelSpec(rbf_ard))
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.02).value());
+        const auto dist_only_k =
+            (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.2).value())
+                * ard_slot.rbf_ard(rbf_ard).value())
+            + cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.02).value());
+
+        // Part 1: FastSimulatedAnnealing incremental ARD optimization matches coordinate Gpr<FastSimulatedAnnealing>.
+        const auto fsa = cxxgpr::optimizer::FastSimulatedAnnealing().with_max_iterations(25U).with_restarts(0U);
+        const auto dist_fsa = cxxgpr::DistanceGpr<cxxgpr::optimizer::FastSimulatedAnnealing>(dist_only_k, fsa)
+                                  .with_noise_variance(0.05)
+                                  .value()
+                                  .fit(train_src, data.y);
+        const auto coord_fsa = cxxgpr::Gpr<cxxgpr::optimizer::FastSimulatedAnnealing>(coord_spec, fsa)
+                                   .with_noise_variance(0.05)
+                                   .value()
+                                   .fit(data.x, data.n, data.d, data.y);
+        ASSERT_TRUE(dist_fsa.has_value()) << dist_fsa.error().message();
+        ASSERT_TRUE(coord_fsa.has_value()) << coord_fsa.error().message();
+        EXPECT_NEAR(dist_fsa->neg_log_marginal_likelihood(), coord_fsa->neg_log_marginal_likelihood(), 1e-9);
+        EXPECT_LT(rel_diff(dist_fsa->optimizer_result().params, coord_fsa->optimizer_result().params), 1e-9);
+
+        const auto dist_pred = dist_fsa->predict(cross_src);
+        const auto coord_pred = coord_fsa->predict(data.q, data.m, data.d);
+        ASSERT_TRUE(dist_pred.has_value()) << dist_pred.error().message();
+        ASSERT_TRUE(coord_pred.has_value()) << coord_pred.error().message();
+        EXPECT_LT(rel_diff(dist_pred->mean, coord_pred->mean), 1e-9);
+
+        // Part 2: Lbfgs optimization and zero-alloc gradient evaluation reusing forward s^2.
+        const auto lbfgs = cxxgpr::optimizer::Lbfgs().with_max_iterations(15U);
+        const auto dist_lbfgs = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dist_only_k, lbfgs)
+                                    .with_noise_variance(0.05)
+                                    .value()
+                                    .fit(train_src, data.y);
+        const auto coord_lbfgs = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_spec, lbfgs)
+                                     .with_noise_variance(0.05)
+                                     .value()
+                                     .fit(data.x, data.n, data.d, data.y);
+        ASSERT_TRUE(dist_lbfgs.has_value()) << dist_lbfgs.error().message();
+        ASSERT_TRUE(coord_lbfgs.has_value()) << coord_lbfgs.error().message();
+        EXPECT_NEAR(dist_lbfgs->neg_log_marginal_likelihood(), coord_lbfgs->neg_log_marginal_likelihood(), 1e-8);
+        EXPECT_LT(rel_diff(dist_lbfgs->optimizer_result().params, coord_lbfgs->optimizer_result().params), 1e-7);
+
+        std::size_t probe_allocs = 999U;
+        const auto probed =
+            cxxgpr::DistanceGpr<AllocationProbeOptimizer>(dist_only_k, AllocationProbeOptimizer{&probe_allocs})
+                .with_noise_variance(0.05)
+                .value()
+                .fit(train_src, data.y);
+        ASSERT_TRUE(probed.has_value()) << probed.error().message();
+        EXPECT_EQ(probe_allocs, 0U);
     }
 
 }  // namespace

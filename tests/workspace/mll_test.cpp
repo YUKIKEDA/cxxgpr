@@ -7,10 +7,12 @@
 /// differences across cache and Cholesky buffer policies, Single/MixedPrecision parity, and
 /// bitwise determinism across OpenMP thread counts.
 
+#include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/workspace/workspace.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -26,6 +28,21 @@
 
 namespace
 {
+
+    /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
+    [[nodiscard]] bool has_external_blas_backend() noexcept
+    {
+        const auto info = cxxgpr::build_info();
+        for (const auto& dep : info.dependencies)
+        {
+            if (dep.name == "blas_backend")
+            {
+                return dep.version != "BuiltIn";
+            }
+        }
+        return false;
+    }
 
     /// @brief Verifies FitBuffers/WorkspaceCore sizing policies and QueryWorkspace zero-alloc reuse.
     /// @details Checks EmptyInput on zero size, Retain vs Reuse W-matrix and distance buffer flags,
@@ -224,9 +241,9 @@ namespace
         }
     }
 
-    /// @brief Verifies MLL and analytical gradients are bit-identical across 1 and 4 OpenMP threads.
-    /// @details Compares std::bit_cast<uint64_t> bit patterns of every gradient entry and final MLL
-    /// on an n = 72 composite kernel under FastApprox across single- and multi-threaded OpenMP runs.
+    /// @brief Verifies MLL and analytical gradients stay deterministic on same-thread repeats and agree across threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns for repeated 4-thread runs (and 1 vs 4 threads under
+    /// BuiltIn SIMD linear algebra, or scaled rounding tolerance when an external vendor BLAS is linked).
     TEST(WorkspaceMllTest, MllAndGradientAreBitwiseDeterministicAcrossOpenMpThreads)
     {
         // Construct an n = 72 2D synthetic dataset exercising OpenMP column reductions.
@@ -279,14 +296,25 @@ namespace
 #endif
         const auto r1 = run_threads(1);
         const auto r4 = run_threads(4);
+        const auto r4_repeat = run_threads(4);
 #ifdef _OPENMP
         omp_set_num_threads(saved);
 #endif
 
         ASSERT_EQ(r1.size(), r4.size());
+        ASSERT_EQ(r4.size(), r4_repeat.size());
+        const bool ext_blas = has_external_blas_backend();
         for (std::size_t i = 0; i < r1.size(); ++i)
         {
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[i]), std::bit_cast<std::uint64_t>(r4[i])) << "i=" << i;
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(r4[i]), std::bit_cast<std::uint64_t>(r4_repeat[i])) << "i=" << i;
+            if (!ext_blas)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(r1[i]), std::bit_cast<std::uint64_t>(r4[i])) << "i=" << i;
+            }
+            else
+            {
+                EXPECT_NEAR(r1[i], r4[i], 1e-11 * std::max(1.0, std::abs(r1[i]))) << "i=" << i;
+            }
         }
     }
 
@@ -402,9 +430,9 @@ namespace
         }
     }
 
-    /// @brief Verifies analytical MLL Hessian entries are bit-identical across 1 and 4 OpenMP threads.
-    /// @details Compares std::bit_cast<uint64_t> bit patterns of the full Hessian matrix between
-    /// 1-thread and 4-thread OpenMP executions on an n = 72 training set.
+    /// @brief Verifies analytical MLL Hessian entries stay deterministic on repeats and agree across threads.
+    /// @details Compares std::bit_cast<uint64_t> bit patterns for repeated 4-thread runs (and 1 vs 4 threads under
+    /// BuiltIn SIMD linear algebra, or scaled rounding tolerance when external vendor BLAS is linked) on n = 72.
     TEST(WorkspaceMllTest, AnalyticalHessianIsBitwiseDeterministicAcrossOpenMpThreads)
     {
         // Evaluate full Hessian on n = 72 points under 1 and 4 threads and compare raw bits.
@@ -447,20 +475,33 @@ namespace
 #endif
         const auto h1 = run_threads(1);
         const auto h4 = run_threads(4);
+        const auto h4_repeat = run_threads(4);
 #ifdef _OPENMP
         omp_set_num_threads(saved);
 #endif
 
         ASSERT_EQ(h1.size(), h4.size());
+        ASSERT_EQ(h4.size(), h4_repeat.size());
+        const bool ext_blas = has_external_blas_backend();
         for (std::size_t i = 0; i < h1.size(); ++i)
         {
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(h1[i]), std::bit_cast<std::uint64_t>(h4[i])) << "i=" << i;
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(h4[i]), std::bit_cast<std::uint64_t>(h4_repeat[i])) << "i=" << i;
+            if (!ext_blas)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(h1[i]), std::bit_cast<std::uint64_t>(h4[i])) << "i=" << i;
+            }
+            else
+            {
+                EXPECT_NEAR(h1[i], h4[i], 1e-10 * std::max(1.0, std::abs(h1[i]))) << "i=" << i;
+            }
         }
     }
 
     /// @brief Verifies 1-pass isotropic/linear adjoint contraction (n >= 128) and DistanceKernel non-zero diag parity.
-    /// @details Confirms analytical gradients match central finite differences, stay bit-identical between 1 and 4
-    /// OpenMP threads, allocate zero heap bytes in reuse calls, and handle positive DistanceKernel diagonals cleanly.
+    /// @details Confirms analytical gradients match central finite differences, stay bitwise deterministic across
+    /// repeated calls and serial-vs-parallel col_partials (plus 1 vs 4 threads under Eigen, or 1e-11 relative tolerance
+    /// under external BLAS), allocate zero heap bytes in reuse calls, and handle positive DistanceKernel diagonals
+    /// cleanly.
     TEST(WorkspaceMllTest, IsotropicOnePassWeightedGradsLargeNAndNonZeroDistDiag)
     {
         // Case 1: n = 132 (>= 128 parallel threshold) across all 5 leaf_iso_weighted_grads kernel families (1D Periodic
@@ -516,13 +557,24 @@ namespace
 #endif
             const auto g1 = run_threads(1);
             const auto g4 = run_threads(4);
+            const auto g4_repeat = run_threads(4);
 #ifdef _OPENMP
             omp_set_num_threads(saved);
 #endif
             ASSERT_EQ(g1.size(), g4.size());
+            ASSERT_EQ(g4.size(), g4_repeat.size());
+            const bool ext_blas = has_external_blas_backend();
             for (std::size_t p = 0U; p < g1.size(); ++p)
             {
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(g1[p]), std::bit_cast<std::uint64_t>(g4[p])) << "p=" << p;
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(g4[p]), std::bit_cast<std::uint64_t>(g4_repeat[p])) << "p=" << p;
+                if (!ext_blas)
+                {
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(g1[p]), std::bit_cast<std::uint64_t>(g4[p])) << "p=" << p;
+                }
+                else
+                {
+                    EXPECT_NEAR(g1[p], g4[p], 1e-11 * std::max(1.0, std::abs(g1[p]))) << "p=" << p;
+                }
             }
 
             // Finite-difference check on representative parameters across each isotropic/linear family.
@@ -623,10 +675,11 @@ namespace
         }
     }
 
-    /// @brief Verifies parallel W construction and MLL+grad match bitwise across 1/2/4 threads for odd n >= 96.
+    /// @brief Verifies parallel W construction and MLL+grad stay deterministic on repeats and agree across threads.
     /// @details Evaluates DoublePrecision and SinglePrecision mll_and_gradient_into at n = 99, 131, and 389 with
-    /// zero heap allocations under NoAllocationScope(AuditMode::CppAndEigen), checks exact bitwise invariance of MLL,
-    /// gradients, and lower-triangular W across 1/2/4 OpenMP threads, and verifies parity with CholeskyBuffer::Reuse.
+    /// zero heap allocations under NoAllocationScope(AuditMode::CppAndEigen), checks exact bitwise invariance on
+    /// repeated 4-thread calls (and across 1/2/4 threads under Eigen, or scaled rounding tolerances under external
+    /// vendor BLAS), and verifies parity with CholeskyBuffer::Reuse.
     TEST(WorkspaceMllTest, MllAndGradBitwiseDeterministicAcrossThreadsAndOddSizes)
     {
         // Spec: DES-13, DES-15, DES-20
@@ -702,36 +755,86 @@ namespace
             const auto s1 = run_threads(1);
             const auto s2 = run_threads(2);
             const auto s4 = run_threads(4);
+            const auto s4_repeat = run_threads(4);
 #ifdef _OPENMP
             omp_set_num_threads(saved_threads);
 #endif
 
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s2.mll));
-            EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s4.mll));
+            const bool ext_blas = has_external_blas_backend();
+            const double blas_tol = std::same_as<Scalar, double> ? 1e-11 : 1e-4;
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(s4.mll), std::bit_cast<std::uint64_t>(s4_repeat.mll));
+            if (!ext_blas)
+            {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s2.mll));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.mll), std::bit_cast<std::uint64_t>(s4.mll));
+            }
+            else
+            {
+                const double mll_tol = blas_tol * std::max(1.0, std::abs(s1.mll));
+                EXPECT_NEAR(s1.mll, s2.mll, mll_tol);
+                EXPECT_NEAR(s1.mll, s4.mll, mll_tol);
+            }
             for (std::size_t p = 0U; p < p_tot; ++p)
             {
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s2.grad[p]));
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s4.grad[p]));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(s4.grad[p]), std::bit_cast<std::uint64_t>(s4_repeat.grad[p]));
+                if (!ext_blas)
+                {
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s2.grad[p]));
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(s1.grad[p]), std::bit_cast<std::uint64_t>(s4.grad[p]));
+                }
+                else
+                {
+                    const double grad_tol = blas_tol * std::max(1.0, std::abs(s1.grad[p]));
+                    EXPECT_NEAR(s1.grad[p], s2.grad[p], grad_tol);
+                    EXPECT_NEAR(s1.grad[p], s4.grad[p], grad_tol);
+                }
             }
             for (std::size_t idx = 0U; idx < s1.w_lower.size(); ++idx)
             {
                 if constexpr (std::same_as<Scalar, double>)
                 {
                     EXPECT_EQ(
-                        std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s2.w_lower[idx])
+                        std::bit_cast<std::uint64_t>(s4.w_lower[idx]),
+                        std::bit_cast<std::uint64_t>(s4_repeat.w_lower[idx])
                     );
-                    EXPECT_EQ(
-                        std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s4.w_lower[idx])
-                    );
+                    if (!ext_blas)
+                    {
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s2.w_lower[idx])
+                        );
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint64_t>(s1.w_lower[idx]), std::bit_cast<std::uint64_t>(s4.w_lower[idx])
+                        );
+                    }
+                    else
+                    {
+                        const double w_tol = blas_tol * std::max(1.0, std::abs(s1.w_lower[idx]));
+                        EXPECT_NEAR(s1.w_lower[idx], s2.w_lower[idx], w_tol);
+                        EXPECT_NEAR(s1.w_lower[idx], s4.w_lower[idx], w_tol);
+                    }
                 }
                 else
                 {
                     EXPECT_EQ(
-                        std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s2.w_lower[idx])
+                        std::bit_cast<std::uint32_t>(s4.w_lower[idx]),
+                        std::bit_cast<std::uint32_t>(s4_repeat.w_lower[idx])
                     );
-                    EXPECT_EQ(
-                        std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s4.w_lower[idx])
-                    );
+                    if (!ext_blas)
+                    {
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s2.w_lower[idx])
+                        );
+                        EXPECT_EQ(
+                            std::bit_cast<std::uint32_t>(s1.w_lower[idx]), std::bit_cast<std::uint32_t>(s4.w_lower[idx])
+                        );
+                    }
+                    else
+                    {
+                        const auto ref = static_cast<double>(s1.w_lower[idx]);
+                        const double w_tol = blas_tol * std::max(1.0, std::abs(ref));
+                        EXPECT_NEAR(ref, static_cast<double>(s2.w_lower[idx]), w_tol);
+                        EXPECT_NEAR(ref, static_cast<double>(s4.w_lower[idx]), w_tol);
+                    }
                 }
             }
 
@@ -788,7 +891,7 @@ namespace
 
         auto check = [&]<typename P>(const cxxgpr::KernelSpec& spec, const char* label)
         {
-            using Scalar = typename P::Storage;
+            using Scalar = P::Storage;
             SCOPED_TRACE(label);
             auto compiled = spec.compile<Scalar>();
             const std::size_t nk = compiled.num_params();
@@ -870,6 +973,92 @@ namespace
             check.template operator()<cxxgpr::SinglePrecision>(spec, "SinglePrecision");
             check.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(spec, "MixedPromote");
             check.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(spec, "MixedReevaluate");
+        }
+    }
+
+    /// @brief Verifies forward-to-backward ARD s^2 reuse in mll_and_gradient_into() across Cached and Uncached modes.
+    /// @details Confirms that forward apply_keeping() / apply_cached_keeping() captured packed s^2 buffers match direct
+    /// weighted_grads() (without precomputed s^2) and finite differences, with zero heap allocations after warm-up.
+    TEST(WorkspaceMllTest, ArdForwardS2ReuseMatchesDirectWeightedGradsWithZeroAlloc)
+    {
+        // Spec: REQ-02, REQ-08, DES-11, DES-20
+        constexpr std::size_t n = 10U;
+        constexpr std::size_t d = 3U;
+        std::vector<double> x_raw(n * d);
+        std::vector<double> y_raw(n);
+        for (std::size_t row = 0U; row < n; ++row)
+        {
+            for (std::size_t col = 0U; col < d; ++col)
+            {
+                x_raw[(col * n) + row] = (0.19 * static_cast<double>(row)) - (0.27 * static_cast<double>(col));
+            }
+            y_raw[row] = std::sin(0.5 * static_cast<double>(row)) + (0.05 * static_cast<double>(row));
+        }
+
+        const auto lik = cxxgpr::GaussianLikelihood::create(0.08).value();
+        const auto jitter = cxxgpr::JitterPolicy::fixed(1e-8).value();
+        const auto composite_ard = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.3).value())
+                * cxxgpr::KernelSpec(cxxgpr::RationalQuadraticArdKernel::create(std::array{0.7, 1.1, 1.6}, 2.2).value())
+            + cxxgpr::KernelSpec(
+                cxxgpr::MaternArdKernel::create(std::array{0.9, 1.4, 2.0}, cxxgpr::MaternNu::ThreeHalves).value()
+            )
+            + cxxgpr::KernelSpec(cxxgpr::RbfArdKernel::create(std::array{1.2, 0.8, 1.5}).value());
+
+        for (const auto cache_policy : {cxxgpr::DistanceCachePolicy::Cached, cxxgpr::DistanceCachePolicy::Uncached})
+        {
+            auto compiled = composite_ard.compile<double>();
+            const std::size_t nk = compiled.num_params();
+            const std::size_t n_ard = compiled.ard_leaf_count();
+            ASSERT_EQ(n_ard, 3U);
+
+            auto bufs =
+                cxxgpr::FitBuffers<cxxgpr::DoublePrecision>::create(n, cache_policy, cxxgpr::CholeskyBuffer::Retain);
+            ASSERT_TRUE(bufs.has_value());
+            const cxxgpr::MatrixRef<double> x_ref(x_raw.data(), n, d, n);
+
+            std::vector<double> grad_warm(nk + 1U, 0.0);
+            ASSERT_TRUE(
+                cxxgpr::mll_and_gradient_into(compiled, lik, x_ref, y_raw, jitter, *bufs, grad_warm).has_value()
+            );
+
+            std::vector<double> params(nk);
+            ASSERT_TRUE(compiled.get_params(params).has_value());
+            for (double& p : params)
+            {
+                p += 0.12;
+            }
+            ASSERT_TRUE(compiled.set_params(params).has_value());
+
+            std::vector<double> grad_reused(nk + 1U, 0.0);
+            {
+                const cxxgpr::test_support::NoAllocationScope audit(cxxgpr::test_support::AuditMode::CppAndEigen);
+                ASSERT_TRUE(
+                    cxxgpr::mll_and_gradient_into(compiled, lik, x_ref, y_raw, jitter, *bufs, grad_reused).has_value()
+                );
+                EXPECT_EQ(audit.delta_allocations(), 0U);
+            }
+
+            // Confirm forward capture populated every ARD slot and matches direct weighted_grads() without s^2 reuse.
+            const std::size_t per_dim = (n * (n + 1U)) / 2U;
+            for (std::size_t slot = 0U; slot < n_ard; ++slot)
+            {
+                EXPECT_EQ(bufs->core.ard_s2_ref(slot).size(), per_dim);
+            }
+            std::vector<double> direct_kgrads(nk, 0.0);
+            const cxxgpr::DistanceCache<double>* dist_ptr =
+                (bufs->dist.has_value() && (bufs->dist->has_dist() || bufs->dist->has_ard())) ? &(*bufs->dist)
+                                                                                              : nullptr;
+            ASSERT_TRUE(compiled
+                    .weighted_grads(
+                        x_ref, dist_ptr, bufs->w_ref(), direct_kgrads, bufs->core.kernel_scratch_mut(),
+                        bufs->core.nested, bufs->core.weighted, compiled.kept_products(),
+                        std::span<double>(bufs->core.col_partials)
+                    )
+                    .has_value());
+            for (std::size_t p = 0U; p < nk; ++p)
+            {
+                EXPECT_NEAR(grad_reused[p], -0.5 * direct_kgrads[p], 1e-12) << "param " << p;
+            }
         }
     }
 

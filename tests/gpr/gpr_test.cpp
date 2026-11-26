@@ -10,14 +10,18 @@
 
 #include "cxxgpr/gpr/gpr.hpp"
 
+#include "cxxgpr/core/build_info.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
 #include "cxxgpr/transform/transform.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <limits>
 #include <optional>
@@ -36,6 +40,21 @@
 
 namespace
 {
+
+    /// @brief Returns true when the compiled library links an external BLAS backend (OpenBLAS or MKL).
+    /// @return True if `build_info().dependencies` reports an external vendor `blas_backend`, false otherwise.
+    [[nodiscard]] bool has_external_blas_backend() noexcept
+    {
+        const auto info = cxxgpr::build_info();
+        for (const auto& dep : info.dependencies)
+        {
+            if (dep.name == "blas_backend")
+            {
+                return dep.version != "BuiltIn";
+            }
+        }
+        return false;
+    }
 
     /// @brief Compile-time trait checking whether a model type exposes const predict(MatrixRef).
     /// @tparam T Candidate GPR model type (unfitted Gpr vs FittedGpr).
@@ -391,10 +410,9 @@ namespace
 #endif
     };
 
-    /// @brief Verifies mixed-precision refinement weights are bit-identical for any OpenMP thread count.
-    /// @details The float factorization and the kernel evaluations run on OpenMP threads, and the blocked
-    /// double-precision residual sums every row over its columns in ascending order. None of them may change a single
-    /// bit of the refined weights or the summary when the thread count changes.
+    /// @brief Verifies MixedPrecision iterative refinement is deterministic and consistent across OpenMP threads.
+    /// @details Confirms repeated 4-thread fits produce bit-identical `alpha` and summaries, while 1/2/4-thread fits
+    /// match bitwise under BuiltIn SIMD linear algebra or within 1e-8 relative tolerance under external vendor BLAS.
     TEST(GprModelsTest, MixedPrecisionRefinementIsBitwiseIdenticalAcrossThreadCounts)
     {
         // Spec: DES-05, DES-20
@@ -435,9 +453,27 @@ namespace
             FAIL() << "reference refinement summary is missing";
         }
         EXPECT_FALSE(reference_summary->used_fallback());
+        const auto rep4 = run(4);
+        const auto rep4_repeat = run(4);
+        ASSERT_TRUE(rep4.has_value());
+        ASSERT_TRUE(rep4_repeat.has_value());
+        ASSERT_TRUE(rep4->refinement_summary().has_value());
+        ASSERT_TRUE(rep4_repeat->refinement_summary().has_value());
+        ASSERT_EQ(rep4->alpha().size(), n);
+        ASSERT_EQ(rep4_repeat->alpha().size(), n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(rep4->alpha()[i]), std::bit_cast<std::uint64_t>(rep4_repeat->alpha()[i])
+            ) << "repeat index "
+              << i;
+        }
+        EXPECT_EQ(*rep4->refinement_summary(), *rep4_repeat->refinement_summary());
+
+        const bool ext_blas = has_external_blas_backend();
         for (const int threads : {2, 4})
         {
-            const auto other = run(threads);
+            const auto other = (threads == 4) ? rep4 : run(threads);
             ASSERT_TRUE(other.has_value());
             const auto other_summary = other->refinement_summary();
             if (!other_summary.has_value())
@@ -445,11 +481,26 @@ namespace
                 FAIL() << "refinement summary is missing for threads " << threads;
             }
             ASSERT_EQ(other->alpha().size(), reference->alpha().size());
-            for (std::size_t i = 0; i < n; ++i)
+            if (!ext_blas)
             {
-                EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    EXPECT_EQ(other->alpha()[i], reference->alpha()[i]) << "threads " << threads << " index " << i;
+                }
+                EXPECT_EQ(*other_summary, *reference_summary);
             }
-            EXPECT_EQ(*other_summary, *reference_summary);
+            else
+            {
+                EXPECT_EQ(other_summary->status, reference_summary->status);
+                EXPECT_FALSE(other_summary->used_fallback());
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    EXPECT_NEAR(
+                        other->alpha()[i], reference->alpha()[i], 1e-8 * std::max(1.0, std::abs(reference->alpha()[i]))
+                    ) << "threads "
+                      << threads << " index " << i;
+                }
+            }
         }
     }
 

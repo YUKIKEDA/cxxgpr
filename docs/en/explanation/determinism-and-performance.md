@@ -9,7 +9,7 @@ Reproducibility has levels, and it is useful to be exact about which one a state
 | Situation | Same result? |
 |---|---|
 | Same program, same data, run again | Yes. The library has no hidden state, no clock and no unseeded randomness. |
-| Same build, different number of OpenMP threads | Yes, bit for bit, for fitting, prediction, covariance and sampling. |
+| Same build, different number of OpenMP threads | Yes, bit for bit for pure OpenMP kernels and fixed external BLAS thread counts (external BLAS operations agree to rounding error when their own worker count varies). |
 | Same build, different but equal `FittedGpr` (copy, `predict` versus `predict_into`) | Yes. |
 | Same source, different compiler, optimization level, operating system or `CXXGPR_X86_ISA` | No guarantee. Results agree to rounding error, not to the last bit. |
 | Random streams (`Xoshiro256PlusPlus::next_u64`) across platforms | Yes: it is pure integer arithmetic. |
@@ -96,9 +96,9 @@ The guarantee covers the hot paths: a negative log marginal likelihood evaluatio
 
 Preallocation means memory is committed for the largest problem even if an iteration needs less, and the dense matrices dominate: a double-precision $n \times n$ matrix needs $8n^2$ bytes, 8 MB at $n = 1000$ and 800 MB at $n = 10\,000$. `FitPolicy` lets you choose the lean variant at some cost in time (see {doc}`../how-to/optimize-performance`), and `SinglePrecision` and `MixedPrecision` halve the matrix storage. The $O(n^3)$ time and $O(n^2)$ memory of exact inference are inherent; the allocation policy decides only how predictable they are.
 
-## SIMD kernels and the instruction set
+## Vectorized kernels, BLAS backends, and instruction sets
 
-The expensive loops are written for SIMD: Eigen provides the dense linear algebra, and cxxgpr adds its own vectorized kernels for the exponential in the kernel leaves, for non-finite checks, for the packed triangular products and for distance computation. They exist in three tiers, selected when the library is compiled:
+Dense matrix operations (`GEMM`, `SYRK`, `TRSM`, `GEMV`, `DOT`) use either cxxgpr's built-in cache-packed SIMD+OpenMP kernels (`BuiltIn`, default on Windows MSVC) or vendor BLAS/LAPACK libraries such as OpenBLAS or Intel oneMKL (`CXXGPR_BLAS_BACKEND`), while cxxgpr provides vectorized kernels for kernel transforms, non-finite checks, and distance evaluation across three x86-64 tiers:
 
 | Tier | Selected by | Typical hardware |
 |---|---|---|
@@ -106,9 +106,9 @@ The expensive loops are written for SIMD: Eigen provides the dense linear algebr
 | AVX2 with FMA | `-DCXXGPR_X86_ISA=AVX2` (the default on x86-64) | Almost all x86-64 CPUs since about 2013 |
 | SSE2 | `-DCXXGPR_X86_ISA=SSE2` | Every x86-64 CPU |
 
-On 64-bit Arm the cxxgpr kernels use their portable fallbacks and the option does not exist. There is no run-time dispatch: the tier is part of the compiled library, and a library built for AVX2 does not run on a CPU without it. Because fused multiply-add and different vector widths change rounding, two ISA tiers give results that agree to rounding error but not bit for bit, which is the fourth row of the table at the top. See {doc}`../reference/build-options` to choose.
+On 64-bit Arm the cxxgpr kernels use their portable fallbacks and the option does not exist. There is no run-time ISA tier switch for cxxgpr's own loops: two ISA tiers give results that agree to rounding error but not bit for bit, which is the fourth row of the table at the top. See {doc}`../reference/build-options` to choose. Note also that multi-threaded external BLAS libraries (OpenBLAS/oneMKL) only preserve bitwise invariance within fixed BLAS thread settings, whereas cxxgpr's OpenMP coordinate/Frobenius reductions remain bit-identical across thread counts.
 
-The fast exponential `KernelExp::FastApprox` is an independent speed/accuracy choice inside these kernels: a range-reduced degree-7 polynomial instead of `std::exp`. It changes results at the level of $10^{-5}$ relative and is therefore opt-in.
+The fast exponential `KernelExp::FastApprox` replaces `std::exp` inside built-in kernels with vectorized, 2x-unrolled AVX-512 / AVX2+FMA / SSE2 Estrin minimax polynomial evaluation (`1–2 ULP`, $< 10^{-14}$ relative error in `double` and $< 5 \times 10^{-7}$ in `float`). It avoids `std::exp` special-case tails and rounding overhead for throughput and is therefore opt-in.
 
 ## Why exactness costs time
 

@@ -67,12 +67,12 @@ namespace
         return out;
     }
 
-    /// @brief Verifies double-precision FastApprox exponential accuracy across [-50, 0] and extremes.
-    /// @details Checks relative error < 1.2e-7 against KernelExp::Accurate and probes exact 0.0,
+    /// @brief Verifies double-precision FastApprox exponential accuracy across [-700, 0] and extremes.
+    /// @details Checks relative error < 1.0e-14 (<= 2 ULP) against KernelExp::Accurate and probes exact 0.0,
     /// underflow (-800), overflow (+800), and quiet NaN IEEE-754 edge inputs.
     TEST(KernelExpTest, FastApproxDoubleAccuracyAndExtremes)
     {
-        // Sweep negative kernel arguments [-50, 0] and check relative error against std::exp oracle.
+        // Sweep negative kernel arguments [-50, 0] and full normal range [-700, 0] against std::exp oracle.
         for (int i = 0; i <= 500; ++i)
         {
             const double x = -0.1 * static_cast<double>(i);
@@ -80,7 +80,16 @@ namespace
             const double approx = cxxgpr::eval_kernel_exp(x, cxxgpr::KernelExp::FastApprox);
             ASSERT_GT(exact, 0.0);
             const double rel = std::abs(approx - exact) / exact;
-            EXPECT_LT(rel, 1.2e-7) << "x=" << x;
+            EXPECT_LT(rel, 1.0e-14) << "x=" << x;
+        }
+        for (int i = 0; i <= 7000; ++i)
+        {
+            const double x = -0.1 * static_cast<double>(i);
+            const double exact = cxxgpr::eval_kernel_exp(x, cxxgpr::KernelExp::Accurate);
+            const double approx = cxxgpr::eval_kernel_exp(x, cxxgpr::KernelExp::FastApprox);
+            ASSERT_GT(exact, 0.0);
+            const double rel = std::abs(approx - exact) / exact;
+            EXPECT_LT(rel, 1.0e-14) << "x=" << x;
         }
 
         // Probe IEEE-754 boundary cases: identity at 0, underflow to 0, overflow to +inf, NaN pass-through.
@@ -93,7 +102,7 @@ namespace
     }
 
     /// @brief Verifies single-precision FastApprox exponential accuracy across [-50, 0] and extremes.
-    /// @details Checks relative error < 1.0e-6F above subnormal range and probes 0, -120, +120, and NaN.
+    /// @details Checks relative error < 5.0e-7F (<= 2 ULP) above subnormal range and probes 0, -120, +120, and NaN.
     TEST(KernelExpTest, FastApproxFloatAccuracyAndExtremes)
     {
         // Sweep [-50, 0] in single precision excluding subnormal underflow regime.
@@ -105,7 +114,7 @@ namespace
             if (exact > 1e-35F)
             {
                 const float rel = std::abs(approx - exact) / exact;
-                EXPECT_LT(rel, 1.0e-6F) << "x=" << x;
+                EXPECT_LT(rel, 5.0e-7F) << "x=" << x;
             }
         }
 
@@ -197,7 +206,7 @@ namespace
 
             for (std::size_t idx = 0; idx < k_acc.size(); ++idx)
             {
-                EXPECT_NEAR(k_fast[idx], k_acc[idx], 5e-7 * std::max(1.0, std::abs(k_acc[idx])));
+                EXPECT_NEAR(k_fast[idx], k_acc[idx], 1e-13 * std::max(1.0, std::abs(k_acc[idx])));
             }
 
             const std::size_t np = ck.num_params();
@@ -607,6 +616,79 @@ namespace
                 }
             }
         }
+    }
+
+    /// @brief Verifies vectorized FastApprox RBF and Matern slices across lengths 1..33 and underflow bounds.
+    /// @details Covers unaligned lower-triangular column slices, exact diagonal 0 -> 1.0, moderate arguments,
+    /// and extreme separations yielding exp(-88.5) == 0.0f (float) and exp(-800) == 0.0 (double).
+    TEST(KernelExpTest, FastApproxVectorSlicesAndUnderflowAcrossLengths)
+    {
+        const std::vector<cxxgpr::KernelSpec> specs{
+            cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::OneHalf).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::ThreeHalves).value()),
+            cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(1.0, cxxgpr::MaternNu::FiveHalves).value()),
+        };
+
+        auto run_precision = [&specs]<typename T>(T far_x, T rel_tol)
+        {
+            for (const auto& spec : specs)
+            {
+                auto ck_acc = spec.compile<T>();
+                auto ck_fast = spec.compile<T>();
+                ck_fast.set_kernel_exp(cxxgpr::KernelExp::FastApprox);
+
+                for (std::size_t n = 1U; n <= 33U; ++n)
+                {
+                    std::vector<T> x(n);
+                    for (std::size_t i = 0U; i < n; ++i)
+                    {
+                        // Place last point far away to trigger deep exponential underflow inside the same slice.
+                        x[i] = (i + 1U == n && n > 1U) ? far_x : (static_cast<T>(0.15) * static_cast<T>(i));
+                    }
+                    const cxxgpr::MatrixRef<T> x_ref(x.data(), n, 1U, n);
+                    std::vector<T> k_acc(n * n, T{0});
+                    std::vector<T> k_fast(n * n, T{0});
+                    std::vector<T> scratch(n * n, T{0});
+                    ASSERT_TRUE(ck_acc
+                            .apply_points(
+                                x_ref, cxxgpr::MatrixMut<T>(k_acc.data(), n, n, n), cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<T>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+                    ASSERT_TRUE(ck_fast
+                            .apply_points(
+                                x_ref, cxxgpr::MatrixMut<T>(k_fast.data(), n, n, n), cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<T>(scratch.data(), n, n, n)
+                            )
+                            .has_value());
+
+                    for (std::size_t col = 0U; col < n; ++col)
+                    {
+                        EXPECT_EQ(k_fast[(col * n) + col], T{1}) << "n=" << n << " col=" << col;
+                        for (std::size_t row = col + 1U; row < n; ++row)
+                        {
+                            const T ref_val = k_acc[(col * n) + row];
+                            const T fast_val = k_fast[(col * n) + row];
+                            EXPECT_TRUE(std::isfinite(fast_val)) << "n=" << n << " row=" << row << " col=" << col;
+                            EXPECT_GE(fast_val, T{0}) << "n=" << n << " row=" << row << " col=" << col;
+                            if (ref_val == T{0})
+                            {
+                                EXPECT_EQ(fast_val, T{0}) << "n=" << n << " row=" << row << " col=" << col;
+                            }
+                            else
+                            {
+                                EXPECT_NEAR(fast_val, ref_val, rel_tol * std::max(T{1}, ref_val))
+                                    << "n=" << n << " row=" << row << " col=" << col;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        run_precision(60.0, 1e-14);
+        run_precision(150.0F, 1e-6F);
     }
 
 }  // namespace

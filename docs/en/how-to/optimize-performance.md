@@ -126,6 +126,8 @@ checksum of the 64-point prediction: edb08ca7add4082b
 
 How this is achieved is explained in {doc}`../explanation/determinism-and-performance`. If you call cxxgpr from your own parallel loop, give each thread its own `FittedGpr` copy and make sure the OpenMP runtime does not run nested parallel regions with `OMP_NUM_THREADS` threads each; otherwise you oversubscribe the machine.
 
+When using Intel oneMKL (`-DCXXGPR_BLAS_BACKEND=MKL`) on hybrid P-core / E-core processors or alongside MSVC OpenMP loops, note that Windows oneMKL (`libiomp5md.dll`) defaults to `KMP_BLOCKTIME=0` (passive wait). For dedicated workloads executing rapid kernel evaluations or small-to-medium optimization iterations, setting `KMP_BLOCKTIME=200` with `KMP_AFFINITY=disabled` and pinning threads to physical performance cores (`OMP_NUM_THREADS` / `MKL_NUM_THREADS` matching P-core count) avoids repeated thread wake-up latency and E-core spill; leave `KMP_BLOCKTIME=0` when sharing the machine with other processes or independent worker pools.
+
 ## Choose a precision policy
 
 `Gpr` and `FittedGpr` take the precision as their second template argument: `Gpr<optimizer::Lbfgs, SinglePrecision>`. The four policies are `DoublePrecision`, `SinglePrecision`, `MixedPrecision<PromoteStorage>` and `MixedPrecision<ReevaluateKernel>`.
@@ -204,7 +206,7 @@ The same switches exist for the low-level buffers: `FitBuffers<P>::create(n, cac
 
 ## Use the fast exponential
 
-`Gpr::with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernel leaves with a range-reduced degree-7 polynomial. It does not affect `exp(log theta)` parameter transforms or `CustomKernel` leaves.
+`Gpr::with_kernel_exp(KernelExp::FastApprox)` replaces `std::exp` inside the built-in kernel leaves with vectorized 1–2 ULP Estrin minimax exponential evaluation. It does not affect `exp(log theta)` parameter transforms or `CustomKernel` leaves.
 
 In the table above, the `Double + FastApprox` row shows the price: predictions differ by $1.4 \times 10^{-5}$ from the accurate ones, and the weights by $4 \times 10^{-4}$ on this ill-conditioned problem. At `n = 1000` the gradient evaluation was no faster (about 7.5 to 8.4 ms against 7.6 ms), because the Cholesky factorization dominates. `FastApprox` can only help when kernel evaluation is a large share of the work: many prediction points relative to the training size, or low-dimensional problems where the factorization is cheap. Measure before you switch it on, and keep `KernelExp::Accurate` otherwise.
 

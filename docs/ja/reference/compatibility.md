@@ -39,7 +39,7 @@ cxxgpr は、`MAJOR.MINOR.PATCH` の版番号を使う。現在のリリース�
 - エラーの契約。関数は `std::expected<T, GprError>` を返し、API の境界を越えて例外を投げない。
 - 列優先の入力と、`Gpr` と `FittedGpr` の分離。
 - 永続化フォーマットの版（`persist::FORMAT_VERSION`。現在は 1）。`format_version` が異なるディレクトリを読むと `UnsupportedPersistVersion` を返す。自動的な移行はない。{doc}`file-format` を参照。
-- 公開ヘッダーに、Eigen、nlohmann/json、OpenMP の型を含まない（{doc}`../explanation/design-principles`）。
+- 公開ヘッダーに、Eigen、BLAS/oneMKL、nlohmann/json、OpenMP の型を含まない（{doc}`../explanation/design-principles`）。
 
 ## CMake での版
 
@@ -59,7 +59,7 @@ cxxgpr は、C++ のインターフェースを持つ C++ の静的ライブラ�
 
 ## 数値の互換性
 
-結果は、{doc}`../explanation/determinism-and-performance` の規則のもとで再現できる。1 つのビルドの中では、スレッド数が違っていてもビット単位で一致する。コンパイラ、OS、`CXXGPR_X86_ISA` の段階が違えば、丸め誤差の範囲で一致する。`Xoshiro256PlusPlus` の乱数列は、どこでも同じ整数列である。
+結果は、{doc}`../explanation/determinism-and-performance` の規則のもとで再現できる。1 つのビルドの中では（外部 BLAS のスレッド設定を固定した場合に）スレッド数が違っていてもビット単位で一致する。コンパイラ、OS、`CXXGPR_X86_ISA` の段階が違えば、丸め誤差の範囲で一致する。`Xoshiro256PlusPlus` の乱数列は、どこでも同じ整数列である。
 
 保存したモデルは、プラットフォームをまたいで使えることを意図している。ディスク上のフォーマットは、リトルエンディアンのヘッダーと列優先の行列を持つ safetensors のレイアウトである（{doc}`file-format`）。別のプラットフォームで読み込んだモデルは、元のモデルと丸め誤差の範囲で同じ予測を返すと期待される。
 
@@ -69,4 +69,4 @@ cxxgpr が実装するのは厳密なガウス過程回帰だけである。疎�
 
 ## ライセンスとサードパーティのコード
 
-cxxgpr は Apache-2.0 でライセンスされる。依存ライブラリは、それぞれのライセンスを保つ。Eigen は MPL-2.0 で、`EIGEN_MPL2_ONLY` により MPL-2 の部分に限っている。nlohmann/json は MIT である。OpenMP はコンパイラに付属する。ライセンス文と告知は `share/cxxgpr` にインストールされ、`THIRD_PARTY_NOTICES.md` に列挙されている。
+cxxgpr は Apache-2.0 でライセンスされる。依存ライブラリはそれぞれのライセンスを保つ（Eigen は `EIGEN_MPL2_ONLY` 下の MPL-2.0、OpenBLAS は BSD-3-Clause、Intel oneMKL 選択時は ISSL、nlohmann/json は MIT、OpenMP はコンパイラ付属）。ライセンス文と告知は `share/cxxgpr` にインストールされ、`THIRD_PARTY_NOTICES.md` に列挙されている。
