@@ -161,6 +161,10 @@ namespace cxxgpr
         /// @param[in,out] optimize_ctx Opaque pointer to the concrete optimizer instance.
         /// @return Constructed FittedPayload<P> on success, or GprError on validation, optimization, or Cholesky
         /// failure.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
+        /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
+        /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When matrix factorization fails after exhausting jitter retries.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<FittedPayload<P>, GprError> train_or_factor_payload(
             const TrainConfig<P>& cfg,
@@ -179,6 +183,10 @@ namespace cxxgpr
         /// @param[in,out] workspace Mutable query workspace resized if needed.
         /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @return Empty expected on success, or GprError on input or transform error.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> fitted_predict_into(
             const FittedPayload<P>& payload,
@@ -197,6 +205,9 @@ namespace cxxgpr
         /// @param[in] options Prediction variance options.
         /// @param[in,out] workspace Mutable query workspace reused for query transform and kernel blocks.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<PredictiveCovariance<typename P::Refine>, GprError> fitted_predict_covariance(
             const FittedPayload<P>& payload,
@@ -216,6 +227,10 @@ namespace cxxgpr
         /// @param[in,out] workspace Mutable query workspace.
         /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample buffer (m x n_draws) on the original scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<std::vector<typename P::Refine>, GprError> fitted_sample(
             const FittedPayload<P>& payload,
@@ -696,6 +711,11 @@ namespace cxxgpr
         /// @param[in] n_cols Number of feature columns d.
         /// @param[in] y Training target vector of length n_rows.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x_col_major.size() != n_rows * n_cols or y.size() != n_rows.
+        /// @retval GprErrorCode::NonFiniteInput When inputs contain NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
             std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
         ) const
@@ -768,6 +788,10 @@ namespace cxxgpr
         /// @param[in] x Column-major training feature matrix (n x d).
         /// @param[in] y Training target vector of length n.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
+        /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
+        /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
             MatrixRef<double> x, std::span<const double> y
         ) const
@@ -816,6 +840,11 @@ namespace cxxgpr
         /// @param[in] n_cols Number of feature columns d.
         /// @param[in] y Training target vector of length n_rows.
         /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x_col_major.size() != n_rows * n_cols or y.size() != n_rows.
+        /// @retval GprErrorCode::NonFiniteInput When inputs contain NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
             std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
         ) const
@@ -1082,6 +1111,12 @@ namespace cxxgpr
         /// @param[in] n_cols Number of features per query point (must equal n_features()).
         /// @param[in] options Optional prediction variance controls.
         /// @return Prediction<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
+        /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
@@ -1117,6 +1152,10 @@ namespace cxxgpr
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
         /// @param[in] options Prediction variance controls.
         /// @return Prediction<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict_with(
             MatrixRef<double> xs, const PredictOptions& options
         ) const
@@ -1154,6 +1193,14 @@ namespace cxxgpr
         /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @param[in] options Optional prediction variance controls.
         /// @return Empty expected on success, or GprError on validation or transform failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
+        /// @pre `xs.cols() == n_features()` and all query coordinates are finite.
+        /// @note Calling repeatedly with `xs.rows()` at most the warmed query capacity performs zero heap allocations.
+        /// @see predict(), predict_with_into()
+        /// @see cxxgpr::predict_covariance_into()
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
@@ -1184,6 +1231,12 @@ namespace cxxgpr
         /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @param[in] options Optional prediction variance controls.
         /// @return Empty expected on success, or GprError on validation or transform failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
+        /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<void, GprError> predict_into(
             std::span<const double> xs,
             std::size_t n_rows,
@@ -1229,6 +1282,10 @@ namespace cxxgpr
         /// @param[in] options Prediction variance controls.
         /// @param[out] out Destination prediction buffers populated on the original target scale.
         /// @return Empty expected on success, or GprError on validation or transform failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<void, GprError> predict_with_into(
             MatrixRef<double> xs, const PredictOptions& options, Prediction<Refine>& out
         ) const
@@ -1253,6 +1310,9 @@ namespace cxxgpr
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
         /// @param[in] options Optional prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
             MatrixRef<double> xs, const PredictOptions& options = {}
         ) const
@@ -1279,6 +1339,11 @@ namespace cxxgpr
         /// @param[in] n_cols Number of features per query point (must equal n_features()).
         /// @param[in] options Optional prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
+        /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
@@ -1314,6 +1379,9 @@ namespace cxxgpr
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
         /// @param[in] options Prediction variance controls.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance_with(
             MatrixRef<double> xs, const PredictOptions& options
         ) const
@@ -1340,6 +1408,10 @@ namespace cxxgpr
         /// @param[in] options Optional prediction variance controls.
         /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
             MatrixRef<double> xs,
             std::size_t n_draws,
@@ -1380,6 +1452,12 @@ namespace cxxgpr
         /// @param[in] options Optional prediction variance controls.
         /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
+        /// @retval GprErrorCode::DimensionMismatch When n_cols != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
             std::span<const double> xs,
             std::size_t n_rows,
@@ -1433,6 +1511,10 @@ namespace cxxgpr
         /// @param[in] options Prediction variance controls.
         /// @param[in] jitter Optional predictive covariance jitter override.
         /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
+        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != n_features().
+        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample_with(
             MatrixRef<double> xs,
             std::size_t n_draws,
@@ -1558,6 +1640,11 @@ namespace cxxgpr
         /// @param[in] n_cols Number of feature columns d.
         /// @param[in] y Training target vector of length n_rows.
         /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        /// @retval GprErrorCode::EmptyInput When x_col_major or y is empty, or n_rows or n_cols is zero.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x_col_major.size() != n_rows * n_cols or y.size() != n_rows.
+        /// @retval GprErrorCode::NonFiniteInput When inputs contain NaN or Inf.
+        /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
             std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
         ) const

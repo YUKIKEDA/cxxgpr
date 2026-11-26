@@ -1309,14 +1309,14 @@ namespace
     };
 
     /// @brief Verifies float distance table bindings, assume_valid() contract, packed vs dense parity, and
-    /// CheckedDistanceStore move-only and compatibility guarantees.
+    /// CheckedDistanceStore $O(1)$ copyability and move ownership guarantees.
     TEST(DistanceKernelTest, FloatBindingsAssumeValidPackedParityAndStoreOwnership)
     {
         // Spec: DES-10, REQ-05
-        static_assert(!std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
-        static_assert(!std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
-        static_assert(!std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<float>>);
-        static_assert(!std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<float>>);
+        static_assert(std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<float>>);
+        static_assert(std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<float>>);
         static_assert(std::is_move_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
         static_assert(std::is_move_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
 
@@ -1590,6 +1590,74 @@ namespace
                 .error()
                 .code(),
             cxxgpr::GprErrorCode::UnsupportedKernelOperation
+        );
+
+        // O(1) copy shares the validated tables cleanly with independent lifetimes.
+        cxxgpr::CheckedDistanceStore<double> copied = moved_to;
+        std::vector<double> k_copied(n * n, 0.0);
+        ASSERT_TRUE(custom_comp
+                .apply(
+                    copied, std::nullopt, cxxgpr::MatrixMut<double>(k_copied.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        EXPECT_EQ(k_copied, k_custom);
+        EXPECT_TRUE(custom_comp
+                .apply(
+                    moved_to, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+
+        // Null-data MatrixRef with non-zero dims must return EmptyInput in both strict and assume_valid modes.
+        for (const bool assume : {false, true})
+        {
+            cxxgpr::DistanceSource null_scalar_d;
+            null_scalar_d.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(nullptr, n, n))
+                .bind_ard(a_slot.slot(), ard_refs_w)
+                .assume_valid(assume);
+            EXPECT_EQ(comp64.prepare_square(null_scalar_d).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+            const std::array<cxxgpr::MatrixRef<float>, 2U> ard_cross_null_refs_f{
+                cxxgpr::MatrixRef<float>(ard0_f.data(), n, m), cxxgpr::MatrixRef<float>(ard1_f.data(), n, m)
+            };
+            cxxgpr::DistanceSource null_scalar_f;
+            null_scalar_f.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<float>(nullptr, n, m))
+                .bind_ard(a_slot.slot(), ard_cross_null_refs_f)
+                .assume_valid(assume);
+            EXPECT_EQ(comp32.prepare_cross(null_scalar_f).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+            const std::array<cxxgpr::MatrixRef<double>, 2U> null_ard_d{
+                cxxgpr::MatrixRef<double>(ard0_w.data(), n, n), cxxgpr::MatrixRef<double>(nullptr, n, n)
+            };
+            cxxgpr::DistanceSource null_ard_src;
+            null_ard_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(sq_widened.data(), n, n))
+                .bind_ard(a_slot.slot(), null_ard_d)
+                .assume_valid(assume);
+            EXPECT_EQ(comp64.prepare_square(null_ard_src).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+        }
+
+        // Large tidy_tol * max_abs overflowing to +Inf must be rejected with InvalidDistance.
+        std::vector<double> big_d2(n * n, 1e200);
+        for (std::size_t idx = 0; idx < n; ++idx)
+        {
+            big_d2[(idx * n) + idx] = 0.0;
+        }
+        cxxgpr::DistanceSource overflow_tidy;
+        overflow_tidy.bind_scalar(leaf_slot.slot(), cxxgpr::MatrixRef<double>(big_d2.data(), n, n)).tidy(1e200);
+        const auto overflow_err = builtin_comp.prepare_square(overflow_tidy);
+        ASSERT_FALSE(overflow_err.has_value());
+        EXPECT_EQ(overflow_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+        EXPECT_EQ(overflow_err.error().distance_reason(), std::optional<std::string_view>{"tidy tolerance overflow"});
+
+        std::vector<double> big_cross(n * m, 1e200);
+        cxxgpr::DistanceSource overflow_cross;
+        overflow_cross.bind_scalar(leaf_slot.slot(), cxxgpr::MatrixRef<double>(big_cross.data(), n, m)).tidy(1e200);
+        const auto overflow_cross_err = builtin_comp.prepare_cross(overflow_cross);
+        ASSERT_FALSE(overflow_cross_err.has_value());
+        EXPECT_EQ(overflow_cross_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+        EXPECT_EQ(
+            overflow_cross_err.error().distance_reason(), std::optional<std::string_view>{"tidy tolerance overflow"}
         );
     }
 

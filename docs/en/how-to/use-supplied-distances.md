@@ -78,7 +78,7 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 store: 5 x 5, square = true, requires_points = false
 ```
 
-Validation checks slot coverage, shapes, finiteness, non-negativity and, for square tables, a zero diagonal and symmetry, then converts the values to `T`. For built-in isotropic leaves (`Rbf`, `Matern`, `Periodic`, `RationalQuadratic`), `CheckedDistanceStore<T>` packs scalar square tables in lower-triangular order and shares internal storage when reused. The store reports `rows`, `cols` and `is_square`. It is **move-only** (not copyable), and passing a moved-from store fails with `EmptyInput`; the same store can be reused for any number of evaluations.
+Validation checks slot coverage, shapes, finiteness, non-negativity and, for square tables, a zero diagonal and symmetry, then converts the values to `T`. For built-in isotropic leaves (`Rbf`, `Matern`, `Periodic`, `RationalQuadratic`), `CheckedDistanceStore<T>` packs scalar square tables in lower-triangular order and shares internal storage when reused. The store reports `rows`, `cols` and `is_square`. It is copyable ($O(1)$, sharing its immutable storage) and movable; passing a moved-from store fails with `EmptyInput`, and the same store can be reused for any number of evaluations.
 
 ### Strict by default, repairable with `tidy`, or bypassable with `assume_valid`
 
@@ -227,7 +227,7 @@ The packed ARD layout stores $d$ blocks, one per feature, each holding the lower
 | `ArdDistance` | ARD slot: `create`, `slot`, `dims`, `rbf_ard`, `matern_ard`, `rational_quadratic_ard` |
 | `DistanceKernel<Mode>` | Expression tree: `with_points`, `num_params`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings`, `slots`, `num_scalar_slots`, `num_ard_slots`, `compile`, `operator+`, `operator*` |
 | `DistanceSource` | `bind_scalar` (`double`/`float`), `bind_ard` (`double`/`float`), `tidy`, `tidy_tolerance`, `assume_valid`, `assumes_valid` |
-| `CheckedDistanceStore<T>` | Move-only validated tables: `rows`, `cols`, `is_square` |
+| `CheckedDistanceStore<T>` | Copyable ($O(1)$ shared immutable storage) and movable validated tables: `rows`, `cols`, `is_square` |
 | `CompiledDistanceKernel<T>` | `num_params`, `num_leaves`, `requires_points`, `nested_depth`, `kernel_exp`, `set_kernel_exp`, `make_nested_buffers`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings`, `slots`, `prepare_square`, `prepare_cross`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess` |
 | `DistanceCachePolicy` | `Cached`, `Uncached` |
 | `DistanceCache<T>` | `build`, `ensure`, `reset`, `policy`, `num_points`, `num_dims`, `has_dist`, `has_ard`, `dist_view`, `dist_mut`, `ard_packed`, `ard_packed_mut` |

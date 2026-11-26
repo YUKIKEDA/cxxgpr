@@ -409,9 +409,11 @@ namespace cxxgpr::detail
     /// @param[in] uplo Matrix triangle or full region to write.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
     /// @param[out] out_ard_s2 Optional packed lower-triangular $s^2$ destination buffer of size `n * (n + 1) / 2`.
+    /// @param[in] ard_borrowed Optional borrowed per-dimension `(n, n)` views used when @p ard_packed is empty.
     /// @return Empty expected on success or GprError on shape mismatch or non-ARD leaf.
-    /// @retval GprErrorCode::EmptyInput When n == 0 or ls is empty.
-    /// @retval GprErrorCode::LengthMismatch When out shape is not n x n or ard_packed/out_ard_s2 size disagrees.
+    /// @retval GprErrorCode::EmptyInput When n == 0, ls is empty, or a borrowed view is empty/null.
+    /// @retval GprErrorCode::LengthMismatch When out shape is not n x n or ard_packed/ard_borrowed/out_ard_s2 size
+    /// disagrees.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf does not consume packed ARD distances.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<void, GprError> leaf_apply_ard_packed(
@@ -422,18 +424,20 @@ namespace cxxgpr::detail
         MatrixMut<T> out,
         Triangle uplo,
         KernelExp exp_mode = KernelExp::Accurate,
-        std::span<T> out_ard_s2 = {}
+        std::span<T> out_ard_s2 = {},
+        std::span<const MatrixRef<T>> ard_borrowed = {}
     );
 
     /// @brief Evaluates an ARD kernel leaf using an incrementally maintained lower-triangular $s^2$ cache.
-    /// @details Supports both precomputed packed differences (`ard_packed`) and uncached coordinate matrices (`x`) in
-    /// $O(n^2)$ per changed dimension. Fuses delta $s^2$ computation with the radial kernel transform inside a single
-    /// lower-triangular column pass, and when `commit_s2` is false evaluates a non-destructive trial directly into
-    /// `out` without mutating `ard_s2_cache` or `prev_ls`.
+    /// @details Supports precomputed packed differences (`ard_packed`), zero-copy borrowed coordinate-wise tables
+    /// (`ard_borrowed`), and uncached coordinate matrices (`x`) in $O(n^2)$ per changed dimension. Fuses delta $s^2$
+    /// computation with the radial kernel transform inside a single lower-triangular column pass, and when `commit_s2`
+    /// is false evaluates a non-destructive trial directly into `out` without mutating `ard_s2_cache` or `prev_ls`.
     /// @tparam T Kernel evaluation scalar type (double or float).
     /// @param[in] leaf ARD kernel leaf variant to evaluate.
     /// @param[in] ls Current lengthscale vector in user units of length d.
-    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` is empty).
+    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` and `ard_borrowed` are
+    /// empty).
     /// @param[in] ard_packed Packed lower-triangular (dx_d)^2 array of length d * n * (n + 1) / 2, or empty.
     /// @param[in] n Number of training points.
     /// @param[out] out Column-major n x n destination Gram matrix.
@@ -444,10 +448,12 @@ namespace cxxgpr::detail
     /// @param[in,out] s2_valid True while `ard_s2_cache` corresponds to `prev_ls[0..d-1]`.
     /// @param[in,out] inc_steps Number of consecutive incremental delta updates applied since the last rebuild.
     /// @param[in] commit_s2 True to update `ard_s2_cache`/`prev_ls`/`inc_steps`; false for non-destructive trial eval.
+    /// @param[in] ard_borrowed Optional span of d borrowed n x n column-major matrices containing lower-triangular
+    /// (dx_d)^2.
     /// @return Empty expected on success or GprError on shape mismatch, non-finite coords, or non-ARD leaf.
     /// @retval GprErrorCode::EmptyInput When n == 0, ls is empty, or required x is empty.
-    /// @retval GprErrorCode::LengthMismatch When out shape is not n x n or ard_packed size disagrees.
-    /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with ls.size().
+    /// @retval GprErrorCode::LengthMismatch When out shape is not n x n or ard_packed/ard_borrowed size disagrees.
+    /// @retval GprErrorCode::DimensionMismatch When x.cols() or ard_borrowed.size() disagrees with ls.size().
     /// @retval GprErrorCode::NonFiniteInput When touched coordinates in uncached x are non-finite.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is not an ARD kernel.
     template <KernelScalarConcept T>
@@ -464,7 +470,8 @@ namespace cxxgpr::detail
         std::span<double> prev_ls,
         bool& s2_valid,
         std::size_t& inc_steps,
-        bool commit_s2 = true
+        bool commit_s2 = true,
+        std::span<const MatrixRef<T>> ard_borrowed = {}
     );
 
     /// @brief Commits accepted ARD lengthscales to the cached lower-triangular $s^2$ baseline.
@@ -474,17 +481,20 @@ namespace cxxgpr::detail
     /// @tparam T Kernel evaluation scalar type (double or float).
     /// @param[in] leaf ARD kernel leaf variant.
     /// @param[in] ls Accepted lengthscale vector in user units of length d.
-    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` is empty).
+    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` and `ard_borrowed` are
+    /// empty).
     /// @param[in] ard_packed Packed lower-triangular (dx_d)^2 array of length d * n * (n + 1) / 2, or empty.
     /// @param[in] n Number of training points.
     /// @param[in,out] ard_s2_cache Pre-allocated per-leaf packed $s^2$ buffer of length `n * (n + 1) / 2`.
     /// @param[in,out] prev_ls Pre-allocated lengthscale snapshot buffer of length at least `d`.
     /// @param[in,out] s2_valid True while `ard_s2_cache` corresponds to `prev_ls[0..d-1]`.
     /// @param[in,out] inc_steps Number of consecutive incremental delta updates applied since the last rebuild.
+    /// @param[in] ard_borrowed Optional span of d borrowed n x n column-major matrices containing lower-triangular
+    /// (dx_d)^2.
     /// @return Empty expected on success or GprError on shape mismatch, non-finite coords, or non-ARD leaf.
     /// @retval GprErrorCode::EmptyInput When n == 0, ls is empty, or required x is empty.
-    /// @retval GprErrorCode::LengthMismatch When ard_s2_cache/prev_ls/ard_packed size disagrees.
-    /// @retval GprErrorCode::DimensionMismatch When x.cols() disagrees with ls.size().
+    /// @retval GprErrorCode::LengthMismatch When ard_s2_cache/prev_ls/ard_packed/ard_borrowed size disagrees.
+    /// @retval GprErrorCode::DimensionMismatch When x.cols() or ard_borrowed.size() disagrees with ls.size().
     /// @retval GprErrorCode::NonFiniteInput When touched coordinates in uncached x are non-finite.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is not an ARD kernel.
     template <KernelScalarConcept T>
@@ -497,7 +507,8 @@ namespace cxxgpr::detail
         std::span<T> ard_s2_cache,
         std::span<double> prev_ls,
         bool& s2_valid,
-        std::size_t& inc_steps
+        std::size_t& inc_steps,
+        std::span<const MatrixRef<T>> ard_borrowed = {}
     );
 
     /// @brief Evaluates the first derivative of an ARD leaf from packed lower-triangular ARD differences.
@@ -565,8 +576,9 @@ namespace cxxgpr::detail
     /// @tparam T Kernel evaluation scalar type (double or float).
     /// @param[in] leaf ARD kernel leaf variant to contract.
     /// @param[in] ls Lengthscale vector in user units of length d.
-    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` is empty).
-    /// @param[in] ard_packed Precomputed packed lower-triangular (dx_d)^2 buffer, or empty to read `x`.
+    /// @param[in] x Column-major n x d training coordinate matrix (used when `ard_packed` and `ard_borrowed` are
+    /// empty).
+    /// @param[in] ard_packed Precomputed packed lower-triangular (dx_d)^2 buffer, or empty.
     /// @param[in] weight Symmetric n x n adjoint weight matrix (lower triangle read).
     /// @param[in,out] scratch Reusable n x n square scratch matrix.
     /// @param[in,out] col_partials Pre-allocated per-column partial sum buffer of length at least n.
@@ -574,11 +586,13 @@ namespace cxxgpr::detail
     /// @param[in] need_value True when <weight, K_leaf>_F must also be evaluated and returned.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
     /// @param[in] precomputed_ard_s2 Optional packed lower-triangular $s^2$ buffer captured during forward eval.
+    /// @param[in] ard_borrowed Optional span of d borrowed n x n column-major matrices containing lower-triangular
+    /// (dx_d)^2.
     /// @return <weight, K_leaf>_F when `need_value` is true (otherwise 0.0), or GprError on invalid inputs/buffers.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is not an ARD leaf.
     /// @retval GprErrorCode::EmptyInput When `ls`, `weight`, or uncached `x` is empty.
     /// @retval GprErrorCode::LengthMismatch When matrix/cache/precomputed shapes or `out_grads.size()` mismatch.
-    /// @retval GprErrorCode::DimensionMismatch When `x.cols()` disagrees with `ls.size()`.
+    /// @retval GprErrorCode::DimensionMismatch When `x.cols()` or `ard_borrowed.size()` disagrees with `ls.size()`.
     /// @retval GprErrorCode::WorkspaceTooSmall When `scratch` or `col_partials` is undersized.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<double, GprError> leaf_ard_weighted_grads(
@@ -592,7 +606,8 @@ namespace cxxgpr::detail
         std::span<double> out_grads,
         bool need_value,
         KernelExp exp_mode = KernelExp::Accurate,
-        std::span<const T> precomputed_ard_s2 = {}
+        std::span<const T> precomputed_ard_s2 = {},
+        std::span<const MatrixRef<T>> ard_borrowed = {}
     );
 
     /// @brief Contracts all hyperparameters of an isotropic or linear leaf against `weight` in one lower-triangle pass.

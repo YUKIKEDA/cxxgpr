@@ -78,7 +78,7 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 store: 5 x 5, square = true, requires_points = false
 ```
 
-検証では、スロットの過不足、形、有限性、非負性、そして正方の表では対角が 0 であることと対称性を調べ、値を `T` に変換する。組込みの等方的な葉（`Rbf`、`Matern`、`Periodic`、`RationalQuadratic`）だけを読むスカラー正方表は、下三角順に詰めて保持する。ストアは `rows`、`cols`、`is_square` を報告する。この型は**ムーブ専用**（コピー不可）であり、ムーブ済みのストアを渡すと `EmptyInput` で失敗する。同じストアを何度でも評価に使い回せる。
+検証では、スロットの過不足、形、有限性、非負性、そして正方の表では対角が 0 であることと対称性を調べ、値を `T` に変換する。組込みの等方的な葉（`Rbf`、`Matern`、`Periodic`、`RationalQuadratic`）だけを読むスカラー正方表は、下三角順に詰めて保持する。ストアは `rows`、`cols`、`is_square` を報告する。コピー（不変な内部領域を $O(1)$ で共有）もムーブもでき、ムーブ済みのストアを渡すと `EmptyInput` で失敗する。同じストアを何度でも評価に使い回せる。
 
 ### 既定は厳格、`tidy` で修復、または `assume_valid` で値検査を省略
 
@@ -227,7 +227,7 @@ cache: points = 3, dims = 2, has_dist = true, has_ard = true, packed size = 12
 | `ArdDistance` | ARD のスロット: `create`、`slot`、`dims`、`rbf_ard`、`matern_ard`、`rational_quadratic_ard` |
 | `DistanceKernel<Mode>` | 式の木: `with_points`、`num_params`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings`、`slots`、`num_scalar_slots`、`num_ard_slots`、`compile`、`operator+`、`operator*` |
 | `DistanceSource` | `bind_scalar`（`double`/`float`）、`bind_ard`（`double`/`float`）、`tidy`、`tidy_tolerance`、`assume_valid`、`assumes_valid` |
-| `CheckedDistanceStore<T>` | ムーブ専用の検証済みの表: `rows`、`cols`、`is_square` |
+| `CheckedDistanceStore<T>` | コピー可能（共有不変保持・$O(1)$）かつムーブ可能な検証済みの表: `rows`、`cols`、`is_square` |
 | `CompiledDistanceKernel<T>` | `num_params`、`num_leaves`、`requires_points`、`nested_depth`、`kernel_exp`、`set_kernel_exp`、`make_nested_buffers`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings`、`slots`、`prepare_square`、`prepare_cross`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess` |
 | `DistanceCachePolicy` | `Cached`、`Uncached` |
 | `DistanceCache<T>` | `build`、`ensure`、`reset`、`policy`、`num_points`、`num_dims`、`has_dist`、`has_ard`、`dist_view`、`dist_mut`、`ard_packed`、`ard_packed_mut` |

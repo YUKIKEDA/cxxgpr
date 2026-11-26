@@ -517,18 +517,20 @@ namespace cxxgpr
     };
 
     /// @brief Validated (and optionally repaired) supplied squared-distance store ready for zero-alloc eval.
-    /// @details Shares an immutable internal payload holding packed lower-triangular or borrowed scalar distance
-    /// views and packed lower-triangular (square) or rectangular (cross) ARD distance tables in scalar T.
+    /// @details Shares an immutable internal payload holding packed lower-triangular or borrowed scalar and ARD
+    /// squared-distance tables in scalar T. Copying is $O(1)$ and shares the immutable validated state cleanly.
     /// @tparam T Kernel evaluation scalar type (double or float).
     template <KernelScalarConcept T> class CheckedDistanceStore
     {
     public:
-        /// @brief Deleted copy constructor; stores are move-only in the public API.
-        CheckedDistanceStore(const CheckedDistanceStore&) = delete;
+        /// @brief Copy-constructs a checked distance store sharing immutable internal storage in $O(1)$.
+        /// @param[in] other CheckedDistanceStore instance to share state with.
+        CheckedDistanceStore(const CheckedDistanceStore& other) noexcept;
 
-        /// @brief Deleted copy assignment; stores are move-only in the public API.
-        /// @return Never returns.
-        CheckedDistanceStore& operator=(const CheckedDistanceStore&) = delete;
+        /// @brief Copy-assigns a checked distance store sharing immutable internal storage in $O(1)$.
+        /// @param[in] other CheckedDistanceStore instance to share state with.
+        /// @return Reference to this CheckedDistanceStore.
+        CheckedDistanceStore& operator=(const CheckedDistanceStore& other) noexcept;
 
         /// @brief Move-constructs a checked distance store.
         /// @details Transfers ownership of the internal validated store state. Defined out of line, where the

@@ -2037,6 +2037,21 @@ namespace cxxgpr
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(CheckedDistanceStore&& other) noexcept = default;
 
+    /// @brief Copy-constructs a `CheckedDistanceStore<T>`, sharing the immutable validated tables in $O(1)$ time.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to copy from.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>::CheckedDistanceStore(const CheckedDistanceStore& other) noexcept = default;
+
+    /// @brief Copy-assigns a `CheckedDistanceStore<T>`, sharing the immutable validated tables in $O(1)$ time.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] other Store instance to copy from.
+    /// @return Reference to this store.
+    template <KernelScalarConcept T>
+    CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(const CheckedDistanceStore& other) noexcept = default;
+
     /// @brief Returns the row count of each stored squared-distance block.
     /// @details Equals training point count for square stores or first point set size for cross stores,
     /// or `0` for moved-from stores.
@@ -2937,55 +2952,121 @@ namespace cxxgpr
         /// @details Avoids inner-loop floating-point divisions across `(n, n)` packed lower-triangular slabs.
         /// @param[in] packed Packed lower-triangular per-dimension squared distance buffer.
         /// @param[in] n Square matrix order.
-        /// @param[in] per_dim Number of packed entries per dimension (@c n*(n+1)/2).
+        /// @brief Lightweight non-owning adapter over packed or borrowed square ARD squared differences.
+        struct ArdSquareView
+        {
+            /// @brief Packed lower-triangular `(dx_d)^2` buffer when non-empty.
+            std::span<const T> packed{};
+            /// @brief Borrowed per-dimension column-major `(n, n)` views when non-empty.
+            std::span<const MatrixRef<T>> borrowed{};
+            /// @brief Square matrix order `n`.
+            std::size_t n{0U};
+            /// @brief Packed entry count per dimension `n * (n + 1) / 2`.
+            std::size_t per_dim{0U};
+
+            /// @brief Returns true when backed by borrowed per-dimension matrices.
+            /// @return True when @c borrowed is non-empty.
+            [[nodiscard]] bool is_borrowed() const noexcept { return !borrowed.empty(); }
+
+            /// @brief Reads symmetric squared difference for dimension @p dim and pair `(row, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] row Zero-based row index.
+            /// @param[in] col Zero-based column index.
+            /// @return Stored `(x_{row, dim} - x_{col, dim})^2` entry.
+            [[nodiscard]] T at(std::size_t dim, std::size_t row, std::size_t col) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    if (row < col)
+                    {
+                        std::swap(row, col);
+                    }
+                    return borrowed[dim](row, col);
+                }
+                return packed[(dim * per_dim) + packed_lower_index(n, row, col)];
+            }
+
+            /// @brief Returns contiguous pointer to lower-triangular column slice starting at `(row_begin, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] col Zero-based column index.
+            /// @param[in] row_begin Starting row index (`row_begin >= col`).
+            /// @return Pointer to contiguous column entries `[row_begin .. n - 1]`.
+            [[nodiscard]] const T* lower_col_ptr(std::size_t dim, std::size_t col, std::size_t row_begin) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    return &borrowed[dim](row_begin, col);
+                }
+                const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
+                return &packed[(dim * per_dim) + col_packed_base];
+            }
+        };
+
+        /// @brief Constructs an `ArdSquareView` for ARD slot @p slot_at from @p store.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] slot_at Zero-based ARD slot index.
+        /// @return Adapter reading borrowed views if active, otherwise packed storage.
+        [[nodiscard]] static ArdSquareView make_ard_square_view(
+            const CheckedDistanceStore<T>& store, std::size_t slot_at
+        ) noexcept
+        {
+            const std::size_t n = store.rows();
+            const std::size_t per_dim = (n * (n + 1U)) / 2U;
+            const auto& impl = *store.impl_;
+            if (slot_at < impl.ard_borrowed.size() && !impl.ard_borrowed[slot_at].empty())
+            {
+                return ArdSquareView{
+                    .packed = {},
+                    .borrowed = std::span<const MatrixRef<T>>(impl.ard_borrowed[slot_at]),
+                    .n = n,
+                    .per_dim = per_dim,
+                };
+            }
+            return ArdSquareView{
+                .packed = std::span<const T>(impl.ard_data[slot_at]),
+                .borrowed = {},
+                .n = n,
+                .per_dim = per_dim,
+            };
+        }
+
+        /// @brief Computes scaled squared distance $\sum_m (\Delta x_m)^2 / \ell_m^2$ for pair `(row, col)`.
+        /// @param[in] ard Packed or borrowed ARD square view.
         /// @param[in] weights Precomputed inverse-squared lengthscales $1 / \ell_m^2$.
         /// @param[in] row Matrix row index.
         /// @param[in] col Matrix column index.
         /// @return Total ARD-weighted squared distance $s^2$.
         [[nodiscard]] static T ard_scaled_sq_packed_weights(
-            std::span<const T> packed,
-            std::size_t n,
-            std::size_t per_dim,
-            ArdWeightView<T> weights,
-            std::size_t row,
-            std::size_t col
+            const ArdSquareView& ard, ArdWeightView<T> weights, std::size_t row, std::size_t col
         ) noexcept
         {
             if (row == col)
             {
                 return T{0};
             }
-            const std::size_t p = packed_lower_index(n, row, col);
             T acc = T{0};
             for (std::size_t m = 0; m < weights.size(); ++m)
             {
-                acc += packed[(m * per_dim) + p] * weights[m];
+                acc += ard.at(m, row, col) * weights[m];
             }
             return acc;
         }
 
-        /// @brief Accumulates packed ARD lower column slices into `out` and applies `slice_fn`.
-        /// @details Requires `uplo` to be `Lower` or `Full` so packed storage is unit-stride contiguous within each
-        /// column. Mirrors lower entries to upper triangle when `Full`.
+        /// @brief Accumulates packed or borrowed ARD lower column slices into `out` and applies `slice_fn`.
+        /// @details Requires `uplo` to be `Lower` or `Full` so lower-triangular columns are unit-stride contiguous.
+        /// Mirrors lower entries to upper triangle when `Full`.
         /// @tparam SliceFn Callable invoked as `slice_fn(col_ptr, len)`.
-        /// @param[in] packed Packed lower-triangular per-dimension squared distance buffer.
-        /// @param[in] n Square matrix order.
-        /// @param[in] per_dim Number of packed entries per dimension.
+        /// @param[in] ard Packed or borrowed ARD square view.
         /// @param[in] weights Precomputed per-dimension weights.
         /// @param[out] out Destination Gram matrix.
         /// @param[in] uplo Triangle mode (`Lower` or `Full`).
         /// @param[in] slice_fn In-place transformation applied to each populated lower column slice.
         template <typename SliceFn>
         void eval_supplied_ard_lower_cols(
-            std::span<const T> packed,
-            std::size_t n,
-            std::size_t per_dim,
-            ArdWeightView<T> weights,
-            MatrixMut<T> out,
-            Triangle uplo,
-            SliceFn&& slice_fn
+            const ArdSquareView& ard, ArdWeightView<T> weights, MatrixMut<T> out, Triangle uplo, SliceFn&& slice_fn
         ) const
         {
+            const std::size_t n = ard.n;
             if (n == 0U || weights.empty())
             {
                 return;
@@ -2998,12 +3079,11 @@ namespace cxxgpr
                 {
                     return;
                 }
-                const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
                 T* col_ptr = &out(row_begin, col);
-                detail::scale_set_slice(col_ptr, &packed[col_packed_base], weights[0U], len);
+                detail::scale_set_slice(col_ptr, ard.lower_col_ptr(0U, col, row_begin), weights[0U], len);
                 for (std::size_t m = 1U; m < weights.size(); ++m)
                 {
-                    detail::axpy_slice(col_ptr, &packed[(m * per_dim) + col_packed_base], weights[m], len);
+                    detail::axpy_slice(col_ptr, ard.lower_col_ptr(m, col, row_begin), weights[m], len);
                 }
                 out(col, col) = T{0};
                 slice_fn(col_ptr, len);
@@ -3014,7 +3094,7 @@ namespace cxxgpr
 
         /// @brief Evaluates a supplied-ARD leaf over the specified triangle of a square @c CheckedDistanceStore.
         /// @param[in] ref Compiled supplied-ARD leaf reference.
-        /// @param[in] store Pre-validated square supplied-distance store containing packed ARD slabs.
+        /// @param[in] store Pre-validated square supplied-distance store containing packed or borrowed ARD tables.
         /// @param[out] out Output matrix receiving kernel entries on @p uplo.
         /// @param[in] uplo Triangle mode specifying which entries to populate.
         void eval_supplied_ard_square(
@@ -3022,8 +3102,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -3034,7 +3113,7 @@ namespace cxxgpr
                     if (uplo != Triangle::Upper)
                     {
                         eval_supplied_ard_lower_cols(
-                            packed, n, per_dim, weights, out, uplo, [this](T* col_ptr, std::size_t len) noexcept
+                            ard, weights, out, uplo, [this](T* col_ptr, std::size_t len) noexcept
                         { detail::exp_scaled_nonpos_in_place(col_ptr, len, T{-0.5}, exp_mode); }
                         );
                         return;
@@ -3042,7 +3121,7 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         out(row, col) = eval_kernel_exp(-T{0.5} * s2, exp_mode);
                     }
                     );
@@ -3060,7 +3139,7 @@ namespace cxxgpr
                     if (uplo != Triangle::Upper)
                     {
                         eval_supplied_ard_lower_cols(
-                            packed, n, per_dim, weights, out, uplo, [this, c, nu](T* col_ptr, std::size_t len) noexcept
+                            ard, weights, out, uplo, [this, c, nu](T* col_ptr, std::size_t len) noexcept
                         { detail::matern_s2_in_place(col_ptr, len, c, nu, exp_mode); }
                         );
                         return;
@@ -3068,7 +3147,7 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
                         out(row, col) = eval_matern_u_d(u, nu, exp_mode);
                     }
@@ -3086,7 +3165,7 @@ namespace cxxgpr
                 if (uplo != Triangle::Upper)
                 {
                     eval_supplied_ard_lower_cols(
-                        packed, n, per_dim, weights, out, uplo, [this, alpha](T* col_ptr, std::size_t len) noexcept
+                        ard, weights, out, uplo, [this, alpha](T* col_ptr, std::size_t len) noexcept
                     { transform_rq_slice_in_place(col_ptr, len, alpha, exp_mode); }
                     );
                     return;
@@ -3094,7 +3173,7 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const T w = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T w = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     out(row, col) = eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
                 }
                 );
@@ -3204,8 +3283,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -3218,9 +3296,8 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
-                        const T sp2 = packed[(local_idx * per_dim) + p] * inv_l2;
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
+                        const T sp2 = ard.at(local_idx, row, col) * inv_l2;
                         d_k(row, col) = sp2 * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
                     }
                     );
@@ -3241,15 +3318,14 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (u2 <= T{0})
                         {
                             d_k(row, col) = T{0};
                             return;
                         }
                         const T u = std::sqrt(u2);
-                        const T wp = (c * packed[(local_idx * per_dim) + p] * inv_l2) / u2;
+                        const T wp = (c * ard.at(local_idx, row, col) * inv_l2) / u2;
                         d_k(row, col) = eval_matern_grad_g1_d(u, nu, exp_mode) * wp;
                     }
                     );
@@ -3267,15 +3343,14 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
                     if (local_idx < alpha_idx)
                     {
                         // d(-alpha * log(1 + w)) / d(log l_p) = s_p^2 / (1 + w).
-                        const T sp2 = packed[(local_idx * per_dim) + p] * inv_l2;
+                        const T sp2 = ard.at(local_idx, row, col) * inv_l2;
                         d_k(row, col) = (sp2 / b) * d1_exp;
                     }
                     else
@@ -3308,8 +3383,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -3322,10 +3396,9 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
-                        const T si2 = packed[(i * per_dim) + p] * inv_li2;
+                        const T si2 = ard.at(i, row, col) * inv_li2;
                         if (i == j)
                         {
                             // Diagonal second derivative includes -2*s_i^2*jet.d1 from d(s_i^2)/d(log l_i) = -2*s_i^2.
@@ -3333,7 +3406,7 @@ namespace cxxgpr
                         }
                         else
                         {
-                            const T sj2 = packed[(j * per_dim) + p] * inv_lj2;
+                            const T sj2 = ard.at(j, row, col) * inv_lj2;
                             d2_k(row, col) = si2 * sj2 * jet.d2;
                         }
                     }
@@ -3354,16 +3427,15 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (u2 <= T{0})
                         {
                             d2_k(row, col) = T{0};
                             return;
                         }
                         const T u = std::sqrt(u2);
-                        const T wi = (c * packed[(i * per_dim) + p] * inv_li2) / u2;
-                        const T wj = (c * packed[(j * per_dim) + p] * inv_lj2) / u2;
+                        const T wi = (c * ard.at(i, row, col) * inv_li2) / u2;
+                        const T wj = (c * ard.at(j, row, col) * inv_lj2) / u2;
                         // Mixed Matérn ARD Hessian splits into cross-dimension term plus diagonal -2*g1(u)*w_i.
                         T val = eval_matern_ard_cross_d(u, nu, exp_mode) * wi * wj;
                         if (i == j)
@@ -3386,8 +3458,7 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
@@ -3402,14 +3473,14 @@ namespace cxxgpr
                     {
                         // Mixed (log alpha, log l_k) derivative: df/d(log l_k) * d_alpha(f) + w*df/(b*b).
                         const std::size_t ls_idx = (i == alpha_idx) ? j : i;
-                        const T s_ls2 = packed[(ls_idx * per_dim) + p] * weights[ls_idx];
+                        const T s_ls2 = ard.at(ls_idx, row, col) * weights[ls_idx];
                         d2_k(row, col) = (s_ls2 / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
                     }
                     else
                     {
                         // Lengthscale-lengthscale Hessian mixes outer chain, 1/alpha term, and diagonal -2*s_i^2/b.
-                        const T si2 = packed[(i * per_dim) + p] * weights[i];
-                        const T sj2 = packed[(j * per_dim) + p] * weights[j];
+                        const T si2 = ard.at(i, row, col) * weights[i];
+                        const T sj2 = ard.at(j, row, col) * weights[j];
                         const T sq_term = (si2 * sj2) / (b * b);
                         T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
                         if (i == j)
@@ -3547,9 +3618,10 @@ namespace cxxgpr
                 if (slot < ard_s2_ready.size() && per_dim > 0U && (ard_s2_buf.size() / per_dim) > slot)
                 {
                     std::span<T> out_s2 = ard_s2_buf.subspan(slot * per_dim, per_dim);
-                    const std::span<const T> packed(store.impl_->ard_data[a->slot_at]);
+                    const ArdSquareView ard = make_ard_square_view(store, a->slot_at);
                     auto res = detail::leaf_apply_ard_packed(
-                        leaves[a->leaf_idx], cached_ls[a->leaf_idx], packed, n, out, uplo, exp_mode, out_s2
+                        leaves[a->leaf_idx], cached_ls[a->leaf_idx], ard.packed, n, out, uplo, exp_mode, out_s2,
+                        ard.borrowed
                     );
                     if (res.has_value())
                     {
@@ -3990,10 +4062,10 @@ namespace cxxgpr
             const KernelLeaf& kl = leaves[leaf_idx];
             if (meta.kind == LeafKind::SuppliedArd)
             {
-                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                const ArdSquareView ard = make_ard_square_view(store, meta.slot_at);
                 return detail::leaf_apply_ard_incremental(
-                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), out, uplo, exp_mode, ard_s2_cache,
-                    prev_ls, s2_valid, inc_steps, commit_s2
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, ard.packed, store.rows(), out, uplo, exp_mode,
+                    ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2, ard.borrowed
                 );
             }
             if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
@@ -4047,10 +4119,10 @@ namespace cxxgpr
             const KernelLeaf& kl = leaves[leaf_idx];
             if (meta.kind == LeafKind::SuppliedArd)
             {
-                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                const ArdSquareView ard = make_ard_square_view(store, meta.slot_at);
                 return detail::leaf_commit_ard_s2(
-                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), ard_s2_cache, prev_ls, s2_valid,
-                    inc_steps
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, ard.packed, store.rows(), ard_s2_cache, prev_ls, s2_valid,
+                    inc_steps, ard.borrowed
                 );
             }
             if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
@@ -4271,7 +4343,7 @@ namespace cxxgpr
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
                 const KernelLeaf& kl = leaves[a->leaf_idx];
-                const std::span<const T> packed(ctx.store.impl_->ard_data[a->slot_at]);
+                const ArdSquareView ard = make_ard_square_view(ctx.store, a->slot_at);
                 const std::span<double> out_slice = ctx.out_grads.subspan(a->param_begin, a->param_count);
                 std::span<const T> precomputed_s2{};
                 const std::size_t slot = leaf_meta[a->leaf_idx].ard_slot;
@@ -4281,8 +4353,8 @@ namespace cxxgpr
                     precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
                 }
                 auto res = detail::leaf_ard_weighted_grads(
-                    kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, packed, weight, ctx.scratch_a, ctx.col_partials,
-                    out_slice, need_value, exp_mode, precomputed_s2
+                    kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, ard.packed, weight, ctx.scratch_a, ctx.col_partials,
+                    out_slice, need_value, exp_mode, precomputed_s2, ard.borrowed
                 );
                 if (!res.has_value())
                 {
@@ -5599,6 +5671,43 @@ namespace cxxgpr
         /// @param[in] slot_idx Packed slot index for error diagnostics.
         /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
         /// @return Canonical `GprError` identifying the first failing entry.
+        /// @brief Computes and validates scaled tidy tolerance `*tidy_tol * max_abs`, rejecting double overflow.
+        /// @param[in] tidy_tol Optional relative tidy tolerance.
+        /// @param[in] max_abs Finite maximum absolute distance entry in the block.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Scaled absolute tolerance (or `0.0` when untidied), or `InvalidDistance` on overflow.
+        [[nodiscard]] static std::expected<double, GprError> compute_tidy_tol(
+            std::optional<double> tidy_tol,
+            double max_abs,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            if (!tidy_tol.has_value())
+            {
+                return 0.0;
+            }
+            const double tol = *tidy_tol * max_abs;
+            if (!std::isfinite(tol))
+            {
+                return std::unexpected(
+                    GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "tidy tolerance overflow")
+                );
+            }
+            return tol;
+        }
+
+        /// @brief Symmetrizes two nearly equal finite distance entries without intermediate `(b - a)` overflow.
+        /// @param[in] a Lower-triangle entry `(i, j)`.
+        /// @param[in] b Upper-triangle entry `(j, i)`.
+        /// @return Non-negative midpoint clamped at `0.0`.
+        [[nodiscard]] static double safe_tidy_mean(double a, double b) noexcept
+        {
+            const double mean = (a == b) ? a : ((a * 0.5) + (b * 0.5));
+            return std::max(0.0, mean);
+        }
+
         template <typename SrcT, KernelScalarConcept DstT>
         [[nodiscard]] static GprError diagnose_square_block_error(
             MatrixRef<SrcT> src,
@@ -5623,7 +5732,12 @@ namespace cxxgpr
                     max_abs = std::max(std::abs(v), max_abs);
                 }
             }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
+            const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+            if (!tol_exp.has_value())
+            {
+                return tol_exp.error();
+            }
+            const double tol = *tol_exp;
             if (!tidy_tol.has_value())
             {
                 for (std::size_t col = 0U; col < n; ++col)
@@ -5726,8 +5840,7 @@ namespace cxxgpr
                 {
                     const auto a = static_cast<double>(src(i, j));
                     const auto b = static_cast<double>(src(j, i));
-                    const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                    const double repaired = std::max(0.0, mean);
+                    const double repaired = safe_tidy_mean(a, b);
                     auto cast = checked_cast<DstT>(repaired, slot_idx, dim_idx, i, j);
                     if (!cast.has_value())
                     {
@@ -5771,7 +5884,12 @@ namespace cxxgpr
                     max_abs = std::max(std::abs(v), max_abs);
                 }
             }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
+            const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+            if (!tol_exp.has_value())
+            {
+                return tol_exp.error();
+            }
+            const double tol = *tol_exp;
             for (std::size_t col = 0U; col < n_cols; ++col)
             {
                 for (std::size_t row = 0U; row < n_rows; ++row)
@@ -5902,7 +6020,12 @@ namespace cxxgpr
                 {
                     return std::unexpected(diagnose_square_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
                 }
-                tol = *tidy_tol * max_abs;
+                const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+                if (!tol_exp.has_value())
+                {
+                    return std::unexpected(tol_exp.error());
+                }
+                tol = *tol_exp;
             }
 
             auto process_cols = [&](std::size_t col_begin, std::size_t col_end)
@@ -5964,8 +6087,7 @@ namespace cxxgpr
                                         failed.store(true, std::memory_order_relaxed);
                                         return;
                                     }
-                                    const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                                    const double repaired = std::max(0.0, mean);
+                                    const double repaired = safe_tidy_mean(a, b);
                                     val = (repaired == 0.0) ? DstT{0} : static_cast<DstT>(repaired);
                                 }
                                 if constexpr (!std::same_as<DstT, double>)
@@ -6080,7 +6202,12 @@ namespace cxxgpr
                 {
                     return std::unexpected(diagnose_rect_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
                 }
-                tol = *tidy_tol * max_abs;
+                const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+                if (!tol_exp.has_value())
+                {
+                    return std::unexpected(tol_exp.error());
+                }
+                tol = *tol_exp;
             }
 
             std::atomic<bool> failed{false};
@@ -6255,9 +6382,14 @@ namespace cxxgpr
 
             const auto mat_shape = [](const auto& var) noexcept
             {
-                return std::visit([](const auto& mat) noexcept {
-                    return detail::DistanceTableShape{mat.rows(), mat.cols()};
-                }, var);
+                return std::visit(
+                    [](const auto& mat) noexcept
+                {
+                    return std::pair{
+                        mat.data() != nullptr, detail::DistanceTableShape{mat.rows(), mat.cols()}
+                    };
+                }, var
+                );
             };
             const auto check_non_empty_ard = [](const auto& vec) noexcept
             {
@@ -6267,7 +6399,7 @@ namespace cxxgpr
                 }
                 for (const auto& blk : vec)
                 {
-                    if (blk.rows() == 0U || blk.cols() == 0U)
+                    if (blk.data() == nullptr || blk.rows() == 0U || blk.cols() == 0U)
                     {
                         return false;
                     }
@@ -6278,8 +6410,8 @@ namespace cxxgpr
             // Every table must be non-empty before any shape comparison.
             for (const auto& entry : source.scalars_)
             {
-                const auto s = mat_shape(entry.d2);
-                if (s.rows == 0U || s.cols == 0U)
+                const auto [has_data, s] = mat_shape(entry.d2);
+                if (!has_data || s.rows == 0U || s.cols == 0U)
                 {
                     return std::unexpected(GprError::empty_input());
                 }
@@ -6292,8 +6424,9 @@ namespace cxxgpr
                 }
             }
 
-            const detail::DistanceTableShape shape =
-                !source.scalars_.empty() ? mat_shape(source.scalars_[0].d2) : std::visit([](const auto& vec) noexcept {
+            const detail::DistanceTableShape shape = !source.scalars_.empty()
+                ? mat_shape(source.scalars_[0].d2).second
+                : std::visit([](const auto& vec) noexcept {
                 return detail::DistanceTableShape{vec[0].rows(), vec[0].cols()};
             }, source.ards_[0].d2_per_dim);
 
@@ -6326,7 +6459,7 @@ namespace cxxgpr
             }
             for (const auto& entry : source.scalars_)
             {
-                const auto s = mat_shape(entry.d2);
+                const auto s = mat_shape(entry.d2).second;
                 if (s.rows != shape.rows || s.cols != shape.cols)
                 {
                     return std::unexpected(GprError::length_mismatch("scalar distance block shape mismatch"));
@@ -6484,16 +6617,15 @@ namespace cxxgpr
                     using SrcT = std::remove_const_t<std::remove_pointer_t<decltype(vec[0].data())>>;
                     const std::size_t dims = vec.size();
                     impl.ard_dims[at] = dims;
-                    const bool can_borrow_cross =
-                        !is_square && allow_borrow && !source.tidy_rel_tol_.has_value() && std::same_as<SrcT, T>;
+                    const bool can_borrow = allow_borrow && !source.tidy_rel_tol_.has_value() && std::same_as<SrcT, T>;
                     if constexpr (std::same_as<VecMat, MatrixRef<T>>)
                     {
-                        if (can_borrow_cross)
+                        if (can_borrow)
                         {
                             impl.ard_borrowed[at].assign(vec.begin(), vec.end());
                         }
                     }
-                    if (!can_borrow_cross)
+                    if (!can_borrow)
                     {
                         // check_structure() verified that these products do not overflow.
                         const std::size_t block = is_square ? packed_len(shape.rows).value_or(0U)
@@ -6506,13 +6638,13 @@ namespace cxxgpr
                         if (is_square)
                         {
                             res = validate_and_pack_square_block<SrcT, T>(
-                                blk, source.tidy_rel_tol_, at, dim, true, skip_checks, true, impl.ard_data[at]
+                                blk, source.tidy_rel_tol_, at, dim, true, skip_checks, !can_borrow, impl.ard_data[at]
                             );
                         }
                         else
                         {
                             res = validate_and_copy_rect_block<SrcT, T>(
-                                blk, source.tidy_rel_tol_, at, dim, skip_checks, !can_borrow_cross, impl.ard_data[at]
+                                blk, source.tidy_rel_tol_, at, dim, skip_checks, !can_borrow, impl.ard_data[at]
                             );
                         }
                         if (!res.has_value())
@@ -6734,7 +6866,7 @@ namespace cxxgpr
                     const auto view = src.scalar_borrowed[at];
                     if (want_packed)
                     {
-                        dst_tbl.resize(n * (n + 1U) / 2U);
+                        dst_tbl.resize(packed_len(n).value_or(0U));
                         for (std::size_t j = 0U; j < n; ++j)
                         {
                             const std::size_t dp = packed_lower_index(n, j, j);
@@ -6788,7 +6920,7 @@ namespace cxxgpr
                     const auto& src_tbl = src.scalar_tables[at];
                     if (want_packed)
                     {
-                        dst_tbl.resize(n * (n + 1U) / 2U);
+                        dst_tbl.resize(packed_len(n).value_or(0U));
                         for (std::size_t j = 0U; j < n; ++j)
                         {
                             const std::size_t dp = packed_lower_index(n, j, j);
@@ -6814,15 +6946,33 @@ namespace cxxgpr
                 auto& dst_ard = impl->ard_data[at];
                 if (at < src.ard_borrowed.size() && !src.ard_borrowed[at].empty())
                 {
-                    const std::size_t blk_len = n * cols;
-                    dst_ard.reserve(blk_len * src.ard_borrowed[at].size());
-                    for (const auto& blk : src.ard_borrowed[at])
+                    if (src.square)
                     {
-                        for (std::size_t j = 0U; j < cols; ++j)
+                        const std::size_t per_dim = packed_len(n).value_or(0U);
+                        dst_ard.reserve(per_dim * src.ard_borrowed[at].size());
+                        for (const auto& blk : src.ard_borrowed[at])
                         {
-                            for (std::size_t i = 0U; i < n; ++i)
+                            for (std::size_t j = 0U; j < n; ++j)
                             {
-                                dst_ard.push_back(static_cast<double>(blk(i, j)));
+                                for (std::size_t i = j; i < n; ++i)
+                                {
+                                    dst_ard.push_back(static_cast<double>(blk(i, j)));
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        const std::size_t blk_len = n * cols;
+                        dst_ard.reserve(blk_len * src.ard_borrowed[at].size());
+                        for (const auto& blk : src.ard_borrowed[at])
+                        {
+                            for (std::size_t j = 0U; j < cols; ++j)
+                            {
+                                for (std::size_t i = 0U; i < n; ++i)
+                                {
+                                    dst_ard.push_back(static_cast<double>(blk(i, j)));
+                                }
                             }
                         }
                     }
@@ -7788,14 +7938,33 @@ namespace cxxgpr
         {
             const auto& impl = *store.impl_;
             const std::size_t n = impl.n_rows;
-            const std::size_t packed_len = n * (n + 1U) / 2U;
+            const std::size_t per_blk = packed_len(n).value_or(0U);
             std::vector<std::vector<T>> out;
             out.reserve(impl.kernel_slots.size());
             for (const auto& slot : impl.kernel_slots)
             {
                 if (slot.ard_dims.has_value())
                 {
-                    out.push_back(impl.ard_data[slot.at]);
+                    if (slot.at < impl.ard_borrowed.size() && !impl.ard_borrowed[slot.at].empty())
+                    {
+                        std::vector<T> packed_ard;
+                        packed_ard.reserve(per_blk * impl.ard_borrowed[slot.at].size());
+                        for (const auto& view : impl.ard_borrowed[slot.at])
+                        {
+                            for (std::size_t j = 0U; j < n; ++j)
+                            {
+                                for (std::size_t i = j; i < n; ++i)
+                                {
+                                    packed_ard.push_back(view(i, j));
+                                }
+                            }
+                        }
+                        out.push_back(std::move(packed_ard));
+                    }
+                    else
+                    {
+                        out.push_back(impl.ard_data[slot.at]);
+                    }
                     continue;
                 }
                 if (slot.at < impl.scalar_is_packed.size() && impl.scalar_is_packed[slot.at] != 0U)
@@ -7803,7 +7972,7 @@ namespace cxxgpr
                     out.push_back(impl.scalar_tables[slot.at]);
                     continue;
                 }
-                std::vector<T> packed_table(packed_len);
+                std::vector<T> packed_table(per_blk);
                 std::size_t pos = 0;
                 if (slot.at < impl.scalar_borrowed.size() && impl.scalar_borrowed[slot.at].data() != nullptr)
                 {

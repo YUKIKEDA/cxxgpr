@@ -53,6 +53,7 @@ namespace cxxgpr
         /// @param[out] out Destination vector resized to rows * cols.
         /// @return Empty expected on success, or GprError.
         /// @retval GprErrorCode::EmptyInput When x is empty.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
         /// @retval GprErrorCode::NonFiniteInput When x contains NaN or Inf.
         [[nodiscard]] std::expected<void, GprError> copy_points(detail::PointMatrixRef x_var, std::vector<double>& out)
         {
@@ -65,7 +66,12 @@ namespace cxxgpr
                 }
                 const std::size_t n_rows = x.rows();
                 const std::size_t n_cols = x.cols();
-                out.resize(n_rows * n_cols);
+                auto nm = checked_mul(n_rows, n_cols);
+                if (!nm.has_value())
+                {
+                    return std::unexpected(std::move(nm).error());
+                }
+                out.resize(*nm);
                 for (std::size_t col = 0U; col < n_cols; ++col)
                 {
                     const auto* const src_col = &x(0U, col);

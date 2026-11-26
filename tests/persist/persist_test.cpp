@@ -2499,22 +2499,35 @@ namespace
         EXPECT_EQ(pred_out, *pred_d);
 
         const auto cov_d = loaded->predict_covariance(xq_ref_d, opts);
+        const auto cov_d_span = loaded->predict_covariance(std::span<const double>(xq_d), m, d, opts);
         const auto cov_f_mat = loaded->predict_covariance(xq_ref_f, opts);
         const auto cov_f_span = loaded->predict_covariance(std::span<const float>(xq_f), m, d, opts);
         ASSERT_TRUE(cov_d.has_value());
+        ASSERT_TRUE(cov_d_span.has_value());
         ASSERT_TRUE(cov_f_mat.has_value());
         ASSERT_TRUE(cov_f_span.has_value());
+        EXPECT_EQ(*cov_d, *cov_d_span);
         EXPECT_EQ(*cov_d, *cov_f_mat);
         EXPECT_EQ(*cov_d, *cov_f_span);
 
         const auto samp_d = loaded->sample(xq_ref_d, 3U, 42U, opts);
+        const auto samp_d_span = loaded->sample(std::span<const double>(xq_d), m, d, 3U, 42U, opts);
         const auto samp_f_mat = loaded->sample(xq_ref_f, 3U, 42U, opts);
         const auto samp_f_span = loaded->sample(std::span<const float>(xq_f), m, d, 3U, 42U, opts);
         ASSERT_TRUE(samp_d.has_value());
+        ASSERT_TRUE(samp_d_span.has_value());
         ASSERT_TRUE(samp_f_mat.has_value());
         ASSERT_TRUE(samp_f_span.has_value());
+        EXPECT_EQ(*samp_d, *samp_d_span);
         EXPECT_EQ(*samp_d, *samp_f_mat);
         EXPECT_EQ(*samp_d, *samp_f_span);
+
+        const auto bad_cov = loaded->predict_covariance(std::span<const double>(xq_d), m + 1U, d, opts);
+        ASSERT_FALSE(bad_cov.has_value());
+        EXPECT_EQ(bad_cov.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        const auto bad_samp = loaded->sample(std::span<const double>(xq_d), m + 1U, d, 3U, 42U, opts);
+        ASSERT_FALSE(bad_samp.has_value());
+        EXPECT_EQ(bad_samp.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
     }
 
 }  // namespace

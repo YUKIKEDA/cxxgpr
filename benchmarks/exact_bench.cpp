@@ -893,6 +893,269 @@ namespace
         state.counters["iters"] = static_cast<double>(last_iters);
     }
 
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit with retain_distances(false) and assume_valid(true) at n =
+    /// 128.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_fit_lbfgs_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(128U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false);
+
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit reusing a pre-built CheckedDistanceStore at n = 128.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_fit_lbfgs_store_reuse_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(128U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+        const auto store = spec.compile<double>().prepare_square(src);
+        if (!store.has_value())
+        {
+            state.SkipWithError("prepare_square failed");
+            return;
+        }
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(*store, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD factorization (retained + validated) at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_factor_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-2).value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD factorization with retain_distances(false) and assume_valid(true) at
+    /// n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_factor_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-2).value().with_retain_distances(
+                false
+            );
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit (retained + validated) at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit with retain_distances(false) and assume_valid(true) at n =
+    /// 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false);
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit reusing a pre-built CheckedDistanceStore at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_store_reuse_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+        const auto store = spec.compile<double>().prepare_square(src);
+        if (!store.has_value())
+        {
+            state.SkipWithError("prepare_square failed");
+            return;
+        }
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(*store, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
     /// @brief Benchmarks fixed-hyperparameter factorization with retain_distances(false) and assume_valid(true) at n =
     /// 256.
     /// @param[in,out] state Google Benchmark iteration state.
@@ -1226,6 +1489,13 @@ namespace
     BENCHMARK(bm_distance_forrester_256_predict_into_double)->UseRealTime();
     BENCHMARK(bm_distance_forrester_512_predict_cov_double)->UseRealTime();
     BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_store_reuse_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_factor_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_factor_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_store_reuse_double)->UseRealTime();
     BENCHMARK(bm_distance_forrester_256_factor_nocopy_unchecked_double)->UseRealTime();
     BENCHMARK(bm_distance_forrester_1024_factor_nocopy_unchecked_double)->UseRealTime();
     BENCHMARK(bm_distance_forrester_256_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();

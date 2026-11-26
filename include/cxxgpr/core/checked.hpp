@@ -89,6 +89,9 @@ namespace cxxgpr
         /// @param[in] n_rows Declared number of rows.
         /// @param[in] n_cols Declared number of columns.
         /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When data is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When data.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<float>, GprError> matrix_view_from_span(
             std::span<const float> data, std::size_t n_rows, std::size_t n_cols
         );
@@ -102,6 +105,9 @@ namespace cxxgpr
         /// @param[in] n_cols Declared number of columns.
         /// @param[in] y Training target vector.
         /// @return View with leading dimension n_rows, or GprError on an empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<double>, GprError> training_view_from_span(
             std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
         );
@@ -112,6 +118,9 @@ namespace cxxgpr
         /// @param[in] n_cols Declared number of columns.
         /// @param[in] y Training target vector.
         /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<float>, GprError> training_view_from_span(
             std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
         );
@@ -122,6 +131,9 @@ namespace cxxgpr
         /// @param[in] n_cols Declared number of columns.
         /// @param[in] y Single-precision training target vector.
         /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<double>, GprError> training_view_from_span(
             std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
         );
@@ -132,6 +144,9 @@ namespace cxxgpr
         /// @param[in] n_cols Declared number of columns.
         /// @param[in] y Single-precision training target vector.
         /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
+        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
+        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<float>, GprError> training_view_from_span(
             std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
         );

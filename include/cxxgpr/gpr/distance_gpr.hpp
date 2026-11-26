@@ -451,6 +451,20 @@ namespace cxxgpr
         /// @param[in] xq Query coordinates, m x d, in double precision.
         /// @param[in] options Variance selection.
         /// @return Prediction on the original target scale, or GprError.
+        /// @retval GprErrorCode::EmptyInput When xq, a table, or a store is empty or moved-from.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of cross is invalid or combined with
+        /// assume_valid().
+        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel or an
+        /// incompatible store.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
+        /// @retval GprErrorCode::LengthMismatch When the tables differ in shape, do not have n_train() rows, or
+        /// xq.rows() differs from the table columns.
+        /// @retval GprErrorCode::DimensionMismatch When xq.cols() != n_features() or an ARD slot supplies the wrong
+        /// number of tables.
+        /// @retval GprErrorCode::NonFiniteInput When xq contains NaN or Inf.
+        /// @retval GprErrorCode::InvalidDistance When a table entry is non-finite or negative.
+        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf before its
+        /// clamp at zero.
         template <DistanceInputConcept<Storage> CrossT>
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
             const CrossT& cross, MatrixRef<double> xq, const PredictOptions& options = {}
@@ -1044,11 +1058,27 @@ namespace cxxgpr
         }
 
         /// @brief Optimizes the hyperparameters and fits the model on supplied training distances.
+        /// @details Checks, in this order: empty y, the structure of the tables (slots, emptiness, size products,
+        /// shapes), y.size() against the table order, the number of ARD tables, the finiteness of y, and only then
+        /// the table values; the table is validated once, not per objective evaluation.
         /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the training points, bound to the slots of
         /// the kernel.
         /// @param[in] y Training targets, one per training point, in double precision.
         /// @return Fitted model, or GprError leaving this trainer unchanged.
+        /// @retval GprErrorCode::EmptyInput When y, a table, or a store is empty or moved-from.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of train is invalid or combined with
+        /// assume_valid().
+        /// @retval GprErrorCode::UnsupportedKernelOperation When train binds a slot of another kernel or an
+        /// incompatible store.
+        /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
+        /// @retval GprErrorCode::LengthMismatch When a table is not square, the tables differ in shape, or y.size()
+        /// differs from the table order.
+        /// @retval GprErrorCode::DimensionMismatch When an ARD slot supplies the wrong number of tables.
+        /// @retval GprErrorCode::NonFiniteInput When y contains NaN or Inf.
+        /// @retval GprErrorCode::InvalidDistance When a table is non-finite, negative, asymmetric or nonzero on the
+        /// diagonal (unless repaired with DistanceSource::tidy()).
+        /// @retval GprErrorCode::CholeskyFailed When factorization fails after the jitter policy is exhausted.
         template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
             const TrainT& train, std::span<const double> y
@@ -1073,11 +1103,17 @@ namespace cxxgpr
         }
 
         /// @brief Optimizes the hyperparameters and fits a WithPoints model on double coordinates and targets.
+        /// @details Checks as the DistanceOnly overload, with x added: empty x with y, x.rows() with the table
+        /// order, x.cols() against the coordinate leaves with the ARD table counts, and the finiteness of x with y.
         /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the training points.
         /// @param[in] x Training coordinates, n x d, in double precision.
         /// @param[in] y Training targets in double precision.
         /// @return Fitted model, or GprError leaving this trainer unchanged.
+        /// @retval GprErrorCode::EmptyInput When y, x, a table, or a store is empty or moved-from.
+        /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from the table order.
+        /// @retval GprErrorCode::DimensionMismatch When x.cols() does not match an ARD coordinate leaf.
+        /// @retval GprErrorCode::NonFiniteInput When y or x contains NaN or Inf.
         template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
             const TrainT& train, MatrixRef<double> x, std::span<const double> y
