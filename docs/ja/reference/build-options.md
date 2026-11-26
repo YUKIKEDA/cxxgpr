@@ -131,7 +131,7 @@ cmake --preset linux-release -DCXXGPR_X86_ISA=AVX512
 | `lib/cmake/cxxgpr/` | `cxxgprConfig.cmake`、`cxxgprConfigVersion.cmake`、`cxxgprTargets.cmake` |
 | `share/cxxgpr/` | `LICENSE` と `THIRD_PARTY_NOTICES.md` |
 
-パッケージは、ターゲット `cxxgpr::cxxgpr` をエクスポートする。バージョンファイルの互換モードは `SameMinorVersion` である。`find_package(cxxgpr 0.1.0 CONFIG REQUIRED)` は、インストール済みの `0.1.x` を受け入れ、`0.2.0` と `1.0.0` を拒否する。版の方針は {doc}`compatibility` で説明する。
+パッケージは、ターゲット `cxxgpr::cxxgpr` をエクスポートする。バージョンファイルの互換モードは `SameMinorVersion` である。`find_package(cxxgpr 0.2.0 CONFIG REQUIRED)` は、インストール済みの `0.2.x` を受け入れ、`0.3.0` と `1.0.0` を拒否する。版の方針は {doc}`compatibility` で説明する。
 
 ## ビルドした内容を確かめる
 
