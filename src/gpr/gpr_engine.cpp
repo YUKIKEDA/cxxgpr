@@ -21,6 +21,7 @@
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "gpr/refine_constants.hpp"
@@ -766,91 +767,108 @@ namespace cxxgpr::detail
             return {};
         }
 
-        /// @brief Copies a possibly strided column-major MatrixRef<double> into a dense contiguous vector while
-        /// checking finiteness.
+        /// @brief Copies a strided column-major double or float MatrixRef into a dense double vector while checking
+        /// finiteness.
         /// @details Rejects empty or null inputs, guards rows * cols multiplication overflow, and checks every
-        /// matrix element for NaN or Inf.
-        /// @param[in] src Source column-major matrix view.
-        /// @param[out] dst Destination contiguous column-major buffer resized to rows * cols.
+        /// matrix element for NaN or Inf before widening into @p dst.
+        /// @param[in] src_var Source double or float column-major matrix view.
+        /// @param[out] dst Destination contiguous column-major double buffer resized to rows * cols.
         /// @return Empty expected on success, or EmptyInput, SizeOverflow, or NonFiniteInput on invalid data.
-        /// @retval GprErrorCode::EmptyInput When src is empty or has a null data pointer.
-        /// @retval GprErrorCode::SizeOverflow When src.rows() * src.cols() overflows std::size_t.
-        /// @retval GprErrorCode::NonFiniteInput When any matrix entry is NaN or Inf.
         [[nodiscard]] std::expected<void, GprError> copy_double_matrix_col_major(
-            MatrixRef<double> src, std::vector<double>& dst
+            PointMatrixRef src_var, std::vector<double>& dst
         )
         {
-            if (src.is_empty())
+            return std::visit(
+                [&dst](auto src) -> std::expected<void, GprError>
             {
-                return std::unexpected(GprError::empty_input());
-            }
-            if (src.data() == nullptr)
-            {
-                return std::unexpected(GprError::empty_input());
-            }
-            // Guard dense allocation size against std::size_t multiplication overflow.
-            auto nm = checked_mul(src.rows(), src.cols());
-            if (!nm.has_value())
-            {
-                return std::unexpected(std::move(nm).error());
-            }
-            dst.resize(*nm);
-            const std::size_t rows = src.rows();
-            const std::size_t cols = src.cols();
-            // Copy column-major order while rejecting NaN or +/-Inf training coordinates.
-            for (std::size_t col = 0; col < cols; ++col)
-            {
-                for (std::size_t row = 0; row < rows; ++row)
+                if (src.is_empty() || src.data() == nullptr)
                 {
-                    const double val = src(row, col);
+                    return std::unexpected(GprError::empty_input());
+                }
+                auto nm = checked_mul(src.rows(), src.cols());
+                if (!nm.has_value())
+                {
+                    return std::unexpected(std::move(nm).error());
+                }
+                dst.resize(*nm);
+                const std::size_t rows = src.rows();
+                const std::size_t cols = src.cols();
+                for (std::size_t col = 0; col < cols; ++col)
+                {
+                    for (std::size_t row = 0; row < rows; ++row)
+                    {
+                        const auto val = static_cast<double>(src(row, col));
+                        if (!std::isfinite(val))
+                        {
+                            return std::unexpected(GprError::non_finite_input());
+                        }
+                        dst[(col * rows) + row] = val;
+                    }
+                }
+                return {};
+            }, src_var
+            );
+        }
+
+        /// @brief Validates and widens a double or float target span into a dense double vector.
+        /// @param[in] y_var Source double or float target span.
+        /// @param[out] dst Destination double vector.
+        /// @return Empty expected on success, or NonFiniteInput if any element is non-finite.
+        [[nodiscard]] std::expected<void, GprError> copy_double_targets(TargetSpanRef y_var, std::vector<double>& dst)
+        {
+            return std::visit(
+                [&dst](auto y) -> std::expected<void, GprError>
+            {
+                dst.resize(y.size());
+                for (std::size_t i = 0; i < y.size(); ++i)
+                {
+                    const auto val = static_cast<double>(y[i]);
                     if (!std::isfinite(val))
                     {
                         return std::unexpected(GprError::non_finite_input());
                     }
-                    dst[(col * rows) + row] = val;
+                    dst[i] = val;
                 }
-            }
-            return {};
+                return {};
+            }, y_var
+            );
         }
 
     }  // namespace
 
     /// @brief Validates training inputs, fits transforms, optimizes or factors hyperparameters, and assembles
     /// FittedPayload<P>.
-    /// @details Preserves raw (x, y) copies for persistence, fits input/target transforms in double precision,
-    /// allocates FitBuffers<P>, optionally runs optimize_cb, re-factors at the final parameters, and runs
-    /// mixed-precision iterative refinement when P::refines_in_f64 is true.
     /// @tparam P Precision policy controlling Storage and Refine arithmetic.
     /// @param[in] cfg Borrowed trainer configuration and transform prototypes.
-    /// @param[in] x Column-major training feature matrix (n x d).
-    /// @param[in] y Training target vector of length n.
+    /// @param[in] x Column-major training feature matrix (n x d) in double or float precision.
+    /// @param[in] y Training target vector of length n in double or float precision.
     /// @param[in] optimize_cb Callback invoking the concrete optimizer when cfg.optimize is true.
     /// @param[in,out] optimize_ctx Opaque pointer forwarded to optimize_cb.
     /// @return Populated FittedPayload<P> on success, or GprError on any validation, optimization, or solve error.
-    /// @retval GprErrorCode::EmptyInput When x or y is empty or null.
-    /// @retval GprErrorCode::LengthMismatch When y.size() != x.rows().
-    /// @retval GprErrorCode::NonFiniteInput When x or y contains NaN or Inf.
-    /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
     template <PrecisionPolicyConcept P>
     std::expected<FittedPayload<P>, GprError> train_or_factor_payload(
-        const TrainConfig<P>& cfg,
-        MatrixRef<double> x,
-        std::span<const double> y,
-        OptimizeCallback optimize_cb,
-        void* optimize_ctx
+        const TrainConfig<P>& cfg, PointMatrixRef x, TargetSpanRef y, OptimizeCallback optimize_cb, void* optimize_ctx
     )
     {
         using Storage = P::Storage;
         using Refine = P::Refine;
 
-        // Validate dimensions, column-major feature entries, and target finiteness before mutating workspace.
-        if (x.is_empty() || y.empty())
+        std::size_t n = 0U;
+        std::size_t d = 0U;
+        const bool x_empty = std::visit(
+            [&n, &d](auto mat) noexcept
+        {
+            n = mat.rows();
+            d = mat.cols();
+            return mat.is_empty() || mat.data() == nullptr;
+        }, x
+        );
+        const std::size_t y_size = std::visit([](auto sp) noexcept { return sp.size(); }, y);
+        if (x_empty || y_size == 0U)
         {
             return std::unexpected(GprError::empty_input());
         }
-        const std::size_t n = x.rows();
-        const std::size_t d = x.cols();
-        if (y.size() != n)
+        if (y_size != n)
         {
             return std::unexpected(GprError::length_mismatch("target length must match training row count"));
         }
@@ -860,14 +878,11 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(cp).error());
         }
         std::vector<double> x_raw = x_f64;
-        for (const double val : y)
+        std::vector<double> y_raw;
+        if (auto cy = copy_double_targets(y, y_raw); !cy.has_value())
         {
-            if (!std::isfinite(val))
-            {
-                return std::unexpected(GprError::non_finite_input());
-            }
+            return std::unexpected(std::move(cy).error());
         }
-        std::vector<double> y_raw(y.begin(), y.end());
 
         // Fit and apply input and target transforms in double precision while retaining raw snapshots.
         auto fitted_in = cfg.input_transform.fit(x_f64, n, d);
@@ -880,12 +895,12 @@ namespace cxxgpr::detail
             return std::unexpected(std::move(ap).error());
         }
 
-        auto fitted_tgt = cfg.target_transform.fit(y);
+        auto fitted_tgt = cfg.target_transform.fit(y_raw);
         if (!fitted_tgt.has_value())
         {
             return std::unexpected(std::move(fitted_tgt).error());
         }
-        std::vector<double> y_f64(y.begin(), y.end());
+        std::vector<double> y_f64 = y_raw;
         if (auto tf = (*fitted_tgt)->transform(y_f64); !tf.has_value())
         {
             return std::unexpected(std::move(tf).error());
@@ -1065,7 +1080,7 @@ namespace cxxgpr::detail
         /// input transform in double precision, and casts transformed features to Storage precision.
         /// @tparam P Precision policy defining Storage scalar type.
         /// @param[in] payload Fitted model payload supplying n_train, n_features, compiled_kernel, and input_transform.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs_var Column-major query feature matrix (m x d), double or float.
         /// @param[in,out] workspace Mutable query workspace reused across calls.
         /// @return Column-major MatrixRef<Storage> backed by workspace.query_x, or GprError on invalid query.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
@@ -1073,56 +1088,61 @@ namespace cxxgpr::detail
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<MatrixRef<typename P::Storage>, GprError> prepare_query_matrix(
-            const FittedPayload<P>& payload, MatrixRef<double> xs, QueryWorkspace<P>& workspace
+            const FittedPayload<P>& payload, PointMatrixRef xs_var, QueryWorkspace<P>& workspace
         )
         {
             using Storage = P::Storage;
 
-            if (xs.is_empty() || xs.data() == nullptr)
+            return std::visit(
+                [&](auto xs) -> std::expected<MatrixRef<Storage>, GprError>
             {
-                return std::unexpected(GprError::empty_input());
-            }
-            const std::size_t m = xs.rows();
-            const std::size_t d = xs.cols();
-            if (d != payload.n_features)
-            {
-                return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
-            }
-            // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
-            if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
-                !ens.has_value())
-            {
-                return std::unexpected(std::move(ens).error());
-            }
-
-            // Copy query coordinates column-major into double staging buffer while checking finiteness.
-            for (std::size_t col = 0; col < d; ++col)
-            {
-                for (std::size_t row = 0; row < m; ++row)
+                if (xs.is_empty() || xs.data() == nullptr)
                 {
-                    const double val = xs(row, col);
-                    if (!std::isfinite(val))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    workspace.query_xs[(col * m) + row] = val;
+                    return std::unexpected(GprError::empty_input());
                 }
-            }
+                const std::size_t m = xs.rows();
+                const std::size_t d = xs.cols();
+                if (d != payload.n_features)
+                {
+                    return std::unexpected(GprError::dimension_mismatch(d, payload.n_features));
+                }
+                // Grow reusable query workspace only when m, n, d, or nested depth exceeds current capacity.
+                if (auto ens = workspace.ensure(payload.n_train, m, d, payload.compiled_kernel->nested_depth());
+                    !ens.has_value())
+                {
+                    return std::unexpected(std::move(ens).error());
+                }
 
-            // Apply fitted input transform in double precision before casting down to Storage. The workspace only
-            // grows, so restrict the span to exactly m * d values (a smaller batch may follow a larger one).
-            const std::span<double> query_span(workspace.query_xs.data(), m * d);
-            if (auto ap = payload.input_transform->apply(query_span, m, d); !ap.has_value())
-            {
-                return std::unexpected(std::move(ap).error());
-            }
+                // Copy/widen query coordinates column-major into double staging buffer while checking finiteness.
+                for (std::size_t col = 0; col < d; ++col)
+                {
+                    for (std::size_t row = 0; row < m; ++row)
+                    {
+                        const auto val = static_cast<double>(xs(row, col));
+                        if (!std::isfinite(val))
+                        {
+                            return std::unexpected(GprError::non_finite_input());
+                        }
+                        workspace.query_xs[(col * m) + row] = val;
+                    }
+                }
 
-            const std::size_t md = m * d;
-            for (std::size_t i = 0; i < md; ++i)
-            {
-                workspace.query_x[i] = static_cast<Storage>(workspace.query_xs[i]);
-            }
-            return MatrixRef<Storage>(workspace.query_x.data(), m, d, m);
+                // Apply fitted input transform in double precision before casting down to Storage. The workspace
+                // only grows, so restrict the span to exactly m * d values (a smaller batch may follow a larger one).
+                const std::span<double> query_span(workspace.query_xs.data(), m * d);
+                if (auto ap = payload.input_transform->apply(query_span, m, d); !ap.has_value())
+                {
+                    return std::unexpected(std::move(ap).error());
+                }
+
+                const std::size_t md = m * d;
+                for (std::size_t i = 0; i < md; ++i)
+                {
+                    workspace.query_x[i] = static_cast<Storage>(workspace.query_xs[i]);
+                }
+                return MatrixRef<Storage>(workspace.query_x.data(), m, d, m);
+            }, xs_var
+            );
         }
 
         /// @brief Applies inverse target transforms to a Prediction<T> using a preallocated double scratch span.
@@ -1214,7 +1234,7 @@ namespace cxxgpr::detail
     template <PrecisionPolicyConcept P>
     std::expected<void, GprError> fitted_predict_into(
         const FittedPayload<P>& payload,
-        MatrixRef<double> xs,
+        PointMatrixRef xs,
         const PredictOptions& options,
         QueryWorkspace<P>& workspace,
         Prediction<typename P::Refine>& out
@@ -1245,19 +1265,13 @@ namespace cxxgpr::detail
     /// @brief Evaluates posterior mean and full m x m covariance matrix on the original target scale.
     /// @tparam P Precision policy matching payload.
     /// @param[in] payload Fitted model payload.
-    /// @param[in] xs Column-major query feature matrix (m x d).
+    /// @param[in] xs Column-major query feature matrix (m x d) in double or float precision.
     /// @param[in] options Prediction variance options.
     /// @param[in,out] workspace Mutable query workspace.
     /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
-    /// @retval GprErrorCode::EmptyInput When xs is empty or null.
-    /// @retval GprErrorCode::DimensionMismatch When xs.cols() != payload.n_features.
-    /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
     template <PrecisionPolicyConcept P>
     std::expected<PredictiveCovariance<typename P::Refine>, GprError> fitted_predict_covariance(
-        const FittedPayload<P>& payload,
-        MatrixRef<double> xs,
-        const PredictOptions& options,
-        QueryWorkspace<P>& workspace
+        const FittedPayload<P>& payload, PointMatrixRef xs, const PredictOptions& options, QueryWorkspace<P>& workspace
     )
     {
         using Storage = P::Storage;
@@ -1333,7 +1347,7 @@ namespace cxxgpr::detail
     template <PrecisionPolicyConcept P>
     std::expected<std::vector<typename P::Refine>, GprError> fitted_sample(
         const FittedPayload<P>& payload,
-        MatrixRef<double> xs,
+        PointMatrixRef xs,
         std::size_t n_draws,
         std::uint64_t seed,
         const PredictOptions& options,
@@ -1362,7 +1376,7 @@ namespace cxxgpr::detail
             return samples;
         }
         // Apply inverse mean transform to each column draw independently.
-        const std::size_t m = xs.rows();
+        const std::size_t m = xq_ref->rows();
         if constexpr (std::same_as<Refine, double>)
         {
             for (std::size_t draw = 0; draw < n_draws; ++draw)
@@ -1424,87 +1438,73 @@ namespace cxxgpr::detail
     }
 
     template std::expected<FittedPayload<DoublePrecision>, GprError> train_or_factor_payload<DoublePrecision>(
-        const TrainConfig<DoublePrecision>&, MatrixRef<double>, std::span<const double>, OptimizeCallback, void*
+        const TrainConfig<DoublePrecision>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
     );
     template std::expected<FittedPayload<SinglePrecision>, GprError> train_or_factor_payload<SinglePrecision>(
-        const TrainConfig<SinglePrecision>&, MatrixRef<double>, std::span<const double>, OptimizeCallback, void*
+        const TrainConfig<SinglePrecision>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
     );
     template std::expected<FittedPayload<MixedPrecision<PromoteStorage>>, GprError> train_or_factor_payload<
         MixedPrecision<PromoteStorage>>(
-        const TrainConfig<MixedPrecision<PromoteStorage>>&,
-        MatrixRef<double>,
-        std::span<const double>,
-        OptimizeCallback,
-        void*
+        const TrainConfig<MixedPrecision<PromoteStorage>>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
     );
     template std::expected<FittedPayload<MixedPrecision<ReevaluateKernel>>, GprError> train_or_factor_payload<
         MixedPrecision<ReevaluateKernel>>(
-        const TrainConfig<MixedPrecision<ReevaluateKernel>>&,
-        MatrixRef<double>,
-        std::span<const double>,
-        OptimizeCallback,
-        void*
+        const TrainConfig<MixedPrecision<ReevaluateKernel>>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
     );
 
     template std::expected<void, GprError> fitted_predict_into<DoublePrecision>(
         const FittedPayload<DoublePrecision>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<DoublePrecision>&,
         Prediction<double>&
     );
     template std::expected<void, GprError> fitted_predict_into<SinglePrecision>(
         const FittedPayload<SinglePrecision>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<SinglePrecision>&,
         Prediction<float>&
     );
     template std::expected<void, GprError> fitted_predict_into<MixedPrecision<PromoteStorage>>(
         const FittedPayload<MixedPrecision<PromoteStorage>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<MixedPrecision<PromoteStorage>>&,
         Prediction<double>&
     );
     template std::expected<void, GprError> fitted_predict_into<MixedPrecision<ReevaluateKernel>>(
         const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<MixedPrecision<ReevaluateKernel>>&,
         Prediction<double>&
     );
 
     template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<DoublePrecision>(
-        const FittedPayload<DoublePrecision>&,
-        MatrixRef<double>,
-        const PredictOptions&,
-        QueryWorkspace<DoublePrecision>&
+        const FittedPayload<DoublePrecision>&, PointMatrixRef, const PredictOptions&, QueryWorkspace<DoublePrecision>&
     );
     template std::expected<PredictiveCovariance<float>, GprError> fitted_predict_covariance<SinglePrecision>(
-        const FittedPayload<SinglePrecision>&,
-        MatrixRef<double>,
-        const PredictOptions&,
-        QueryWorkspace<SinglePrecision>&
+        const FittedPayload<SinglePrecision>&, PointMatrixRef, const PredictOptions&, QueryWorkspace<SinglePrecision>&
     );
     template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<
         MixedPrecision<PromoteStorage>>(
         const FittedPayload<MixedPrecision<PromoteStorage>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<MixedPrecision<PromoteStorage>>&
     );
     template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<
         MixedPrecision<ReevaluateKernel>>(
         const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         const PredictOptions&,
         QueryWorkspace<MixedPrecision<ReevaluateKernel>>&
     );
 
     template std::expected<std::vector<double>, GprError> fitted_sample<DoublePrecision>(
         const FittedPayload<DoublePrecision>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         std::size_t,
         std::uint64_t,
         const PredictOptions&,
@@ -1513,7 +1513,7 @@ namespace cxxgpr::detail
     );
     template std::expected<std::vector<float>, GprError> fitted_sample<SinglePrecision>(
         const FittedPayload<SinglePrecision>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         std::size_t,
         std::uint64_t,
         const PredictOptions&,
@@ -1522,7 +1522,7 @@ namespace cxxgpr::detail
     );
     template std::expected<std::vector<double>, GprError> fitted_sample<MixedPrecision<PromoteStorage>>(
         const FittedPayload<MixedPrecision<PromoteStorage>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         std::size_t,
         std::uint64_t,
         const PredictOptions&,
@@ -1531,7 +1531,7 @@ namespace cxxgpr::detail
     );
     template std::expected<std::vector<double>, GprError> fitted_sample<MixedPrecision<ReevaluateKernel>>(
         const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-        MatrixRef<double>,
+        PointMatrixRef,
         std::size_t,
         std::uint64_t,
         const PredictOptions&,

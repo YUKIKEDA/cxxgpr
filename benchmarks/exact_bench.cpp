@@ -7,6 +7,7 @@
 /// and coordinate vs supplied-distance kernel Gram evaluation.
 
 #include "cxxgpr/core/build_info.hpp"
+#include "cxxgpr/gpr/distance_gpr.hpp"
 #include "cxxgpr/gpr/gpr.hpp"
 #include "cxxgpr/kernel/kernel.hpp"
 #include "cxxgpr/persist/persist.hpp"
@@ -743,6 +744,693 @@ namespace
         }
     }
 
+    /// @brief Builds pairwise scalar squared Euclidean distance tables between column-major point matrices.
+    /// @param[in] a Column-major matrix of shape `(na, d)`.
+    /// @param[in] na Row count of @p a.
+    /// @param[in] b Column-major matrix of shape `(nb, d)`.
+    /// @param[in] nb Row count of @p b.
+    /// @param[in] d Number of feature dimensions.
+    /// @return Column-major `na x nb` squared Euclidean distance buffer.
+    std::vector<double> build_scalar_sq_dist(
+        std::span<const double> a, std::size_t na, std::span<const double> b, std::size_t nb, std::size_t d
+    )
+    {
+        std::vector<double> out(na * nb, 0.0);
+        for (std::size_t dim = 0U; dim < d; ++dim)
+        {
+            for (std::size_t col = 0U; col < nb; ++col)
+            {
+                const double b_val = b[(dim * nb) + col];
+                for (std::size_t row = 0U; row < na; ++row)
+                {
+                    const double diff = a[(dim * na) + row] - b_val;
+                    out[(col * na) + row] += diff * diff;
+                }
+            }
+        }
+        return out;
+    }
+
+    /// @brief Builds per-dimension squared Euclidean distance tables between column-major point matrices.
+    /// @param[in] a Column-major matrix of shape `(na, d)`.
+    /// @param[in] na Row count of @p a.
+    /// @param[in] b Column-major matrix of shape `(nb, d)`.
+    /// @param[in] nb Row count of @p b.
+    /// @param[in] d Number of feature dimensions.
+    /// @return Vector of @p d column-major `na x nb` per-dimension squared-distance buffers.
+    std::vector<std::vector<double>> build_ard_sq_dist(
+        std::span<const double> a, std::size_t na, std::span<const double> b, std::size_t nb, std::size_t d
+    )
+    {
+        std::vector<std::vector<double>> out(d, std::vector<double>(na * nb, 0.0));
+        for (std::size_t dim = 0U; dim < d; ++dim)
+        {
+            for (std::size_t col = 0U; col < nb; ++col)
+            {
+                const double b_val = b[(dim * nb) + col];
+                for (std::size_t row = 0U; row < na; ++row)
+                {
+                    const double diff = a[(dim * na) + row] - b_val;
+                    out[dim][(col * na) + row] = diff * diff;
+                }
+            }
+        }
+        return out;
+    }
+
+    /// @brief Benchmarks prepare_square() validation and packing on a scalar distance matrix.
+    /// @param[in,out] state Google Benchmark iteration state with training count `n`.
+    void bm_distance_prepare_square_double(benchmark::State& state)
+    {
+        const auto n = static_cast<std::size_t>(state.range(0));
+        const ForresterDataset data(n, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, n, data.x_train, n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto ck = spec.compile<double>();
+
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n, n));
+        for (auto _ : state)
+        {
+            auto store = ck.prepare_square(src);
+            if (!store)
+            {
+                state.SkipWithError("prepare_square failed");
+                break;
+            }
+            benchmark::DoNotOptimize(store);
+        }
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter supplied-distance factorization on n = 256 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_factor_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n));
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter supplied-distance factorization on n = 1024 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_1024_factor_double(benchmark::State& state)
+    {
+        const ForresterDataset data(1024U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n));
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks L-BFGS supplied-distance fitting on n = 256 Forrester data.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_fit_lbfgs_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-3)
+                .value();
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n));
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit with retain_distances(false) and assume_valid(true) at n =
+    /// 128.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_fit_lbfgs_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(128U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false);
+
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit reusing a pre-built CheckedDistanceStore at n = 128.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_fit_lbfgs_store_reuse_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(128U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+        const auto store = spec.compile<double>().prepare_square(src);
+        if (!store.has_value())
+        {
+            state.SkipWithError("prepare_square failed");
+            return;
+        }
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(*store, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD factorization (retained + validated) at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_factor_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-2).value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD factorization with retain_distances(false) and assume_valid(true) at
+    /// n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_factor_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-2).value().with_retain_distances(
+                false
+            );
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit (retained + validated) at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit with retain_distances(false) and assume_valid(true) at n =
+    /// 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false);
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs).assume_valid(true);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks 8D supplied-distance ARD L-BFGS fit reusing a pre-built CheckedDistanceStore at n = 512.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_512_fit_lbfgs_store_reuse_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(512U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+        const auto store = spec.compile<double>().prepare_square(src);
+        if (!store.has_value())
+        {
+            state.SkipWithError("prepare_square failed");
+            return;
+        }
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(*store, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter factorization with retain_distances(false) and assume_valid(true) at n =
+    /// 256.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_factor_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value().with_retain_distances(
+                false
+            );
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n)).assume_valid(true);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter factorization with retain_distances(false) and assume_valid(true) at n =
+    /// 1024.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_1024_factor_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ForresterDataset data(1024U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value().with_retain_distances(
+                false
+            );
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n)).assume_valid(true);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks L-BFGS fit with retain_distances(false) and assume_valid(true) at n = 256.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_fit_lbfgs_nocopy_unchecked_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-3)
+                .value()
+                .with_retain_distances(false);
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n)).assume_valid(true);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
+    /// @brief Benchmarks fixed-hyperparameter factorization reusing a pre-built CheckedDistanceStore at n = 256.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_factor_store_reuse_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2 = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value();
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), data.n, data.n, data.n));
+        const auto store = spec.compile<double>().prepare_square(src);
+        if (!store.has_value())
+        {
+            state.SkipWithError("prepare_square failed");
+            return;
+        }
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(*store, data.y_train);
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks warmed-up FittedDistanceGpr::predict_into() with assume_valid(true) at n = 256, m = 64.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_predict_into_unchecked_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2_train = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const std::vector<double> d2_cross = build_scalar_sq_dist(data.x_train, data.n, data.x_query, data.m, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_train.data(), data.n, data.n, data.n))
+            .assume_valid(true);
+        const auto fit = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec)
+                             .with_noise_variance(1e-3)
+                             .value()
+                             .with_retain_distances(false)
+                             .factor(train_src, data.y_train)
+                             .value();
+
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), data.n, data.m, data.n))
+            .assume_valid(true);
+        cxxgpr::Prediction<double> pred;
+        (void)fit.predict_into(cross_src, pred);
+
+        for (auto _ : state)
+        {
+            auto res = fit.predict_into(cross_src, pred);
+            benchmark::DoNotOptimize(res);
+            benchmark::DoNotOptimize(pred.mean.data());
+        }
+    }
+
+    /// @brief Benchmarks SinglePrecision supplied-distance factorization using float distance and target inputs at n =
+    /// 256.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_factor_single_float(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2_d = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        std::vector<float> d2_f(d2_d.size());
+        for (std::size_t i = 0; i < d2_d.size(); ++i)
+        {
+            d2_f[i] = static_cast<float>(d2_d[i]);
+        }
+        std::vector<float> y_f(data.y_train.size());
+        for (std::size_t i = 0; i < data.y_train.size(); ++i)
+        {
+            y_f[i] = static_cast<float>(data.y_train[i]);
+        }
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::SinglePrecision>(spec)
+                                 .with_noise_variance(1e-3)
+                                 .value()
+                                 .with_retain_distances(false);
+        cxxgpr::DistanceSource src;
+        src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(d2_f.data(), data.n, data.n, data.n)).assume_valid(true);
+
+        for (auto _ : state)
+        {
+            auto fit = trainer.factor(src, std::span<const float>(y_f));
+            benchmark::DoNotOptimize(fit);
+        }
+    }
+
+    /// @brief Benchmarks warmed-up FittedDistanceGpr::predict_into() on n = 256 training and m = 64 query points.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_256_predict_into_double(benchmark::State& state)
+    {
+        const ForresterDataset data(256U, 64U);
+        const std::vector<double> d2_train = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const std::vector<double> d2_cross = build_scalar_sq_dist(data.x_train, data.n, data.x_query, data.m, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_train.data(), data.n, data.n, data.n));
+        const auto fit = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec)
+                             .with_noise_variance(1e-3)
+                             .value()
+                             .factor(train_src, data.y_train)
+                             .value();
+
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), data.n, data.m, data.n));
+        cxxgpr::Prediction<double> pred;
+        (void)fit.predict_into(cross_src, pred);
+
+        for (auto _ : state)
+        {
+            auto res = fit.predict_into(cross_src, pred);
+            benchmark::DoNotOptimize(res);
+            benchmark::DoNotOptimize(pred.mean.data());
+        }
+    }
+
+    /// @brief Benchmarks FittedDistanceGpr::predict_covariance() on n = 512 training and m = 256 query points.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_forrester_512_predict_cov_double(benchmark::State& state)
+    {
+        const ForresterDataset data(512U, 256U);
+        const std::vector<double> d2_train = build_scalar_sq_dist(data.x_train, data.n, data.x_train, data.n, 1U);
+        const std::vector<double> d2_cross = build_scalar_sq_dist(data.x_train, data.n, data.x_query, data.m, 1U);
+        const std::vector<double> d2_query = build_scalar_sq_dist(data.x_query, data.m, data.x_query, data.m, 1U);
+        const cxxgpr::ScalarDistance slot;
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_train.data(), data.n, data.n, data.n));
+        auto fit_res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-3).value().factor(
+            train_src, data.y_train
+        );
+        if (!fit_res.has_value())
+        {
+            state.SkipWithError("factor failed");
+            return;
+        }
+        const auto& fit = *fit_res;
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), data.n, data.m, data.n));
+        cxxgpr::DistanceSource query_src;
+        query_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_query.data(), data.m, data.m, data.m));
+
+        for (auto _ : state)
+        {
+            auto cov = fit.predict_covariance(cross_src, query_src);
+            benchmark::DoNotOptimize(cov);
+        }
+    }
+
+    /// @brief Benchmarks 8D supplied-distance Constant * RbfArd fitting with L-BFGS on n = 128 points.
+    /// @param[in,out] state Google Benchmark iteration state.
+    void bm_distance_ard_sphere_fit_lbfgs_double(benchmark::State& state)
+    {
+        const ArdSphereDataset data(128U, 8U);
+        const std::vector<double> ls(data.d, 1.0);
+        const auto ard_leaf = cxxgpr::RbfArdKernel::create(ls).value();
+        const auto ard_slot = cxxgpr::ArdDistance::create(data.d).value();
+        const auto spec = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * ard_slot.rbf_ard(ard_leaf).value();
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(spec, cxxgpr::optimizer::Lbfgs().with_max_iterations(20U))
+                .with_noise_variance(1e-2)
+                .value();
+
+        const auto d2_ard = build_ard_sq_dist(data.x_train, data.n, data.x_train, data.n, data.d);
+        std::vector<cxxgpr::MatrixRef<double>> ard_refs;
+        ard_refs.reserve(data.d);
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            ard_refs.emplace_back(d2_ard[dim].data(), data.n, data.n, data.n);
+        }
+        cxxgpr::DistanceSource src;
+        src.bind_ard(ard_slot.slot(), ard_refs);
+
+        std::size_t last_iters = 0U;
+        for (auto _ : state)
+        {
+            auto fit = trainer.fit(src, data.y_train);
+            if (fit.has_value())
+            {
+                last_iters = fit->optimizer_result().iterations;
+            }
+            benchmark::DoNotOptimize(fit);
+        }
+        state.counters["iters"] = static_cast<double>(last_iters);
+    }
+
     BENCHMARK(bm_build_info);
     BENCHMARK(bm_forrester_256_factor_double);
     BENCHMARK_TEMPLATE(bm_forrester_256_fit_lbfgs, cxxgpr::DoublePrecision);
@@ -794,6 +1482,26 @@ namespace
         ->UseRealTime();
     BENCHMARK(bm_distance_supply_apply_double);
     BENCHMARK(bm_distance_supply_scalar_only_double);
+    BENCHMARK(bm_distance_prepare_square_double)->Arg(256)->Arg(1024)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_factor_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_1024_factor_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_fit_lbfgs_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_predict_into_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_512_predict_cov_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_fit_lbfgs_store_reuse_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_factor_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_factor_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_ard_sphere_512_fit_lbfgs_store_reuse_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_factor_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_1024_factor_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_fit_lbfgs_nocopy_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_factor_store_reuse_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_predict_into_unchecked_double)->UseRealTime();
+    BENCHMARK(bm_distance_forrester_256_factor_single_float)->UseRealTime();
     BENCHMARK_TEMPLATE(bm_repeated_predict_into, false)
         ->ArgsProduct({
             {256, 1024, 4096},

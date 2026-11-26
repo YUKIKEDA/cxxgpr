@@ -19,9 +19,12 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <variant>
 
+#include "core/finite_simd.hpp"
 #include "gpr/refine_constants.hpp"
 #include "kernel/distance_store.hpp"
+#include "linalg/blas_backend.hpp"
 #include "linalg/factor_validation.hpp"
 #include "workspace/mll_kernels.hpp"
 #include "workspace/sample_draws.hpp"
@@ -43,32 +46,82 @@ namespace cxxgpr
         /// @brief Brings the shared dense transpose_square_in_place kernel into scope.
         using mll_kernels::transpose_square_in_place;
 
-        /// @brief Copies a double matrix view into a column-major vector, rejecting non-finite entries.
-        /// @param[in] x Source view.
+        /// @brief Copies a double or float matrix view into a double vector, rejecting non-finite entries.
+        /// @details Resizes @p out without shrinking previously reserved capacity so query staging allocates nothing
+        /// once warmed up.
+        /// @param[in] x_var Source double or float column-major view.
         /// @param[out] out Destination vector resized to rows * cols.
         /// @return Empty expected on success, or GprError.
         /// @retval GprErrorCode::EmptyInput When x is empty.
+        /// @retval GprErrorCode::SizeOverflow When rows * cols overflows std::size_t.
         /// @retval GprErrorCode::NonFiniteInput When x contains NaN or Inf.
-        [[nodiscard]] std::expected<void, GprError> copy_points(MatrixRef<double> x, std::vector<double>& out)
+        [[nodiscard]] std::expected<void, GprError> copy_points(detail::PointMatrixRef x_var, std::vector<double>& out)
         {
-            if (x.is_empty() || x.data() == nullptr)
+            return std::visit(
+                [&](auto x) -> std::expected<void, GprError>
             {
-                return std::unexpected(GprError::empty_input());
-            }
-            out.resize(x.rows() * x.cols());
-            for (std::size_t col = 0; col < x.cols(); ++col)
-            {
-                for (std::size_t row = 0; row < x.rows(); ++row)
+                if (x.is_empty() || x.data() == nullptr)
                 {
-                    const double v = x(row, col);
-                    if (!std::isfinite(v))
+                    return std::unexpected(GprError::empty_input());
+                }
+                const std::size_t n_rows = x.rows();
+                const std::size_t n_cols = x.cols();
+                auto nm = checked_mul(n_rows, n_cols);
+                if (!nm.has_value())
+                {
+                    return std::unexpected(std::move(nm).error());
+                }
+                out.resize(*nm);
+                for (std::size_t col = 0U; col < n_cols; ++col)
+                {
+                    const auto* const src_col = &x(0U, col);
+                    if (!detail::all_finite_simd(src_col, n_rows))
                     {
                         return std::unexpected(GprError::non_finite_input());
                     }
-                    out[(col * x.rows()) + row] = v;
+                    double* const dst_col = out.data() + (col * n_rows);
+                    if constexpr (std::same_as<decltype(x), MatrixRef<double>>)
+                    {
+                        std::copy_n(src_col, n_rows, dst_col);
+                    }
+                    else
+                    {
+                        for (std::size_t row = 0U; row < n_rows; ++row)
+                        {
+                            dst_col[row] = static_cast<double>(src_col[row]);
+                        }
+                    }
                 }
-            }
-            return {};
+                return {};
+            }, x_var
+            );
+        }
+
+        /// @brief Copies a double or float target span into a double vector, rejecting non-finite entries.
+        /// @param[in] y_var Source double or float target span.
+        /// @param[out] out Destination double vector.
+        /// @return Empty expected on success, or EmptyInput / NonFiniteInput on error.
+        [[nodiscard]] std::expected<void, GprError> copy_targets(detail::TargetSpanRef y_var, std::vector<double>& out)
+        {
+            return std::visit(
+                [&](auto y) -> std::expected<void, GprError>
+            {
+                if (y.empty())
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                if (!detail::all_finite_simd(y.data(), y.size()))
+                {
+                    return std::unexpected(GprError::non_finite_input());
+                }
+                out.resize(y.size());
+                for (std::size_t i = 0U; i < y.size(); ++i)
+                {
+                    out[i] = static_cast<double>(y[i]);
+                }
+                return {};
+            }, y_var
+            );
         }
 
         /// @brief Negative log marginal likelihood objective over supplied-distance tables.
@@ -168,7 +221,11 @@ namespace cxxgpr
                     }
                     return mll;
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
                 }
@@ -201,7 +258,11 @@ namespace cxxgpr
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
                 }
@@ -429,20 +490,31 @@ namespace cxxgpr
                 return likelihood_.set_params(params.subspan(nk, 1U));
             }
 
-            /// @brief Grows the shared scratch (kernel scratch, nested pool, second scratch matrix).
-            /// @return Success, or GprError when preparing the kernel scratch fails.
-            [[nodiscard]] std::expected<void, GprError> ensure_scratch()
+            /// @brief Grows only the scratch needed to evaluate the kernel Gram matrix (no gradient/ARD buffers).
+            /// @return Success, or GprError when preparing nested workspace fails.
+            [[nodiscard]] std::expected<void, GprError> ensure_value_scratch()
             {
                 auto& core = buffers_.core;
                 const std::size_t n = core.order();
+                const std::size_t need_depth = kernel_.nested_depth();
+                if (need_depth > 0U
+                    && (core.nested.depth() < need_depth || core.nested.rows() < n || core.nested.cols() < n))
+                {
+                    core.nested.resize(need_depth, n, n);
+                }
+                return {};
+            }
+
+            /// @brief Grows the lazy scratch needed only for derivatives, Hessians, and leaf caching.
+            /// @return Success, or GprError when preparing gradient buffers fails.
+            [[nodiscard]] std::expected<void, GprError> ensure_grad_scratch()
+            {
+                auto& core = buffers_.core;
                 if (auto ok = core.ensure_kernel_scratch(); !ok.has_value())
                 {
                     return ok;
                 }
-                if (core.nested.depth() < kernel_.nested_depth() || core.nested.rows() < n || core.nested.cols() < n)
-                {
-                    core.nested.resize(kernel_.nested_depth(), n, n);
-                }
+                const std::size_t n = core.order();
                 if (scratch_b_.size() < n * n)
                 {
                     scratch_b_.assign(n * n, Storage{0});
@@ -602,7 +674,7 @@ namespace cxxgpr
                 }
                 if (auto comb = detail::distance_combine_from_leaf_grams(
                         kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
-                        core.kernel_scratch_mut(), core.nested
+                        core.exp_mut(), core.nested
                     );
                     !comb.has_value())
                 {
@@ -702,7 +774,7 @@ namespace cxxgpr
                 }
                 if (auto comb = detail::distance_combine_from_leaf_grams(
                         kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
-                        core.kernel_scratch_mut(), core.nested
+                        core.exp_mut(), core.nested
                     );
                     !comb.has_value())
                 {
@@ -765,24 +837,29 @@ namespace cxxgpr
             [[nodiscard]] std::expected<double, GprError> factor_and_mll(bool capture_ard_s2)
             {
                 auto& core = buffers_.core;
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
+                }
+                if (capture_ard_s2)
+                {
+                    if (auto ok = ensure_grad_scratch(); !ok.has_value())
+                    {
+                        return std::unexpected(std::move(ok).error());
+                    }
                 }
                 core.clear_ard_s2_ready();
                 std::expected<void, GprError> ap;
                 if (capture_ard_s2 && !core.ard_s2_ready.empty())
                 {
                     ap = detail::distance_apply_capturing_s2(
-                        kernel_, store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested,
+                        kernel_, store_, x_, core.k_mut(), Triangle::Lower, core.exp_mut(), core.nested,
                         std::span<Storage>(core.ard_s2_storage), std::span<std::uint8_t>(core.ard_s2_ready)
                     );
                 }
                 else
                 {
-                    ap = kernel_.apply(
-                        store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested
-                    );
+                    ap = kernel_.apply(store_, x_, core.k_mut(), Triangle::Lower, core.exp_mut(), core.nested);
                 }
                 if (!ap.has_value())
                 {
@@ -812,6 +889,14 @@ namespace cxxgpr
                 if (out_grad.size() != nk + 1U)
                 {
                     return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
+                }
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return ok;
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
+                {
+                    return ok;
                 }
                 if (auto wg = detail::distance_weighted_grads(
                         kernel_, store_, x_, buffers_.w_ref(), out_grad.subspan(0, nk), core.kernel_scratch_mut(),
@@ -849,7 +934,11 @@ namespace cxxgpr
                 {
                     return std::unexpected(GprError::length_mismatch("hessian output length mismatch"));
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return ok;
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return ok;
                 }
@@ -1180,28 +1269,38 @@ namespace cxxgpr
                     gram64_.resize(n * n);
                     gram_scratch_.resize(n * n);
                 }
-                auto nested = kernel64_.make_nested_buffers(n, n);
+                const std::size_t need_depth = kernel64_.nested_depth();
+                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < n)
+                {
+                    nested64_.resize(need_depth, n, n);
+                }
                 MatrixMut<double> gram_mut(gram64_.data(), n, n, n);
                 MatrixMut<double> scratch_mut(gram_scratch_.data(), n, n, n);
-                if (auto ap = kernel64_.apply(store64_, x64_, gram_mut, Triangle::Full, scratch_mut, nested);
+                if (auto ap = kernel64_.apply(store64_, x64_, gram_mut, Triangle::Lower, scratch_mut, nested64_);
                     !ap.has_value())
                 {
                     return std::unexpected(std::move(ap).error());
                 }
                 std::ranges::fill(row_abs_, 0.0);
                 std::ranges::fill(sum_, 0.0);
-                for (std::size_t col = 0; col < n; ++col)
+                for (std::size_t col = 0U; col < n; ++col)
                 {
                     const double* g_col = gram64_.data() + (col * n);
                     const double w_col = w[col];
-                    for (std::size_t row = 0; row < n; ++row)
+                    const double diag = g_col[col] + diag_offset_;
+                    sum_[col] += diag * w_col;
+                    row_abs_[col] += std::abs(diag);
+                    for (std::size_t row = col + 1U; row < n; ++row)
                     {
-                        const double entry = g_col[row] + ((row == col) ? diag_offset_ : 0.0);
+                        const double entry = g_col[row];
+                        const double abs_entry = std::abs(entry);
                         sum_[row] += entry * w_col;
-                        row_abs_[row] += std::abs(entry);
+                        sum_[col] += entry * w[row];
+                        row_abs_[row] += abs_entry;
+                        row_abs_[col] += abs_entry;
                     }
                 }
-                for (std::size_t row = 0; row < n; ++row)
+                for (std::size_t row = 0U; row < n; ++row)
                 {
                     r[row] = y64_[row] - sum_[row];
                 }
@@ -1232,6 +1331,8 @@ namespace cxxgpr
             std::vector<double> gram64_;
             /// @brief Scratch matrix for building the Gram matrix.
             std::vector<double> gram_scratch_;
+            /// @brief Cached nested buffers reused across residual checks.
+            NestedBuffers<double> nested64_;
         };
 
     }  // namespace
@@ -1249,9 +1350,9 @@ namespace cxxgpr
     template <PrecisionPolicyConcept P, DistanceModeConcept C>
     std::expected<detail::DistanceFittedPayload<P, C>, GprError> detail::train_distance_payload(
         const DistanceTrainConfig<C>& cfg,
-        const DistanceSource& train,
-        std::optional<MatrixRef<double>> x,
-        std::span<const double> y,
+        DistanceTableRef<typename P::Storage> train,
+        std::optional<PointMatrixRef> x,
+        TargetSpanRef y,
         std::expected<optimizer::OptimizerResult, GprError> (*optimize_cb)(
             void*, optimizer::TwiceDifferentiable&, std::span<const double>
         ),
@@ -1265,14 +1366,28 @@ namespace cxxgpr
         // Validation order (each phase in the order of the error-code contract): empty arguments, structure of the
         // supplied tables (slots, emptiness, size products, shapes) without reading values, lengths against the table
         // order, dimensions, finiteness of the targets and points, and only then the table values.
-        const std::size_t n = y.size();
+        const std::size_t n = std::visit([](auto sp) noexcept { return sp.size(); }, y);
         if (n == 0U)
         {
             return std::unexpected(GprError::empty_input());
         }
+        std::size_t x_rows = 0U;
+        std::size_t x_cols = 0U;
         if constexpr (with_points)
         {
-            if (!x.has_value() || x->is_empty() || x->data() == nullptr)
+            if (!x.has_value())
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            const bool empty_x = std::visit(
+                [&x_rows, &x_cols](auto mat) noexcept
+            {
+                x_rows = mat.rows();
+                x_cols = mat.cols();
+                return mat.is_empty() || mat.data() == nullptr;
+            }, *x
+            );
+            if (empty_x)
             {
                 return std::unexpected(GprError::empty_input());
             }
@@ -1280,7 +1395,20 @@ namespace cxxgpr
 
         auto compiled = std::make_shared<CompiledDistanceKernel<Storage>>(cfg.kernel.template compile<Storage>());
         compiled->set_kernel_exp(cfg.kernel_exp);
-        auto shape = check_distance_structure(*compiled, train, true);
+        auto shape = std::visit(
+            [&](auto ptr) -> std::expected<DistanceTableShape, GprError>
+        {
+            using PtrT = std::decay_t<decltype(ptr)>;
+            if constexpr (std::same_as<PtrT, const DistanceSource*>)
+            {
+                return check_distance_structure(*compiled, *ptr, true);
+            }
+            else
+            {
+                return validate_store_for_kernel(*compiled, *ptr, true);
+            }
+        }, train
+        );
         if (!shape.has_value())
         {
             return std::unexpected(std::move(shape).error());
@@ -1291,30 +1419,31 @@ namespace cxxgpr
         }
         if constexpr (with_points)
         {
-            if (x->rows() != n)
+            if (x_rows != n)
             {
                 return std::unexpected(GprError::length_mismatch("training point rows must match the table order"));
             }
         }
-        if (auto counts = check_distance_ard_counts(*compiled, train); !counts.has_value())
+        if (const auto* src_ptr = std::get_if<const DistanceSource*>(&train))
         {
-            return std::unexpected(std::move(counts).error());
+            if (auto counts = check_distance_ard_counts(*compiled, **src_ptr); !counts.has_value())
+            {
+                return std::unexpected(std::move(counts).error());
+            }
         }
-        std::size_t d = 0;
+        std::size_t d = 0U;
         if constexpr (with_points)
         {
-            if (auto cols = check_distance_point_cols(*compiled, x->cols()); !cols.has_value())
+            if (auto cols = check_distance_point_cols(*compiled, x_cols); !cols.has_value())
             {
                 return std::unexpected(std::move(cols).error());
             }
-            d = x->cols();
+            d = x_cols;
         }
-        for (const double v : y)
+        std::vector<double> y_raw_f64;
+        if (auto cy = copy_targets(y, y_raw_f64); !cy.has_value())
         {
-            if (!std::isfinite(v))
-            {
-                return std::unexpected(GprError::non_finite_input());
-            }
+            return std::unexpected(std::move(cy).error());
         }
         std::vector<double> x_f64;
         if constexpr (with_points)
@@ -1324,10 +1453,21 @@ namespace cxxgpr
                 return std::unexpected(std::move(cp).error());
             }
         }
-        auto store = make_distance_store(*compiled, train, *shape, true);
-        if (!store.has_value())
+        std::optional<CheckedDistanceStore<Storage>> local_store;
+        const CheckedDistanceStore<Storage>* active_store = nullptr;
+        if (const auto* src_ptr = std::get_if<const DistanceSource*>(&train))
         {
-            return std::unexpected(std::move(store).error());
+            auto built = make_distance_store(*compiled, **src_ptr, *shape, true, !cfg.retain_distances);
+            if (!built.has_value())
+            {
+                return std::unexpected(std::move(built).error());
+            }
+            local_store = std::move(*built);
+            active_store = &*local_store;
+        }
+        else
+        {
+            active_store = std::get<const CheckedDistanceStore<Storage>*>(train);
         }
 
         DistanceFittedPayload<P, C> payload{
@@ -1338,7 +1478,7 @@ namespace cxxgpr
             .input_transform = nullptr,
             .target_transform = nullptr,
             .x_raw = {},
-            .y_raw = std::vector<double>(y.begin(), y.end()),
+            .y_raw = std::move(y_raw_f64),
             .x_train = {},
             .y_transformed = {},
             .l_factor = {},
@@ -1371,12 +1511,12 @@ namespace cxxgpr
             }
         }
 
-        auto fitted_tgt = cfg.target_transform.fit(y);
+        auto fitted_tgt = cfg.target_transform.fit(payload.y_raw);
         if (!fitted_tgt.has_value())
         {
             return std::unexpected(std::move(fitted_tgt).error());
         }
-        std::vector<double> y_f64(y.begin(), y.end());
+        std::vector<double> y_f64 = payload.y_raw;
         if (auto tf = (*fitted_tgt)->transform(y_f64); !tf.has_value())
         {
             return std::unexpected(std::move(tf).error());
@@ -1390,7 +1530,8 @@ namespace cxxgpr
             payload.y_transformed[i] = static_cast<Refine>(y_f64[i]);
         }
 
-        auto buffers = FitBuffers<P>::create(n, DistanceCachePolicy::Uncached, CholeskyBuffer::Retain);
+        const auto buffer_policy = cfg.value_only ? CholeskyBuffer::Reuse : CholeskyBuffer::Retain;
+        auto buffers = FitBuffers<P>::create(n, DistanceCachePolicy::Uncached, buffer_policy);
         if (!buffers.has_value())
         {
             return std::unexpected(std::move(buffers).error());
@@ -1402,7 +1543,7 @@ namespace cxxgpr
         }
         GaussianLikelihood likelihood = cfg.likelihood;
         DistanceObjective<P> obj(
-            *compiled, likelihood, *store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
+            *compiled, likelihood, *active_store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
         );
 
         const std::size_t nk = compiled->num_params();
@@ -1476,7 +1617,15 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(sp).error());
             }
-            auto store64 = compiled64.prepare_square(train);
+            std::expected<CheckedDistanceStore<double>, GprError> store64 = std::unexpected(GprError::empty_input());
+            if (const auto* src_ptr = std::get_if<const DistanceSource*>(&train))
+            {
+                store64 = make_distance_store(compiled64, **src_ptr, *shape, true, true);
+            }
+            else
+            {
+                store64 = promote_store_to_double(compiled64, *std::get<const CheckedDistanceStore<Storage>*>(train));
+            }
             if (!store64.has_value())
             {
                 return std::unexpected(std::move(store64).error());
@@ -1490,9 +1639,13 @@ namespace cxxgpr
             MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
             if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
             {
+                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
+                {
+                    return std::unexpected(std::move(ks).error());
+                }
                 // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
                 if (auto ap = compiled->apply(
-                        *store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
+                        *active_store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
                         buffers->core.nested
                     );
                     !ap.has_value())
@@ -1534,7 +1687,17 @@ namespace cxxgpr
         payload.optimizer_result = std::move(opt_res);
         payload.l_factor.owned = std::move(buffers->core.k_matrix);
         payload.compiled = std::move(compiled);
-        payload.store = std::make_shared<const CheckedDistanceStore<Storage>>(std::move(*store));
+        if (cfg.retain_distances)
+        {
+            if (local_store.has_value())
+            {
+                payload.store = std::make_shared<const CheckedDistanceStore<Storage>>(std::move(*local_store));
+            }
+            else
+            {
+                payload.store = detail::share_distance_store(*std::get<const CheckedDistanceStore<Storage>*>(train));
+            }
+        }
         return payload;
     }
 
@@ -1565,27 +1728,61 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P, DistanceModeConcept C>
         [[nodiscard]] std::expected<QueryShapes, GprError> check_query_shapes(
             const detail::DistanceFittedPayload<P, C>& payload,
-            const DistanceSource& cross,
-            const DistanceSource* query,
-            std::optional<MatrixRef<double>> xq
+            detail::DistanceTableRef<typename P::Storage> cross,
+            std::optional<detail::DistanceTableRef<typename P::Storage>> query,
+            std::optional<detail::PointMatrixRef> xq
         )
         {
+            using Storage = P::Storage;
+            std::size_t xq_rows = 0U;
+            std::size_t xq_cols = 0U;
             if constexpr (std::same_as<C, WithPoints>)
             {
-                if (!xq.has_value() || xq->is_empty() || xq->data() == nullptr)
+                if (!xq.has_value())
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                const bool empty_xq = std::visit(
+                    [&xq_rows, &xq_cols](auto mat) noexcept
+                {
+                    xq_rows = mat.rows();
+                    xq_cols = mat.cols();
+                    return mat.is_empty() || mat.data() == nullptr;
+                }, *xq
+                );
+                if (empty_xq)
                 {
                     return std::unexpected(GprError::empty_input());
                 }
             }
-            auto cross_shape = detail::check_distance_structure(*payload.compiled, cross, false);
+            auto check_table_struct = [&payload](
+                                          detail::DistanceTableRef<Storage> tbl, bool is_square
+                                      ) -> std::expected<detail::DistanceTableShape, GprError>
+            {
+                return std::visit(
+                    [&payload, is_square](auto ptr) -> std::expected<detail::DistanceTableShape, GprError>
+                {
+                    using PtrT = std::decay_t<decltype(ptr)>;
+                    if constexpr (std::same_as<PtrT, const DistanceSource*>)
+                    {
+                        return detail::check_distance_structure(*payload.compiled, *ptr, is_square);
+                    }
+                    else
+                    {
+                        return detail::validate_store_for_kernel(*payload.compiled, *ptr, is_square);
+                    }
+                }, tbl
+                );
+            };
+            auto cross_shape = check_table_struct(cross, false);
             if (!cross_shape.has_value())
             {
                 return std::unexpected(std::move(cross_shape).error());
             }
             QueryShapes shapes{.cross = *cross_shape, .query = {}};
-            if (query != nullptr)
+            if (query.has_value())
             {
-                auto query_shape = detail::check_distance_structure(*payload.compiled, *query, true);
+                auto query_shape = check_table_struct(*query, true);
                 if (!query_shape.has_value())
                 {
                     return std::unexpected(std::move(query_shape).error());
@@ -1599,31 +1796,39 @@ namespace cxxgpr
             const std::size_t m = shapes.cross.cols;
             if constexpr (std::same_as<C, WithPoints>)
             {
-                if (xq->rows() != m)
+                if (xq_rows != m)
                 {
                     return std::unexpected(GprError::length_mismatch("query coordinate rows must match the tables"));
                 }
             }
-            if (query != nullptr && shapes.query.rows != m)
+            if (query.has_value() && shapes.query.rows != m)
             {
                 return std::unexpected(GprError::length_mismatch("query tables must match the cross tables"));
             }
-            if (auto counts = detail::check_distance_ard_counts(*payload.compiled, cross); !counts.has_value())
+            if (const auto* cross_src = std::get_if<const DistanceSource*>(&cross))
             {
-                return std::unexpected(std::move(counts).error());
-            }
-            if (query != nullptr)
-            {
-                if (auto counts = detail::check_distance_ard_counts(*payload.compiled, *query); !counts.has_value())
+                if (auto counts = detail::check_distance_ard_counts(*payload.compiled, **cross_src);
+                    !counts.has_value())
                 {
                     return std::unexpected(std::move(counts).error());
                 }
             }
+            if (query.has_value())
+            {
+                if (const auto* query_src = std::get_if<const DistanceSource*>(&*query))
+                {
+                    if (auto counts = detail::check_distance_ard_counts(*payload.compiled, **query_src);
+                        !counts.has_value())
+                    {
+                        return std::unexpected(std::move(counts).error());
+                    }
+                }
+            }
             if constexpr (std::same_as<C, WithPoints>)
             {
-                if (xq->cols() != payload.n_features)
+                if (xq_cols != payload.n_features)
                 {
-                    return std::unexpected(GprError::dimension_mismatch(xq->cols(), payload.n_features));
+                    return std::unexpected(GprError::dimension_mismatch(xq_cols, payload.n_features));
                 }
             }
             return shapes;
@@ -1642,14 +1847,18 @@ namespace cxxgpr
         [[nodiscard]] std::expected<std::optional<MatrixRef<typename P::Storage>>, GprError> stage_queries(
             const detail::DistanceFittedPayload<P, C>& payload,
             detail::DistanceQueryScratch<typename P::Storage>& scratch,
-            std::optional<MatrixRef<double>> xq,
+            std::optional<detail::PointMatrixRef> xq,
             std::size_t m
         )
         {
             using Storage = P::Storage;
             if constexpr (std::same_as<C, WithPoints>)
             {
-                if (auto cp = copy_points(xq.value_or(MatrixRef<double>{}), scratch.xq_double); !cp.has_value())
+                if (!xq.has_value())
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                if (auto cp = copy_points(*xq, scratch.xq_double); !cp.has_value())
                 {
                     return std::unexpected(std::move(cp).error());
                 }
@@ -1657,14 +1866,23 @@ namespace cxxgpr
                 {
                     return std::unexpected(std::move(ap).error());
                 }
-                scratch.xq.resize(scratch.xq_double.size());
-                for (std::size_t i = 0; i < scratch.xq_double.size(); ++i)
+                if constexpr (std::same_as<Storage, double>)
                 {
-                    scratch.xq[i] = static_cast<Storage>(scratch.xq_double[i]);
+                    return std::optional<MatrixRef<Storage>>(
+                        MatrixRef<Storage>(scratch.xq_double.data(), m, payload.n_features, m)
+                    );
                 }
-                return std::optional<MatrixRef<Storage>>(
-                    MatrixRef<Storage>(scratch.xq.data(), m, payload.n_features, m)
-                );
+                else
+                {
+                    scratch.xq.resize(scratch.xq_double.size());
+                    for (std::size_t i = 0; i < scratch.xq_double.size(); ++i)
+                    {
+                        scratch.xq[i] = static_cast<Storage>(scratch.xq_double[i]);
+                    }
+                    return std::optional<MatrixRef<Storage>>(
+                        MatrixRef<Storage>(scratch.xq.data(), m, payload.n_features, m)
+                    );
+                }
             }
             else
             {
@@ -1683,7 +1901,7 @@ namespace cxxgpr
         /// @tparam C Distance mode.
         /// @param[in] payload Fitted state.
         /// @param[in,out] scratch Query buffers; k_star holds V on success.
-        /// @param[in] cross Rectangular n x m tables.
+        /// @param[in] cross Rectangular n x m tables or pre-validated cross store.
         /// @param[in] cross_shape Shape returned by check_query_shapes().
         /// @param[in] xq_staged Staged query coordinates (WithPoints).
         /// @param[out] mean_t Posterior mean on the transformed scale, length m.
@@ -1692,7 +1910,7 @@ namespace cxxgpr
         [[nodiscard]] std::expected<void, GprError> cross_and_solve(
             const detail::DistanceFittedPayload<P, C>& payload,
             detail::DistanceQueryScratch<typename P::Storage>& scratch,
-            const DistanceSource& cross,
+            detail::DistanceTableRef<typename P::Storage> cross,
             detail::DistanceTableShape cross_shape,
             std::optional<MatrixRef<typename P::Storage>> xq_staged,
             std::vector<typename P::Refine>& mean_t
@@ -1703,11 +1921,21 @@ namespace cxxgpr
             const std::size_t n = payload.n_train;
             const std::size_t m = cross_shape.cols;
 
-            auto cross_store =
-                detail::fill_distance_store(*payload.compiled, cross, cross_shape, false, scratch.cross_store);
-            if (!cross_store.has_value())
+            const CheckedDistanceStore<Storage>* active_cross = nullptr;
+            if (const auto* src_ptr = std::get_if<const DistanceSource*>(&cross))
             {
-                return std::unexpected(std::move(cross_store).error());
+                auto cross_store = detail::fill_distance_store(
+                    *payload.compiled, **src_ptr, cross_shape, false, scratch.cross_store, true
+                );
+                if (!cross_store.has_value())
+                {
+                    return std::unexpected(std::move(cross_store).error());
+                }
+                active_cross = *cross_store;
+            }
+            else
+            {
+                active_cross = std::get<const CheckedDistanceStore<Storage>*>(cross);
             }
             auto nm = checked_mul(n, m);
             if (!nm.has_value())
@@ -1738,7 +1966,7 @@ namespace cxxgpr
             MatrixMut<Storage> k_star(scratch.k_star.data(), n, m, n);
             MatrixMut<Storage> k_scratch(scratch.scratch.data(), n, m, n);
             if (auto ap =
-                    payload.compiled->apply_cross(**cross_store, x_train, xq_staged, k_star, k_scratch, scratch.nested);
+                    payload.compiled->apply_cross(*active_cross, x_train, xq_staged, k_star, k_scratch, scratch.nested);
                 !ap.has_value())
             {
                 return std::unexpected(std::move(ap).error());
@@ -1753,12 +1981,7 @@ namespace cxxgpr
             for (std::ptrdiff_t col = 0; col < m_signed; ++col)
             {
                 const Storage* k_col = scratch.k_star.data() + (static_cast<std::size_t>(col) * n);
-                double acc = 0.0;
-                for (std::size_t i = 0; i < n; ++i)
-                {
-                    acc += static_cast<double>(k_col[i]) * static_cast<double>(payload.alpha[i]);
-                }
-                mean_t[static_cast<std::size_t>(col)] = static_cast<Refine>(acc);
+                mean_t[static_cast<std::size_t>(col)] = detail::dot_accum<Refine>(k_col, payload.alpha.data(), n);
             }
 
             const MatrixRef<Storage> l_ref(payload.l_factor.data(), n, n, n);
@@ -1782,33 +2005,49 @@ namespace cxxgpr
             const transform::FittedTargetTransform& tf, std::span<Refine> values, std::vector<double>& tmp
         )
         {
-            tmp.assign(values.begin(), values.end());
-            if (auto r = tf.inverse_transform_mean(tmp); !r.has_value())
+            if constexpr (std::same_as<Refine, double>)
             {
-                return r;
+                (void)tmp;
+                return tf.inverse_transform_mean(values);
             }
-            std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
-            return {};
+            else
+            {
+                tmp.assign(values.begin(), values.end());
+                if (auto r = tf.inverse_transform_mean(tmp); !r.has_value())
+                {
+                    return r;
+                }
+                std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
+                return {};
+            }
         }
 
-        /// @brief Applies the inverse target transform to variances through the double staging buffer.
+        /// @brief Applies the inverse target transform to variances, using direct in-place transform for `double`.
         /// @tparam Refine Output scalar type.
         /// @param[in] tf Fitted target transform.
         /// @param[in,out] values Variances transformed in place.
-        /// @param[in,out] tmp Double staging buffer.
+        /// @param[in,out] tmp Double staging buffer used when `Refine` differs from `double`.
         /// @return Empty expected on success, or GprError.
         template <typename Refine>
         [[nodiscard]] std::expected<void, GprError> inverse_variance(
             const transform::FittedTargetTransform& tf, std::span<Refine> values, std::vector<double>& tmp
         )
         {
-            tmp.assign(values.begin(), values.end());
-            if (auto r = tf.inverse_transform_variance(tmp); !r.has_value())
+            if constexpr (std::same_as<Refine, double>)
             {
-                return r;
+                (void)tmp;
+                return tf.inverse_transform_variance(values);
             }
-            std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
-            return {};
+            else
+            {
+                tmp.assign(values.begin(), values.end());
+                if (auto r = tf.inverse_transform_variance(tmp); !r.has_value())
+                {
+                    return r;
+                }
+                std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
+                return {};
+            }
         }
 
         /// @brief Computes the joint mean and covariance on the transformed scale (no inverse transform).
@@ -1825,9 +2064,9 @@ namespace cxxgpr
         [[nodiscard]] std::expected<PredictiveCovariance<typename P::Refine>, GprError> covariance_transformed(
             const detail::DistanceFittedPayload<P, C>& payload,
             detail::DistanceQueryScratch<typename P::Storage>& scratch,
-            const DistanceSource& cross,
-            const DistanceSource& query,
-            std::optional<MatrixRef<double>> xq,
+            detail::DistanceTableRef<typename P::Storage> cross,
+            detail::DistanceTableRef<typename P::Storage> query,
+            std::optional<detail::PointMatrixRef> xq,
             const PredictOptions& options
         )
         {
@@ -1835,7 +2074,7 @@ namespace cxxgpr
             using Refine = P::Refine;
             const std::size_t n = payload.n_train;
 
-            auto shapes = check_query_shapes<P, C>(payload, cross, &query, xq);
+            auto shapes = check_query_shapes<P, C>(payload, cross, query, xq);
             if (!shapes.has_value())
             {
                 return std::unexpected(std::move(shapes).error());
@@ -1852,10 +2091,21 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(solved).error());
             }
-            auto query_store = detail::make_distance_store(*payload.compiled, query, shapes->query, true);
-            if (!query_store.has_value())
+            std::optional<CheckedDistanceStore<Storage>> local_query_store;
+            const CheckedDistanceStore<Storage>* active_query = nullptr;
+            if (const auto* src_ptr = std::get_if<const DistanceSource*>(&query))
             {
-                return std::unexpected(std::move(query_store).error());
+                auto query_store = detail::make_distance_store(*payload.compiled, **src_ptr, shapes->query, true, true);
+                if (!query_store.has_value())
+                {
+                    return std::unexpected(std::move(query_store).error());
+                }
+                local_query_store = std::move(*query_store);
+                active_query = &*local_query_store;
+            }
+            else
+            {
+                active_query = std::get<const CheckedDistanceStore<Storage>*>(query);
             }
             auto mm = checked_mul(m, m);
             if (!mm.has_value())
@@ -1868,7 +2118,7 @@ namespace cxxgpr
             MatrixMut<Storage> kqq_mut(k_qq.data(), m, m, m);
             MatrixMut<Storage> kqq_scratch_mut(k_qq_scratch.data(), m, m, m);
             if (auto ap = payload.compiled->apply(
-                    *query_store, *xq_staged, kqq_mut, Triangle::Lower, kqq_scratch_mut, nested
+                    *active_query, *xq_staged, kqq_mut, Triangle::Lower, kqq_scratch_mut, nested
                 );
                 !ap.has_value())
             {
@@ -1879,35 +2129,12 @@ namespace cxxgpr
             out.mean = std::move(mean_t);
             out.n_points = m;
             out.variance_kind = options.variance_kind;
-            out.covariance.assign(*mm, Refine{0});
+            out.covariance.resize(*mm);
             const Refine noise = (options.variance_kind == VarianceKind::Observation)
                 ? static_cast<Refine>(payload.likelihood.noise_variance())
                 : Refine{0};
-            const auto m_signed = static_cast<std::ptrdiff_t>(m);
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if ((n * m * m) >= 4194304U)
-#endif
-            for (std::ptrdiff_t col_s = 0; col_s < m_signed; ++col_s)
-            {
-                const auto col = static_cast<std::size_t>(col_s);
-                const Storage* v_col = scratch.k_star.data() + (col * n);
-                for (std::size_t row = col; row < m; ++row)
-                {
-                    const Storage* v_row = scratch.k_star.data() + (row * n);
-                    double acc = 0.0;
-                    for (std::size_t i = 0; i < n; ++i)
-                    {
-                        acc += static_cast<double>(v_row[i]) * static_cast<double>(v_col[i]);
-                    }
-                    auto value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
-                    if (row == col)
-                    {
-                        value += noise;
-                    }
-                    out.covariance[(col * m) + row] = value;
-                    out.covariance[(row * m) + col] = value;
-                }
-            }
+            detail::blas_posterior_cov_lower(n, m, scratch.k_star.data(), k_qq.data(), noise, out.covariance.data(), m);
+            detail::symmetrize_lower_to_upper(m, out.covariance.data(), m);
             return out;
         }
 
@@ -1918,7 +2145,7 @@ namespace cxxgpr
     /// @tparam C Distance mode.
     /// @param[in] payload Fitted state.
     /// @param[in,out] scratch Reusable query buffers.
-    /// @param[in] cross Cross squared distances between training and query points.
+    /// @param[in] cross Cross squared distances or pre-validated store between training and query points.
     /// @param[in] xq Optional query points (with-points mode).
     /// @param[in] options Prediction options.
     /// @param[out] out Prediction written in place.
@@ -1927,8 +2154,8 @@ namespace cxxgpr
     std::expected<void, GprError> detail::predict_distance_into(
         const DistanceFittedPayload<P, C>& payload,
         DistanceQueryScratch<typename P::Storage>& scratch,
-        const DistanceSource& cross,
-        std::optional<MatrixRef<double>> xq,
+        DistanceTableRef<typename P::Storage> cross,
+        std::optional<PointMatrixRef> xq,
         const PredictOptions& options,
         Prediction<typename P::Refine>& out
     )
@@ -1938,7 +2165,7 @@ namespace cxxgpr
         const std::size_t n = payload.n_train;
 
         // Shapes of every input first, then the coordinates, then the table values (see check_query_shapes()).
-        auto shapes = check_query_shapes<P, C>(payload, cross, nullptr, xq);
+        auto shapes = check_query_shapes<P, C>(payload, cross, std::nullopt, xq);
         if (!shapes.has_value())
         {
             return std::unexpected(std::move(shapes).error());
@@ -1980,13 +2207,9 @@ namespace cxxgpr
         {
             const auto j = static_cast<std::size_t>(col);
             const Storage* v_col = scratch.k_star.data() + (j * n);
-            double sq = 0.0;
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                sq += static_cast<double>(v_col[i]) * static_cast<double>(v_col[i]);
-            }
+            const auto sq = detail::dot_accum<Refine>(v_col, v_col, n);
             // Store the unclamped latent variance; it is checked and clamped below.
-            out.variance[j] = static_cast<Refine>(static_cast<double>(scratch.k_ss[j]) - sq);
+            out.variance[j] = static_cast<Refine>(scratch.k_ss[j]) - sq;
         }
         // Reject a non-finite latent variance before clamping: max(0, NaN) and max(0, -Inf) would both silently
         // become 0. Then clamp rounding-induced negatives to 0 and add the observation noise.
@@ -2022,9 +2245,9 @@ namespace cxxgpr
     std::expected<PredictiveCovariance<typename P::Refine>, GprError> detail::predict_distance_covariance(
         const DistanceFittedPayload<P, C>& payload,
         DistanceQueryScratch<typename P::Storage>& scratch,
-        const DistanceSource& cross,
-        const DistanceSource& query,
-        std::optional<MatrixRef<double>> xq,
+        DistanceTableRef<typename P::Storage> cross,
+        DistanceTableRef<typename P::Storage> query,
+        std::optional<PointMatrixRef> xq,
         const PredictOptions& options
     )
     {
@@ -2039,14 +2262,24 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(r).error());
         }
-        scratch.var_tmp.assign(cov->covariance.begin(), cov->covariance.end());
-        if (auto r = payload.target_transform->inverse_transform_covariance(scratch.var_tmp); !r.has_value())
+        if constexpr (std::same_as<Refine, double>)
         {
-            return std::unexpected(std::move(r).error());
+            if (auto r = payload.target_transform->inverse_transform_covariance(cov->covariance); !r.has_value())
+            {
+                return std::unexpected(std::move(r).error());
+            }
         }
-        std::ranges::transform(scratch.var_tmp, cov->covariance.begin(), [](double v) {
-            return static_cast<Refine>(v);
-        });
+        else
+        {
+            scratch.var_tmp.assign(cov->covariance.begin(), cov->covariance.end());
+            if (auto r = payload.target_transform->inverse_transform_covariance(scratch.var_tmp); !r.has_value())
+            {
+                return std::unexpected(std::move(r).error());
+            }
+            std::ranges::transform(scratch.var_tmp, cov->covariance.begin(), [](double v) {
+                return static_cast<Refine>(v);
+            });
+        }
         return cov;
     }
 
@@ -2066,9 +2299,9 @@ namespace cxxgpr
     std::expected<std::vector<typename P::Refine>, GprError> detail::sample_distance(
         const DistanceFittedPayload<P, C>& payload,
         DistanceQueryScratch<typename P::Storage>& scratch,
-        const DistanceSource& cross,
-        const DistanceSource& query,
-        std::optional<MatrixRef<double>> xq,
+        DistanceTableRef<typename P::Storage> cross,
+        DistanceTableRef<typename P::Storage> query,
+        std::optional<PointMatrixRef> xq,
         std::size_t n_draws,
         std::uint64_t seed,
         const PredictOptions& options
@@ -2332,9 +2565,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<DoublePrecision, DistanceOnly>, GprError> detail::
         train_distance_payload<DoublePrecision, DistanceOnly>(
             const DistanceTrainConfig<DistanceOnly>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2343,8 +2576,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<DoublePrecision, DistanceOnly>(
         const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
         DistanceQueryScratch<DoublePrecision::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<DoublePrecision::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<DoublePrecision::Refine>&
     );
@@ -2352,18 +2585,18 @@ namespace cxxgpr
         predict_distance_covariance<DoublePrecision, DistanceOnly>(
             const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
             DistanceQueryScratch<DoublePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<DoublePrecision::Refine>, GprError> detail::
         sample_distance<DoublePrecision, DistanceOnly>(
             const DistanceFittedPayload<DoublePrecision, DistanceOnly>&,
             DistanceQueryScratch<DoublePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2376,9 +2609,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<DoublePrecision, WithPoints>, GprError> detail::
         train_distance_payload<DoublePrecision, WithPoints>(
             const DistanceTrainConfig<WithPoints>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2387,8 +2620,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<DoublePrecision, WithPoints>(
         const DistanceFittedPayload<DoublePrecision, WithPoints>&,
         DistanceQueryScratch<DoublePrecision::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<DoublePrecision::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<DoublePrecision::Refine>&
     );
@@ -2396,18 +2629,18 @@ namespace cxxgpr
         predict_distance_covariance<DoublePrecision, WithPoints>(
             const DistanceFittedPayload<DoublePrecision, WithPoints>&,
             DistanceQueryScratch<DoublePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<DoublePrecision::Refine>, GprError> detail::
         sample_distance<DoublePrecision, WithPoints>(
             const DistanceFittedPayload<DoublePrecision, WithPoints>&,
             DistanceQueryScratch<DoublePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            DistanceTableRef<DoublePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2420,9 +2653,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<SinglePrecision, DistanceOnly>, GprError> detail::
         train_distance_payload<SinglePrecision, DistanceOnly>(
             const DistanceTrainConfig<DistanceOnly>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2431,8 +2664,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<SinglePrecision, DistanceOnly>(
         const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
         DistanceQueryScratch<SinglePrecision::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<SinglePrecision::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<SinglePrecision::Refine>&
     );
@@ -2440,18 +2673,18 @@ namespace cxxgpr
         predict_distance_covariance<SinglePrecision, DistanceOnly>(
             const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
             DistanceQueryScratch<SinglePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<SinglePrecision::Refine>, GprError> detail::
         sample_distance<SinglePrecision, DistanceOnly>(
             const DistanceFittedPayload<SinglePrecision, DistanceOnly>&,
             DistanceQueryScratch<SinglePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2464,9 +2697,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<SinglePrecision, WithPoints>, GprError> detail::
         train_distance_payload<SinglePrecision, WithPoints>(
             const DistanceTrainConfig<WithPoints>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2475,8 +2708,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<SinglePrecision, WithPoints>(
         const DistanceFittedPayload<SinglePrecision, WithPoints>&,
         DistanceQueryScratch<SinglePrecision::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<SinglePrecision::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<SinglePrecision::Refine>&
     );
@@ -2484,18 +2717,18 @@ namespace cxxgpr
         predict_distance_covariance<SinglePrecision, WithPoints>(
             const DistanceFittedPayload<SinglePrecision, WithPoints>&,
             DistanceQueryScratch<SinglePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<SinglePrecision::Refine>, GprError> detail::
         sample_distance<SinglePrecision, WithPoints>(
             const DistanceFittedPayload<SinglePrecision, WithPoints>&,
             DistanceQueryScratch<SinglePrecision::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            DistanceTableRef<SinglePrecision::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2508,9 +2741,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>, GprError>
         detail::train_distance_payload<MixedPrecision<PromoteStorage>, DistanceOnly>(
             const DistanceTrainConfig<DistanceOnly>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2519,8 +2752,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<PromoteStorage>, DistanceOnly>(
         const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
         DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<MixedPrecision<PromoteStorage>::Refine>&
     );
@@ -2528,18 +2761,18 @@ namespace cxxgpr
         predict_distance_covariance<MixedPrecision<PromoteStorage>, DistanceOnly>(
             const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
             DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
         sample_distance<MixedPrecision<PromoteStorage>, DistanceOnly>(
             const DistanceFittedPayload<MixedPrecision<PromoteStorage>, DistanceOnly>&,
             DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2552,9 +2785,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>, GprError> detail::
         train_distance_payload<MixedPrecision<PromoteStorage>, WithPoints>(
             const DistanceTrainConfig<WithPoints>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2563,8 +2796,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<PromoteStorage>, WithPoints>(
         const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
         DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<MixedPrecision<PromoteStorage>::Refine>&
     );
@@ -2572,18 +2805,18 @@ namespace cxxgpr
         predict_distance_covariance<MixedPrecision<PromoteStorage>, WithPoints>(
             const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
             DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<MixedPrecision<PromoteStorage>::Refine>, GprError> detail::
         sample_distance<MixedPrecision<PromoteStorage>, WithPoints>(
             const DistanceFittedPayload<MixedPrecision<PromoteStorage>, WithPoints>&,
             DistanceQueryScratch<MixedPrecision<PromoteStorage>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            DistanceTableRef<MixedPrecision<PromoteStorage>::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2596,9 +2829,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>, GprError>
         detail::train_distance_payload<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
             const DistanceTrainConfig<DistanceOnly>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2608,8 +2841,8 @@ namespace cxxgpr
         predict_distance_into<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
             DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&,
             Prediction<MixedPrecision<ReevaluateKernel>::Refine>&
         );
@@ -2617,18 +2850,18 @@ namespace cxxgpr
         predict_distance_covariance<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
             DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
         sample_distance<MixedPrecision<ReevaluateKernel>, DistanceOnly>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, DistanceOnly>&,
             DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&
@@ -2641,9 +2874,9 @@ namespace cxxgpr
     template std::expected<detail::DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>, GprError>
         detail::train_distance_payload<MixedPrecision<ReevaluateKernel>, WithPoints>(
             const DistanceTrainConfig<WithPoints>&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
-            std::span<const double>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
+            TargetSpanRef,
             std::expected<optimizer::OptimizerResult, GprError> (*)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -2652,8 +2885,8 @@ namespace cxxgpr
     template std::expected<void, GprError> detail::predict_distance_into<MixedPrecision<ReevaluateKernel>, WithPoints>(
         const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
         DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-        const DistanceSource&,
-        std::optional<MatrixRef<double>>,
+        DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+        std::optional<PointMatrixRef>,
         const PredictOptions&,
         Prediction<MixedPrecision<ReevaluateKernel>::Refine>&
     );
@@ -2661,18 +2894,18 @@ namespace cxxgpr
         predict_distance_covariance<MixedPrecision<ReevaluateKernel>, WithPoints>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
             DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
             const PredictOptions&
         );
     template std::expected<std::vector<MixedPrecision<ReevaluateKernel>::Refine>, GprError> detail::
         sample_distance<MixedPrecision<ReevaluateKernel>, WithPoints>(
             const DistanceFittedPayload<MixedPrecision<ReevaluateKernel>, WithPoints>&,
             DistanceQueryScratch<MixedPrecision<ReevaluateKernel>::Storage>&,
-            const DistanceSource&,
-            const DistanceSource&,
-            std::optional<MatrixRef<double>>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            DistanceTableRef<MixedPrecision<ReevaluateKernel>::Storage>,
+            std::optional<PointMatrixRef>,
             std::size_t,
             std::uint64_t,
             const PredictOptions&

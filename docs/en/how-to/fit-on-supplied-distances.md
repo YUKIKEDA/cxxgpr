@@ -36,7 +36,7 @@ The kernel is an exponential kernel of the arc length, which is valid on the cir
 
 ## Step 2: Fit
 
-Bind one table per slot to a `DistanceSource`, then call `fit`. The tables are validated once: they must be finite, non-negative, symmetric and zero on the diagonal, unless you call `DistanceSource::tidy` to allow a documented repair.
+Bind one table per slot to a `DistanceSource` (or pre-validate with `prepare_square` into a `CheckedDistanceStore`), then call `fit`. Tables passed through `DistanceSource` are validated once (`finite`, non-negative, symmetric and zero on the diagonal) unless you call `DistanceSource::tidy` to allow a documented repair, or `DistanceSource::assume_valid(true)` when tables are already trusted. Both `MatrixRef<double>` and `MatrixRef<float>` tables, `std::span<const double>` and `std::span<const float>` targets, and (for `WithPoints`) `MatrixRef<float>` coordinates are accepted.
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp
@@ -44,9 +44,11 @@ Bind one table per slot to a `DistanceSource`, then call `fit`. The tables are v
 :end-before: // [end]
 ```
 
-`with_noise_variance` validates its argument and returns `std::expected`, exactly as for `Gpr`. The other configuration methods are `with_jitter`, `with_kernel_exp`, `with_target_transform`, `with_optimizer` and, for `WithPoints` kernels only, `with_input_transform`. The getters are `kernel`, `likelihood`, `jitter` and `optimizer`.
+`with_noise_variance` validates its argument and returns `std::expected`, exactly as for `Gpr`, while `with_likelihood(GaussianLikelihood)` installs custom open-interval bounds on the observation noise. The other configuration methods are `with_jitter`, `with_kernel_exp`, `with_retain_distances`, `with_target_transform`, `with_optimizer` and, for `WithPoints` kernels only, `with_input_transform`. The getters are `kernel`, `likelihood`, `jitter`, `optimizer` and `retains_distances`.
 
-`fit` optimizes the kernel hyperparameters and the noise variance by maximizing the marginal likelihood. To factorize at the current hyperparameters without optimizing, call `factor`. For a `WithPoints` kernel both take the coordinates as an extra argument: `fit(train, x, y)` and `factor(train, x, y)`.
+When training models that will **not** be saved to disk, calling `with_retain_distances(false)` lets `fit` and `factor` borrow compatible caller tables without copying or retaining an internal training store (and drops retained copies from fitted models). Persistence refuses non-retained models (`retains_distances() == false`) with `PersistFailed(PersistErrorKind::NotPersistable)`.
+
+`fit` optimizes the kernel hyperparameters and the noise variance by maximizing the marginal likelihood. To factorize at the current hyperparameters without optimizing, call `factor`. For a `WithPoints` kernel both take the coordinates as an extra argument: `fit(train, x, y)` and `factor(train, x, y)`. Both `DistanceSource` and a pre-validated `CheckedDistanceStore<Storage>` (matching the model's `DistanceInputConcept`) are accepted wherever training, cross or query tables are taken (`fit`, `factor`, `refit`, `predict`, `predict_into`, `predict_covariance`, `sample`).
 
 :::{note}
 The default precision policy is double precision. `DistanceGpr<Lbfgs, MixedPrecision<ReevaluateKernel>>` and the other policies of {doc}`optimize-performance` work the same way and report `refinement_summary`.
@@ -54,7 +56,7 @@ The default precision policy is double precision. `DistanceGpr<Lbfgs, MixedPreci
 
 ## Step 3: Predict
 
-Build one table of squared distances from every training point to every query point (n × m, with the training points along the rows) and bind it to the same slot. A kernel with several slots needs a table for each.
+Build one table of squared distances from every training point to every query point (n × m, with the training points along the rows) and bind it to the same slot (or pass a `CheckedDistanceStore<Storage>` built by `prepare_cross`). A kernel with several slots needs a table for each.
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp
@@ -62,7 +64,7 @@ Build one table of squared distances from every training point to every query po
 :end-before: // [end]
 ```
 
-`predict` returns the mean and the marginal variance on the original target scale. `predict_into` writes into a `Prediction` you own and reuses the model's query workspace: after one call with m queries, later calls with the same slots and at most m queries allocate no memory. For a `WithPoints` model, pass the query coordinates after the table: `predict(cross, xq)`.
+`predict` returns the mean and the marginal variance on the original target scale. `predict_into` writes into a `Prediction` you own and reuses the model's query workspace: after one call with m queries, later calls with the same slots and at most m queries allocate no memory (including when passing `MatrixRef<float>` query coordinates or a `CheckedDistanceStore`). For a `WithPoints` model, pass the query coordinates after the table: `predict(cross, xq)`.
 
 ## Step 4: Covariance, samples and cross-validation
 
@@ -110,7 +112,8 @@ Because the tables are checked at the API boundary, a bad table is reported inst
 
 | Symbol | Purpose |
 |---|---|
-| `DistanceGpr` | trainer for a `DistanceKernel`; `fit`, `factor`, `with_*` configuration |
-| `FittedDistanceGpr` | fitted model; `predict`, `predict_into`, `predict_covariance`, `sample`, `loo_predict`, `into_trainer`, `refit` |
+| `DistanceInputConcept` | concept accepting `DistanceSource` or `CheckedDistanceStore<Storage>` |
+| `DistanceGpr` | trainer for a `DistanceKernel`; `fit`, `factor`, `with_*` configuration (`with_likelihood`, `with_retain_distances`) |
+| `FittedDistanceGpr` | fitted model; `predict`, `predict_into`, `predict_covariance`, `sample`, `loo_predict`, `retains_distances`, `into_trainer`, `refit` |
 
 To save a distance model to disk and load it back, see {doc}`persist-models`.

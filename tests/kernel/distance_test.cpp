@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -682,6 +683,988 @@ namespace
         }
         );
         ASSERT_TRUE(ran);
+    }
+
+    /// @brief Verifies ConstantKernel folding in DistanceKernel matches coordinate KernelSpec for apply, cross, grad,
+    /// and hess.
+    /// @details Evaluates pure-distance `Constant * Constant * Rbf` and mixed `Constant * Rbf * Matern + Linear`
+    /// across Lower, Upper, Full, and rectangular cross paths and asserts zero heap allocations on warmed buffers.
+    TEST(DistanceKernelTest, ConstantProductFoldingMatchesCoordinateSpec)
+    {
+        // Spec: REQ-05, DES-10
+        constexpr std::size_t n = 4U;
+        constexpr std::size_t m = 3U;
+        constexpr std::size_t d = 2U;
+
+        const std::vector<double> x{0.0, 0.4, 1.1, -0.5, 0.2, -0.8, 0.3, 0.9};
+        const std::vector<double> q{0.1, 0.7, -0.3, -0.2, 0.5, 1.2};
+
+        auto sq_dist = [](const std::vector<double>& a, std::size_t na, const std::vector<double>& b, std::size_t nb)
+        {
+            std::vector<double> out(na * nb, 0.0);
+            for (std::size_t j = 0; j < nb; ++j)
+            {
+                for (std::size_t i = 0; i < na; ++i)
+                {
+                    double acc = 0.0;
+                    for (std::size_t dim = 0; dim < d; ++dim)
+                    {
+                        const double diff = a[(dim * na) + i] - b[(dim * nb) + j];
+                        acc += diff * diff;
+                    }
+                    out[(j * na) + i] = acc;
+                }
+            }
+            return out;
+        };
+
+        const auto d2_train = sq_dist(x, n, x, n);
+        const auto d2_cross = sq_dist(x, n, q, m);
+        const cxxgpr::ScalarDistance slot;
+
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_train.data(), n, n));
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), n, m));
+
+        const auto c1 = cxxgpr::ConstantKernel::create(2.3).value();
+        const auto c2 = cxxgpr::ConstantKernel::create(0.75).value();
+        const auto rbf = cxxgpr::RbfKernel::create(1.15).value();
+        const auto m52 = cxxgpr::MaternKernel::create(0.85, cxxgpr::MaternNu::FiveHalves).value();
+        const auto lin = cxxgpr::LinearKernel::create(0.45).value();
+
+        // Case 1: DistanceOnly Constant * Constant * Rbf.
+        {
+            const auto dist_k =
+                (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c2))
+                * slot.rbf(rbf);
+            const auto coord_k = (cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(c2)) * cxxgpr::KernelSpec(rbf);
+            const auto dist_comp = dist_k.compile<double>();
+            const auto coord_comp = coord_k.compile<double>();
+
+            const auto sq_store = dist_comp.prepare_square(train_src);
+            const auto cx_store = dist_comp.prepare_cross(cross_src);
+            ASSERT_TRUE(sq_store.has_value()) << sq_store.error().message();
+            ASSERT_TRUE(cx_store.has_value()) << cx_store.error().message();
+
+            auto dist_nested = dist_comp.make_nested_buffers(n, n);
+            auto coord_nested = coord_comp.make_nested_buffers(n, n);
+            std::vector<double> k_dist(n * n);
+            std::vector<double> k_coord(n * n);
+            std::vector<double> sa(n * n);
+            std::vector<double> sb(n * n);
+            std::vector<double> sc(n * n);
+            const cxxgpr::MatrixRef<double> x_ref(x.data(), n, d);
+            const cxxgpr::MatrixRef<double> q_ref(q.data(), m, d);
+
+            for (const auto uplo : {cxxgpr::Triangle::Lower, cxxgpr::Triangle::Upper, cxxgpr::Triangle::Full})
+            {
+                std::ranges::fill(k_dist, -999.0);
+                std::ranges::fill(k_coord, -999.0);
+                ASSERT_TRUE(dist_comp
+                        .apply(
+                            *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), uplo,
+                            cxxgpr::MatrixMut<double>(sa.data(), n, n), dist_nested
+                        )
+                        .has_value());
+                ASSERT_TRUE(coord_comp
+                        .apply_points(
+                            x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), uplo,
+                            cxxgpr::MatrixMut<double>(sa.data(), n, n), coord_nested
+                        )
+                        .has_value());
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    for (std::size_t row = 0; row < n; ++row)
+                    {
+                        const bool check = (uplo == cxxgpr::Triangle::Full)
+                            || (uplo == cxxgpr::Triangle::Lower && row >= col)
+                            || (uplo == cxxgpr::Triangle::Upper && row <= col);
+                        if (check)
+                        {
+                            EXPECT_NEAR(k_dist[(col * n) + row], k_coord[(col * n) + row], 1e-13);
+                        }
+                    }
+                }
+            }
+
+            std::vector<double> cx_dist(n * m);
+            std::vector<double> cx_coord(n * m);
+            std::vector<double> cx_s(n * m);
+            ASSERT_TRUE(dist_comp
+                    .apply_cross(
+                        *cx_store, std::nullopt, std::nullopt, cxxgpr::MatrixMut<double>(cx_dist.data(), n, m),
+                        cxxgpr::MatrixMut<double>(cx_s.data(), n, m), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(coord_comp
+                    .apply_cross_points(
+                        x_ref, q_ref, cxxgpr::MatrixMut<double>(cx_coord.data(), n, m),
+                        cxxgpr::MatrixMut<double>(cx_s.data(), n, m), coord_nested
+                    )
+                    .has_value());
+            for (std::size_t k = 0; k < cx_dist.size(); ++k)
+            {
+                EXPECT_NEAR(cx_dist[k], cx_coord[k], 1e-13);
+            }
+
+            const std::size_t np = dist_comp.num_params();
+            for (std::size_t p = 0; p < np; ++p)
+            {
+                ASSERT_TRUE(dist_comp
+                        .grad(
+                            *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), p,
+                            cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                            cxxgpr::MatrixMut<double>(sb.data(), n, n), dist_nested
+                        )
+                        .has_value());
+                ASSERT_TRUE(coord_comp
+                        .grad_points(
+                            x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), p, cxxgpr::Triangle::Lower,
+                            cxxgpr::MatrixMut<double>(sa.data(), n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n),
+                            coord_nested
+                        )
+                        .has_value());
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    for (std::size_t row = col; row < n; ++row)
+                    {
+                        EXPECT_NEAR(k_dist[(col * n) + row], k_coord[(col * n) + row], 1e-13);
+                    }
+                }
+                for (std::size_t j = 0; j < np; ++j)
+                {
+                    ASSERT_TRUE(dist_comp
+                            .hess(
+                                *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), p, j,
+                                cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                                cxxgpr::MatrixMut<double>(sb.data(), n, n), cxxgpr::MatrixMut<double>(sc.data(), n, n),
+                                dist_nested
+                            )
+                            .has_value());
+                    ASSERT_TRUE(coord_comp
+                            .hess_points(
+                                x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), p, j, cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<double>(sa.data(), n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n),
+                                cxxgpr::MatrixMut<double>(sc.data(), n, n), coord_nested
+                            )
+                            .has_value());
+                    for (std::size_t col = 0; col < n; ++col)
+                    {
+                        for (std::size_t row = col; row < n; ++row)
+                        {
+                            EXPECT_NEAR(k_dist[(col * n) + row], k_coord[(col * n) + row], 1e-13);
+                        }
+                    }
+                }
+            }
+
+            const cxxgpr::test_support::NoAllocationScope audit;
+            ASSERT_TRUE(dist_comp
+                    .apply(
+                        *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), cxxgpr::Triangle::Full,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(dist_comp
+                    .apply_cross(
+                        *cx_store, std::nullopt, std::nullopt, cxxgpr::MatrixMut<double>(cx_dist.data(), n, m),
+                        cxxgpr::MatrixMut<double>(cx_s.data(), n, m), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(dist_comp
+                    .grad(
+                        *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), 0U,
+                        cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                        cxxgpr::MatrixMut<double>(sb.data(), n, n), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(dist_comp
+                    .hess(
+                        *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), 0U, 2U,
+                        cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                        cxxgpr::MatrixMut<double>(sb.data(), n, n), cxxgpr::MatrixMut<double>(sc.data(), n, n),
+                        dist_nested
+                    )
+                    .has_value());
+            EXPECT_EQ(audit.delta_allocations(), 0U);
+        }
+
+        // Case 2: WithPoints (Constant * Rbf * Matern) + Linear.
+        {
+            const auto dist_k = ((cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * slot.rbf(rbf)) * slot.matern(m52))
+                + cxxgpr::KernelSpec(lin);
+            const auto coord_k = ((cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(rbf)) * cxxgpr::KernelSpec(m52))
+                + cxxgpr::KernelSpec(lin);
+            const auto dist_comp = dist_k.compile<double>();
+            const auto coord_comp = coord_k.compile<double>();
+
+            const auto sq_store = dist_comp.prepare_square(train_src);
+            const auto cx_store = dist_comp.prepare_cross(cross_src);
+            ASSERT_TRUE(sq_store.has_value());
+            ASSERT_TRUE(cx_store.has_value());
+
+            auto dist_nested = dist_comp.make_nested_buffers(n, n);
+            auto coord_nested = coord_comp.make_nested_buffers(n, n);
+            std::vector<double> k_dist(n * n);
+            std::vector<double> k_coord(n * n);
+            std::vector<double> sa(n * n);
+            std::vector<double> sb(n * n);
+            std::vector<double> sc(n * n);
+            const cxxgpr::MatrixRef<double> x_ref(x.data(), n, d);
+            const cxxgpr::MatrixRef<double> q_ref(q.data(), m, d);
+
+            ASSERT_TRUE(dist_comp
+                    .apply(
+                        *sq_store, x_ref, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), cxxgpr::Triangle::Full,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(coord_comp
+                    .apply_points(
+                        x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), cxxgpr::Triangle::Full,
+                        cxxgpr::MatrixMut<double>(sa.data(), n, n), coord_nested
+                    )
+                    .has_value());
+            for (std::size_t idx = 0; idx < k_dist.size(); ++idx)
+            {
+                EXPECT_NEAR(k_dist[idx], k_coord[idx], 1e-13);
+            }
+
+            std::vector<double> cx_dist(n * m);
+            std::vector<double> cx_coord(n * m);
+            std::vector<double> cx_s(n * m);
+            ASSERT_TRUE(dist_comp
+                    .apply_cross(
+                        *cx_store, x_ref, q_ref, cxxgpr::MatrixMut<double>(cx_dist.data(), n, m),
+                        cxxgpr::MatrixMut<double>(cx_s.data(), n, m), dist_nested
+                    )
+                    .has_value());
+            ASSERT_TRUE(coord_comp
+                    .apply_cross_points(
+                        x_ref, q_ref, cxxgpr::MatrixMut<double>(cx_coord.data(), n, m),
+                        cxxgpr::MatrixMut<double>(cx_s.data(), n, m), coord_nested
+                    )
+                    .has_value());
+            for (std::size_t idx = 0; idx < cx_dist.size(); ++idx)
+            {
+                EXPECT_NEAR(cx_dist[idx], cx_coord[idx], 1e-13);
+            }
+
+            const std::size_t np = dist_comp.num_params();
+            for (std::size_t p = 0; p < np; ++p)
+            {
+                ASSERT_TRUE(dist_comp
+                        .grad(
+                            *sq_store, x_ref, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), p,
+                            cxxgpr::Triangle::Upper, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                            cxxgpr::MatrixMut<double>(sb.data(), n, n), dist_nested
+                        )
+                        .has_value());
+                ASSERT_TRUE(coord_comp
+                        .grad_points(
+                            x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), p, cxxgpr::Triangle::Upper,
+                            cxxgpr::MatrixMut<double>(sa.data(), n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n),
+                            coord_nested
+                        )
+                        .has_value());
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    for (std::size_t row = 0; row <= col; ++row)
+                    {
+                        EXPECT_NEAR(k_dist[(col * n) + row], k_coord[(col * n) + row], 1e-13);
+                    }
+                }
+                for (std::size_t j = 0; j < np; ++j)
+                {
+                    ASSERT_TRUE(dist_comp
+                            .hess(
+                                *sq_store, x_ref, cxxgpr::MatrixMut<double>(k_dist.data(), n, n), p, j,
+                                cxxgpr::Triangle::Lower, cxxgpr::MatrixMut<double>(sa.data(), n, n),
+                                cxxgpr::MatrixMut<double>(sb.data(), n, n), cxxgpr::MatrixMut<double>(sc.data(), n, n),
+                                dist_nested
+                            )
+                            .has_value());
+                    ASSERT_TRUE(coord_comp
+                            .hess_points(
+                                x_ref, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), p, j, cxxgpr::Triangle::Lower,
+                                cxxgpr::MatrixMut<double>(sa.data(), n, n), cxxgpr::MatrixMut<double>(sb.data(), n, n),
+                                cxxgpr::MatrixMut<double>(sc.data(), n, n), coord_nested
+                            )
+                            .has_value());
+                    for (std::size_t col = 0; col < n; ++col)
+                    {
+                        for (std::size_t row = col; row < n; ++row)
+                        {
+                            EXPECT_NEAR(k_dist[(col * n) + row], k_coord[(col * n) + row], 1e-13);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// @brief Verifies parallel DistanceStoreBuilder preserves exact error priority and float-overflow checks.
+    /// @details Tests strict and tidy modes on n = 140 square and rectangular blocks where non-finite or negative
+    /// entries appear after earlier violations, plus float scalar range overflow during packing.
+    TEST(DistanceKernelTest, LargeBlockErrorPriorityAndFloatOverflow)
+    {
+        // Spec: REQ-05, DES-10
+        constexpr std::size_t n = 140U;
+        const cxxgpr::ScalarDistance slot;
+        const auto dk = slot.rbf(cxxgpr::RbfKernel::create(1.0).value());
+        const auto comp64 = dk.compile<double>();
+        const auto comp32 = dk.compile<float>();
+
+        auto make_valid_sq = []()
+        {
+            std::vector<double> d2(n * n, 1.0);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                d2[(i * n) + i] = 0.0;
+            }
+            return d2;
+        };
+
+        // 1. Late NaN beats earlier nonzero diagonal, negative value, and asymmetry in strict & tidy modes.
+        {
+            auto d2 = make_valid_sq();
+            d2[0U] = 1e-3;             // nonzero diag at (0, 0)
+            d2[(1U * n) + 2U] = 1.5;   // asymmetric with (2, 1)
+            d2[(3U * n) + 5U] = -0.2;  // earlier negative
+            d2[(138U * n) + 139U] = std::numeric_limits<double>::quiet_NaN();
+
+            cxxgpr::DistanceSource strict_src;
+            strict_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n));
+            const auto err_strict = comp64.prepare_square(strict_src);
+            ASSERT_FALSE(err_strict.has_value());
+            EXPECT_EQ(err_strict.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(err_strict.error().distance_reason(), std::optional<std::string_view>{"distance is not finite"});
+
+            cxxgpr::DistanceSource tidy_src;
+            tidy_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n)).tidy(1e-6);
+            const auto err_tidy = comp64.prepare_square(tidy_src);
+            ASSERT_FALSE(err_tidy.has_value());
+            EXPECT_EQ(err_tidy.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(err_tidy.error().distance_reason(), std::optional<std::string_view>{"distance is not finite"});
+        }
+
+        // 2. Strict & tidy error priorities across diagonal, negative, and off-diagonal asymmetry.
+        {
+            // Strict: same-pair negative beats asymmetry on (139, 138) vs (138, 139).
+            auto d2_pair = make_valid_sq();
+            d2_pair[(138U * n) + 139U] = -0.5;
+            d2_pair[(139U * n) + 138U] = 2.0;
+            cxxgpr::DistanceSource strict_pair_src;
+            strict_pair_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_pair.data(), n, n));
+            const auto err_strict_pair = comp64.prepare_square(strict_pair_src);
+            ASSERT_FALSE(err_strict_pair.has_value());
+            EXPECT_EQ(err_strict_pair.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(
+                err_strict_pair.error().distance_reason(), std::optional<std::string_view>{"distance is negative"}
+            );
+
+            // Tidy: late negative at (139, 138) beats earlier asymmetry at (2, 1).
+            auto d2_tidy = make_valid_sq();
+            d2_tidy[(1U * n) + 2U] = 2.0;
+            d2_tidy[(138U * n) + 139U] = -0.5;
+            cxxgpr::DistanceSource tidy_src;
+            tidy_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_tidy.data(), n, n)).tidy(1e-6);
+            const auto err_tidy = comp64.prepare_square(tidy_src);
+            ASSERT_FALSE(err_tidy.has_value());
+            EXPECT_EQ(err_tidy.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(
+                err_tidy.error().distance_reason(),
+                std::optional<std::string_view>{"negative distance exceeds tidy tolerance"}
+            );
+
+            // Strict & tidy: late nonzero diagonal at (n - 1, n - 1) beats earlier asymmetry at (2, 1).
+            auto d2_diag = make_valid_sq();
+            d2_diag[(1U * n) + 2U] = 2.0;
+            d2_diag[((n - 1U) * n) + (n - 1U)] = 0.5;
+            cxxgpr::DistanceSource diag_strict_src;
+            diag_strict_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_diag.data(), n, n));
+            const auto diag_strict = comp64.prepare_square(diag_strict_src);
+            ASSERT_FALSE(diag_strict.has_value());
+            EXPECT_EQ(diag_strict.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(diag_strict.error().distance_reason(), std::optional<std::string_view>{"diagonal must be zero"});
+
+            cxxgpr::DistanceSource diag_tidy_src;
+            diag_tidy_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_diag.data(), n, n)).tidy(1e-6);
+            const auto diag_tidy = comp64.prepare_square(diag_tidy_src);
+            ASSERT_FALSE(diag_tidy.has_value());
+            EXPECT_EQ(diag_tidy.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(
+                diag_tidy.error().distance_reason(),
+                std::optional<std::string_view>{"nonzero diagonal exceeds tidy tolerance"}
+            );
+        }
+
+        // 3. Rectangular prepare_cross: late Inf beats earlier negative in strict & tidy modes.
+        {
+            std::vector<double> rect(n * n, 1.0);
+            rect[(1U * n) + 0U] = -0.5;
+            rect[(138U * n) + 139U] = std::numeric_limits<double>::infinity();
+
+            cxxgpr::DistanceSource strict_cx;
+            strict_cx.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(rect.data(), n, n));
+            const auto err_strict = comp64.prepare_cross(strict_cx);
+            ASSERT_FALSE(err_strict.has_value());
+            EXPECT_EQ(err_strict.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(err_strict.error().distance_reason(), std::optional<std::string_view>{"distance is not finite"});
+
+            cxxgpr::DistanceSource tidy_cx;
+            tidy_cx.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(rect.data(), n, n)).tidy(1e-6);
+            const auto err_tidy = comp64.prepare_cross(tidy_cx);
+            ASSERT_FALSE(err_tidy.has_value());
+            EXPECT_EQ(err_tidy.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(err_tidy.error().distance_reason(), std::optional<std::string_view>{"distance is not finite"});
+        }
+
+        // 4. Float storage overflow in large square and cross blocks.
+        {
+            auto d2 = make_valid_sq();
+            d2[(138U * n) + 139U] = 1e40;
+            d2[(139U * n) + 138U] = 1e40;
+            cxxgpr::DistanceSource sq_src;
+            sq_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2.data(), n, n));
+            const auto sq_err = comp32.prepare_square(sq_src);
+            ASSERT_FALSE(sq_err.has_value());
+            EXPECT_EQ(sq_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(
+                sq_err.error().distance_reason(),
+                std::optional<std::string_view>{"value overflows storage scalar range"}
+            );
+
+            std::vector<double> rect(n * n, 1.0);
+            rect[(138U * n) + 139U] = 1e40;
+            cxxgpr::DistanceSource cx_src;
+            cx_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(rect.data(), n, n));
+            const auto cx_err = comp32.prepare_cross(cx_src);
+            ASSERT_FALSE(cx_err.has_value());
+            EXPECT_EQ(cx_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+            EXPECT_EQ(
+                cx_err.error().distance_reason(),
+                std::optional<std::string_view>{"value overflows storage scalar range"}
+            );
+        }
+    }
+
+    /// @brief Minimal user-defined custom kernel term k(d2) = scale * exp(-d2) for scalar-slot fallback tests.
+    /// @tparam T Evaluation scalar type (`double` or `float`).
+    template <cxxgpr::KernelScalarConcept T> class SimpleExpTerm final : public cxxgpr::KernelTerm<T>
+    {
+    public:
+        /// @brief Constructs the custom term with output scale @p scale.
+        /// @param[in] scale Positive output scale parameter.
+        explicit SimpleExpTerm(double scale = 1.5) : scale_(scale) {}
+
+        /// @brief Clones this custom term.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override
+        {
+            return std::make_unique<SimpleExpTerm<T>>(scale_);
+        }
+
+        /// @brief Returns parameter count (1).
+        /// @return Hyperparameter count.
+        [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
+
+        /// @brief Reads log(scale) into @p out.
+        /// @param[out] out Parameter destination span.
+        /// @return Empty expected on success, or LengthMismatch.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
+        {
+            if (out.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("out"));
+            }
+            out[0] = std::log(scale_);
+            return {};
+        }
+
+        /// @brief Writes log(scale) from @p params.
+        /// @param[in] params Log-space parameter span.
+        /// @return Empty expected on success, or GprError on invalid value.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
+        {
+            if (params.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("params"));
+            }
+            if (!std::isfinite(params[0]))
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_input());
+            }
+            const double next = std::exp(params[0]);
+            if (!std::isfinite(next) || next < 1e-4 || next > 1e4)
+            {
+                return std::unexpected(cxxgpr::GprError::invalid_config("scale out of bounds"));
+            }
+            scale_ = next;
+            return {};
+        }
+
+        /// @brief Populates parameter bounds [1e-4, 1e4] into @p out.
+        /// @param[out] out Interval destination span.
+        /// @return Empty expected on success, or GprError.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
+        {
+            if (out.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("out"));
+            }
+            auto b = cxxgpr::Interval::create(1e-4, 1e4);
+            if (!b.has_value())
+            {
+                return std::unexpected(std::move(b).error());
+            }
+            out[0] = *b;
+            return {};
+        }
+
+        /// @brief Evaluates scale * exp(-d2) across @p uplo.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] out Output kernel matrix.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
+        ) const override
+        {
+            for (std::size_t col = 0; col < dist.cols(); ++col)
+            {
+                for (std::size_t row = 0; row < dist.rows(); ++row)
+                {
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
+                        || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    {
+                        continue;
+                    }
+                    const T d2 = dist(row, col) < T{0} ? T{0} : dist(row, col);
+                    out(row, col) = static_cast<T>(scale_) * std::exp(-d2);
+                }
+            }
+            return {};
+        }
+
+        /// @brief Evaluates rectangular cross-covariance.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] out Output kernel matrix.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
+        ) const override
+        {
+            return apply(dist, out, cxxgpr::Triangle::Full);
+        }
+
+        /// @brief Fills diagonal entries with scale.
+        /// @param[out] out Destination span.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
+        {
+            std::fill(out.begin(), out.end(), static_cast<T>(scale_));
+            return {};
+        }
+
+        /// @brief Computes d/d(log scale) = k.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] d_k Gradient output matrix.
+        /// @param[in] param_idx Parameter index.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success, or IndexOutOfRange.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
+        ) const override
+        {
+            if (param_idx != 0U)
+            {
+                return std::unexpected(cxxgpr::GprError::index_out_of_range("param_idx"));
+            }
+            return apply(dist, d_k, uplo);
+        }
+
+        /// @brief Computes d2/d(log scale)^2 = k.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] d2_k Hessian output matrix.
+        /// @param[in] i First parameter index.
+        /// @param[in] j Second parameter index.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success, or IndexOutOfRange.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
+        ) const override
+        {
+            if (i != 0U || j != 0U)
+            {
+                return std::unexpected(cxxgpr::GprError::index_out_of_range("param_idx"));
+            }
+            return apply(dist, d2_k, uplo);
+        }
+
+    private:
+        /// @brief Linear output scale.
+        double scale_;
+    };
+
+    /// @brief Verifies float distance table bindings, assume_valid() contract, packed vs dense parity, and
+    /// CheckedDistanceStore $O(1)$ copyability and move ownership guarantees.
+    TEST(DistanceKernelTest, FloatBindingsAssumeValidPackedParityAndStoreOwnership)
+    {
+        // Spec: DES-10, REQ-05
+        static_assert(std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_copy_constructible_v<cxxgpr::CheckedDistanceStore<float>>);
+        static_assert(std::is_copy_assignable_v<cxxgpr::CheckedDistanceStore<float>>);
+        static_assert(std::is_move_constructible_v<cxxgpr::CheckedDistanceStore<double>>);
+        static_assert(std::is_move_assignable_v<cxxgpr::CheckedDistanceStore<double>>);
+
+        constexpr std::size_t n = 4U;
+        constexpr std::size_t m = 3U;
+        const std::vector<float> x1_f{0.0F, 0.4F, 0.9F, 1.4F, 0.2F, 0.7F, 0.1F, 1.1F};
+        const std::vector<float> x2_f{0.1F, 0.8F, 1.3F, 0.3F, 0.5F, 1.0F};
+        const std::vector<double> x1_d(x1_f.begin(), x1_f.end());
+        const std::vector<double> x2_d(x2_f.begin(), x2_f.end());
+        const cxxgpr::MatrixRef<double> x1_ref_d(x1_d.data(), n, 2U);
+        const cxxgpr::MatrixRef<double> x2_ref_d(x2_d.data(), m, 2U);
+
+        const std::vector<double> sq_d = make_sq_dist_rect(x1_ref_d, x1_ref_d);
+        const std::vector<double> cross_d = make_sq_dist_rect(x1_ref_d, x2_ref_d);
+        std::vector<float> sq_f(sq_d.size());
+        std::vector<float> cross_f(cross_d.size());
+        for (std::size_t idx = 0; idx < sq_d.size(); ++idx)
+        {
+            sq_f[idx] = static_cast<float>(sq_d[idx]);
+        }
+        for (std::size_t idx = 0; idx < cross_d.size(); ++idx)
+        {
+            cross_f[idx] = static_cast<float>(cross_d[idx]);
+        }
+        std::vector<double> sq_widened(sq_f.begin(), sq_f.end());
+        std::vector<double> cross_widened(cross_f.begin(), cross_f.end());
+
+        const auto ard0_d = make_dim_sq_diff_rect(x1_ref_d, x1_ref_d, 0U);
+        const auto ard1_d = make_dim_sq_diff_rect(x1_ref_d, x1_ref_d, 1U);
+        std::vector<float> ard0_f(ard0_d.size());
+        std::vector<float> ard1_f(ard1_d.size());
+        for (std::size_t idx = 0; idx < ard0_d.size(); ++idx)
+        {
+            ard0_f[idx] = static_cast<float>(ard0_d[idx]);
+            ard1_f[idx] = static_cast<float>(ard1_d[idx]);
+        }
+        const std::vector<double> ard0_w(ard0_f.begin(), ard0_f.end());
+        const std::vector<double> ard1_w(ard1_f.begin(), ard1_f.end());
+
+        const cxxgpr::ScalarDistance s_slot;
+        const auto a_slot = cxxgpr::ArdDistance::create(2U).value();
+        const auto dk = (s_slot.rbf(cxxgpr::RbfKernel::create(0.8).value())
+                            * s_slot.matern(cxxgpr::MaternKernel::create(1.1, cxxgpr::MaternNu::FiveHalves).value()))
+            + a_slot.rbf_ard(cxxgpr::RbfArdKernel::create(std::array<double, 2>{0.7, 1.2}).value()).value();
+
+        const auto comp64 = dk.compile<double>();
+        const auto comp32 = dk.compile<float>();
+
+        cxxgpr::DistanceSource src_f;
+        EXPECT_FALSE(src_f.assumes_valid());
+        const std::array<cxxgpr::MatrixRef<float>, 2> ard_refs_f{
+            cxxgpr::MatrixRef<float>(ard0_f.data(), n, n), cxxgpr::MatrixRef<float>(ard1_f.data(), n, n)
+        };
+        src_f.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<float>(sq_f.data(), n, n))
+            .bind_ard(a_slot.slot(), ard_refs_f);
+
+        cxxgpr::DistanceSource src_w;
+        const std::array<cxxgpr::MatrixRef<double>, 2> ard_refs_w{
+            cxxgpr::MatrixRef<double>(ard0_w.data(), n, n), cxxgpr::MatrixRef<double>(ard1_w.data(), n, n)
+        };
+        src_w.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(sq_widened.data(), n, n))
+            .bind_ard(a_slot.slot(), ard_refs_w);
+
+        auto store64_f = comp64.prepare_square(src_f);
+        auto store64_w = comp64.prepare_square(src_w);
+        auto store32_f = comp32.prepare_square(src_f);
+        auto store32_w = comp32.prepare_square(src_w);
+        ASSERT_TRUE(store64_f.has_value());
+        ASSERT_TRUE(store64_w.has_value());
+        ASSERT_TRUE(store32_f.has_value());
+        ASSERT_TRUE(store32_w.has_value());
+
+        std::vector<double> scratch64(n * n, 0.0);
+        std::vector<double> scratch64_b(n * n, 0.0);
+        std::vector<float> scratch32(n * n, 0.0F);
+        std::vector<double> k64_f(n * n, 0.0);
+        std::vector<double> k64_w(n * n, 0.0);
+        ASSERT_TRUE(comp64
+                .apply(
+                    *store64_f, std::nullopt, cxxgpr::MatrixMut<double>(k64_f.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        ASSERT_TRUE(comp64
+                .apply(
+                    *store64_w, std::nullopt, cxxgpr::MatrixMut<double>(k64_w.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        EXPECT_EQ(k64_f, k64_w);
+
+        std::vector<float> k32_f(n * n, 0.0F);
+        std::vector<float> k32_w(n * n, 0.0F);
+        ASSERT_TRUE(comp32
+                .apply(
+                    *store32_f, std::nullopt, cxxgpr::MatrixMut<float>(k32_f.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<float>(scratch32.data(), n, n)
+                )
+                .has_value());
+        ASSERT_TRUE(comp32
+                .apply(
+                    *store32_w, std::nullopt, cxxgpr::MatrixMut<float>(k32_w.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<float>(scratch32.data(), n, n)
+                )
+                .has_value());
+        EXPECT_EQ(k32_f, k32_w);
+
+        // Strict float rejection on negative entry and double > float::max overflow in compile<float>().
+        std::vector<float> bad_sq_f = sq_f;
+        bad_sq_f[1] = -0.25F;
+        cxxgpr::DistanceSource bad_f_src;
+        bad_f_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<float>(bad_sq_f.data(), n, n))
+            .bind_ard(a_slot.slot(), ard_refs_f);
+        EXPECT_EQ(comp64.prepare_square(bad_f_src).error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+
+        std::vector<double> huge_sq = sq_widened;
+        huge_sq[(1U * n) + 0U] = 1e300;
+        huge_sq[(0U * n) + 1U] = 1e300;
+        cxxgpr::DistanceSource huge_src;
+        huge_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(huge_sq.data(), n, n))
+            .bind_ard(a_slot.slot(), ard_refs_w);
+        EXPECT_EQ(comp32.prepare_square(huge_src).error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+
+        // assume_valid(true) skips value checks on bad values but still enforces structural checks and forbids tidy().
+        cxxgpr::DistanceSource av_src;
+        av_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<float>(bad_sq_f.data(), n, n))
+            .bind_ard(a_slot.slot(), ard_refs_f)
+            .assume_valid(true);
+        EXPECT_TRUE(av_src.assumes_valid());
+        EXPECT_TRUE(comp64.prepare_square(av_src).has_value());
+
+        cxxgpr::DistanceSource av_tidy = src_w;
+        av_tidy.assume_valid(true).tidy(1e-9);
+        EXPECT_EQ(comp64.prepare_square(av_tidy).error().code(), cxxgpr::GprErrorCode::InvalidConfig);
+
+        cxxgpr::DistanceSource av_missing;
+        av_missing.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(sq_widened.data(), n, n)).assume_valid(true);
+        EXPECT_EQ(comp64.prepare_square(av_missing).error().code(), cxxgpr::GprErrorCode::DistanceSlot);
+
+        cxxgpr::DistanceSource av_rect;
+        av_rect.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(cross_widened.data(), n, m))
+            .bind_ard(a_slot.slot(), ard_refs_w)
+            .assume_valid(true);
+        EXPECT_EQ(comp64.prepare_square(av_rect).error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+
+        // Packed scalar storage matches dense coordinate evaluation for built-in leaves, and CustomKernel falls back
+        // to dense storage while rejecting an incompatible packed store.
+        const cxxgpr::ScalarDistance leaf_slot;
+        const auto all_builtin =
+            (leaf_slot.rbf(cxxgpr::RbfKernel::create(0.8).value())
+                + leaf_slot.matern(cxxgpr::MaternKernel::create(0.9, cxxgpr::MaternNu::ThreeHalves).value()))
+            + (leaf_slot.periodic(cxxgpr::PeriodicKernel::create(1.1, 2.0).value())
+                + leaf_slot.rational_quadratic(cxxgpr::RationalQuadraticKernel::create(0.7, 1.5).value()));
+        const auto builtin_comp = all_builtin.compile<double>();
+        cxxgpr::DistanceSource leaf_src;
+        leaf_src.bind_scalar(leaf_slot.slot(), cxxgpr::MatrixRef<double>(sq_d.data(), n, n));
+        auto builtin_store = builtin_comp.prepare_square(leaf_src);
+        ASSERT_TRUE(builtin_store.has_value());
+        std::vector<double> k_builtin(n * n, 0.0);
+        ASSERT_TRUE(builtin_comp
+                .apply(
+                    *builtin_store, std::nullopt, cxxgpr::MatrixMut<double>(k_builtin.data(), n, n),
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+
+        const auto coord_equiv =
+            (cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.8).value())
+                + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(0.9, cxxgpr::MaternNu::ThreeHalves).value()))
+            + (cxxgpr::KernelSpec(cxxgpr::PeriodicKernel::create(1.1, 2.0).value())
+                + cxxgpr::KernelSpec(cxxgpr::RationalQuadraticKernel::create(0.7, 1.5).value()));
+        const auto coord_comp = coord_equiv.compile<double>();
+        auto coord_nested = coord_comp.make_nested_buffers(n, n);
+        std::vector<double> k_coord(n * n, 0.0);
+        ASSERT_TRUE(coord_comp
+                .apply_points(
+                    x1_ref_d, cxxgpr::MatrixMut<double>(k_coord.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n), coord_nested
+                )
+                .has_value());
+        for (std::size_t idx = 0; idx < k_builtin.size(); ++idx)
+        {
+            EXPECT_NEAR(k_builtin[idx], k_coord[idx], 1e-12);
+        }
+
+        // CustomKernel on the same slot builds dense storage and works end-to-end; passing builtin_store (packed)
+        // to custom_comp is rejected with UnsupportedKernelOperation.
+        auto ck = cxxgpr::CustomKernel::create(
+            std::make_unique<SimpleExpTerm<double>>(1.5), std::make_unique<SimpleExpTerm<float>>(1.5F)
+        );
+        ASSERT_TRUE(ck.has_value());
+        const auto custom_dk = leaf_slot.custom(*ck);
+        const auto custom_comp = custom_dk.compile<double>();
+        auto custom_store = custom_comp.prepare_square(leaf_src);
+        ASSERT_TRUE(custom_store.has_value());
+        std::vector<double> k_custom(n * n, 0.0);
+        ASSERT_TRUE(custom_comp
+                .apply(
+                    *custom_store, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n),
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        for (std::size_t idx = 0; idx < n * n; ++idx)
+        {
+            EXPECT_NEAR(k_custom[idx], 1.5 * std::exp(-sq_d[idx]), 1e-13);
+        }
+        EXPECT_EQ(
+            custom_comp
+                .apply(
+                    *builtin_store, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n),
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::UnsupportedKernelOperation
+        );
+
+        // Moved-from CheckedDistanceStore returns EmptyInput on apply/grad/hess/apply_cross.
+        cxxgpr::CheckedDistanceStore<double> moved_to = std::move(*custom_store);
+        EXPECT_EQ(
+            custom_comp
+                .apply(
+                    *custom_store, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n),
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::EmptyInput
+        );
+        EXPECT_EQ(
+            custom_comp
+                .grad(
+                    *custom_store, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n), 0U,
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n),
+                    cxxgpr::MatrixMut<double>(scratch64_b.data(), n, n)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::EmptyInput
+        );
+        EXPECT_EQ(
+            custom_comp
+                .apply_cross(
+                    *custom_store, std::nullopt, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n),
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::EmptyInput
+        );
+        EXPECT_TRUE(custom_comp
+                .apply(
+                    moved_to, std::nullopt, cxxgpr::MatrixMut<double>(k_custom.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+
+        // Foreign store built with another slot returns UnsupportedKernelOperation.
+        const cxxgpr::ScalarDistance foreign_slot;
+        const auto foreign_comp = foreign_slot.rbf(cxxgpr::RbfKernel::create(0.8).value()).compile<double>();
+        cxxgpr::DistanceSource foreign_src;
+        foreign_src.bind_scalar(foreign_slot.slot(), cxxgpr::MatrixRef<double>(sq_d.data(), n, n));
+        auto foreign_store = foreign_comp.prepare_square(foreign_src);
+        ASSERT_TRUE(foreign_store.has_value());
+        EXPECT_EQ(
+            builtin_comp
+                .apply(
+                    *foreign_store, std::nullopt, cxxgpr::MatrixMut<double>(k_builtin.data(), n, n),
+                    cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::UnsupportedKernelOperation
+        );
+
+        // O(1) copy construction and assignment share validated tables cleanly with independent lifetimes.
+        cxxgpr::CheckedDistanceStore<double> copied = moved_to;
+        cxxgpr::CheckedDistanceStore<double> assigned = *builtin_store;
+        assigned = copied;
+        moved_to = *builtin_store;
+        copied = assigned;
+        std::vector<double> k_copied(n * n, 0.0);
+        ASSERT_TRUE(custom_comp
+                .apply(
+                    copied, std::nullopt, cxxgpr::MatrixMut<double>(k_copied.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        EXPECT_EQ(k_copied, k_custom);
+        std::vector<double> k_assigned(n * n, 0.0);
+        ASSERT_TRUE(custom_comp
+                .apply(
+                    assigned, std::nullopt, cxxgpr::MatrixMut<double>(k_assigned.data(), n, n), cxxgpr::Triangle::Full,
+                    cxxgpr::MatrixMut<double>(scratch64.data(), n, n)
+                )
+                .has_value());
+        EXPECT_EQ(k_assigned, k_custom);
+
+        // Null-data MatrixRef with non-zero dims must return EmptyInput in both strict and assume_valid modes.
+        for (const bool assume : {false, true})
+        {
+            cxxgpr::DistanceSource null_scalar_d;
+            null_scalar_d.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(nullptr, n, n))
+                .bind_ard(a_slot.slot(), ard_refs_w)
+                .assume_valid(assume);
+            EXPECT_EQ(comp64.prepare_square(null_scalar_d).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+            const std::array<cxxgpr::MatrixRef<float>, 2U> ard_cross_null_refs_f{
+                cxxgpr::MatrixRef<float>(ard0_f.data(), n, m), cxxgpr::MatrixRef<float>(ard1_f.data(), n, m)
+            };
+            cxxgpr::DistanceSource null_scalar_f;
+            null_scalar_f.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<float>(nullptr, n, m))
+                .bind_ard(a_slot.slot(), ard_cross_null_refs_f)
+                .assume_valid(assume);
+            EXPECT_EQ(comp32.prepare_cross(null_scalar_f).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+
+            const std::array<cxxgpr::MatrixRef<double>, 2U> null_ard_d{
+                cxxgpr::MatrixRef<double>(ard0_w.data(), n, n), cxxgpr::MatrixRef<double>(nullptr, n, n)
+            };
+            cxxgpr::DistanceSource null_ard_src;
+            null_ard_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(sq_widened.data(), n, n))
+                .bind_ard(a_slot.slot(), null_ard_d)
+                .assume_valid(assume);
+            EXPECT_EQ(comp64.prepare_square(null_ard_src).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+        }
+
+        // Large tidy_tol * max_abs overflowing to +Inf must be rejected with InvalidDistance.
+        std::vector<double> big_d2(n * n, 1e200);
+        for (std::size_t idx = 0; idx < n; ++idx)
+        {
+            big_d2[(idx * n) + idx] = 0.0;
+        }
+        cxxgpr::DistanceSource overflow_tidy;
+        overflow_tidy.bind_scalar(leaf_slot.slot(), cxxgpr::MatrixRef<double>(big_d2.data(), n, n)).tidy(1e200);
+        const auto overflow_err = builtin_comp.prepare_square(overflow_tidy);
+        ASSERT_FALSE(overflow_err.has_value());
+        EXPECT_EQ(overflow_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+        EXPECT_EQ(overflow_err.error().distance_reason(), std::optional<std::string_view>{"tidy tolerance overflow"});
+
+        std::vector<double> big_cross(n * m, 1e200);
+        cxxgpr::DistanceSource overflow_cross;
+        overflow_cross.bind_scalar(leaf_slot.slot(), cxxgpr::MatrixRef<double>(big_cross.data(), n, m)).tidy(1e200);
+        const auto overflow_cross_err = builtin_comp.prepare_cross(overflow_cross);
+        ASSERT_FALSE(overflow_cross_err.has_value());
+        EXPECT_EQ(overflow_cross_err.error().code(), cxxgpr::GprErrorCode::InvalidDistance);
+        EXPECT_EQ(
+            overflow_cross_err.error().distance_reason(), std::optional<std::string_view>{"tidy tolerance overflow"}
+        );
     }
 
 }  // namespace

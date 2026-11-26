@@ -1854,4 +1854,837 @@ namespace
         EXPECT_EQ(probe_allocs, 0U);
     }
 
+    /// @brief Verifies ConstantKernel-folded composite products in DistanceGpr training and inference.
+    /// @details Confirms parity against coordinate Gpr across fit(Lbfgs), factor, predict_into, and predict_covariance
+    /// for DistanceOnly `Constant * Constant * Rbf` and WithPoints `Constant * Rbf * Matern + Linear`, plus zero
+    /// allocations during optimization.
+    TEST(DistanceGprTest, ConstantFoldedCompositeModelParityAndZeroAllocFit)
+    {
+        // Spec: REQ-05, DES-10, DES-21
+        const Data data = make_data(14U, 5U, 2U);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+
+        cxxgpr::DistanceSource train_src;
+        cxxgpr::DistanceSource cross_src;
+        cxxgpr::DistanceSource query_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+        query_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m));
+
+        const auto c1 = cxxgpr::ConstantKernel::create(1.8).value();
+        const auto c2 = cxxgpr::ConstantKernel::create(0.7).value();
+        const auto rbf = cxxgpr::RbfKernel::create(1.1).value();
+        const auto m52 = cxxgpr::MaternKernel::create(0.9, cxxgpr::MaternNu::FiveHalves).value();
+        const auto lin = cxxgpr::LinearKernel::create(0.4).value();
+        const auto lbfgs = cxxgpr::optimizer::Lbfgs().with_max_iterations(15U);
+
+        // Case 1: DistanceOnly Constant * Constant * Rbf.
+        {
+            const auto dist_k =
+                (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c2))
+                * slot.rbf(rbf);
+            const auto coord_k = (cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(c2)) * cxxgpr::KernelSpec(rbf);
+
+            const auto dist_fit = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dist_k, lbfgs)
+                                      .with_noise_variance(0.05)
+                                      .value()
+                                      .fit(train_src, data.y);
+            const auto coord_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_k, lbfgs)
+                                       .with_noise_variance(0.05)
+                                       .value()
+                                       .fit(data.x, data.n, data.d, data.y);
+            ASSERT_TRUE(dist_fit.has_value()) << dist_fit.error().message();
+            ASSERT_TRUE(coord_fit.has_value()) << coord_fit.error().message();
+            EXPECT_NEAR(dist_fit->neg_log_marginal_likelihood(), coord_fit->neg_log_marginal_likelihood(), 1e-8);
+            EXPECT_LT(rel_diff(dist_fit->optimizer_result().params, coord_fit->optimizer_result().params), 1e-7);
+
+            const auto dist_fac =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(dist_k).with_noise_variance(0.05).value().factor(
+                    train_src, data.y
+                );
+            const auto coord_fac =
+                cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(coord_k).with_noise_variance(0.05).value().factor(
+                    data.x, data.n, data.d, data.y
+                );
+            ASSERT_TRUE(dist_fac.has_value()) << dist_fac.error().message();
+            ASSERT_TRUE(coord_fac.has_value()) << coord_fac.error().message();
+            EXPECT_NEAR(dist_fac->neg_log_marginal_likelihood(), coord_fac->neg_log_marginal_likelihood(), 1e-10);
+
+            cxxgpr::Prediction<double> pred_out;
+            ASSERT_TRUE(dist_fit->predict_into(cross_src, pred_out).has_value());
+            const auto coord_pred = coord_fit->predict(data.q, data.m, data.d);
+            ASSERT_TRUE(coord_pred.has_value());
+            EXPECT_LT(rel_diff(pred_out.mean, coord_pred->mean), 1e-8);
+            EXPECT_LT(rel_diff(pred_out.variance, coord_pred->variance), 1e-8);
+
+            const auto dist_cov = dist_fit->predict_covariance(cross_src, query_src);
+            const auto coord_cov = coord_fit->predict_covariance(data.q, data.m, data.d);
+            ASSERT_TRUE(dist_cov.has_value()) << dist_cov.error().message();
+            ASSERT_TRUE(coord_cov.has_value());
+            EXPECT_LT(rel_diff(dist_cov->covariance, coord_cov->covariance), 1e-7);
+
+            std::size_t probe_allocs = 999U;
+            const auto probed =
+                cxxgpr::DistanceGpr<AllocationProbeOptimizer>(dist_k, AllocationProbeOptimizer{&probe_allocs})
+                    .with_noise_variance(0.05)
+                    .value()
+                    .fit(train_src, data.y);
+            ASSERT_TRUE(probed.has_value()) << probed.error().message();
+            EXPECT_EQ(probe_allocs, 0U);
+        }
+
+        // Case 2: WithPoints (Constant * Rbf * Matern) + Linear.
+        {
+            const auto dist_k = ((cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * slot.rbf(rbf)) * slot.matern(m52))
+                + cxxgpr::KernelSpec(lin);
+            const auto coord_k = ((cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(rbf)) * cxxgpr::KernelSpec(m52))
+                + cxxgpr::KernelSpec(lin);
+
+            const cxxgpr::MatrixRef<double> x_ref(data.x.data(), data.n, data.d);
+            const cxxgpr::MatrixRef<double> q_ref(data.q.data(), data.m, data.d);
+            const auto dist_fit =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+                    dist_k, lbfgs
+                )
+                    .with_noise_variance(0.05)
+                    .value()
+                    .fit(train_src, x_ref, data.y);
+            const auto coord_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_k, lbfgs)
+                                       .with_noise_variance(0.05)
+                                       .value()
+                                       .fit(data.x, data.n, data.d, data.y);
+            ASSERT_TRUE(dist_fit.has_value()) << dist_fit.error().message();
+            ASSERT_TRUE(coord_fit.has_value()) << coord_fit.error().message();
+            EXPECT_NEAR(dist_fit->neg_log_marginal_likelihood(), coord_fit->neg_log_marginal_likelihood(), 1e-8);
+
+            cxxgpr::Prediction<double> pred_out;
+            ASSERT_TRUE(dist_fit->predict_into(cross_src, q_ref, pred_out).has_value());
+            const auto coord_pred = coord_fit->predict(data.q, data.m, data.d);
+            ASSERT_TRUE(coord_pred.has_value());
+            EXPECT_LT(rel_diff(pred_out.mean, coord_pred->mean), 1e-8);
+            EXPECT_LT(rel_diff(pred_out.variance, coord_pred->variance), 1e-8);
+
+            const auto dist_cov = dist_fit->predict_covariance(cross_src, query_src, q_ref);
+            const auto coord_cov = coord_fit->predict_covariance(data.q, data.m, data.d);
+            ASSERT_TRUE(dist_cov.has_value()) << dist_cov.error().message();
+            ASSERT_TRUE(coord_cov.has_value());
+            EXPECT_LT(rel_diff(dist_cov->covariance, coord_cov->covariance), 1e-7);
+        }
+    }
+
+#ifdef _OPENMP
+    /// @brief Verifies bitwise determinism of DistanceStoreBuilder and apply across OpenMP thread counts.
+    /// @details Prepares and evaluates a Constant * Rbf + Matern kernel on n = 140 points under 1 and 4 OpenMP threads
+    /// and asserts identical bit patterns for packed square/cross stores and evaluated Gram matrices.
+    TEST(DistanceGprTest, ParallelDistanceOperationsBitwiseDeterministicAcrossThreads)
+    {
+        // Spec: REQ-05, DES-10, DES-21
+        struct ThreadCountGuard
+        {
+            /// @brief Saved OpenMP thread limit prior to test modification.
+            int prev = omp_get_max_threads();
+
+            /// @brief Restores the original OpenMP thread limit when the scope exits.
+            ~ThreadCountGuard() { omp_set_num_threads(prev); }
+        };
+
+        const ThreadCountGuard guard;
+
+        constexpr std::size_t n = 140U;
+        const Data data = make_data(n, 32U, 2U);
+        const Tables t = euclid_tables(data);
+
+        const cxxgpr::ScalarDistance slot;
+        const auto c = cxxgpr::ConstantKernel::create(1.7).value();
+        const auto rbf = cxxgpr::RbfKernel::create(1.25).value();
+        const auto m32 = cxxgpr::MaternKernel::create(0.85, cxxgpr::MaternNu::ThreeHalves).value();
+        const auto dist_k = (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c) * slot.rbf(rbf)) + slot.matern(m32);
+        const auto compiled = dist_k.compile<double>();
+
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), n, n));
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), n, data.m));
+
+        auto eval_with_threads = [&](int threads)
+        {
+            omp_set_num_threads(threads);
+            const auto sq_store = compiled.prepare_square(train_src);
+            const auto cx_store = compiled.prepare_cross(cross_src);
+            EXPECT_TRUE(sq_store.has_value());
+            EXPECT_TRUE(cx_store.has_value());
+
+            auto nested = compiled.make_nested_buffers(n, n);
+            std::vector<double> gram(n * n, 0.0);
+            std::vector<double> cross_out(n * data.m, 0.0);
+            std::vector<double> scratch_sq(n * n, 0.0);
+            std::vector<double> scratch_cx(n * data.m, 0.0);
+
+            if (sq_store.has_value() && cx_store.has_value())
+            {
+                EXPECT_TRUE(compiled
+                        .apply(
+                            *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(gram.data(), n, n),
+                            cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch_sq.data(), n, n), nested
+                        )
+                        .has_value());
+                EXPECT_TRUE(compiled
+                        .apply_cross(
+                            *cx_store, std::nullopt, std::nullopt,
+                            cxxgpr::MatrixMut<double>(cross_out.data(), n, data.m),
+                            cxxgpr::MatrixMut<double>(scratch_cx.data(), n, data.m), nested
+                        )
+                        .has_value());
+            }
+            return std::pair{gram, cross_out};
+        };
+
+        const auto [gram_1, cross_1] = eval_with_threads(1);
+        const auto [gram_4, cross_4] = eval_with_threads(4);
+        EXPECT_TRUE(bits_equal(gram_1, gram_4));
+        EXPECT_TRUE(bits_equal(cross_1, cross_4));
+    }
+#endif
+
+    /// @brief Verifies DistanceGpr::with_likelihood() preserves custom bounds through optimization and into_trainer().
+    TEST(DistanceGprTest, WithLikelihoodConfiguresCustomBoundsAndSurvivesIntoTrainer)
+    {
+        // Spec: DES-21, REQ-09
+        const Data data = make_data(14, 4, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        cxxgpr::DistanceSource train;
+        train.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+
+        const auto custom_bounds = cxxgpr::Interval::create(0.08, 0.25).value();
+        const auto lik = cxxgpr::GaussianLikelihood::create(0.15).value().with_bounds(custom_bounds).value();
+
+        const auto kernel = distance_scalar_kernel(slot);
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(kernel).with_likelihood(lik);
+        EXPECT_DOUBLE_EQ(trainer.likelihood().noise_variance(), 0.15);
+        EXPECT_DOUBLE_EQ(trainer.likelihood().bounds().lo(), 0.08);
+        EXPECT_DOUBLE_EQ(trainer.likelihood().bounds().hi(), 0.25);
+
+        const auto fitted = trainer.fit(train, data.y);
+        ASSERT_TRUE(fitted.has_value()) << fitted.error().message();
+        EXPECT_GT(fitted->likelihood().noise_variance(), 0.08);
+        EXPECT_LT(fitted->likelihood().noise_variance(), 0.25);
+
+        const auto next_trainer = fitted->into_trainer();
+        EXPECT_DOUBLE_EQ(next_trainer.likelihood().bounds().lo(), 0.08);
+        EXPECT_DOUBLE_EQ(next_trainer.likelihood().bounds().hi(), 0.25);
+        EXPECT_TRUE(next_trainer.retains_distances());
+    }
+
+    /// @brief Verifies with_retain_distances(false) and zero-copy assume_valid(true) match retained results
+    /// bit-for-bit.
+    TEST(DistanceGprTest, NonRetainedZeroCopyAndAssumeValidMatchRetainedBitForBit)
+    {
+        // Spec: DES-10, DES-21, REQ-05, REQ-11
+        const Data data = make_data(16, 5, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        const auto kernel = distance_scalar_kernel(slot);
+
+        cxxgpr::DistanceSource retained_train;
+        retained_train.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cxxgpr::DistanceSource retained_cross;
+        retained_cross.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+        cxxgpr::DistanceSource retained_query;
+        retained_query.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m));
+
+        cxxgpr::DistanceSource fast_train;
+        fast_train.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n))
+            .assume_valid(true);
+        cxxgpr::DistanceSource fast_cross;
+        fast_cross.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m))
+            .assume_valid(true);
+        cxxgpr::DistanceSource fast_query;
+        fast_query.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m))
+            .assume_valid(true);
+
+        const auto trainer_ret =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(kernel).with_noise_variance(0.03).value();
+        EXPECT_TRUE(trainer_ret.retains_distances());
+        const auto trainer_nocopy = trainer_ret.with_retain_distances(false);
+        EXPECT_FALSE(trainer_nocopy.retains_distances());
+
+        const auto m_ret = trainer_ret.fit(retained_train, data.y);
+        const auto m_fast = trainer_nocopy.fit(fast_train, data.y);
+        ASSERT_TRUE(m_ret.has_value());
+        ASSERT_TRUE(m_fast.has_value());
+        EXPECT_TRUE(m_ret->retains_distances());
+        EXPECT_FALSE(m_fast->retains_distances());
+        EXPECT_FALSE(m_fast->into_trainer().retains_distances());
+
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(m_ret->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(m_fast->neg_log_marginal_likelihood())
+        );
+
+        const auto p_ret = m_ret->predict(retained_cross);
+        const auto p_fast = m_fast->predict(fast_cross);
+        ASSERT_TRUE(p_ret.has_value());
+        ASSERT_TRUE(p_fast.has_value());
+        EXPECT_TRUE(bits_equal(p_ret->mean, p_fast->mean));
+        EXPECT_TRUE(bits_equal(p_ret->variance, p_fast->variance));
+
+        cxxgpr::Prediction<double> p_into;
+        ASSERT_TRUE(m_fast->predict_into(fast_cross, p_into).has_value());
+        {
+            const cxxgpr::test_support::NoAllocationScope scope;
+            ASSERT_TRUE(m_fast->predict_into(fast_cross, p_into).has_value());
+        }
+        EXPECT_TRUE(bits_equal(p_into.mean, p_ret->mean));
+        EXPECT_TRUE(bits_equal(p_into.variance, p_ret->variance));
+
+        const auto cov_ret = m_ret->predict_covariance(retained_cross, retained_query);
+        const auto cov_fast = m_fast->predict_covariance(fast_cross, fast_query);
+        ASSERT_TRUE(cov_ret.has_value());
+        ASSERT_TRUE(cov_fast.has_value());
+        EXPECT_TRUE(bits_equal(cov_ret->mean, cov_fast->mean));
+        EXPECT_TRUE(bits_equal(cov_ret->covariance, cov_fast->covariance));
+
+        const auto s_ret = m_ret->sample(retained_cross, retained_query, 3U, 77U);
+        const auto s_fast = m_fast->sample(fast_cross, fast_query, 3U, 77U);
+        ASSERT_TRUE(s_ret.has_value());
+        ASSERT_TRUE(s_fast.has_value());
+        EXPECT_TRUE(bits_equal(*s_ret, *s_fast));
+
+        const auto loo_ret = m_ret->loo_predict();
+        const auto loo_fast = m_fast->loo_predict();
+        ASSERT_TRUE(loo_ret.has_value());
+        ASSERT_TRUE(loo_fast.has_value());
+        EXPECT_TRUE(bits_equal(loo_ret->mean, loo_fast->mean));
+        EXPECT_TRUE(bits_equal(loo_ret->variance, loo_fast->variance));
+
+        const auto refit_ret = m_ret->refit(retained_train, data.y);
+        const auto refit_fast = m_fast->refit(fast_train, data.y);
+        ASSERT_TRUE(refit_ret.has_value());
+        ASSERT_TRUE(refit_fast.has_value());
+        EXPECT_FALSE(refit_fast->retains_distances());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(refit_ret->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(refit_fast->neg_log_marginal_likelihood())
+        );
+    }
+
+    /// @brief Verifies CheckedDistanceStore direct reuse across fit/factor/refit/predict/covariance/sample and
+    /// MixedPrecision store promotion.
+    TEST(DistanceGprTest, CheckedDistanceStoreReuseAndMixedPrecisionPromotion)
+    {
+        // Spec: DES-10, DES-21, REQ-05, REQ-11
+        const Data data = make_data(14, 4, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        const auto dk_only = distance_scalar_kernel(slot);
+
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+        cxxgpr::DistanceSource query_src;
+        query_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m));
+
+        const auto comp64 = dk_only.compile<double>();
+        auto train_store64 = comp64.prepare_square(train_src);
+        auto cross_store64 = comp64.prepare_cross(cross_src);
+        auto query_store64 = comp64.prepare_square(query_src);
+        ASSERT_TRUE(train_store64.has_value());
+        ASSERT_TRUE(cross_store64.has_value());
+        ASSERT_TRUE(query_store64.has_value());
+
+        const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dk_only).with_noise_variance(0.05).value();
+        const auto m_src = trainer.fit(train_src, data.y);
+        const auto m_store = trainer.fit(*train_store64, data.y);
+        ASSERT_TRUE(m_src.has_value());
+        ASSERT_TRUE(m_store.has_value());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(m_src->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(m_store->neg_log_marginal_likelihood())
+        );
+
+        cxxgpr::Prediction<double> p_into;
+        ASSERT_TRUE(m_store->predict_into(*cross_store64, p_into).has_value());
+        {
+            const cxxgpr::test_support::NoAllocationScope scope;
+            ASSERT_TRUE(m_store->predict_into(*cross_store64, p_into).has_value());
+        }
+        const auto p_src = m_src->predict(cross_src);
+        ASSERT_TRUE(p_src.has_value());
+        EXPECT_TRUE(bits_equal(p_into.mean, p_src->mean));
+        EXPECT_TRUE(bits_equal(p_into.variance, p_src->variance));
+
+        const auto cov_src = m_src->predict_covariance(cross_src, query_src);
+        const auto cov_store = m_store->predict_covariance(*cross_store64, *query_store64);
+        ASSERT_TRUE(cov_src.has_value());
+        ASSERT_TRUE(cov_store.has_value());
+        EXPECT_TRUE(bits_equal(cov_src->covariance, cov_store->covariance));
+
+        const auto s_src = m_src->sample(cross_src, query_src, 3U, 123U);
+        const auto s_store = m_store->sample(*cross_store64, *query_store64, 3U, 123U);
+        ASSERT_TRUE(s_src.has_value());
+        ASSERT_TRUE(s_store.has_value());
+        EXPECT_TRUE(bits_equal(*s_src, *s_store));
+
+        const auto refit_store = m_store->refit(*train_store64, data.y);
+        ASSERT_TRUE(refit_store.has_value());
+        EXPECT_TRUE(bits_equal(refit_store->predict(*cross_store64)->mean, m_store->predict(*cross_store64)->mean));
+
+        // MixedPrecision<ReevaluateKernel> stores Storage=float internally; passing CheckedDistanceStore<float>
+        // succeeds including double promotion for residual refinement, matches double-precision DistanceSource to
+        // float precision, and is bit-identical to a float-bound DistanceSource.
+        const auto to_float_tbl = [](const std::vector<double>& src)
+        {
+            std::vector<float> out(src.size());
+            for (std::size_t idx = 0; idx < src.size(); ++idx)
+            {
+                out[idx] = static_cast<float>(src[idx]);
+            }
+            return out;
+        };
+        const std::vector<float> train_f_mp = to_float_tbl(t.train);
+        const std::vector<float> cross_f_mp = to_float_tbl(t.cross);
+        const std::vector<float> query_f_mp = to_float_tbl(t.query);
+        cxxgpr::DistanceSource train_f_src;
+        train_f_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(train_f_mp.data(), data.n, data.n));
+        cxxgpr::DistanceSource cross_f_src;
+        cross_f_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(cross_f_mp.data(), data.n, data.m));
+        cxxgpr::DistanceSource query_f_src;
+        query_f_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(query_f_mp.data(), data.m, data.m));
+
+        const auto comp32 = dk_only.compile<float>();
+        auto train_store32 = comp32.prepare_square(train_f_src);
+        auto cross_store32 = comp32.prepare_cross(cross_f_src);
+        auto query_store32 = comp32.prepare_square(query_f_src);
+        ASSERT_TRUE(train_store32.has_value());
+        ASSERT_TRUE(cross_store32.has_value());
+        ASSERT_TRUE(query_store32.has_value());
+
+        const auto mp_trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk_only)
+                .with_noise_variance(0.05)
+                .value();
+        const auto mp_src_d = mp_trainer.factor(train_src, data.y);
+        const auto mp_src_f = mp_trainer.factor(train_f_src, data.y);
+        const auto mp_store = mp_trainer.factor(*train_store32, data.y);
+        ASSERT_TRUE(mp_src_d.has_value());
+        ASSERT_TRUE(mp_src_f.has_value());
+        ASSERT_TRUE(mp_store.has_value());
+        EXPECT_LT(rel_diff(mp_src_d->predict(cross_src)->mean, mp_store->predict(*cross_store32)->mean), 1e-5);
+        EXPECT_TRUE(bits_equal(mp_src_f->predict(cross_f_src)->mean, mp_store->predict(*cross_store32)->mean));
+        EXPECT_TRUE(bits_equal(
+            mp_src_f->predict_covariance(cross_f_src, query_f_src)->covariance,
+            mp_store->predict_covariance(*cross_store32, *query_store32)->covariance
+        ));
+
+        // WithPoints CheckedDistanceStore reuse and float query coordinates.
+        const auto dk_wp =
+            dk_only + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(0.7, cxxgpr::MaternNu::ThreeHalves).value());
+        const auto wp_comp = dk_wp.compile<double>();
+        auto wp_train_store = wp_comp.prepare_square(train_src);
+        auto wp_cross_store = wp_comp.prepare_cross(cross_src);
+        ASSERT_TRUE(wp_train_store.has_value());
+        ASSERT_TRUE(wp_cross_store.has_value());
+        const auto wp_trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(dk_wp)
+                .with_noise_variance(0.05)
+                .value();
+        const cxxgpr::MatrixRef<double> x_ref_d(data.x.data(), data.n, data.d);
+        const cxxgpr::MatrixRef<double> q_ref_d(data.q.data(), data.m, data.d);
+        const auto wp_fit = wp_trainer.factor(*wp_train_store, x_ref_d, data.y);
+        ASSERT_TRUE(wp_fit.has_value());
+        const auto wp_ref = wp_trainer.factor(train_src, x_ref_d, data.y);
+        ASSERT_TRUE(wp_ref.has_value());
+        EXPECT_TRUE(
+            bits_equal(wp_fit->predict(*wp_cross_store, q_ref_d)->mean, wp_ref->predict(cross_src, q_ref_d)->mean)
+        );
+    }
+
+    /// @brief Verifies float distance tables, float coordinates (WithPoints), and float targets on DistanceGpr across
+    /// DoublePrecision, SinglePrecision, and MixedPrecision<ReevaluateKernel>.
+    TEST(DistanceGprTest, FloatInputsMatchDoubleWidenedAndZeroAllocPredictInto)
+    {
+        // Spec: DES-10, DES-16, DES-21, REQ-09, REQ-11
+        const Data raw = make_data(12, 4, 2);
+        const Tables t_raw = euclid_tables(raw);
+
+        auto to_float = [](const std::vector<double>& src)
+        {
+            std::vector<float> out(src.size());
+            for (std::size_t idx = 0; idx < src.size(); ++idx)
+            {
+                out[idx] = static_cast<float>(src[idx]);
+            }
+            return out;
+        };
+        const std::vector<float> x_f = to_float(raw.x);
+        const std::vector<float> q_f = to_float(raw.q);
+        const std::vector<float> y_f = to_float(raw.y);
+        const std::vector<float> d_train_f = to_float(t_raw.train);
+        const std::vector<float> d_cross_f = to_float(t_raw.cross);
+        const std::vector<float> d_query_f = to_float(t_raw.query);
+
+        const std::vector<double> x_w(x_f.begin(), x_f.end());
+        const std::vector<double> q_w(q_f.begin(), q_f.end());
+        const std::vector<double> y_w(y_f.begin(), y_f.end());
+        const std::vector<double> d_train_w(d_train_f.begin(), d_train_f.end());
+        const std::vector<double> d_cross_w(d_cross_f.begin(), d_cross_f.end());
+        const std::vector<double> d_query_w(d_query_f.begin(), d_query_f.end());
+
+        const cxxgpr::ScalarDistance slot;
+        const auto dk_wp = distance_scalar_kernel(slot)
+            + cxxgpr::KernelSpec(cxxgpr::MaternKernel::create(0.8, cxxgpr::MaternNu::ThreeHalves).value());
+
+        cxxgpr::DistanceSource src_train_f;
+        src_train_f.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(d_train_f.data(), raw.n, raw.n));
+        cxxgpr::DistanceSource src_cross_f;
+        src_cross_f.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(d_cross_f.data(), raw.n, raw.m));
+        cxxgpr::DistanceSource src_query_f;
+        src_query_f.bind_scalar(slot.slot(), cxxgpr::MatrixRef<float>(d_query_f.data(), raw.m, raw.m));
+
+        cxxgpr::DistanceSource src_train_w;
+        src_train_w.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d_train_w.data(), raw.n, raw.n));
+        cxxgpr::DistanceSource src_cross_w;
+        src_cross_w.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d_cross_w.data(), raw.n, raw.m));
+        cxxgpr::DistanceSource src_query_w;
+        src_query_w.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d_query_w.data(), raw.m, raw.m));
+
+        const cxxgpr::MatrixRef<float> x_ref_f(x_f.data(), raw.n, raw.d);
+        const cxxgpr::MatrixRef<double> x_ref_w(x_w.data(), raw.n, raw.d);
+        const cxxgpr::MatrixRef<float> q_ref_f(q_f.data(), raw.m, raw.d);
+        const cxxgpr::MatrixRef<double> q_ref_w(q_w.data(), raw.m, raw.d);
+
+        auto verify_policy = [&]<cxxgpr::PrecisionPolicyConcept P>()
+        {
+            using Refine = typename P::Refine;
+            const auto trainer = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, P, cxxgpr::WithPoints>(dk_wp)
+                                     .with_noise_variance(0.04)
+                                     .value();
+
+            const auto fit_w = trainer.fit(src_train_w, x_ref_w, y_w);
+            const auto fit_f = trainer.fit(src_train_f, x_ref_f, std::span<const float>(y_f));
+            ASSERT_TRUE(fit_w.has_value());
+            ASSERT_TRUE(fit_f.has_value());
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_w->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_f->neg_log_marginal_likelihood())
+            );
+
+            const auto p_w = fit_w->predict(src_cross_w, q_ref_w);
+            const auto p_f = fit_f->predict(src_cross_f, q_ref_f);
+            ASSERT_TRUE(p_w.has_value());
+            ASSERT_TRUE(p_f.has_value());
+            EXPECT_TRUE(bits_equal(p_w->mean, p_f->mean));
+            EXPECT_TRUE(bits_equal(p_w->variance, p_f->variance));
+
+            cxxgpr::Prediction<Refine> p_into;
+            ASSERT_TRUE(fit_f->predict_into(src_cross_f, q_ref_f, p_into).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope scope;
+                ASSERT_TRUE(fit_f->predict_into(src_cross_f, q_ref_f, p_into).has_value());
+            }
+            EXPECT_TRUE(bits_equal(p_into.mean, p_w->mean));
+
+            const auto cov_w = fit_w->predict_covariance(src_cross_w, src_query_w, q_ref_w);
+            const auto cov_f = fit_f->predict_covariance(src_cross_f, src_query_f, q_ref_f);
+            ASSERT_TRUE(cov_w.has_value());
+            ASSERT_TRUE(cov_f.has_value());
+            EXPECT_TRUE(bits_equal(cov_w->covariance, cov_f->covariance));
+
+            const auto s_w = fit_w->sample(src_cross_w, src_query_w, q_ref_w, 3U, 55U);
+            const auto s_f = fit_f->sample(src_cross_f, src_query_f, q_ref_f, 3U, 55U);
+            ASSERT_TRUE(s_w.has_value());
+            ASSERT_TRUE(s_f.has_value());
+            EXPECT_TRUE(bits_equal(*s_w, *s_f));
+
+            const auto refit_w = fit_w->refit(src_train_w, x_ref_w, y_w);
+            const auto refit_f = fit_f->refit(src_train_f, x_ref_f, std::span<const float>(y_f));
+            ASSERT_TRUE(refit_w.has_value());
+            ASSERT_TRUE(refit_f.has_value());
+            EXPECT_TRUE(
+                bits_equal(refit_w->predict(src_cross_w, q_ref_w)->mean, refit_f->predict(src_cross_f, q_ref_f)->mean)
+            );
+        };
+
+        verify_policy.template operator()<cxxgpr::DoublePrecision>();
+        verify_policy.template operator()<cxxgpr::SinglePrecision>();
+        verify_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>();
+    }
+
+#ifdef _OPENMP
+    /// @brief Verifies non-retained zero-copy assume_valid() and CheckedDistanceStore reuse remain bit-identical across
+    /// 1 vs 2 OpenMP threads.
+    TEST(DistanceGprTest, ZeroCopyAndStoreReuseAreBitwiseDeterministicAcrossThreads)
+    {
+        // Spec: REQ-11, DES-10, DES-21
+        const Data data = make_data(40, 8, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        const auto dk = distance_scalar_kernel(slot);
+
+        cxxgpr::DistanceSource av_train;
+        av_train.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n)).assume_valid(true);
+        cxxgpr::DistanceSource av_cross;
+        av_cross.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m)).assume_valid(true);
+
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dk).with_noise_variance(0.05).value().with_retain_distances(
+                false
+            );
+        const auto store = dk.compile<double>().prepare_square(av_train);
+        ASSERT_TRUE(store.has_value());
+
+        const int saved_threads = omp_get_max_threads();
+
+        const struct Restore
+        {
+            int threads;
+
+            ~Restore() { omp_set_num_threads(threads); }
+        } restore{saved_threads};
+
+        omp_set_num_threads(1);
+        const auto fit1 = trainer.fit(av_train, data.y);
+        const auto fit_s1 = trainer.fit(*store, data.y);
+        omp_set_num_threads(2);
+        const auto fit2 = trainer.fit(av_train, data.y);
+        const auto fit_s2 = trainer.fit(*store, data.y);
+        ASSERT_TRUE(fit1.has_value());
+        ASSERT_TRUE(fit2.has_value());
+        ASSERT_TRUE(fit_s1.has_value());
+        ASSERT_TRUE(fit_s2.has_value());
+
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(fit1->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(fit2->neg_log_marginal_likelihood())
+        );
+        EXPECT_TRUE(bits_equal(fit1->alpha(), fit2->alpha()));
+        EXPECT_TRUE(bits_equal(fit_s1->alpha(), fit_s2->alpha()));
+        EXPECT_TRUE(bits_equal(fit1->predict(av_cross)->mean, fit2->predict(av_cross)->mean));
+    }
+#endif
+
+    /// @brief Verifies non-retained zero-copy ARD borrowing with assume_valid(true) matches retained training
+    /// bit-for-bit.
+    /// @details Covers L-BFGS, FastSimulatedAnnealing incremental LeafCache, factor, predict, zero-alloc predict_into,
+    /// predict_covariance, sample, loo_predict, refit, and MixedPrecision<ReevaluateKernel> refinement.
+    TEST(DistanceGprTest, ArdNonRetainedZeroCopyAndAssumeValidMatchRetainedBitForBit)
+    {
+        // Spec: DES-10, DES-20, DES-21, REQ-05, REQ-11
+        const Data data = make_data(16, 5, 3);
+        const auto ard_slot_exp = cxxgpr::ArdDistance::create(data.d);
+        ASSERT_TRUE(ard_slot_exp.has_value());
+        const auto ard_slot = *ard_slot_exp;
+
+        std::vector<std::vector<double>> dim_train_d(data.d);
+        std::vector<std::vector<double>> dim_cross_d(data.d);
+        std::vector<std::vector<double>> dim_query_d(data.d);
+        std::vector<cxxgpr::MatrixRef<double>> train_views_d;
+        std::vector<cxxgpr::MatrixRef<double>> cross_views_d;
+        std::vector<cxxgpr::MatrixRef<double>> query_views_d;
+        std::vector<std::vector<float>> dim_train_f(data.d);
+        std::vector<std::vector<float>> dim_cross_f(data.d);
+        std::vector<std::vector<float>> dim_query_f(data.d);
+        std::vector<cxxgpr::MatrixRef<float>> train_views_f;
+        std::vector<cxxgpr::MatrixRef<float>> cross_views_f;
+        std::vector<cxxgpr::MatrixRef<float>> query_views_f;
+        for (std::size_t dim = 0U; dim < data.d; ++dim)
+        {
+            dim_train_d[dim] = table(data.x, data.n, data.x, data.n, data.d, dim);
+            dim_cross_d[dim] = table(data.x, data.n, data.q, data.m, data.d, dim);
+            dim_query_d[dim] = table(data.q, data.m, data.q, data.m, data.d, dim);
+            train_views_d.emplace_back(dim_train_d[dim].data(), data.n, data.n, data.n);
+            cross_views_d.emplace_back(dim_cross_d[dim].data(), data.n, data.m, data.n);
+            query_views_d.emplace_back(dim_query_d[dim].data(), data.m, data.m, data.m);
+
+            dim_train_f[dim].reserve(dim_train_d[dim].size());
+            for (const double v : dim_train_d[dim])
+            {
+                dim_train_f[dim].push_back(static_cast<float>(v));
+            }
+            dim_cross_f[dim].reserve(dim_cross_d[dim].size());
+            for (const double v : dim_cross_d[dim])
+            {
+                dim_cross_f[dim].push_back(static_cast<float>(v));
+            }
+            dim_query_f[dim].reserve(dim_query_d[dim].size());
+            for (const double v : dim_query_d[dim])
+            {
+                dim_query_f[dim].push_back(static_cast<float>(v));
+            }
+            train_views_f.emplace_back(dim_train_f[dim].data(), data.n, data.n, data.n);
+            cross_views_f.emplace_back(dim_cross_f[dim].data(), data.n, data.m, data.n);
+            query_views_f.emplace_back(dim_query_f[dim].data(), data.m, data.m, data.m);
+        }
+
+        cxxgpr::DistanceSource retained_train;
+        cxxgpr::DistanceSource retained_cross;
+        cxxgpr::DistanceSource retained_query;
+        retained_train.bind_ard(ard_slot.slot(), train_views_d);
+        retained_cross.bind_ard(ard_slot.slot(), cross_views_d);
+        retained_query.bind_ard(ard_slot.slot(), query_views_d);
+
+        cxxgpr::DistanceSource fast_train;
+        cxxgpr::DistanceSource fast_cross;
+        cxxgpr::DistanceSource fast_query;
+        fast_train.bind_ard(ard_slot.slot(), train_views_d).assume_valid(true);
+        fast_cross.bind_ard(ard_slot.slot(), cross_views_d).assume_valid(true);
+        fast_query.bind_ard(ard_slot.slot(), query_views_d).assume_valid(true);
+
+        const std::array<double, 3> ell0{0.8, 1.3, 1.8};
+        const auto dk = (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.2).value())
+                            * ard_slot.rbf_ard(cxxgpr::RbfArdKernel::create(ell0).value()).value())
+            + cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.02).value());
+
+        const auto trainer_ret = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dk).with_noise_variance(0.03).value();
+        const auto trainer_fast = trainer_ret.with_retain_distances(false);
+
+        const auto m_ret = trainer_ret.fit(retained_train, data.y);
+        const auto m_fast = trainer_fast.fit(fast_train, data.y);
+        ASSERT_TRUE(m_ret.has_value()) << m_ret.error().message();
+        ASSERT_TRUE(m_fast.has_value()) << m_fast.error().message();
+        EXPECT_TRUE(m_ret->retains_distances());
+        EXPECT_FALSE(m_fast->retains_distances());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(m_ret->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(m_fast->neg_log_marginal_likelihood())
+        );
+        EXPECT_TRUE(bits_equal(m_ret->alpha(), m_fast->alpha()));
+
+        const auto p_ret = m_ret->predict(retained_cross);
+        const auto p_fast = m_fast->predict(fast_cross);
+        ASSERT_TRUE(p_ret.has_value());
+        ASSERT_TRUE(p_fast.has_value());
+        EXPECT_TRUE(bits_equal(p_ret->mean, p_fast->mean));
+        EXPECT_TRUE(bits_equal(p_ret->variance, p_fast->variance));
+
+        cxxgpr::Prediction<double> p_into;
+        ASSERT_TRUE(m_fast->predict_into(fast_cross, p_into).has_value());
+        {
+            const cxxgpr::test_support::NoAllocationScope scope;
+            ASSERT_TRUE(m_fast->predict_into(fast_cross, p_into).has_value());
+        }
+        EXPECT_TRUE(bits_equal(p_into.mean, p_ret->mean));
+        EXPECT_TRUE(bits_equal(p_into.variance, p_ret->variance));
+
+        const auto cov_ret = m_ret->predict_covariance(retained_cross, retained_query);
+        const auto cov_fast = m_fast->predict_covariance(fast_cross, fast_query);
+        ASSERT_TRUE(cov_ret.has_value());
+        ASSERT_TRUE(cov_fast.has_value());
+        EXPECT_TRUE(bits_equal(cov_ret->mean, cov_fast->mean));
+        EXPECT_TRUE(bits_equal(cov_ret->covariance, cov_fast->covariance));
+
+        const auto s_ret = m_ret->sample(retained_cross, retained_query, 3U, 77U);
+        const auto s_fast = m_fast->sample(fast_cross, fast_query, 3U, 77U);
+        ASSERT_TRUE(s_ret.has_value());
+        ASSERT_TRUE(s_fast.has_value());
+        EXPECT_TRUE(bits_equal(*s_ret, *s_fast));
+
+        const auto loo_ret = m_ret->loo_predict();
+        const auto loo_fast = m_fast->loo_predict();
+        ASSERT_TRUE(loo_ret.has_value());
+        ASSERT_TRUE(loo_fast.has_value());
+        EXPECT_TRUE(bits_equal(loo_ret->mean, loo_fast->mean));
+        EXPECT_TRUE(bits_equal(loo_ret->variance, loo_fast->variance));
+
+        const auto fac_ret = trainer_ret.factor(retained_train, data.y);
+        const auto fac_fast = trainer_fast.factor(fast_train, data.y);
+        ASSERT_TRUE(fac_ret.has_value());
+        ASSERT_TRUE(fac_fast.has_value());
+        EXPECT_TRUE(bits_equal(fac_ret->alpha(), fac_fast->alpha()));
+
+        const auto refit_ret = m_ret->refit(retained_train, data.y);
+        const auto refit_fast = m_fast->refit(fast_train, data.y);
+        ASSERT_TRUE(refit_ret.has_value());
+        ASSERT_TRUE(refit_fast.has_value());
+        EXPECT_FALSE(refit_fast->retains_distances());
+        EXPECT_TRUE(bits_equal(refit_ret->alpha(), refit_fast->alpha()));
+
+        // Incremental LeafCache path (FastSimulatedAnnealing) must also match bit-for-bit.
+        const auto fsa = cxxgpr::optimizer::FastSimulatedAnnealing().with_max_iterations(25U).with_restarts(0U);
+        const auto fsa_ret = cxxgpr::DistanceGpr<cxxgpr::optimizer::FastSimulatedAnnealing>(dk, fsa)
+                                 .with_noise_variance(0.03)
+                                 .value()
+                                 .fit(retained_train, data.y);
+        const auto fsa_fast = cxxgpr::DistanceGpr<cxxgpr::optimizer::FastSimulatedAnnealing>(dk, fsa)
+                                  .with_noise_variance(0.03)
+                                  .value()
+                                  .with_retain_distances(false)
+                                  .fit(fast_train, data.y);
+        ASSERT_TRUE(fsa_ret.has_value());
+        ASSERT_TRUE(fsa_fast.has_value());
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(fsa_ret->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(fsa_fast->neg_log_marginal_likelihood())
+        );
+        EXPECT_TRUE(bits_equal(fsa_ret->alpha(), fsa_fast->alpha()));
+
+        // MixedPrecision<ReevaluateKernel> exercises float ARD borrowing + promote_to_double packing.
+        cxxgpr::DistanceSource retained_train_f;
+        cxxgpr::DistanceSource fast_train_f;
+        cxxgpr::DistanceSource retained_cross_f;
+        cxxgpr::DistanceSource fast_cross_f;
+        retained_train_f.bind_ard(ard_slot.slot(), train_views_f);
+        fast_train_f.bind_ard(ard_slot.slot(), train_views_f).assume_valid(true);
+        retained_cross_f.bind_ard(ard_slot.slot(), cross_views_f);
+        fast_cross_f.bind_ard(ard_slot.slot(), cross_views_f).assume_valid(true);
+
+        const auto mp_ret =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk)
+                .with_noise_variance(0.03)
+                .value()
+                .fit(retained_train_f, data.y);
+        const auto mp_fast =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk)
+                .with_noise_variance(0.03)
+                .value()
+                .with_retain_distances(false)
+                .fit(fast_train_f, data.y);
+        ASSERT_TRUE(mp_ret.has_value()) << mp_ret.error().message();
+        ASSERT_TRUE(mp_fast.has_value()) << mp_fast.error().message();
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(mp_ret->neg_log_marginal_likelihood()),
+            std::bit_cast<std::uint64_t>(mp_fast->neg_log_marginal_likelihood())
+        );
+        EXPECT_TRUE(bits_equal(mp_ret->alpha(), mp_fast->alpha()));
+        EXPECT_TRUE(bits_equal(mp_ret->predict(retained_cross_f)->mean, mp_fast->predict(fast_cross_f)->mean));
+    }
+
+    /// @brief Verifies WithPoints copy_points() rejects MatrixRef dimensions whose product overflows std::size_t.
+    TEST(DistanceGprTest, WithPointsRejectsCopyPointsSizeOverflow)
+    {
+        // Spec: DES-10, REQ-01
+        const Data data = make_data(4, 2, 2);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+        const auto wp_kernel = slot.rbf(cxxgpr::RbfKernel::create(1.0).value()).with_points()
+            + cxxgpr::DistanceKernel<cxxgpr::WithPoints>(cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(1.0).value()));
+
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+
+        const auto trainer =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(wp_kernel)
+                .with_noise_variance(0.05)
+                .value();
+
+        constexpr std::size_t huge_cols = (std::numeric_limits<std::size_t>::max() / 2U) + 1U;
+        const double dummy_d = 0.0;
+        const float dummy_f = 0.0F;
+        const cxxgpr::MatrixRef<double> overflow_x_d(&dummy_d, data.n, huge_cols, data.n);
+        const cxxgpr::MatrixRef<float> overflow_x_f(&dummy_f, data.n, huge_cols, data.n);
+
+        const auto fit_d = trainer.fit(train_src, overflow_x_d, data.y);
+        ASSERT_FALSE(fit_d.has_value());
+        EXPECT_EQ(fit_d.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
+
+        const auto fit_f = trainer.fit(train_src, overflow_x_f, data.y);
+        ASSERT_FALSE(fit_f.has_value());
+        EXPECT_EQ(fit_f.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
+    }
+
 }  // namespace

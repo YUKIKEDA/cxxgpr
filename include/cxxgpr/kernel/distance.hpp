@@ -423,55 +423,85 @@ namespace cxxgpr
     [[nodiscard]] DistanceKernel<WithPoints> operator*(const KernelSpec& lhs, const DistanceKernel<DistanceOnly>& rhs);
 
     /// @brief Binds caller-supplied squared-distance tables to slots for a single preparation call.
-    /// @details Collects non-owning double-precision MatrixRef<double> views paired with SlotIds plus an
-    /// optional tidy relative tolerance prior to CheckedDistanceStore validation and packing.
+    /// @details Collects non-owning double- or float-precision MatrixRef views paired with SlotIds plus optional
+    /// tidy tolerance or validation-skip controls prior to CheckedDistanceStore preparation.
     class DistanceSource
     {
     public:
-        /// @brief Binds a single scalar squared-distance table (n x n for square, n x m for cross) to slot.
+        /// @brief Binds a single double-precision scalar squared-distance table (n x n for square, n x m for cross).
         /// @details Appends a scalar slot binding validated later during prepare_square() or prepare_cross().
         /// @param[in] slot Target scalar SlotId obtained from ScalarDistance::slot().
         /// @param[in] d2 Column-major squared-distance matrix view in double precision.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& bind_scalar(SlotId slot, MatrixRef<double> d2);
 
-        /// @brief Binds per-dimension ARD squared-distance tables (length dims) to slot.
+        /// @brief Binds a single float-precision scalar squared-distance table (n x n for square, n x m for cross).
+        /// @details Used without conversion by SinglePrecision models and widened to double for DoublePrecision or
+        /// MixedPrecision models.
+        /// @param[in] slot Target scalar SlotId obtained from ScalarDistance::slot().
+        /// @param[in] d2 Column-major squared-distance matrix view in single precision.
+        /// @return Reference to *this for fluent chaining.
+        DistanceSource& bind_scalar(SlotId slot, MatrixRef<float> d2);
+
+        /// @brief Binds per-dimension double-precision ARD squared-distance tables (length dims) to slot.
         /// @details Copies the span of MatrixRef<double> views into internal entry storage.
         /// @param[in] slot Target ARD SlotId obtained from ArdDistance::slot().
-        /// @param[in] d2_per_dim Span of column-major squared-distance matrices, one per ARD dimension.
+        /// @param[in] d2_per_dim Span of column-major squared-distance matrices in double precision, one per ARD dim.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& bind_ard(SlotId slot, std::span<const MatrixRef<double>> d2_per_dim);
+
+        /// @brief Binds per-dimension float-precision ARD squared-distance tables (length dims) to slot.
+        /// @details Used without precision loss on SinglePrecision and widened to double on DoublePrecision or
+        /// MixedPrecision models.
+        /// @param[in] slot Target ARD SlotId obtained from ArdDistance::slot().
+        /// @param[in] d2_per_dim Span of column-major squared-distance matrices in float precision, one per ARD dim.
+        /// @return Reference to *this for fluent chaining.
+        DistanceSource& bind_ard(SlotId slot, std::span<const MatrixRef<float>> d2_per_dim);
 
         /// @brief Enables repair of minor negative/diagonal/asymmetry violations within relative tolerance.
         /// @details Permits negative entries >= -rel_tol * max_abs, diagonal |d2(i,i)| <= rel_tol * max_abs,
         /// and asymmetry |d2(i,j) - d2(j,i)| <= rel_tol * max_abs, clamping negative values to 0, zeroing
-        /// square diagonals, and symmetrizing off-diagonal pairs by averaging.
+        /// square diagonals, and symmetrizing off-diagonal pairs by averaging. Cannot be combined with
+        /// assume_valid(true).
         /// @param[in] rel_tol Non-negative finite relative tolerance multiplier against max_abs.
         /// @return Reference to *this for fluent chaining.
         DistanceSource& tidy(double rel_tol);
+
+        /// @brief Opts in to skipping element-level value checks when the caller guarantees table validity.
+        /// @details Skips only the element scan (finiteness, non-negativity, zero diagonal, symmetry, and
+        /// storage-range checks) while keeping all O(1) slot, emptiness, length, and dimension checks intact.
+        /// Combining assume_valid(true) with tidy() is rejected with GprErrorCode::InvalidConfig.
+        /// @param[in] skip True to skip element-level validation, false to keep validation enabled.
+        /// @return Reference to *this for fluent chaining.
+        DistanceSource& assume_valid(bool skip = true) noexcept;
 
         /// @brief Returns the configured tidy relative tolerance, if enabled.
         /// @details Returns std::nullopt when strict exact validation is in effect.
         /// @return Configured relative tolerance or std::nullopt.
         [[nodiscard]] std::optional<double> tidy_tolerance() const noexcept { return tidy_rel_tol_; }
 
+        /// @brief Returns true when element-level validation is skipped by assume_valid().
+        /// @details Structural, slot, length, and dimension checks still run when assumes_valid() is true.
+        /// @return True if assume_valid(true) is set on this source.
+        [[nodiscard]] bool assumes_valid() const noexcept { return assume_valid_; }
+
     private:
-        /// @brief Binding entry associating one scalar slot ID with a supplied squared-distance view.
+        /// @brief Binding entry associating one scalar slot ID with a supplied double or float squared-distance view.
         struct ScalarEntry
         {
             /// @brief Bound scalar slot identifier.
             SlotId slot;
-            /// @brief Non-owning column-major view of supplied squared distances.
-            MatrixRef<double> d2;
+            /// @brief Non-owning column-major view of supplied squared distances in double or float precision.
+            std::variant<MatrixRef<double>, MatrixRef<float>> d2;
         };
 
-        /// @brief Binding entry associating one ARD slot ID with per-dimension squared-distance views.
+        /// @brief Binding entry associating one ARD slot ID with per-dimension double or float squared-distance views.
         struct ArdEntry
         {
             /// @brief Bound ARD slot identifier.
             SlotId slot;
-            /// @brief Vector of non-owning per-dimension squared-distance views.
-            std::vector<MatrixRef<double>> d2_per_dim;
+            /// @brief Per-dimension non-owning squared-distance views in double or float precision.
+            std::variant<std::vector<MatrixRef<double>>, std::vector<MatrixRef<float>>> d2_per_dim;
         };
 
         /// @brief Registered scalar slot bindings.
@@ -480,27 +510,27 @@ namespace cxxgpr
         std::vector<ArdEntry> ards_;
         /// @brief Optional relative tolerance enabling tidy repair during store preparation.
         std::optional<double> tidy_rel_tol_;
+        /// @brief True when caller opted in to skipping element-level value validation.
+        bool assume_valid_{false};
 
         friend struct DistanceStoreBuilder;
     };
 
     /// @brief Validated (and optionally repaired) supplied squared-distance store ready for zero-alloc eval.
-    /// @details Holds validated scalar distance matrices and packed lower-triangular (for square) or
-    /// rectangular ARD distance tables converted to scalar T.
+    /// @details Shares an immutable internal payload holding packed lower-triangular or borrowed scalar and ARD
+    /// squared-distance tables in scalar T. Copying is $O(1)$ and shares the immutable validated state cleanly.
     /// @tparam T Kernel evaluation scalar type (double or float).
     template <KernelScalarConcept T> class CheckedDistanceStore
     {
     public:
-        /// @brief Copy-constructs a checked distance store.
-        /// @details Deep-copies the validated distance buffers.
-        /// @param[in] other CheckedDistanceStore instance to copy.
-        CheckedDistanceStore(const CheckedDistanceStore& other);
+        /// @brief Copy-constructs a checked distance store sharing immutable internal storage in $O(1)$.
+        /// @param[in] other CheckedDistanceStore instance to share state with.
+        CheckedDistanceStore(const CheckedDistanceStore& other) noexcept;
 
-        /// @brief Copy-assigns a checked distance store.
-        /// @details Deep-copies the validated distance buffers.
-        /// @param[in] other CheckedDistanceStore instance to copy.
+        /// @brief Copy-assigns a checked distance store sharing immutable internal storage in $O(1)$.
+        /// @param[in] other CheckedDistanceStore instance to share state with.
         /// @return Reference to this CheckedDistanceStore.
-        CheckedDistanceStore& operator=(const CheckedDistanceStore& other);
+        CheckedDistanceStore& operator=(const CheckedDistanceStore& other) noexcept;
 
         /// @brief Move-constructs a checked distance store.
         /// @details Transfers ownership of the internal validated store state. Defined out of line, where the
@@ -516,21 +546,24 @@ namespace cxxgpr
         CheckedDistanceStore& operator=(CheckedDistanceStore&& other) noexcept;
 
         /// @brief Destroys the checked distance store.
-        /// @details Frees internal distance buffers out of line where Impl is complete.
+        /// @details Releases the shared internal distance store out of line where Impl is complete.
         ~CheckedDistanceStore();
 
         /// @brief Returns the row count of each distance block.
-        /// @details Equals the number of training points for square stores or query rows for cross stores.
+        /// @details Equals the number of training points for square stores or query rows for cross stores,
+        /// or 0 for moved-from stores.
         /// @return Block row count.
         [[nodiscard]] std::size_t rows() const noexcept;
 
         /// @brief Returns the column count of each distance block.
-        /// @details Equals rows() for square stores or target point count for cross stores.
+        /// @details Equals rows() for square stores or target point count for cross stores,
+        /// or 0 for moved-from stores.
         /// @return Block column count.
         [[nodiscard]] std::size_t cols() const noexcept;
 
         /// @brief Returns true if this store holds square training blocks (as opposed to cross blocks).
-        /// @details Distinguishes stores produced by prepare_square() from prepare_cross().
+        /// @details Distinguishes stores produced by prepare_square() from prepare_cross(); returns false when
+        /// moved-from.
         /// @return True for square training distance stores, false for rectangular cross stores.
         [[nodiscard]] bool is_square() const noexcept;
 
@@ -540,11 +573,11 @@ namespace cxxgpr
 
         /// @brief Private constructor taking ownership of a built Impl state.
         /// @details Invoked by DistanceStoreBuilder after validation succeeds.
-        /// @param[in] impl Heap-allocated validated store state.
-        explicit CheckedDistanceStore(std::unique_ptr<Impl> impl) noexcept;
+        /// @param[in] impl Reference-counted validated store state.
+        explicit CheckedDistanceStore(std::shared_ptr<Impl> impl) noexcept;
 
-        /// @brief Owning pointer to the validated distance store implementation.
-        std::unique_ptr<Impl> impl_;
+        /// @brief Reference-counted pointer to the validated distance store implementation.
+        std::shared_ptr<Impl> impl_;
 
         template <KernelScalarConcept U> friend class CompiledDistanceKernel;
         friend struct DistanceStoreBuilder;

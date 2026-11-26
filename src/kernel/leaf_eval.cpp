@@ -318,20 +318,21 @@ namespace cxxgpr::detail
             }
         }
 
-        /// @brief Validates dimensions and finiteness of a square squared-distance matrix and output view.
-        /// @details Enforces empty-input, squareness, shape-match, and active-triangle finiteness checks in
+        /// @brief Validates dimensions and optional finiteness of a square squared-distance matrix and output view.
+        /// @details Enforces empty-input, squareness, shape-match, and optional active-triangle finiteness checks in
         /// deterministic order before leaf evaluation.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in] dist Input squared Euclidean distance matrix.
         /// @param[in] out Target output matrix view.
         /// @param[in] uplo Triangle of `dist` and `out` that will be read and written.
+        /// @param[in] validate_entries When true, verifies active-triangle entries of `dist` are finite.
         /// @return Empty expected on success, or an input/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `dist` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `dist` is non-square or `out` has a different shape.
-        /// @retval GprErrorCode::NonFiniteInput If any entry in the active triangle of `dist` is non-finite.
+        /// @retval GprErrorCode::NonFiniteInput If `validate_entries` is true and an active entry is non-finite.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> validate_square_dist(
-            MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo
+            MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, bool validate_entries = true
         )
         {
             // Enforce deterministic validation order: empty -> squareness -> output shape -> finiteness.
@@ -349,6 +350,10 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
             }
+            if (!validate_entries)
+            {
+                return {};
+            }
             // Scan only the active triangle so callers do not need to populate the opposite half.
             const std::size_t n = dist.rows();
             for (std::size_t col = 0; col < n; ++col)
@@ -363,17 +368,124 @@ namespace cxxgpr::detail
             return {};
         }
 
-        /// @brief Validates dimensions and finiteness of a rectangular cross squared-distance matrix and output view.
-        /// @details Checks non-emptiness, exact shape agreement with `out`, and finiteness of all entries in `dist`.
+        /// @brief Computes the starting index of column `col` (at diagonal row `col`) inside packed lower storage.
+        /// @param[in] n Matrix side length.
+        /// @param[in] col Zero-based column index in `[0, n)`.
+        /// @return Linear offset into packed column-major lower-triangular storage.
+        [[nodiscard]] constexpr std::size_t packed_dist_col_offset(std::size_t n, std::size_t col) noexcept
+        {
+            return (col * ((2U * n) - col + 1U)) / 2U;
+        }
+
+        /// @brief Lightweight non-owning adapter over dense or packed lower-triangular square squared distances.
+        /// @tparam T Storage floating-point scalar type.
+        template <KernelScalarConcept T> struct SquareDistView
+        {
+            /// @brief Dense column-major square view when `packed` is empty.
+            MatrixRef<T> dense{};
+            /// @brief Packed lower-triangular scalar span when non-empty.
+            std::span<const T> packed{};
+            /// @brief Square matrix order `n`.
+            std::size_t n{0U};
+
+            /// @brief Returns true when backed by packed lower-triangular storage.
+            /// @return True when @c packed is non-empty.
+            [[nodiscard]] bool is_packed() const noexcept { return !packed.empty(); }
+
+            /// @brief Reads symmetric squared distance `(row, col)`.
+            /// @param[in] row Zero-based row index.
+            /// @param[in] col Zero-based column index.
+            /// @return Stored squared distance entry.
+            [[nodiscard]] T at(std::size_t row, std::size_t col) const noexcept
+            {
+                if (!is_packed())
+                {
+                    return dense(row, col);
+                }
+                if (row < col)
+                {
+                    std::swap(row, col);
+                }
+                return packed[packed_dist_col_offset(n, col) + (row - col)];
+            }
+
+            /// @brief Copies `[row_begin, row_end)` of column `col` into `dst` (unit stride when lower triangle).
+            /// @param[in] col Zero-based column index.
+            /// @param[in] row_begin Starting row index (inclusive).
+            /// @param[in] row_end Ending row index (exclusive).
+            /// @param[out] dst Destination slice pointer of length `row_end - row_begin`.
+            void copy_col_slice(std::size_t col, std::size_t row_begin, std::size_t row_end, T* dst) const noexcept
+            {
+                const std::size_t len = row_end - row_begin;
+                if (!is_packed())
+                {
+                    std::copy_n(&dense(row_begin, col), len, dst);
+                    return;
+                }
+                if (row_begin >= col)
+                {
+                    std::copy_n(packed.data() + packed_dist_col_offset(n, col) + (row_begin - col), len, dst);
+                    return;
+                }
+                for (std::size_t row = row_begin; row < row_end; ++row)
+                {
+                    *dst++ = at(row, col);
+                }
+            }
+        };
+
+        /// @brief Validates packed lower-triangular square distance dimensions, output shape, and optional finiteness.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] packed_lower Packed lower-triangular distance span of expected length `n * (n + 1) / 2`.
+        /// @param[in] n Square matrix side length.
+        /// @param[in] out Target square output matrix view.
+        /// @param[in] validate_entries When true, verifies all packed entries are finite.
+        /// @return Empty expected on success, or an input/shape validation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> validate_packed_square_dist(
+            std::span<const T> packed_lower, std::size_t n, MatrixMut<T> out, bool validate_entries = false
+        )
+        {
+            if (n == 0U || packed_lower.empty() || out.is_empty() || out.data() == nullptr)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            const auto expected_len = packed_len(n);
+            if (!expected_len.has_value())
+            {
+                return std::unexpected(expected_len.error());
+            }
+            if (packed_lower.size() != *expected_len)
+            {
+                return std::unexpected(GprError::length_mismatch("packed lower distance span length mismatch"));
+            }
+            if (out.rows() != n || out.cols() != n)
+            {
+                return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+            }
+            if (validate_entries && !detail::all_finite_slice(packed_lower.data(), packed_lower.size()))
+            {
+                return std::unexpected(GprError::non_finite_input());
+            }
+            return {};
+        }
+
+        /// @brief Validates dimensions and optional finiteness of a rectangular cross squared-distance matrix and
+        /// output view.
+        /// @details Checks non-emptiness, exact shape agreement with `out`, and optional finiteness of all entries in
+        /// `dist`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in] dist Input rectangular squared-distance matrix.
         /// @param[in] out Target cross-covariance output matrix view.
+        /// @param[in] validate_entries When true, verifies all entries of `dist` are finite.
         /// @return Empty expected on success, or an input/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `dist` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `dist`.
-        /// @retval GprErrorCode::NonFiniteInput If any entry of `dist` is non-finite.
+        /// @retval GprErrorCode::NonFiniteInput If `validate_entries` is true and any entry of `dist` is non-finite.
         template <KernelScalarConcept T>
-        [[nodiscard]] std::expected<void, GprError> validate_cross_dist(MatrixRef<T> dist, MatrixMut<T> out)
+        [[nodiscard]] std::expected<void, GprError> validate_cross_dist(
+            MatrixRef<T> dist, MatrixMut<T> out, bool validate_entries = true
+        )
         {
             // Check empty input and shape match before scanning every matrix entry for finiteness.
             if (dist.rows() == 0 || dist.cols() == 0)
@@ -383,6 +495,10 @@ namespace cxxgpr::detail
             if (out.rows() != dist.rows() || out.cols() != dist.cols())
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+            }
+            if (!validate_entries)
+            {
+                return {};
             }
             if (dist.is_contiguous())
             {
@@ -892,8 +1008,24 @@ namespace cxxgpr::detail
             return eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
         }
 
-        /// @brief Populates a square output matrix triangle from a distance matrix using `elem_fn`.
+        /// @brief Populates a square output matrix triangle from a `SquareDistView` via `elem_fn`.
         /// @details Delegates column-parallel iteration to `visit_triangle`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @tparam ElemFn Callable invoked as `elem_fn(dist.at(row, col), row, col)`.
+        /// @param[in] dist Square squared-distance view (dense or packed lower triangle).
+        /// @param[out] out Target square output matrix.
+        /// @param[in] uplo Active matrix triangle to fill.
+        /// @param[in] elem_fn Element evaluation functor.
+        template <KernelScalarConcept T, typename ElemFn>
+        void write_square_dist(const SquareDistView<T>& dist, MatrixMut<T> out, Triangle uplo, ElemFn&& elem_fn)
+        {
+            visit_triangle<T>(dist.n, uplo, [&](std::size_t row, std::size_t col) {
+                out(row, col) = elem_fn(dist.at(row, col), row, col);
+            });
+        }
+
+        /// @brief Populates a square output matrix triangle from a dense distance matrix using `elem_fn`.
+        /// @details Delegates column-parallel iteration to `write_square_dist(SquareDistView<T>, ...)`.
         /// @tparam T Storage floating-point scalar type.
         /// @tparam ElemFn Callable invoked as `elem_fn(dist(row, col), row, col)`.
         /// @param[in] dist Input squared-distance matrix.
@@ -903,9 +1035,10 @@ namespace cxxgpr::detail
         template <KernelScalarConcept T, typename ElemFn>
         void write_square_dist(MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, ElemFn&& elem_fn)
         {
-            visit_triangle<T>(dist.rows(), uplo, [&](std::size_t row, std::size_t col) {
-                out(row, col) = elem_fn(dist(row, col), row, col);
-            });
+            write_square_dist(
+                SquareDistView<T>{.dense = dist, .packed = {}, .n = dist.rows()}, out, uplo,
+                std::forward<ElemFn>(elem_fn)
+            );
         }
 
         /// @brief Populates a rectangular cross output matrix from a distance matrix using `elem_fn`.
@@ -1067,18 +1200,24 @@ namespace cxxgpr::detail
         /// @param[out] out Target square Gram matrix.
         /// @param[in] uplo Active matrix triangle to populate.
         /// @param[in] exp_mode Exponential evaluation backend.
-        /// @return Empty expected on success, or validation/operation error.
-        /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
+        /// @param[in] validate_entries When true, verifies active entries of `dist` are finite before evaluation.
+        /// @brief Evaluates one kernel leaf from a validated `SquareDistView` (dense or packed) into `out`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf Kernel leaf variant to evaluate.
+        /// @param[in] dist_view Validated dense or packed squared-distance view.
+        /// @param[out] out Output Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to fill.
+        /// @param[in] exp_mode Exponential evaluation backend.
+        /// @return Empty expected on success, or operation error for unsupported/custom packed leaves.
         template <KernelScalarConcept T>
-        [[nodiscard]] std::expected<void, GprError> eval_leaf_dist(
-            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, KernelExp exp_mode
+        [[nodiscard]] std::expected<void, GprError> eval_leaf_dist_view(
+            const KernelLeaf& leaf,
+            const SquareDistView<T>& dist_view,
+            MatrixMut<T> out,
+            Triangle uplo,
+            KernelExp exp_mode
         )
         {
-            // Validate distance matrix shape and active-triangle finiteness before dispatching.
-            if (auto v = validate_square_dist(dist, out, uplo); !v.has_value())
-            {
-                return v;
-            }
             return std::visit(
                 [&](const auto& k) -> std::expected<void, GprError>
             {
@@ -1088,10 +1227,10 @@ namespace cxxgpr::detail
                     const T ell = static_cast<T>(k.lengthscale());
                     const T neg_inv_2l2 = -T{1} / (T{2} * ell * ell);
                     for_each_triangle_col(
-                        dist.rows(), uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
+                        dist_view.n, uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
                     {
                         const std::size_t len = row_end - row_begin;
-                        std::copy_n(&dist(row_begin, col), len, &out(row_begin, col));
+                        dist_view.copy_col_slice(col, row_begin, row_end, &out(row_begin, col));
                         detail::exp_scaled_nonpos_in_place(&out(row_begin, col), len, neg_inv_2l2, exp_mode);
                     }
                     );
@@ -1103,10 +1242,10 @@ namespace cxxgpr::detail
                     const T scale_sq = matern_scale_sq<T>(k.nu()) / static_cast<T>(k.lengthscale() * k.lengthscale());
                     const MaternNu nu = k.nu();
                     for_each_triangle_col(
-                        dist.rows(), uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
+                        dist_view.n, uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
                     {
                         const std::size_t len = row_end - row_begin;
-                        std::copy_n(&dist(row_begin, col), len, &out(row_begin, col));
+                        dist_view.copy_col_slice(col, row_begin, row_end, &out(row_begin, col));
                         detail::matern_s2_in_place(&out(row_begin, col), len, scale_sq, nu, exp_mode);
                     }
                     );
@@ -1120,10 +1259,10 @@ namespace cxxgpr::detail
                     const T neg_coeff = -T{2} / (ell * ell);
                     const T pi_p = std::numbers::pi_v<T> / period;
                     for_each_triangle_col(
-                        dist.rows(), uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
+                        dist_view.n, uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
                     {
                         const std::size_t len = row_end - row_begin;
-                        std::copy_n(&dist(row_begin, col), len, &out(row_begin, col));
+                        dist_view.copy_col_slice(col, row_begin, row_end, &out(row_begin, col));
                         transform_periodic_d2_slice_in_place(&out(row_begin, col), len, neg_coeff, pi_p, exp_mode);
                     }
                     );
@@ -1136,10 +1275,10 @@ namespace cxxgpr::detail
                     const T alpha = static_cast<T>(k.alpha());
                     const T w_scale = T{1} / (T{2} * alpha * ell * ell);
                     for_each_triangle_col(
-                        dist.rows(), uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
+                        dist_view.n, uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
                     {
                         const std::size_t len = row_end - row_begin;
-                        std::copy_n(&dist(row_begin, col), len, &out(row_begin, col));
+                        dist_view.copy_col_slice(col, row_begin, row_end, &out(row_begin, col));
                         transform_rq_slice_in_place(&out(row_begin, col), len, w_scale, alpha, exp_mode);
                     }
                     );
@@ -1149,20 +1288,26 @@ namespace cxxgpr::detail
                 else if constexpr (std::is_same_v<LeafT, ConstantKernel>)
                 {
                     const T c = static_cast<T>(k.constant());
-                    write_square_dist(dist, out, uplo, [c](T, std::size_t, std::size_t) { return c; });
+                    write_square_dist(dist_view, out, uplo, [c](T, std::size_t, std::size_t) { return c; });
                     return {};
                 }
                 else if constexpr (std::is_same_v<LeafT, WhiteKernel>)
                 {
                     const T v = static_cast<T>(k.variance());
-                    write_square_dist(dist, out, uplo, [v](T, std::size_t row, std::size_t col) {
+                    write_square_dist(dist_view, out, uplo, [v](T, std::size_t row, std::size_t col) {
                         return row == col ? v : T{0};
                     });
                     return {};
                 }
                 else if constexpr (std::is_same_v<LeafT, CustomKernel>)
                 {
-                    return k.template term<T>().apply(dist, out, uplo);
+                    if (dist_view.is_packed())
+                    {
+                        return std::unexpected(
+                            GprError::unsupported_kernel_operation("CustomKernel requires dense distance matrix")
+                        );
+                    }
+                    return k.template term<T>().apply(dist_view.dense, out, uplo);
                 }
                 else
                 {
@@ -1174,6 +1319,66 @@ namespace cxxgpr::detail
                     );
                 }
             }, leaf
+            );
+        }
+
+        /// @brief Evaluates a single kernel leaf from precomputed squared distances into a square Gram triangle.
+        /// @details Validates inputs and optional triangle finiteness before delegating to `eval_leaf_dist_view`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf Kernel leaf variant to evaluate.
+        /// @param[in] dist Input squared-distance matrix.
+        /// @param[out] out Output Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to fill.
+        /// @param[in] exp_mode Exponential evaluation backend.
+        /// @param[in] validate_entries When true, verifies active entries of `dist` are finite.
+        /// @return Empty expected on success, or validation/operation error.
+        /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> eval_leaf_dist(
+            const KernelLeaf& leaf,
+            MatrixRef<T> dist,
+            MatrixMut<T> out,
+            Triangle uplo,
+            KernelExp exp_mode,
+            bool validate_entries
+        )
+        {
+            if (auto v = validate_square_dist(dist, out, uplo, validate_entries); !v.has_value())
+            {
+                return v;
+            }
+            return eval_leaf_dist_view(
+                leaf, SquareDistView<T>{.dense = dist, .packed = {}, .n = dist.rows()}, out, uplo, exp_mode
+            );
+        }
+
+        /// @brief Evaluates a single kernel leaf from packed lower-triangular squared distances into `out`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf Kernel leaf variant to evaluate.
+        /// @param[in] packed_lower Packed lower-triangular scalar distances of length `n * (n + 1) / 2`.
+        /// @param[in] n Matrix side length.
+        /// @param[out] out Output Gram matrix view.
+        /// @param[in] uplo Active matrix triangle to fill.
+        /// @param[in] exp_mode Exponential evaluation backend.
+        /// @param[in] validate_entries When true, verifies packed entries are finite.
+        /// @return Empty expected on success, or validation/operation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> eval_leaf_dist_packed(
+            const KernelLeaf& leaf,
+            std::span<const T> packed_lower,
+            std::size_t n,
+            MatrixMut<T> out,
+            Triangle uplo,
+            KernelExp exp_mode,
+            bool validate_entries
+        )
+        {
+            if (auto v = validate_packed_square_dist<T>(packed_lower, n, out, validate_entries); !v.has_value())
+            {
+                return v;
+            }
+            return eval_leaf_dist_view(
+                leaf, SquareDistView<T>{.dense = {}, .packed = packed_lower, .n = n}, out, uplo, exp_mode
             );
         }
 
@@ -1389,15 +1594,16 @@ namespace cxxgpr::detail
         /// @param[in] dist Rectangular squared-distance matrix of shape `(n1, n2)`.
         /// @param[out] out Target cross-covariance matrix of shape `(n1, n2)`.
         /// @param[in] exp_mode Exponential evaluation backend.
+        /// @param[in] validate_entries When true, verifies all entries of `dist` are finite before evaluation.
         /// @return Empty expected on success, or validation/operation error.
         /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> eval_leaf_cross_dist(
-            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode
+            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode, bool validate_entries
         )
         {
             // Validate rectangular cross distance matrix and output shape.
-            if (auto v = validate_cross_dist(dist, out); !v.has_value())
+            if (auto v = validate_cross_dist(dist, out, validate_entries); !v.has_value())
             {
                 return v;
             }
@@ -2154,13 +2360,44 @@ namespace cxxgpr::detail
     /// @param[out] out Output Gram matrix view.
     /// @param[in] uplo Active matrix triangle to fill.
     /// @param[in] exp_mode Exponential evaluation backend.
+    /// @param[in] validate_entries When true, checks that active entries of `dist` are finite.
     /// @return Empty expected on success, or validation/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_dist(
-        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, KernelExp exp_mode
+        const KernelLeaf& leaf,
+        MatrixRef<T> dist,
+        MatrixMut<T> out,
+        Triangle uplo,
+        KernelExp exp_mode,
+        bool validate_entries
     )
     {
-        return eval_leaf_dist(leaf, dist, out, uplo, exp_mode);
+        return eval_leaf_dist(leaf, dist, out, uplo, exp_mode, validate_entries);
+    }
+
+    /// @brief Evaluates a square Gram matrix triangle for `leaf` from packed lower-triangular squared distances.
+    /// @details Public wrapper around `eval_leaf_dist_packed`.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf Kernel leaf variant.
+    /// @param[in] packed_lower Column-major packed lower triangle of length `n * (n + 1) / 2`.
+    /// @param[in] n Matrix side length.
+    /// @param[out] out Output Gram matrix view.
+    /// @param[in] uplo Active matrix triangle to fill.
+    /// @param[in] exp_mode Exponential evaluation backend.
+    /// @param[in] validate_entries When true, checks packed entries are finite.
+    /// @return Empty expected on success, or validation/operation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> leaf_apply_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
+        MatrixMut<T> out,
+        Triangle uplo,
+        KernelExp exp_mode,
+        bool validate_entries
+    )
+    {
+        return eval_leaf_dist_packed(leaf, packed_lower, n, out, uplo, exp_mode, validate_entries);
     }
 
     /// @brief Evaluates a square Gram matrix triangle for `leaf` from point coordinates.
@@ -2195,13 +2432,14 @@ namespace cxxgpr::detail
     /// @param[in] dist Input rectangular squared-distance matrix.
     /// @param[out] out Output cross-covariance matrix.
     /// @param[in] exp_mode Exponential evaluation backend.
+    /// @param[in] validate_entries When true, checks that all entries of `dist` are finite.
     /// @return Empty expected on success, or validation/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_cross_dist(
-        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode
+        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode, bool validate_entries
     )
     {
-        return eval_leaf_cross_dist(leaf, dist, out, exp_mode);
+        return eval_leaf_cross_dist(leaf, dist, out, exp_mode, validate_entries);
     }
 
     /// @brief Evaluates a rectangular cross-covariance matrix for `leaf` from point coordinates.
@@ -2306,20 +2544,129 @@ namespace cxxgpr::detail
         );
     }
 
-    /// @brief Evaluates the first log-hyperparameter derivative $\partial K / \partial \theta_{\text{param\_idx}}$
-    /// from squared distances.
-    /// @details Computes exact analytical log-theta gradients for isotropic RBF, Matern, Periodic, RationalQuadratic,
-    /// Constant ($\partial c / \partial \log c = c$), White ($\sigma_w^2 \delta_{row,col}$), and `CustomKernel`.
+    namespace
+    {
+        /// @brief Shared implementation of `leaf_grad_dist` and `leaf_grad_dist_packed` over `SquareDistView`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf Kernel leaf variant.
+        /// @param[in] dist_view Validated dense or packed squared-distance view.
+        /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+        /// @param[in] param_idx Local hyperparameter index within `leaf`.
+        /// @param[in] uplo Active matrix triangle to write.
+        /// @param[in] exp_mode Exponential evaluation backend.
+        /// @return Empty expected on success, or index/operation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> leaf_grad_dist_view(
+            const KernelLeaf& leaf,
+            const SquareDistView<T>& dist_view,
+            MatrixMut<T> d_k,
+            std::size_t param_idx,
+            Triangle uplo,
+            KernelExp exp_mode
+        )
+        {
+            if (auto idx_ok = require_param_index(param_idx, leaf_num_params(leaf)); !idx_ok.has_value())
+            {
+                return idx_ok;
+            }
+            return std::visit(
+                [&](const auto& k) -> std::expected<void, GprError>
+            {
+                using LeafT = std::decay_t<decltype(k)>;
+                if constexpr (std::is_same_v<LeafT, RbfKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    write_square_dist(dist_view, d_k, uplo, [ell, exp_mode](T d2, std::size_t, std::size_t) {
+                        return rbf_grad_d2(d2, ell, exp_mode);
+                    });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, MaternKernel>)
+                {
+                    const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
+                    const MaternNu nu = k.nu();
+                    write_square_dist(
+                        dist_view, d_k, uplo, [scale, nu, exp_mode](T d2, std::size_t, std::size_t)
+                    {
+                        const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                        return eval_matern_grad_g1(scale * r, nu, exp_mode);
+                    }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, PeriodicKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    const T period = static_cast<T>(k.period());
+                    write_square_dist(
+                        dist_view, d_k, uplo, [ell, period, param_idx, exp_mode](T d2, std::size_t, std::size_t)
+                    { return periodic_grad_d2(d2, ell, period, param_idx, exp_mode); }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, RationalQuadraticKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    const T alpha = static_cast<T>(k.alpha());
+                    write_square_dist(
+                        dist_view, d_k, uplo, [ell, alpha, param_idx, exp_mode](T d2, std::size_t, std::size_t)
+                    {
+                        const T clamped = d2 < T{0} ? T{0} : d2;
+                        const T w = clamped / (T{2} * alpha * ell * ell);
+                        return rq_grad_w(w, alpha, param_idx, 1U, exp_mode);
+                    }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, ConstantKernel>)
+                {
+                    // Since theta = log(c), d(c)/d(log c) = c everywhere.
+                    const T c = static_cast<T>(k.constant());
+                    write_square_dist(dist_view, d_k, uplo, [c](T, std::size_t, std::size_t) { return c; });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, WhiteKernel>)
+                {
+                    // Since theta = log(v), d(v * delta)/d(log v) = v on the diagonal and 0 off-diagonal.
+                    const T v = static_cast<T>(k.variance());
+                    write_square_dist(dist_view, d_k, uplo, [v](T, std::size_t row, std::size_t col) {
+                        return row == col ? v : T{0};
+                    });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, CustomKernel>)
+                {
+                    if (dist_view.is_packed())
+                    {
+                        return std::unexpected(
+                            GprError::unsupported_kernel_operation("CustomKernel requires dense distance matrix")
+                        );
+                    }
+                    return k.template term<T>().grad(dist_view.dense, d_k, param_idx, uplo);
+                }
+                else
+                {
+                    return std::unexpected(
+                        GprError::unsupported_kernel_operation("coordinate-dependent leaf gradient requires points")
+                    );
+                }
+            }, leaf
+            );
+        }
+
+    }  // namespace
+
+    /// @brief Evaluates the first log-hyperparameter derivative $\partial K / \partial \theta_{\text{param\_idx}}$ from
+    /// squared distances.
+    /// @details Public entry point delegating to `leaf_grad_dist_view`.
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] leaf Kernel leaf variant.
-    /// @param[in] dist Square squared-distance matrix.
-    /// @param[out] d_k Output derivative matrix view.
+    /// @param[in] dist Input squared-distance matrix.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
     /// @param[in] param_idx Local hyperparameter index within `leaf`.
     /// @param[in] uplo Active matrix triangle to write.
     /// @param[in] exp_mode Exponential evaluation backend.
     /// @return Empty expected on success, or validation/index/operation error.
-    /// @retval GprErrorCode::IndexOutOfRange If `param_idx >= leaf_num_params(leaf)`.
-    /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_grad_dist(
         const KernelLeaf& leaf,
@@ -2330,90 +2677,42 @@ namespace cxxgpr::detail
         KernelExp exp_mode
     )
     {
-        // Validate squared-distance matrix, output dimensions, and local hyperparameter index.
         if (auto v = validate_square_dist(dist, d_k, uplo); !v.has_value())
         {
             return v;
         }
-        if (auto idx_ok = require_param_index(param_idx, leaf_num_params(leaf)); !idx_ok.has_value())
+        return leaf_grad_dist_view(
+            leaf, SquareDistView<T>{.dense = dist, .packed = {}, .n = dist.rows()}, d_k, param_idx, uplo, exp_mode
+        );
+    }
+
+    /// @brief Evaluates the first derivative wrt parameter param_idx from packed lower-triangular squared distances.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf Kernel leaf variant.
+    /// @param[in] packed_lower Column-major packed lower triangle of length `n * (n + 1) / 2`.
+    /// @param[in] n Matrix side length.
+    /// @param[out] d_k Output derivative matrix of shape `(n, n)`.
+    /// @param[in] param_idx Local hyperparameter index within `leaf`.
+    /// @param[in] uplo Active matrix triangle to write.
+    /// @param[in] exp_mode Exponential evaluation backend.
+    /// @return Empty expected on success, or validation/index/operation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> leaf_grad_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
+        MatrixMut<T> d_k,
+        std::size_t param_idx,
+        Triangle uplo,
+        KernelExp exp_mode
+    )
+    {
+        if (auto v = validate_packed_square_dist<T>(packed_lower, n, d_k, false); !v.has_value())
         {
-            return idx_ok;
+            return v;
         }
-        return std::visit(
-            [&](const auto& k) -> std::expected<void, GprError>
-        {
-            using LeafT = std::decay_t<decltype(k)>;
-            if constexpr (std::is_same_v<LeafT, RbfKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                write_square_dist(dist, d_k, uplo, [ell, exp_mode](T d2, std::size_t, std::size_t) {
-                    return rbf_grad_d2(d2, ell, exp_mode);
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, MaternKernel>)
-            {
-                const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
-                const MaternNu nu = k.nu();
-                write_square_dist(
-                    dist, d_k, uplo, [scale, nu, exp_mode](T d2, std::size_t, std::size_t)
-                {
-                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
-                    return eval_matern_grad_g1(scale * r, nu, exp_mode);
-                }
-                );
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, PeriodicKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                const T period = static_cast<T>(k.period());
-                write_square_dist(dist, d_k, uplo, [ell, period, param_idx, exp_mode](T d2, std::size_t, std::size_t) {
-                    return periodic_grad_d2(d2, ell, period, param_idx, exp_mode);
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, RationalQuadraticKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                const T alpha = static_cast<T>(k.alpha());
-                write_square_dist(
-                    dist, d_k, uplo, [ell, alpha, param_idx, exp_mode](T d2, std::size_t, std::size_t)
-                {
-                    const T clamped = d2 < T{0} ? T{0} : d2;
-                    const T w = clamped / (T{2} * alpha * ell * ell);
-                    return rq_grad_w(w, alpha, param_idx, 1U, exp_mode);
-                }
-                );
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, ConstantKernel>)
-            {
-                // Since theta = log(c), d(c)/d(log c) = c everywhere.
-                const T c = static_cast<T>(k.constant());
-                write_square_dist(dist, d_k, uplo, [c](T, std::size_t, std::size_t) { return c; });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, WhiteKernel>)
-            {
-                // Since theta = log(v), d(v * delta)/d(log v) = v on the diagonal and 0 off-diagonal.
-                const T v = static_cast<T>(k.variance());
-                write_square_dist(dist, d_k, uplo, [v](T, std::size_t row, std::size_t col) {
-                    return row == col ? v : T{0};
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, CustomKernel>)
-            {
-                return k.template term<T>().grad(dist, d_k, param_idx, uplo);
-            }
-            else
-            {
-                return std::unexpected(
-                    GprError::unsupported_kernel_operation("coordinate-dependent leaf gradient requires points")
-                );
-            }
-        }, leaf
+        return leaf_grad_dist_view(
+            leaf, SquareDistView<T>{.dense = {}, .packed = packed_lower, .n = n}, d_k, param_idx, uplo, exp_mode
         );
     }
 
@@ -2638,21 +2937,137 @@ namespace cxxgpr::detail
         );
     }
 
+    namespace
+    {
+        /// @brief Shared implementation of `leaf_hess_dist` and `leaf_hess_dist_packed` over `SquareDistView`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf Kernel leaf variant.
+        /// @param[in] dist_view Validated dense or packed squared-distance view.
+        /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+        /// @param[in] i First local hyperparameter index within `leaf`.
+        /// @param[in] j Second local hyperparameter index within `leaf`.
+        /// @param[in] uplo Active matrix triangle to write.
+        /// @param[in] exp_mode Exponential evaluation backend.
+        /// @return Empty expected on success, or index/operation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<void, GprError> leaf_hess_dist_view(
+            const KernelLeaf& leaf,
+            const SquareDistView<T>& dist_view,
+            MatrixMut<T> d2_k,
+            std::size_t i,
+            std::size_t j,
+            Triangle uplo,
+            KernelExp exp_mode
+        )
+        {
+            const std::size_t np = leaf_num_params(leaf);
+            if (auto idx_i = require_param_index(i, np); !idx_i.has_value())
+            {
+                return idx_i;
+            }
+            if (auto idx_j = require_param_index(j, np); !idx_j.has_value())
+            {
+                return idx_j;
+            }
+            return std::visit(
+                [&](const auto& k) -> std::expected<void, GprError>
+            {
+                using LeafT = std::decay_t<decltype(k)>;
+                if constexpr (std::is_same_v<LeafT, RbfKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    write_square_dist(dist_view, d2_k, uplo, [ell, exp_mode](T d2, std::size_t, std::size_t) {
+                        return rbf_hess_d2(d2, ell, exp_mode);
+                    });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, MaternKernel>)
+                {
+                    const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
+                    const MaternNu nu = k.nu();
+                    write_square_dist(
+                        dist_view, d2_k, uplo, [scale, nu, exp_mode](T d2, std::size_t, std::size_t)
+                    {
+                        const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                        return eval_matern_iso_hess(scale * r, nu, exp_mode);
+                    }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, PeriodicKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    const T period = static_cast<T>(k.period());
+                    write_square_dist(
+                        dist_view, d2_k, uplo, [ell, period, i, j, exp_mode](T d2, std::size_t, std::size_t)
+                    { return periodic_hess_d2(d2, ell, period, i, j, exp_mode); }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, RationalQuadraticKernel>)
+                {
+                    const T ell = static_cast<T>(k.lengthscale());
+                    const T alpha = static_cast<T>(k.alpha());
+                    write_square_dist(
+                        dist_view, d2_k, uplo, [ell, alpha, i, j, exp_mode](T d2, std::size_t, std::size_t)
+                    {
+                        const T clamped = d2 < T{0} ? T{0} : d2;
+                        const T w = clamped / (T{2} * alpha * ell * ell);
+                        return rq_hess_iso(w, alpha, i, j, exp_mode);
+                    }
+                    );
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, ConstantKernel>)
+                {
+                    // For c = exp(theta), d^2(c)/d(theta^2) = c.
+                    const T c = static_cast<T>(k.constant());
+                    write_square_dist(dist_view, d2_k, uplo, [c](T, std::size_t, std::size_t) { return c; });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, WhiteKernel>)
+                {
+                    // For v = exp(theta), d^2(v * delta)/d(theta^2) = v * delta.
+                    const T v = static_cast<T>(k.variance());
+                    write_square_dist(dist_view, d2_k, uplo, [v](T, std::size_t row, std::size_t col) {
+                        return row == col ? v : T{0};
+                    });
+                    return {};
+                }
+                else if constexpr (std::is_same_v<LeafT, CustomKernel>)
+                {
+                    if (dist_view.is_packed())
+                    {
+                        return std::unexpected(
+                            GprError::unsupported_kernel_operation("CustomKernel requires dense distance matrix")
+                        );
+                    }
+                    return k.template term<T>().hess(dist_view.dense, d2_k, i, j, uplo);
+                }
+                else
+                {
+                    return std::unexpected(
+                        GprError::unsupported_kernel_operation("coordinate-dependent leaf Hessian requires points")
+                    );
+                }
+            }, leaf
+            );
+        }
+
+    }  // namespace
+
     /// @brief Evaluates the second log-hyperparameter derivative $\partial^2 K / (\partial \theta_i \partial \theta_j)$
     /// from squared distances.
-    /// @details Supports isotropic RBF, Matern, Periodic, RationalQuadratic, Constant, White, and `CustomKernel`
-    /// leaves.
+    /// @details Public entry point delegating to `leaf_hess_dist_view`.
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] leaf Kernel leaf variant.
-    /// @param[in] dist Square squared-distance matrix.
-    /// @param[out] d2_k Output second-derivative matrix view.
+    /// @param[in] dist Input squared-distance matrix.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
     /// @param[in] i First local hyperparameter index within `leaf`.
     /// @param[in] j Second local hyperparameter index within `leaf`.
     /// @param[in] uplo Active matrix triangle to write.
     /// @param[in] exp_mode Exponential evaluation backend.
     /// @return Empty expected on success, or validation/index/operation error.
-    /// @retval GprErrorCode::IndexOutOfRange If `i` or `j` is >= `leaf_num_params(leaf)`.
-    /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_hess_dist(
         const KernelLeaf& leaf,
@@ -2664,95 +3079,44 @@ namespace cxxgpr::detail
         KernelExp exp_mode
     )
     {
-        // Validate distance matrix, output matrix, and both local parameter indices.
         if (auto v = validate_square_dist(dist, d2_k, uplo); !v.has_value())
         {
             return v;
         }
-        const std::size_t np = leaf_num_params(leaf);
-        if (auto idx_i = require_param_index(i, np); !idx_i.has_value())
+        return leaf_hess_dist_view(
+            leaf, SquareDistView<T>{.dense = dist, .packed = {}, .n = dist.rows()}, d2_k, i, j, uplo, exp_mode
+        );
+    }
+
+    /// @brief Evaluates the second derivative wrt (i, j) from packed lower-triangular squared distances.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] leaf Kernel leaf variant.
+    /// @param[in] packed_lower Column-major packed lower triangle of length `n * (n + 1) / 2`.
+    /// @param[in] n Matrix side length.
+    /// @param[out] d2_k Output second-derivative matrix of shape `(n, n)`.
+    /// @param[in] i First local hyperparameter index within `leaf`.
+    /// @param[in] j Second local hyperparameter index within `leaf`.
+    /// @param[in] uplo Active matrix triangle to write.
+    /// @param[in] exp_mode Exponential evaluation backend.
+    /// @return Empty expected on success, or validation/index/operation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> leaf_hess_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
+        MatrixMut<T> d2_k,
+        std::size_t i,
+        std::size_t j,
+        Triangle uplo,
+        KernelExp exp_mode
+    )
+    {
+        if (auto v = validate_packed_square_dist<T>(packed_lower, n, d2_k, false); !v.has_value())
         {
-            return idx_i;
+            return v;
         }
-        if (auto idx_j = require_param_index(j, np); !idx_j.has_value())
-        {
-            return idx_j;
-        }
-        return std::visit(
-            [&](const auto& k) -> std::expected<void, GprError>
-        {
-            using LeafT = std::decay_t<decltype(k)>;
-            if constexpr (std::is_same_v<LeafT, RbfKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                write_square_dist(dist, d2_k, uplo, [ell, exp_mode](T d2, std::size_t, std::size_t) {
-                    return rbf_hess_d2(d2, ell, exp_mode);
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, MaternKernel>)
-            {
-                const T scale = matern_scale<T>(k.nu()) / static_cast<T>(k.lengthscale());
-                const MaternNu nu = k.nu();
-                write_square_dist(
-                    dist, d2_k, uplo, [scale, nu, exp_mode](T d2, std::size_t, std::size_t)
-                {
-                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
-                    return eval_matern_iso_hess(scale * r, nu, exp_mode);
-                }
-                );
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, PeriodicKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                const T period = static_cast<T>(k.period());
-                write_square_dist(dist, d2_k, uplo, [ell, period, i, j, exp_mode](T d2, std::size_t, std::size_t) {
-                    return periodic_hess_d2(d2, ell, period, i, j, exp_mode);
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, RationalQuadraticKernel>)
-            {
-                const T ell = static_cast<T>(k.lengthscale());
-                const T alpha = static_cast<T>(k.alpha());
-                write_square_dist(
-                    dist, d2_k, uplo, [ell, alpha, i, j, exp_mode](T d2, std::size_t, std::size_t)
-                {
-                    const T clamped = d2 < T{0} ? T{0} : d2;
-                    const T w = clamped / (T{2} * alpha * ell * ell);
-                    return rq_hess_iso(w, alpha, i, j, exp_mode);
-                }
-                );
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, ConstantKernel>)
-            {
-                // For c = exp(theta), d^2(c)/d(theta^2) = c.
-                const T c = static_cast<T>(k.constant());
-                write_square_dist(dist, d2_k, uplo, [c](T, std::size_t, std::size_t) { return c; });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, WhiteKernel>)
-            {
-                // For v = exp(theta), d^2(v * delta)/d(theta^2) = v * delta.
-                const T v = static_cast<T>(k.variance());
-                write_square_dist(dist, d2_k, uplo, [v](T, std::size_t row, std::size_t col) {
-                    return row == col ? v : T{0};
-                });
-                return {};
-            }
-            else if constexpr (std::is_same_v<LeafT, CustomKernel>)
-            {
-                return k.template term<T>().hess(dist, d2_k, i, j, uplo);
-            }
-            else
-            {
-                return std::unexpected(
-                    GprError::unsupported_kernel_operation("coordinate-dependent leaf Hessian requires points")
-                );
-            }
-        }, leaf
+        return leaf_hess_dist_view(
+            leaf, SquareDistView<T>{.dense = {}, .packed = packed_lower, .n = n}, d2_k, i, j, uplo, exp_mode
         );
     }
 
@@ -2999,10 +3363,16 @@ namespace cxxgpr::detail
     }
 
     template std::expected<void, GprError> leaf_apply_dist<double>(
-        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, Triangle, KernelExp
+        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, Triangle, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_dist<float>(
-        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, Triangle, KernelExp
+        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, Triangle, KernelExp, bool
+    );
+    template std::expected<void, GprError> leaf_apply_dist_packed<double>(
+        const KernelLeaf&, std::span<const double>, std::size_t, MatrixMut<double>, Triangle, KernelExp, bool
+    );
+    template std::expected<void, GprError> leaf_apply_dist_packed<float>(
+        const KernelLeaf&, std::span<const float>, std::size_t, MatrixMut<float>, Triangle, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_points<double>(
         const KernelLeaf&,
@@ -3023,10 +3393,10 @@ namespace cxxgpr::detail
         std::span<float>
     );
     template std::expected<void, GprError> leaf_apply_cross_dist<double>(
-        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, KernelExp
+        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_cross_dist<float>(
-        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp
+        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_cross_points<double>(
         const KernelLeaf&,
@@ -3058,6 +3428,12 @@ namespace cxxgpr::detail
     template std::expected<void, GprError> leaf_grad_dist<float>(
         const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, std::size_t, Triangle, KernelExp
     );
+    template std::expected<void, GprError> leaf_grad_dist_packed<double>(
+        const KernelLeaf&, std::span<const double>, std::size_t, MatrixMut<double>, std::size_t, Triangle, KernelExp
+    );
+    template std::expected<void, GprError> leaf_grad_dist_packed<float>(
+        const KernelLeaf&, std::span<const float>, std::size_t, MatrixMut<float>, std::size_t, Triangle, KernelExp
+    );
     template std::expected<void, GprError> leaf_grad_points<double>(
         const KernelLeaf&,
         MatrixRef<double>,
@@ -3075,6 +3451,26 @@ namespace cxxgpr::detail
     );
     template std::expected<void, GprError> leaf_hess_dist<float>(
         const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, std::size_t, std::size_t, Triangle, KernelExp
+    );
+    template std::expected<void, GprError> leaf_hess_dist_packed<double>(
+        const KernelLeaf&,
+        std::span<const double>,
+        std::size_t,
+        MatrixMut<double>,
+        std::size_t,
+        std::size_t,
+        Triangle,
+        KernelExp
+    );
+    template std::expected<void, GprError> leaf_hess_dist_packed<float>(
+        const KernelLeaf&,
+        std::span<const float>,
+        std::size_t,
+        MatrixMut<float>,
+        std::size_t,
+        std::size_t,
+        Triangle,
+        KernelExp
     );
     template std::expected<void, GprError> leaf_hess_points<double>(
         const KernelLeaf&,
@@ -3126,37 +3522,92 @@ namespace cxxgpr::detail
         /// @param[in] row Row point index.
         /// @param[in] col Column point index.
         /// @return ARD-scaled squared distance $s^2$.
+        /// @brief Lightweight non-owning adapter over packed or borrowed square ARD squared differences.
+        /// @tparam T Storage floating-point scalar type.
+        template <KernelScalarConcept T> struct ArdSquareView
+        {
+            /// @brief Packed lower-triangular `(dx_d)^2` buffer when non-empty.
+            std::span<const T> packed{};
+            /// @brief Borrowed per-dimension column-major `(n, n)` views when non-empty.
+            std::span<const MatrixRef<T>> borrowed{};
+            /// @brief Square matrix order `n`.
+            std::size_t n{0U};
+            /// @brief Lower-triangle entry count per dimension `n * (n + 1) / 2`.
+            std::size_t per_dim{0U};
+
+            /// @brief Reports whether the view reads borrowed caller matrices directly.
+            /// @return True when @c borrowed is non-empty.
+            [[nodiscard]] bool is_borrowed() const noexcept { return !borrowed.empty(); }
+
+            /// @brief Reports whether any ARD table supply is bound.
+            /// @return True when neither @c packed nor @c borrowed is populated.
+            [[nodiscard]] bool empty() const noexcept { return packed.empty() && borrowed.empty(); }
+
+            /// @brief Reads symmetric squared difference for dimension `dim` and pair `(row, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] row Zero-based row index.
+            /// @param[in] col Zero-based column index.
+            /// @return Stored `(x_{row, dim} - x_{col, dim})^2` entry.
+            [[nodiscard]] T at(std::size_t dim, std::size_t row, std::size_t col) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    if (row < col)
+                    {
+                        std::swap(row, col);
+                    }
+                    return borrowed[dim](row, col);
+                }
+                return packed[(dim * per_dim) + packed_lower_index(n, row, col)];
+            }
+
+            /// @brief Returns contiguous pointer to lower-triangular column slice starting at `(row_begin, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] col Zero-based column index.
+            /// @param[in] row_begin Starting row index (`row_begin >= col`).
+            /// @return Pointer to contiguous column entries `[row_begin .. n - 1]`.
+            [[nodiscard]] const T* lower_col_ptr(std::size_t dim, std::size_t col, std::size_t row_begin) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    return &borrowed[dim](row_begin, col);
+                }
+                const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
+                return &packed[(dim * per_dim) + col_packed_base];
+            }
+        };
+
+        /// @brief Computes scaled squared distance $\sum_m (\Delta x_m)^2 / \ell_m^2$ for pair `(row, col)`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] ard Packed or borrowed ARD square view.
+        /// @param[in] weights Precomputed inverse-squared lengthscales $1 / \ell_m^2$.
+        /// @param[in] row Zero-based row index.
+        /// @param[in] col Zero-based column index.
+        /// @return Total ARD-weighted squared distance $s^2$.
         template <KernelScalarConcept T>
         [[nodiscard]] T ard_scaled_sq_packed_weights(
-            std::span<const T> packed,
-            std::size_t n,
-            std::size_t per_dim,
-            ArdWeightView<T> weights,
-            std::size_t row,
-            std::size_t col
+            const ArdSquareView<T>& ard, ArdWeightView<T> weights, std::size_t row, std::size_t col
         ) noexcept
         {
             if (row == col)
             {
                 return T{0};
             }
-            const std::size_t p = packed_lower_index(n, row, col);
             T acc = T{0};
             for (std::size_t dim = 0; dim < weights.size(); ++dim)
             {
-                acc += packed[(dim * per_dim) + p] * weights[dim];
+                acc += ard.at(dim, row, col) * weights[dim];
             }
             return acc;
         }
 
-        /// @brief Accumulates packed ARD lower-triangular column slices into `out` and transforms via `slice_fn`.
-        /// @details Requires `uplo` to be `Lower` or `Full` so packed storage is unit-stride contiguous within each
-        /// column. Mirrors the lower triangle into the upper triangle when `uplo == Triangle::Full`.
+        /// @brief Accumulates packed or borrowed ARD lower-triangular column slices into `out` and transforms via
+        /// `slice_fn`.
+        /// @details Requires `uplo` to be `Lower` or `Full` so lower-triangular columns are unit-stride contiguous.
+        /// Mirrors the lower triangle into the upper triangle when `uplo == Triangle::Full`.
         /// @tparam T Storage floating-point scalar type.
         /// @tparam SliceFn Callable invoked as `slice_fn(col_ptr, len)`.
-        /// @param[in] ard_packed Packed lower-triangular per-dimension squared differences.
-        /// @param[in] n Square matrix side length.
-        /// @param[in] per_dim Elements per dimension block `n * (n + 1) / 2`.
+        /// @param[in] ard Packed or borrowed ARD square view.
         /// @param[in] weights Precomputed `1 / ell_d^2` weights.
         /// @param[out] out Target square matrix `(n, n)`.
         /// @param[in] uplo Active matrix region (`Lower` or `Full`).
@@ -3164,9 +3615,7 @@ namespace cxxgpr::detail
         /// @param[out] out_ard_s2 Optional lower-packed $s^2$ destination span of length `n * (n + 1) / 2`.
         template <KernelScalarConcept T, typename SliceFn>
         void eval_packed_ard_lower_cols(
-            std::span<const T> ard_packed,
-            std::size_t n,
-            std::size_t per_dim,
+            const ArdSquareView<T>& ard,
             ArdWeightView<T> weights,
             MatrixMut<T> out,
             Triangle uplo,
@@ -3174,6 +3623,8 @@ namespace cxxgpr::detail
             std::span<T> out_ard_s2 = {}
         )
         {
+            const std::size_t n = ard.n;
+            const std::size_t per_dim = ard.per_dim;
             const bool capture_s2 = (out_ard_s2.size() == per_dim);
             for_each_triangle_col(
                 n, uplo, [&](std::size_t col, std::size_t row_begin, std::size_t row_end)
@@ -3185,10 +3636,10 @@ namespace cxxgpr::detail
                 }
                 const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
                 T* col_ptr = &out(row_begin, col);
-                detail::scale_set_slice(col_ptr, &ard_packed[col_packed_base], weights[0U], len);
+                detail::scale_set_slice(col_ptr, ard.lower_col_ptr(0U, col, row_begin), weights[0U], len);
                 for (std::size_t dim = 1U; dim < weights.size(); ++dim)
                 {
-                    detail::axpy_slice(col_ptr, &ard_packed[(dim * per_dim) + col_packed_base], weights[dim], len);
+                    detail::axpy_slice(col_ptr, ard.lower_col_ptr(dim, col, row_begin), weights[dim], len);
                 }
                 out(col, col) = T{0};
                 if (capture_s2)
@@ -3396,14 +3847,60 @@ namespace cxxgpr::detail
         /// @param[in] ls Current per-dimension lengthscale span.
         /// @param[in] x Training coordinate matrix (required when `ard_packed` is empty).
         /// @param[in] ard_packed Precomputed lower-packed per-dimension `(dx_d)^2` buffer, or empty.
-        /// @param[in] n Expected point count.
-        /// @return `true` when `ard_packed` is used, `false` when uncached `x` is used, or `GprError`.
+        /// @brief Input mode resolved for ARD square kernel evaluation.
+        struct ArdInputMode
+        {
+            /// @brief True when reading packed or borrowed supplied ARD differences instead of coordinate `x`.
+            bool use_supplied{false};
+            /// @brief True when reading borrowed column-major views directly rather than packed storage.
+            bool use_borrowed{false};
+        };
+
+        /// @brief Validates borrowed per-dimension square matrices against dimension count and order `n`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] ard_borrowed Borrowed per-dimension views.
+        /// @param[in] expected_dims Expected feature dimension count.
+        /// @param[in] n Expected square matrix order.
+        /// @return Empty expected on success, or EmptyInput / LengthMismatch.
         template <KernelScalarConcept T>
-        [[nodiscard]] std::expected<bool, GprError> validate_ard_incremental_inputs(
+        [[nodiscard]] std::expected<void, GprError> validate_ard_borrowed_views(
+            std::span<const MatrixRef<T>> ard_borrowed, std::size_t expected_dims, std::size_t n
+        )
+        {
+            if (ard_borrowed.size() != expected_dims)
+            {
+                return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
+            }
+            for (const auto& blk : ard_borrowed)
+            {
+                if (blk.is_empty() || blk.data() == nullptr)
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                if (blk.rows() != n || blk.cols() != n)
+                {
+                    return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
+                }
+            }
+            return {};
+        }
+
+        /// @brief Validates supplied packed/borrowed ARD inputs or fallback coordinate matrix `x`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] leaf ARD leaf variant.
+        /// @param[in] ls Lengthscale vector.
+        /// @param[in] x Coordinate matrix used when neither @p ard_packed nor @p ard_borrowed is supplied.
+        /// @param[in] ard_packed Packed lower-triangular differences.
+        /// @param[in] ard_borrowed Borrowed per-dimension square views.
+        /// @param[in] n Expected point count.
+        /// @return Resolved `ArdInputMode`, or `GprError`.
+        template <KernelScalarConcept T>
+        [[nodiscard]] std::expected<ArdInputMode, GprError> validate_ard_incremental_inputs(
             const KernelLeaf& leaf,
             std::span<const double> ls,
             MatrixRef<T> x,
             std::span<const T> ard_packed,
+            std::span<const MatrixRef<T>> ard_borrowed,
             std::size_t n
         )
         {
@@ -3416,6 +3913,14 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::unsupported_kernel_operation("leaf is not an ARD kernel"));
             }
+            if (!ard_borrowed.empty())
+            {
+                if (auto ok = validate_ard_borrowed_views(ard_borrowed, ls.size(), n); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                return ArdInputMode{.use_supplied = true, .use_borrowed = true};
+            }
             const std::size_t per_dim = (n * (n + 1U)) / 2U;
             if (!ard_packed.empty())
             {
@@ -3423,7 +3928,7 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
                 }
-                return true;
+                return ArdInputMode{.use_supplied = true, .use_borrowed = false};
             }
             if (x.is_empty() || x.data() == nullptr)
             {
@@ -3437,7 +3942,7 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(d_ok.error());
             }
-            return false;
+            return ArdInputMode{.use_supplied = false, .use_borrowed = false};
         }
 
         /// @brief Inspects lengthscale deltas against `prev_ls` to decide whether $O(n^2)$ incremental updates apply.
@@ -3546,11 +4051,9 @@ namespace cxxgpr::detail
         /// @param[in,out] dst_col Contiguous slice of length `len` anchored at lower entry `(col, col)`.
         /// @param[in] col Column index in `[0, n)`.
         /// @param[in] len Number of elements in slice (`n - col`).
-        /// @param[in] col_packed_base Starting offset of `(col, col)` in a `per_dim` packed block.
-        /// @param[in] per_dim Packed lower-triangle entry count `n * (n + 1) / 2`.
-        /// @param[in] use_packed True to read `ard_packed`, false to read columns of `x`.
-        /// @param[in] x Coordinate matrix `(n, d)` when `use_packed` is false.
-        /// @param[in] ard_packed Precomputed per-dimension `(dx_d)^2` storage when `use_packed` is true.
+        /// @param[in] use_supplied True to read @p ard, false to read columns of `x`.
+        /// @param[in] x Coordinate matrix `(n, d)` when `use_supplied` is false.
+        /// @param[in] ard Packed or borrowed ARD square view when `use_supplied` is true.
         /// @param[in] ls Current lengthscales.
         /// @param[in] prev_ls Baseline lengthscales.
         /// @param[in] plan Analyzed delta plan.
@@ -3559,11 +4062,9 @@ namespace cxxgpr::detail
             T* dst_col,
             std::size_t col,
             std::size_t len,
-            std::size_t col_packed_base,
-            std::size_t per_dim,
-            bool use_packed,
+            bool use_supplied,
             MatrixRef<T> x,
-            std::span<const T> ard_packed,
+            const ArdSquareView<T>& ard,
             std::span<const double> ls,
             std::span<const double> prev_ls,
             const ArdDeltaPlan& plan
@@ -3576,9 +4077,9 @@ namespace cxxgpr::detail
                 {
                     return;
                 }
-                if (use_packed)
+                if (use_supplied)
                 {
-                    detail::axpy_slice(dst_col, &ard_packed[(dim * per_dim) + col_packed_base], delta_w, len);
+                    detail::axpy_slice(dst_col, ard.lower_col_ptr(dim, col, col), delta_w, len);
                 }
                 else
                 {
@@ -3610,9 +4111,9 @@ namespace cxxgpr::detail
         /// @tparam T Storage floating-point scalar type.
         /// @param[in] leaf ARD kernel leaf variant (only needed when `eval_out` is non-null).
         /// @param[in] ls Current lengthscales.
-        /// @param[in] x Coordinate matrix `(n, d)` when `use_packed` is false.
-        /// @param[in] ard_packed Precomputed packed differences when `use_packed` is true.
-        /// @param[in] use_packed True to read `ard_packed`, false to read `x`.
+        /// @param[in] x Coordinate matrix `(n, d)` when `use_supplied` is false.
+        /// @param[in] ard Packed or borrowed ARD square view when `use_supplied` is true.
+        /// @param[in] use_supplied True to read @p ard, false to read `x`.
         /// @param[in] n Point count.
         /// @param[out] ard_s2_cache Destination lower-packed $s^2$ buffer of length `n * (n + 1) / 2`.
         /// @param[out] eval_out Optional target Gram matrix `(n, n)` to populate while $s^2$ columns are L1-hot.
@@ -3624,8 +4125,8 @@ namespace cxxgpr::detail
             const KernelLeaf& leaf,
             std::span<const double> ls,
             MatrixRef<T> x,
-            std::span<const T> ard_packed,
-            bool use_packed,
+            const ArdSquareView<T>& ard,
+            bool use_supplied,
             std::size_t n,
             std::span<T> ard_s2_cache,
             MatrixMut<T>* eval_out,
@@ -3633,7 +4134,6 @@ namespace cxxgpr::detail
             KernelExp exp_mode
         )
         {
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
             const bool fuse_lower_out = (eval_out != nullptr) && (uplo != Triangle::Upper);
             return with_ard_inv_ell2<T>(
                 ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
@@ -3645,14 +4145,12 @@ namespace cxxgpr::detail
                         const std::size_t len = n - col;
                         const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + col;
                         T* s2_ptr = &ard_s2_cache[col_packed_base];
-                        if (use_packed)
+                        if (use_supplied)
                         {
-                            detail::scale_set_slice(s2_ptr, &ard_packed[col_packed_base], weights[0U], len);
+                            detail::scale_set_slice(s2_ptr, ard.lower_col_ptr(0U, col, col), weights[0U], len);
                             for (std::size_t dim = 1U; dim < weights.size(); ++dim)
                             {
-                                detail::axpy_slice(
-                                    s2_ptr, &ard_packed[(dim * per_dim) + col_packed_base], weights[dim], len
-                                );
+                                detail::axpy_slice(s2_ptr, ard.lower_col_ptr(dim, col, col), weights[dim], len);
                             }
                         }
                         else
@@ -3691,7 +4189,7 @@ namespace cxxgpr::detail
 
     }  // namespace
 
-    /// @brief Evaluates an ARD kernel leaf from precomputed packed per-dimension squared differences.
+    /// @brief Evaluates an ARD kernel leaf from precomputed packed or borrowed per-dimension squared differences.
     /// @details Supports `RbfArdKernel`, `MaternArdKernel`, and `RationalQuadraticArdKernel`, rejecting any other
     /// leaf variant with `GprErrorCode::UnsupportedKernelOperation`.
     /// @tparam T Storage floating-point scalar type.
@@ -3703,10 +4201,10 @@ namespace cxxgpr::detail
     /// @param[in] uplo Active matrix region to write.
     /// @param[in] exp_mode Exponential evaluation backend.
     /// @param[out] out_ard_s2 Optional lower-packed buffer receiving unscaled ARD $s^2$ when sized `n * (n + 1) / 2`.
+    /// @param[in] ard_borrowed Optional borrowed per-dimension `(n, n)` views used when @p ard_packed is empty.
     /// @return Empty expected on success, or validation/shape/operation error.
-    /// @retval GprErrorCode::EmptyInput If `n == 0` or `ls.empty()`.
-    /// @retval GprErrorCode::LengthMismatch If `out` is not `(n, n)` or `ard_packed.size()` mismatches `ls.size() *
-    /// n * (n + 1) / 2`.
+    /// @retval GprErrorCode::EmptyInput If `n == 0`, `ls.empty()`, or a borrowed matrix is empty or null.
+    /// @retval GprErrorCode::LengthMismatch If `out` is not `(n, n)` or `ard_packed`/`ard_borrowed` size mismatches.
     /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` is not an ARD leaf.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_ard_packed(
@@ -3717,10 +4215,11 @@ namespace cxxgpr::detail
         MatrixMut<T> out,
         Triangle uplo,
         KernelExp exp_mode,
-        std::span<T> out_ard_s2
+        std::span<T> out_ard_s2,
+        std::span<const MatrixRef<T>> ard_borrowed
     )
     {
-        // Validate non-empty inputs, square output dimensions, and packed ARD buffer size.
+        // Validate non-empty inputs, square output dimensions, and packed/borrowed ARD buffer sizes.
         if (n == 0U || ls.empty())
         {
             return std::unexpected(GprError::empty_input());
@@ -3730,7 +4229,14 @@ namespace cxxgpr::detail
             return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
         }
         const std::size_t per_dim = (n * (n + 1U)) / 2U;
-        if (ard_packed.size() != ls.size() * per_dim)
+        if (!ard_borrowed.empty())
+        {
+            if (auto ok = validate_ard_borrowed_views(ard_borrowed, ls.size(), n); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+        }
+        else if (ard_packed.size() != ls.size() * per_dim)
         {
             return std::unexpected(GprError::length_mismatch("ARD cache size mismatch"));
         }
@@ -3738,6 +4244,7 @@ namespace cxxgpr::detail
         {
             return std::unexpected(GprError::length_mismatch("ARD s^2 output buffer size mismatch"));
         }
+        const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = ard_borrowed, .n = n, .per_dim = per_dim};
         const bool capture_s2 = (out_ard_s2.size() == per_dim);
         if (std::holds_alternative<RbfArdKernel>(leaf))
         {
@@ -3747,7 +4254,7 @@ namespace cxxgpr::detail
                 if (uplo != Triangle::Upper)
                 {
                     eval_packed_ard_lower_cols(
-                        ard_packed, n, per_dim, weights, out, uplo, [exp_mode](T* col_ptr, std::size_t len) noexcept
+                        ard, weights, out, uplo, [exp_mode](T* col_ptr, std::size_t len) noexcept
                     { detail::exp_scaled_nonpos_in_place(col_ptr, len, T{-0.5}, exp_mode); }, out_ard_s2
                     );
                 }
@@ -3755,10 +4262,9 @@ namespace cxxgpr::detail
                 {
                     write_square_packed(
                         n, out, uplo,
-                        [ard_packed, n, per_dim, weights, exp_mode, capture_s2,
-                            out_ard_s2](std::size_t row, std::size_t col)
+                        [ard, n, weights, exp_mode, capture_s2, out_ard_s2](std::size_t row, std::size_t col)
                     {
-                        const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (capture_s2)
                         {
                             out_ard_s2[packed_lower_index(n, row, col)] = s2;
@@ -3781,8 +4287,7 @@ namespace cxxgpr::detail
                 if (uplo != Triangle::Upper)
                 {
                     eval_packed_ard_lower_cols(
-                        ard_packed, n, per_dim, weights, out, uplo,
-                        [c, nu, exp_mode](T* col_ptr, std::size_t len) noexcept
+                        ard, weights, out, uplo, [c, nu, exp_mode](T* col_ptr, std::size_t len) noexcept
                     { detail::matern_s2_in_place(col_ptr, len, c, nu, exp_mode); }, out_ard_s2
                     );
                 }
@@ -3790,10 +4295,9 @@ namespace cxxgpr::detail
                 {
                     write_square_packed(
                         n, out, uplo,
-                        [ard_packed, n, per_dim, weights, c, nu, exp_mode, capture_s2,
-                            out_ard_s2](std::size_t row, std::size_t col)
+                        [ard, n, weights, c, nu, exp_mode, capture_s2, out_ard_s2](std::size_t row, std::size_t col)
                     {
-                        const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (capture_s2)
                         {
                             out_ard_s2[packed_lower_index(n, row, col)] = s2;
@@ -3818,8 +4322,7 @@ namespace cxxgpr::detail
                 if (uplo != Triangle::Upper)
                 {
                     eval_packed_ard_lower_cols(
-                        ard_packed, n, per_dim, weights, out, uplo,
-                        [rq_scale, alpha, exp_mode](T* col_ptr, std::size_t len) noexcept
+                        ard, weights, out, uplo, [rq_scale, alpha, exp_mode](T* col_ptr, std::size_t len) noexcept
                     { transform_rq_slice_in_place(col_ptr, len, rq_scale, alpha, exp_mode); }, out_ard_s2
                     );
                 }
@@ -3827,10 +4330,10 @@ namespace cxxgpr::detail
                 {
                     write_square_packed(
                         n, out, uplo,
-                        [ard_packed, n, per_dim, weights, rq_scale, alpha, exp_mode, capture_s2,
+                        [ard, n, weights, rq_scale, alpha, exp_mode, capture_s2,
                             out_ard_s2](std::size_t row, std::size_t col)
                     {
-                        const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (capture_s2)
                         {
                             out_ard_s2[packed_lower_index(n, row, col)] = s2;
@@ -3848,14 +4351,14 @@ namespace cxxgpr::detail
     }
 
     /// @brief Evaluates an ARD kernel leaf using an incrementally maintained lower-triangular $s^2$ cache.
-    /// @details Supports both `ard_packed` and uncached `x` coordinate columns, fuses $s^2$ delta updates with the
-    /// radial transform inside one lower-triangular column pass, and leaves `ard_s2_cache`/`prev_ls`/`inc_steps`
-    /// untouched when `commit_s2` is false for non-destructive proposal trials.
+    /// @details Supports `ard_packed`, `ard_borrowed`, and uncached `x` coordinate columns, fuses $s^2$ delta updates
+    /// with the radial transform inside one lower-triangular column pass, and leaves
+    /// `ard_s2_cache`/`prev_ls`/`inc_steps` untouched when `commit_s2` is false for non-destructive proposal trials.
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] leaf ARD kernel leaf variant.
     /// @param[in] ls Current per-dimension lengthscale values in user units.
-    /// @param[in] x Coordinate matrix `(n, d)` used when `ard_packed` is empty.
-    /// @param[in] ard_packed Packed lower-triangular `(dx_d)^2` buffer, or empty for uncached evaluation.
+    /// @param[in] x Coordinate matrix `(n, d)` used when `ard_packed` and `ard_borrowed` are empty.
+    /// @param[in] ard_packed Packed lower-triangular `(dx_d)^2` buffer, or empty.
     /// @param[in] n Number of training points.
     /// @param[out] out Target square Gram matrix `(n, n)`.
     /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
@@ -3865,6 +4368,7 @@ namespace cxxgpr::detail
     /// @param[in,out] s2_valid True while `ard_s2_cache` corresponds to `prev_ls[0..d-1]`.
     /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
     /// @param[in] commit_s2 True to commit `ard_s2_cache` state updates; false for non-destructive trial evaluation.
+    /// @param[in] ard_borrowed Optional borrowed per-dimension `(n, n)` views when @p ard_packed is empty.
     /// @return Empty expected on success, or validation/shape/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_ard_incremental(
@@ -3880,20 +4384,22 @@ namespace cxxgpr::detail
         std::span<double> prev_ls,
         bool& s2_valid,
         std::size_t& inc_steps,
-        bool commit_s2
+        bool commit_s2,
+        std::span<const MatrixRef<T>> ard_borrowed
     )
     {
         if (out.rows() != n || out.cols() != n)
         {
             return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
         }
-        auto mode_res = validate_ard_incremental_inputs(leaf, ls, x, ard_packed, n);
+        auto mode_res = validate_ard_incremental_inputs(leaf, ls, x, ard_packed, ard_borrowed, n);
         if (!mode_res.has_value())
         {
             return std::unexpected(std::move(mode_res).error());
         }
-        const bool use_packed = *mode_res;
+        const ArdInputMode mode = *mode_res;
         const std::size_t per_dim = (n * (n + 1U)) / 2U;
+        const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = ard_borrowed, .n = n, .per_dim = per_dim};
 
         if (ard_s2_cache.size() != per_dim || prev_ls.size() < ls.size())
         {
@@ -3902,8 +4408,9 @@ namespace cxxgpr::detail
                 s2_valid = false;
                 inc_steps = 0U;
             }
-            return use_packed ? leaf_apply_ard_packed(leaf, ls, ard_packed, n, out, uplo, exp_mode)
-                              : leaf_apply_points(leaf, x, out, uplo, exp_mode, ls);
+            return mode.use_supplied
+                ? leaf_apply_ard_packed(leaf, ls, ard_packed, n, out, uplo, exp_mode, {}, ard_borrowed)
+                : leaf_apply_points(leaf, x, out, uplo, exp_mode, ls);
         }
 
         constexpr std::size_t k_max_inc_steps = std::same_as<T, float> ? 16U : 64U;
@@ -3920,7 +4427,7 @@ namespace cxxgpr::detail
                 eval_ard_from_s2_packed<T>(leaf, ard_s2_cache, n, out, uplo, exp_mode);
                 return {};
             }
-            if (!use_packed)
+            if (!mode.use_supplied)
             {
                 if (auto fin = validate_uncached_changed_cols(x, ls, prev_ls, plan); !fin.has_value())
                 {
@@ -3939,19 +4446,14 @@ namespace cxxgpr::detail
                         if (commit_s2)
                         {
                             T* s2_ptr = &ard_s2_cache[col_packed_base];
-                            apply_ard_delta_lower_col(
-                                s2_ptr, col, len, col_packed_base, per_dim, use_packed, x, ard_packed, ls, prev_ls, plan
-                            );
+                            apply_ard_delta_lower_col(s2_ptr, col, len, mode.use_supplied, x, ard, ls, prev_ls, plan);
                             *s2_ptr = T{0};
                             transform_ard_lower_col_from_s2(leaf, s2_ptr, out_col, len, exp_mode);
                         }
                         else
                         {
                             std::copy_n(&ard_s2_cache[col_packed_base], len, out_col);
-                            apply_ard_delta_lower_col(
-                                out_col, col, len, col_packed_base, per_dim, use_packed, x, ard_packed, ls, prev_ls,
-                                plan
-                            );
+                            apply_ard_delta_lower_col(out_col, col, len, mode.use_supplied, x, ard, ls, prev_ls, plan);
                             *out_col = T{0};
                             transform_ard_lower_col_from_s2(leaf, out_col, out_col, len, exp_mode);
                         }
@@ -3976,7 +4478,7 @@ namespace cxxgpr::detail
 
             if (commit_s2)
             {
-                if (use_packed)
+                if (mode.use_supplied && !mode.use_borrowed)
                 {
                     auto apply_flat = [&](std::size_t dim, double delta_w_d)
                     {
@@ -4033,9 +4535,7 @@ namespace cxxgpr::detail
                             const std::size_t len = n - col;
                             const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + col;
                             T* s2_ptr = &ard_s2_cache[col_packed_base];
-                            apply_ard_delta_lower_col(
-                                s2_ptr, col, len, col_packed_base, per_dim, false, x, ard_packed, ls, prev_ls, plan
-                            );
+                            apply_ard_delta_lower_col(s2_ptr, col, len, mode.use_supplied, x, ard, ls, prev_ls, plan);
                             *s2_ptr = T{0};
                         }
                     };
@@ -4067,9 +4567,9 @@ namespace cxxgpr::detail
                 auto add_pair = [&](std::size_t dim, double delta_w_d) noexcept
                 {
                     const T dw = static_cast<T>(delta_w_d);
-                    if (use_packed)
+                    if (mode.use_supplied)
                     {
-                        s2 += dw * ard_packed[(dim * per_dim) + p];
+                        s2 += dw * ard.at(dim, row, col);
                     }
                     else
                     {
@@ -4104,18 +4604,19 @@ namespace cxxgpr::detail
 
         if (!commit_s2)
         {
-            return use_packed ? leaf_apply_ard_packed(leaf, ls, ard_packed, n, out, uplo, exp_mode)
-                              : leaf_apply_points(leaf, x, out, uplo, exp_mode, ls);
+            return mode.use_supplied
+                ? leaf_apply_ard_packed(leaf, ls, ard_packed, n, out, uplo, exp_mode, {}, ard_borrowed)
+                : leaf_apply_points(leaf, x, out, uplo, exp_mode, ls);
         }
 
-        if (!use_packed)
+        if (!mode.use_supplied)
         {
             if (auto v = validate_square_points(x, out); !v.has_value())
             {
                 return v;
             }
         }
-        if (auto res = rebuild_ard_s2_cols(leaf, ls, x, ard_packed, use_packed, n, ard_s2_cache, &out, uplo, exp_mode);
+        if (auto res = rebuild_ard_s2_cols(leaf, ls, x, ard, mode.use_supplied, n, ard_s2_cache, &out, uplo, exp_mode);
             !res.has_value())
         {
             return res;
@@ -4140,13 +4641,14 @@ namespace cxxgpr::detail
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] leaf ARD kernel leaf variant.
     /// @param[in] ls Accepted per-dimension lengthscales.
-    /// @param[in] x Coordinate matrix `(n, d)` when `ard_packed` is empty.
+    /// @param[in] x Coordinate matrix `(n, d)` when `ard_packed` and `ard_borrowed` are empty.
     /// @param[in] ard_packed Precomputed lower-packed per-dimension `(dx_d)^2` buffer, or empty.
     /// @param[in] n Training point count.
     /// @param[in,out] ard_s2_cache Pre-allocated per-leaf packed $s^2$ buffer of length `n * (n + 1) / 2`.
     /// @param[in,out] prev_ls Pre-allocated lengthscale snapshot buffer of length at least `ls.size()`.
     /// @param[in,out] s2_valid True while `ard_s2_cache` corresponds to `prev_ls[0..d-1]`.
     /// @param[in,out] inc_steps Consecutive incremental updates applied since last rebuild.
+    /// @param[in] ard_borrowed Optional borrowed per-dimension `(n, n)` views when @p ard_packed is empty.
     /// @return Empty expected on success, or validation/shape/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_commit_ard_s2(
@@ -4158,16 +4660,18 @@ namespace cxxgpr::detail
         std::span<T> ard_s2_cache,
         std::span<double> prev_ls,
         bool& s2_valid,
-        std::size_t& inc_steps
+        std::size_t& inc_steps,
+        std::span<const MatrixRef<T>> ard_borrowed
     )
     {
-        auto mode_res = validate_ard_incremental_inputs(leaf, ls, x, ard_packed, n);
+        auto mode_res = validate_ard_incremental_inputs(leaf, ls, x, ard_packed, ard_borrowed, n);
         if (!mode_res.has_value())
         {
             return std::unexpected(std::move(mode_res).error());
         }
-        const bool use_packed = *mode_res;
+        const ArdInputMode mode = *mode_res;
         const std::size_t per_dim = (n * (n + 1U)) / 2U;
+        const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = ard_borrowed, .n = n, .per_dim = per_dim};
         if (ard_s2_cache.size() != per_dim || prev_ls.size() < ls.size())
         {
             return std::unexpected(GprError::length_mismatch("ARD s^2 baseline buffer size mismatch"));
@@ -4182,14 +4686,14 @@ namespace cxxgpr::detail
             {
                 return {};
             }
-            if (!use_packed)
+            if (!mode.use_supplied)
             {
                 if (auto fin = validate_uncached_changed_cols(x, ls, prev_ls, plan); !fin.has_value())
                 {
                     return fin;
                 }
             }
-            if (use_packed)
+            if (mode.use_supplied && !mode.use_borrowed)
             {
                 auto apply_flat = [&](std::size_t dim, double delta_w_d)
                 {
@@ -4246,9 +4750,7 @@ namespace cxxgpr::detail
                         const std::size_t len = n - col;
                         const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + col;
                         T* s2_ptr = &ard_s2_cache[col_packed_base];
-                        apply_ard_delta_lower_col(
-                            s2_ptr, col, len, col_packed_base, per_dim, false, x, ard_packed, ls, prev_ls, plan
-                        );
+                        apply_ard_delta_lower_col(s2_ptr, col, len, mode.use_supplied, x, ard, ls, prev_ls, plan);
                         *s2_ptr = T{0};
                     }
                 };
@@ -4266,7 +4768,7 @@ namespace cxxgpr::detail
             return {};
         }
 
-        if (!use_packed)
+        if (!mode.use_supplied)
         {
             for (std::size_t col = 0U; col < x.cols(); ++col)
             {
@@ -4277,7 +4779,7 @@ namespace cxxgpr::detail
             }
         }
         if (auto res = rebuild_ard_s2_cols<T>(
-                leaf, ls, x, ard_packed, use_packed, n, ard_s2_cache, nullptr, Triangle::Lower, KernelExp::Accurate
+                leaf, ls, x, ard, mode.use_supplied, n, ard_s2_cache, nullptr, Triangle::Lower, KernelExp::Accurate
             );
             !res.has_value())
         {
@@ -4338,18 +4840,17 @@ namespace cxxgpr::detail
         }
         if (std::holds_alternative<RbfArdKernel>(leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For RBF-ARD: dk/d(log ell_p) = (dx_p^2 / ell_p^2) * exp'(-0.5 * s^2).
             return with_ard_inv_ell2<T>(
                 ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 const T inv_l2 = weights[param_idx];
                 write_square_packed(
-                    n, d_k, uplo,
-                    [ard_packed, n, per_dim, weights, param_idx, inv_l2, exp_mode](std::size_t row, std::size_t col)
+                    n, d_k, uplo, [ard, weights, param_idx, inv_l2, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
-                    const T sp2 = ard_packed[(param_idx * per_dim) + p] * inv_l2;
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
+                    const T sp2 = ard.at(param_idx, row, col) * inv_l2;
                     return sp2 * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
                 }
                 );
@@ -4359,6 +4860,7 @@ namespace cxxgpr::detail
         }
         if (const auto* mat = std::get_if<MaternArdKernel>(&leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For Matern-ARD: dk/d(log ell_p) = g1(u) * (2*nu * dx_p^2 / ell_p^2) / u^2, with limit 0 at u <= 0.
             const T c = matern_scale_sq<T>(mat->nu());
             const MaternNu nu = mat->nu();
@@ -4367,18 +4869,15 @@ namespace cxxgpr::detail
             {
                 const T inv_l2 = weights[param_idx];
                 write_square_packed(
-                    n, d_k, uplo,
-                    [ard_packed, n, per_dim, weights, c, nu, param_idx, inv_l2,
-                        exp_mode](std::size_t row, std::size_t col)
+                    n, d_k, uplo, [ard, weights, c, nu, param_idx, inv_l2, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T u2 = c * ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                    const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                     if (u2 <= T{0})
                     {
                         return T{0};
                     }
                     const T u = std::sqrt(u2);
-                    const T wp = (c * ard_packed[(param_idx * per_dim) + p] * inv_l2) / u2;
+                    const T wp = (c * ard.at(param_idx, row, col) * inv_l2) / u2;
                     return eval_matern_grad_g1(u, nu, exp_mode) * wp;
                 }
                 );
@@ -4388,6 +4887,7 @@ namespace cxxgpr::detail
         }
         if (const auto* rq = std::get_if<RationalQuadraticArdKernel>(&leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For RQ-ARD: indices < ls.size() differentiate wrt log(ell_p); index == ls.size() differentiates alpha.
             const T alpha = static_cast<T>(rq->alpha());
             const std::size_t alpha_idx = ls.size();
@@ -4397,17 +4897,15 @@ namespace cxxgpr::detail
                 const T inv_l2 = (param_idx < alpha_idx) ? weights[param_idx] : T{0};
                 write_square_packed(
                     n, d_k, uplo,
-                    [ard_packed, n, per_dim, weights, alpha, param_idx, alpha_idx, inv_l2,
-                        exp_mode](std::size_t row, std::size_t col)
+                    [ard, weights, alpha, param_idx, alpha_idx, inv_l2, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
                     if (param_idx < alpha_idx)
                     {
-                        const T sp2 = ard_packed[(param_idx * per_dim) + p] * inv_l2;
+                        const T sp2 = ard.at(param_idx, row, col) * inv_l2;
                         return (sp2 / b) * d1_exp;
                     }
                     return alpha * ((w / b) - std::log1p(w)) * d1_exp;
@@ -4472,6 +4970,7 @@ namespace cxxgpr::detail
         }
         if (std::holds_alternative<RbfArdKernel>(leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For RBF-ARD: s_i^2 * s_j^2 * d2 - 2 * delta_ij * s_i^2 * d1.
             return with_ard_inv_ell2<T>(
                 ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
@@ -4479,19 +4978,16 @@ namespace cxxgpr::detail
                 const T inv_li2 = weights[i];
                 const T inv_lj2 = weights[j];
                 write_square_packed(
-                    n, d2_k, uplo,
-                    [ard_packed, n, per_dim, weights, i, j, inv_li2, inv_lj2,
-                        exp_mode](std::size_t row, std::size_t col)
+                    n, d2_k, uplo, [ard, weights, i, j, inv_li2, inv_lj2, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
-                    const T si2 = ard_packed[(i * per_dim) + p] * inv_li2;
+                    const T si2 = ard.at(i, row, col) * inv_li2;
                     if (i == j)
                     {
                         return (si2 * si2 * jet.d2) - (T{2} * si2 * jet.d1);
                     }
-                    const T sj2 = ard_packed[(j * per_dim) + p] * inv_lj2;
+                    const T sj2 = ard.at(j, row, col) * inv_lj2;
                     return si2 * sj2 * jet.d2;
                 }
                 );
@@ -4501,6 +4997,7 @@ namespace cxxgpr::detail
         }
         if (const auto* mat = std::get_if<MaternArdKernel>(&leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For Matern-ARD: ard_cross * w_i * w_j - 2 * delta_ij * g1 * w_i, returning 0 at u <= 0.
             const T c = matern_scale_sq<T>(mat->nu());
             const MaternNu nu = mat->nu();
@@ -4511,18 +5008,16 @@ namespace cxxgpr::detail
                 const T inv_lj2 = weights[j];
                 write_square_packed(
                     n, d2_k, uplo,
-                    [ard_packed, n, per_dim, weights, c, nu, i, j, inv_li2, inv_lj2,
-                        exp_mode](std::size_t row, std::size_t col)
+                    [ard, weights, c, nu, i, j, inv_li2, inv_lj2, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T u2 = c * ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                    const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                     if (u2 <= T{0})
                     {
                         return T{0};
                     }
                     const T u = std::sqrt(u2);
-                    const T wi = (c * ard_packed[(i * per_dim) + p] * inv_li2) / u2;
-                    const T wj = (c * ard_packed[(j * per_dim) + p] * inv_lj2) / u2;
+                    const T wi = (c * ard.at(i, row, col) * inv_li2) / u2;
+                    const T wj = (c * ard.at(j, row, col) * inv_lj2) / u2;
                     T val = eval_matern_ard_cross_coeff(u, nu, exp_mode) * wi * wj;
                     if (i == j)
                     {
@@ -4537,6 +5032,7 @@ namespace cxxgpr::detail
         }
         if (const auto* rq = std::get_if<RationalQuadraticArdKernel>(&leaf))
         {
+            const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = {}, .n = n, .per_dim = per_dim};
             // For RQ-ARD: evaluate (alpha, alpha), mixed (alpha, ell_k), and (ell_i, ell_j) blocks.
             const T alpha = static_cast<T>(rq->alpha());
             const std::size_t alpha_idx = ls.size();
@@ -4544,12 +5040,9 @@ namespace cxxgpr::detail
                 ls, T{1}, [&](ArdWeightView<T> weights) -> std::expected<void, GprError>
             {
                 write_square_packed(
-                    n, d2_k, uplo,
-                    [ard_packed, n, per_dim, weights, alpha, i, j, alpha_idx,
-                        exp_mode](std::size_t row, std::size_t col)
+                    n, d2_k, uplo, [ard, weights, alpha, i, j, alpha_idx, exp_mode](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(ard_packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
@@ -4561,11 +5054,11 @@ namespace cxxgpr::detail
                     if (i == alpha_idx || j == alpha_idx)
                     {
                         const std::size_t ls_idx = (i == alpha_idx) ? j : i;
-                        const T s_ls2 = ard_packed[(ls_idx * per_dim) + p] * weights[ls_idx];
+                        const T s_ls2 = ard.at(ls_idx, row, col) * weights[ls_idx];
                         return (s_ls2 / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
                     }
-                    const T si2 = ard_packed[(i * per_dim) + p] * weights[i];
-                    const T sj2 = ard_packed[(j * per_dim) + p] * weights[j];
+                    const T si2 = ard.at(i, row, col) * weights[i];
+                    const T sj2 = ard.at(j, row, col) * weights[j];
                     const T sq_term = (si2 * sj2) / (b * b);
                     T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
                     if (i == j)
@@ -4590,7 +5083,8 @@ namespace cxxgpr::detail
         MatrixMut<double>,
         Triangle,
         KernelExp,
-        std::span<double>
+        std::span<double>,
+        std::span<const MatrixRef<double>>
     );
     template std::expected<void, GprError> leaf_apply_ard_packed<float>(
         const KernelLeaf&,
@@ -4600,7 +5094,8 @@ namespace cxxgpr::detail
         MatrixMut<float>,
         Triangle,
         KernelExp,
-        std::span<float>
+        std::span<float>,
+        std::span<const MatrixRef<float>>
     );
     template std::expected<void, GprError> leaf_apply_ard_incremental<double>(
         const KernelLeaf&,
@@ -4615,7 +5110,8 @@ namespace cxxgpr::detail
         std::span<double>,
         bool&,
         std::size_t&,
-        bool
+        bool,
+        std::span<const MatrixRef<double>>
     );
     template std::expected<void, GprError> leaf_apply_ard_incremental<float>(
         const KernelLeaf&,
@@ -4630,7 +5126,8 @@ namespace cxxgpr::detail
         std::span<double>,
         bool&,
         std::size_t&,
-        bool
+        bool,
+        std::span<const MatrixRef<float>>
     );
     template std::expected<void, GprError> leaf_commit_ard_s2<double>(
         const KernelLeaf&,
@@ -4641,7 +5138,8 @@ namespace cxxgpr::detail
         std::span<double>,
         std::span<double>,
         bool&,
-        std::size_t&
+        std::size_t&,
+        std::span<const MatrixRef<double>>
     );
     template std::expected<void, GprError> leaf_commit_ard_s2<float>(
         const KernelLeaf&,
@@ -4652,7 +5150,8 @@ namespace cxxgpr::detail
         std::span<float>,
         std::span<double>,
         bool&,
-        std::size_t&
+        std::size_t&,
+        std::span<const MatrixRef<float>>
     );
     template std::expected<void, GprError> leaf_grad_ard_packed<double>(
         const KernelLeaf&,
@@ -4714,6 +5213,7 @@ namespace cxxgpr::detail
     /// @param[in] need_value True when $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ is requested back.
     /// @param[in] exp_mode Exponential evaluation backend (`Accurate` or `FastApprox`).
     /// @param[in] precomputed_ard_s2 Optional lower-packed $s^2$ cache from forward evaluation.
+    /// @param[in] ard_borrowed Optional span of `d` borrowed `n x n` column-major `(dx_d)^2` views.
     /// @return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ if `need_value` is true (else `0.0`), or error.
     /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not an ARD leaf.
     /// @retval GprErrorCode::EmptyInput When `ls`, `weight`, or uncached `x` is empty.
@@ -4732,7 +5232,8 @@ namespace cxxgpr::detail
         std::span<double> out_grads,
         bool need_value,
         KernelExp exp_mode,
-        std::span<const T> precomputed_ard_s2
+        std::span<const T> precomputed_ard_s2,
+        std::span<const MatrixRef<T>> ard_borrowed
     )
     {
         const bool is_rbf = std::holds_alternative<RbfArdKernel>(leaf);
@@ -4760,14 +5261,23 @@ namespace cxxgpr::detail
         {
             return std::unexpected(GprError::length_mismatch("gradient output span length mismatch"));
         }
+        const bool use_borrowed = !ard_borrowed.empty();
         const bool use_packed = !ard_packed.empty();
+        const bool use_supplied = use_borrowed || use_packed;
         const std::size_t per_dim = (n * (n + 1U)) / 2U;
         if (!precomputed_ard_s2.empty() && precomputed_ard_s2.size() != per_dim)
         {
             return std::unexpected(GprError::length_mismatch("precomputed ARD s^2 size mismatch"));
         }
         const bool has_precomputed_s2 = (precomputed_ard_s2.size() == per_dim);
-        if (use_packed)
+        if (use_borrowed)
+        {
+            if (auto ok = validate_ard_borrowed_views(ard_borrowed, ls.size(), n); !ok.has_value())
+            {
+                return std::unexpected(std::move(ok).error());
+            }
+        }
+        else if (use_packed)
         {
             if (ard_packed.size() != ls.size() * per_dim)
             {
@@ -4789,6 +5299,7 @@ namespace cxxgpr::detail
                 return std::unexpected(d_ok.error());
             }
         }
+        const ArdSquareView<T> ard{.packed = ard_packed, .borrowed = ard_borrowed, .n = n, .per_dim = per_dim};
 
         double leaf_val = 0.0;
         auto weight_res = with_ard_inv_ell2<T>(
@@ -4811,15 +5322,12 @@ namespace cxxgpr::detail
                         const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + col;
                         std::copy_n(&precomputed_ard_s2[col_packed_base], len, col_ptr);
                     }
-                    else if (use_packed)
+                    else if (use_supplied)
                     {
-                        const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + col;
-                        detail::scale_set_slice(col_ptr, &ard_packed[col_packed_base], weights[0U], len);
+                        detail::scale_set_slice(col_ptr, ard.lower_col_ptr(0U, col, col), weights[0U], len);
                         for (std::size_t dim = 1U; dim < weights.size(); ++dim)
                         {
-                            detail::axpy_slice(
-                                col_ptr, &ard_packed[(dim * per_dim) + col_packed_base], weights[dim], len
-                            );
+                            detail::axpy_slice(col_ptr, ard.lower_col_ptr(dim, col, col), weights[dim], len);
                         }
                     }
                     else
@@ -4941,12 +5449,14 @@ namespace cxxgpr::detail
                         }
                         const T* w_rad_col = &scratch(0U, col);
                         double acc = 0.0;
-                        if (use_packed)
+                        if (use_supplied)
                         {
-                            const T* dim_col = &ard_packed[(dim * per_dim) + ((col * ((2U * n) - col - 1U)) / 2U)];
-                            for (std::size_t row = col + 1U; row < n; ++row)
+                            const T* dim_col = ard.lower_col_ptr(dim, col, col + 1U);
+                            const std::size_t len = n - (col + 1U);
+                            for (std::size_t k = 0U; k < len; ++k)
                             {
-                                acc += static_cast<double>(w_rad_col[row]) * static_cast<double>(dim_col[row] * inv_l2);
+                                acc += static_cast<double>(w_rad_col[col + 1U + k])
+                                    * static_cast<double>(dim_col[k] * inv_l2);
                             }
                         }
                         else
@@ -4994,8 +5504,10 @@ namespace cxxgpr::detail
             {
                 eval_ard_from_s2_packed<T>(leaf, precomputed_ard_s2, n, scratch, Triangle::Lower, exp_mode);
             }
-            else if (auto ev = use_packed
-                    ? leaf_apply_ard_packed(leaf, ls, ard_packed, n, scratch, Triangle::Lower, exp_mode)
+            else if (auto ev = use_supplied
+                    ? leaf_apply_ard_packed(
+                          leaf, ls, ard_packed, n, scratch, Triangle::Lower, exp_mode, {}, ard_borrowed
+                      )
                     : leaf_apply_points(leaf, x, scratch, Triangle::Lower, exp_mode, ls);
                 !ev.has_value())
             {
@@ -5037,7 +5549,8 @@ namespace cxxgpr::detail
         std::span<double>,
         bool,
         KernelExp,
-        std::span<const double>
+        std::span<const double>,
+        std::span<const MatrixRef<double>>
     );
     template std::expected<double, GprError> leaf_ard_weighted_grads<float>(
         const KernelLeaf&,
@@ -5050,7 +5563,8 @@ namespace cxxgpr::detail
         std::span<double>,
         bool,
         KernelExp,
-        std::span<const float>
+        std::span<const float>,
+        std::span<const MatrixRef<float>>
     );
 
     /// @brief Evaluates all hyperparameters and optional value contraction of an isotropic or linear leaf in one pass.
@@ -5067,6 +5581,7 @@ namespace cxxgpr::detail
     /// @param[out] out_grads Output span sized to `leaf_num_params(leaf)`.
     /// @param[in] need_value True to also return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$.
     /// @param[in] exp_mode Exponential evaluation backend (`Accurate` or `FastApprox`).
+    /// @param[in] dist_packed Optional packed lower-triangular distances (preferred over @p dist when non-empty).
     /// @return $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ if `need_value`, else `0.0`, or validation error.
     /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not isotropic-distance or `LinearKernel`.
     /// @retval GprErrorCode::EmptyInput When `weight`, required `x`, or supplied `dist` is empty or null.
@@ -5082,7 +5597,8 @@ namespace cxxgpr::detail
         std::span<double> col_partials,
         std::span<double> out_grads,
         bool need_value,
-        KernelExp exp_mode
+        KernelExp exp_mode,
+        std::span<const T> dist_packed
     )
     {
         const auto* rbf = std::get_if<RbfKernel>(&leaf);
@@ -5114,8 +5630,22 @@ namespace cxxgpr::detail
         {
             return std::unexpected(GprError::workspace_too_small());
         }
-        const bool use_dist = (lin == nullptr) && !dist.is_empty();
-        if (use_dist)
+        const bool use_packed = (lin == nullptr) && !dist_packed.empty();
+        const bool use_dense = (lin == nullptr) && !use_packed && !dist.is_empty();
+        const bool use_dist = use_packed || use_dense;
+        if (use_packed)
+        {
+            const auto expected_len = packed_len(n);
+            if (!expected_len.has_value())
+            {
+                return std::unexpected(expected_len.error());
+            }
+            if (dist_packed.size() != *expected_len)
+            {
+                return std::unexpected(GprError::length_mismatch("packed distance span length mismatch"));
+            }
+        }
+        else if (use_dense)
         {
             if (dist.data() == nullptr)
             {
@@ -5151,7 +5681,7 @@ namespace cxxgpr::detail
         const std::size_t n_dims = use_dist ? 0U : x.cols();
         const bool has_param1 = (np >= 2U);
 
-        // Process column `col` independently, reading either cached `dist` or computing slices in `scratch`.
+        // Process column `col` independently, reading packed/dense `dist` or computing slices in `scratch`.
         auto process_col = [&](std::size_t col, double& out_g0, double& out_g1, double& out_val) noexcept
         {
             const std::size_t len = n - col;
@@ -5177,10 +5707,14 @@ namespace cxxgpr::detail
                 return;
             }
 
-            const T* d2_col = nullptr;
-            if (use_dist)
+            const T* d2_lower = nullptr;
+            if (use_packed)
             {
-                d2_col = &dist(0U, col);
+                d2_lower = dist_packed.data() + packed_dist_col_offset(n, col);
+            }
+            else if (use_dense)
+            {
+                d2_lower = &dist(col, col);
             }
             else
             {
@@ -5192,11 +5726,12 @@ namespace cxxgpr::detail
                     detail::add_scaled_sq_diff_slice(dist_slice, col_vec.data() + col, col_vec[col], T{1}, len);
                 }
                 scratch(col, col) = T{0};
-                d2_col = &scratch(0U, col);
+                d2_lower = dist_slice;
             }
 
             // Evaluate the diagonal entry explicitly only if caller-supplied `dist` contains positive diagonal d^2.
-            const auto w_diag = static_cast<double>(w_col[col]);
+            const T* const w_lower = w_col + col;
+            const auto w_diag = static_cast<double>(w_lower[0U]);
             double val_acc = (need_value && !use_dist) ? w_diag : 0.0;
             double g0_diag = 0.0;
             double g1_diag = 0.0;
@@ -5209,7 +5744,7 @@ namespace cxxgpr::detail
                 const T inv_2l2 = T{1} / (T{2} * rbf_l2);
                 if (use_dist)
                 {
-                    const T d2_0 = d2_col[col];
+                    const T d2_0 = d2_lower[0U];
                     if (d2_0 > T{0})
                     {
                         const T z0 = d2_0 * inv_2l2;
@@ -5225,13 +5760,13 @@ namespace cxxgpr::detail
                         val_acc = w_diag;
                     }
                 }
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t r = 1U; r < len; ++r)
                 {
-                    const T d2 = d2_col[row];
+                    const T d2 = d2_lower[r];
                     const T clamped = d2 < T{0} ? T{0} : d2;
                     const T z = clamped * inv_2l2;
                     const ExpJet<T> jet = eval_kernel_exp_jet(-z, exp_mode);
-                    const auto w_rc = static_cast<double>(w_col[row]);
+                    const auto w_rc = static_cast<double>(w_lower[r]);
                     g0_off += w_rc * static_cast<double>((T{2} * z) * jet.d1);
                     if (need_value)
                     {
@@ -5243,7 +5778,7 @@ namespace cxxgpr::detail
             {
                 if (use_dist)
                 {
-                    const T d2_0 = d2_col[col];
+                    const T d2_0 = d2_lower[0U];
                     if (d2_0 > T{0})
                     {
                         const MaternJetVals<T> m0 = eval_matern_jet_vals(mat_scale * std::sqrt(d2_0), mat_nu, exp_mode);
@@ -5258,12 +5793,12 @@ namespace cxxgpr::detail
                         val_acc = w_diag;
                     }
                 }
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t r = 1U; r < len; ++r)
                 {
-                    const T d2 = d2_col[row];
-                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
-                    const MaternJetVals<T> mj = eval_matern_jet_vals(mat_scale * r, mat_nu, exp_mode);
-                    const auto w_rc = static_cast<double>(w_col[row]);
+                    const T d2 = d2_lower[r];
+                    const T dist_r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                    const MaternJetVals<T> mj = eval_matern_jet_vals(mat_scale * dist_r, mat_nu, exp_mode);
+                    const auto w_rc = static_cast<double>(w_lower[r]);
                     g0_off += w_rc * static_cast<double>(mj.g1);
                     if (need_value)
                     {
@@ -5275,7 +5810,7 @@ namespace cxxgpr::detail
             {
                 if (use_dist)
                 {
-                    const T d2_0 = d2_col[col];
+                    const T d2_0 = d2_lower[0U];
                     if (d2_0 > T{0})
                     {
                         const T phi0 = per_pi_p * std::sqrt(d2_0);
@@ -5294,15 +5829,15 @@ namespace cxxgpr::detail
                         val_acc = w_diag;
                     }
                 }
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t r = 1U; r < len; ++r)
                 {
-                    const T d2 = d2_col[row];
-                    const T r = d2 > T{0} ? std::sqrt(d2) : T{0};
-                    const T phi = per_pi_p * r;
+                    const T d2 = d2_lower[r];
+                    const T dist_r = d2 > T{0} ? std::sqrt(d2) : T{0};
+                    const T phi = per_pi_p * dist_r;
                     const T s = std::sin(phi);
                     const T c = std::cos(phi);
                     const ExpJet<T> jet = eval_kernel_exp_jet(-(T{2} * s * s) / per_l2, exp_mode);
-                    const auto w_rc = static_cast<double>(w_col[row]);
+                    const auto w_rc = static_cast<double>(w_lower[r]);
                     g0_off += w_rc * static_cast<double>(((T{4} * s * s) / per_l2) * jet.d1);
                     g1_off += w_rc * static_cast<double>(((T{4} * phi * s * c) / per_l2) * jet.d1);
                     if (need_value)
@@ -5315,7 +5850,7 @@ namespace cxxgpr::detail
             {
                 if (use_dist)
                 {
-                    const T d2_0 = d2_col[col];
+                    const T d2_0 = d2_lower[0U];
                     if (d2_0 > T{0})
                     {
                         const T w0 = d2_0 / rq_denom;
@@ -5334,15 +5869,15 @@ namespace cxxgpr::detail
                         val_acc = w_diag;
                     }
                 }
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t r = 1U; r < len; ++r)
                 {
-                    const T d2 = d2_col[row];
+                    const T d2 = d2_lower[r];
                     const T clamped = d2 < T{0} ? T{0} : d2;
                     const T w = clamped / rq_denom;
                     const T b = T{1} + w;
                     const T l1p = std::log1p(w);
                     const ExpJet<T> jet = eval_kernel_exp_jet(-rq_alpha * l1p, exp_mode);
-                    const auto w_rc = static_cast<double>(w_col[row]);
+                    const auto w_rc = static_cast<double>(w_lower[r]);
                     g0_off += w_rc * static_cast<double>(((T{2} * rq_alpha * w) / b) * jet.d1);
                     g1_off += w_rc * static_cast<double>((rq_alpha * ((w / b) - l1p)) * jet.d1);
                     if (need_value)
@@ -5431,7 +5966,8 @@ namespace cxxgpr::detail
         std::span<double>,
         std::span<double>,
         bool,
-        KernelExp
+        KernelExp,
+        std::span<const double>
     );
     template std::expected<double, GprError> leaf_iso_weighted_grads<float>(
         const KernelLeaf&,
@@ -5442,7 +5978,8 @@ namespace cxxgpr::detail
         std::span<double>,
         std::span<double>,
         bool,
-        KernelExp
+        KernelExp,
+        std::span<const float>
     );
 
 }  // namespace cxxgpr::detail

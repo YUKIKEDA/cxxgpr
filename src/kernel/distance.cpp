@@ -20,6 +20,7 @@
 #include <utility>
 #include <variant>
 
+#include "core/finite_simd.hpp"
 #include "core/noinline.hpp"
 #include "kernel/distance_desc.hpp"
 #include "kernel/distance_store.hpp"
@@ -52,48 +53,90 @@ namespace cxxgpr
             return ((c * n) - tri) + (r - c);
         }
 
+        /// @brief Applies an in-place element-wise binary operation `op(dst(r, c), src(r, c))` over region `uplo`.
+        /// @details Uses area-balanced `linalg::parallel_for_lower_blocks` (`n_cols >= 128U`) for square `Lower`
+        /// triangles and OpenMP column splitting for `Upper` or `Full`/`rect` matrices when large enough.
+        /// @tparam T Storage floating-point scalar type.
+        /// @tparam Op Callable invoked as `op(dst_elem, src_elem)`.
+        /// @param[in,out] dst Destination matrix view modified in place.
+        /// @param[in] src Source matrix view of identical shape.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in] op Element-wise binary mutator.
+        template <KernelScalarConcept T, typename Op>
+        void apply_binary_op(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo, Op&& op) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
+                {
+                    for (std::size_t col = col_begin; col < col_end; ++col)
+                    {
+                        T* const d_col = &dst(0U, col);
+                        const T* const s_col = &src(0U, col);
+                        for (std::size_t row = col; row < n_rows; ++row)
+                        {
+                            op(d_col[row], s_col[row]);
+                        }
+                    }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
+                }
+                return;
+            }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+            if (uplo == Triangle::Upper && n_rows == n_cols)
+            {
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 128U)
+#endif
+                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+                {
+                    const auto col = static_cast<std::size_t>(col_s);
+                    T* const d_col = &dst(0U, col);
+                    const T* const s_col = &src(0U, col);
+                    for (std::size_t row = 0U; row <= col; ++row)
+                    {
+                        op(d_col[row], s_col[row]);
+                    }
+                }
+                return;
+            }
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                T* const d_col = &dst(0U, col);
+                const T* const s_col = &src(0U, col);
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    op(d_col[row], s_col[row]);
+                }
+            }
+        }
+
         /// @brief Accumulates `dst += src` over the active matrix region `uplo`.
-        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @details Delegates column-parallel addition across `Lower`, `Upper`, or `Full` to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] dst Destination matrix modified in place.
         /// @param[in] src Summand matrix view.
         /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
-            const std::size_t n_rows = dst.rows();
-            const std::size_t n_cols = dst.cols();
-            if (uplo == Triangle::Lower && n_rows == n_cols)
-            {
-                for (std::size_t col = 0; col < n_cols; ++col)
-                {
-                    for (std::size_t row = col; row < n_rows; ++row)
-                    {
-                        dst(row, col) += src(row, col);
-                    }
-                }
-                return;
-            }
-            if (uplo == Triangle::Upper && n_rows == n_cols)
-            {
-                for (std::size_t col = 0; col < n_cols; ++col)
-                {
-                    for (std::size_t row = 0; row <= col; ++row)
-                    {
-                        dst(row, col) += src(row, col);
-                    }
-                }
-                return;
-            }
-            for (std::size_t col = 0; col < n_cols; ++col)
-            {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    dst(row, col) += src(row, col);
-                }
-            }
+            apply_binary_op(dst, src, uplo, [](T& d, T s) { d += s; });
         }
 
         /// @brief Copies matrix triangle (or full matrix) `src` into `dst`.
+        /// @details Parallelizes contiguous column slice copies across `Lower`, `Upper`, or `Full`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[out] dst Destination matrix view.
         /// @param[in] src Source matrix view.
@@ -104,22 +147,42 @@ namespace cxxgpr
             const std::size_t n_cols = dst.cols();
             if (uplo == Triangle::Lower && n_rows == n_cols)
             {
-                for (std::size_t col = 0U; col < n_cols; ++col)
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    std::copy_n(&src(col, col), n_rows - col, &dst(col, col));
+                    for (std::size_t col = col_begin; col < col_end; ++col)
+                    {
+                        std::copy_n(&src(col, col), n_rows - col, &dst(col, col));
+                    }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
             if (uplo == Triangle::Upper && n_rows == n_cols)
             {
-                for (std::size_t col = 0U; col < n_cols; ++col)
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 128U)
+#endif
+                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
                 {
+                    const auto col = static_cast<std::size_t>(col_s);
                     std::copy_n(&src(0U, col), col + 1U, &dst(0U, col));
                 }
                 return;
             }
-            for (std::size_t col = 0U; col < n_cols; ++col)
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
+                const auto col = static_cast<std::size_t>(col_s);
                 std::copy_n(&src(0U, col), n_rows, &dst(0U, col));
             }
         }
@@ -204,48 +267,107 @@ namespace cxxgpr
         }
 
         /// @brief Multiplies `dst *= src` element-wise over the active matrix region `uplo`.
-        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @details Delegates column-parallel Hadamard product across `Lower`, `Upper`, or `Full` to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] dst Destination matrix scaled in place.
         /// @param[in] src Multiplier matrix view.
         /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
+            apply_binary_op(dst, src, uplo, [](T& d, T s) { d *= s; });
+        }
+
+        /// @brief Scales all active entries in `dst` over `uplo` by scalar `scale` in place.
+        /// @details Uses vectorized `scale_set_slice` per contiguous column slice and OpenMP parallelism when large
+        /// enough.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in,out] dst Target matrix view scaled in place.
+        /// @param[in] scale Scalar multiplier (no-op when `scale == 1`).
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void scale_region(MatrixMut<T> dst, T scale, Triangle uplo) noexcept
+        {
+            if (scale == T{1})
+            {
+                return;
+            }
             const std::size_t n_rows = dst.rows();
             const std::size_t n_cols = dst.cols();
             if (uplo == Triangle::Lower && n_rows == n_cols)
             {
-                for (std::size_t col = 0; col < n_cols; ++col)
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    for (std::size_t row = col; row < n_rows; ++row)
+                    for (std::size_t col = col_begin; col < col_end; ++col)
                     {
-                        dst(row, col) *= src(row, col);
+                        T* const col_ptr = &dst(col, col);
+                        detail::scale_set_slice(col_ptr, col_ptr, scale, n_rows - col);
                     }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
-            if (uplo == Triangle::Upper && n_rows == n_cols)
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
-                for (std::size_t col = 0; col < n_cols; ++col)
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                T* const col_ptr = &dst(0U, col);
+                detail::scale_set_slice(col_ptr, col_ptr, scale, len);
+            }
+        }
+
+        /// @brief Populates all active entries in `dst` over `uplo` with scalar constant `val`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[out] dst Destination matrix view populated in place.
+        /// @param[in] val Constant fill scalar.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void fill_region(MatrixMut<T> dst, T val, Triangle uplo) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    for (std::size_t row = 0; row <= col; ++row)
+                    for (std::size_t col = col_begin; col < col_end; ++col)
                     {
-                        dst(row, col) *= src(row, col);
+                        std::fill_n(&dst(col, col), n_rows - col, val);
                     }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
-            for (std::size_t col = 0; col < n_cols; ++col)
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    dst(row, col) *= src(row, col);
-                }
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                std::fill_n(&dst(0U, col), len, val);
             }
         }
 
         /// @brief Mirrors strictly lower entries of a square column-major matrix into its upper triangle when `Full`.
-        /// @details No-op for `Triangle::Lower` and `Triangle::Upper`.
+        /// @details No-op for `Triangle::Lower` and `Triangle::Upper`. Parallelizes disjoint lower-column sweeps when
+        /// `n >= 128U`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] out Target square matrix view.
         /// @param[in] uplo Active matrix region (`Full` triggers mirroring).
@@ -256,14 +378,26 @@ namespace cxxgpr
                 return;
             }
             const std::size_t n = out.rows();
-            for (std::size_t col = 0U; col < n; ++col)
+            auto run_range = [&](std::size_t col_begin, std::size_t col_end)
             {
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t col = col_begin; col < col_end; ++col)
                 {
-                    const std::size_t r1 = row;
-                    const std::size_t r2 = col;
-                    out(r2, r1) = out(r1, r2);
+                    const T* const src_col = &out(0U, col);
+                    for (std::size_t row = col + 1U; row < n; ++row)
+                    {
+                        const std::size_t dst_row = col;
+                        const std::size_t dst_col = row;
+                        out(dst_row, dst_col) = src_col[row];
+                    }
                 }
+            };
+            if (n >= 128U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, run_range);
+            }
+            else
+            {
+                run_range(0U, n);
             }
         }
 
@@ -1768,11 +1902,11 @@ namespace cxxgpr
 
     // --- DistanceSource ---
 
-    /// @brief Appends a scalar squared-distance table binding for `slot`.
+    /// @brief Appends a double-precision scalar squared-distance table binding for `slot`.
     /// @details Validation of slot compatibility, duplicates, shapes, and values occurs during `prepare_square` or
     /// `prepare_cross`.
     /// @param[in] slot Scalar slot identifier.
-    /// @param[in] d2 Supplied squared-distance matrix view (`n x n` for square, `n x m` for cross).
+    /// @param[in] d2 Supplied squared-distance matrix view (`n x n` for square, `n x m` for cross) in double.
     /// @return Reference to `*this` for fluent chaining.
     DistanceSource& DistanceSource::bind_scalar(SlotId slot, MatrixRef<double> d2)
     {
@@ -1780,15 +1914,41 @@ namespace cxxgpr
         return *this;
     }
 
-    /// @brief Appends per-dimension ARD squared-distance tables for `slot`.
+    /// @brief Appends a single-precision scalar squared-distance table binding for `slot`.
+    /// @details Used without conversion on `SinglePrecision` models and widened on `DoublePrecision` or
+    /// `MixedPrecision` models.
+    /// @param[in] slot Scalar slot identifier.
+    /// @param[in] d2 Supplied squared-distance matrix view (`n x n` for square, `n x m` for cross) in float.
+    /// @return Reference to `*this` for fluent chaining.
+    DistanceSource& DistanceSource::bind_scalar(SlotId slot, MatrixRef<float> d2)
+    {
+        scalars_.push_back(ScalarEntry{.slot = slot, .d2 = d2});
+        return *this;
+    }
+
+    /// @brief Appends per-dimension double-precision ARD squared-distance tables for `slot`.
     /// @details Copies the span of `MatrixRef<double>` views; validation and packing occur during `prepare_*`.
     /// @param[in] slot ARD slot identifier.
-    /// @param[in] d2_per_dim Span of per-dimension squared-distance matrix views.
+    /// @param[in] d2_per_dim Span of per-dimension squared-distance matrix views in double precision.
     /// @return Reference to `*this` for fluent chaining.
     DistanceSource& DistanceSource::bind_ard(SlotId slot, std::span<const MatrixRef<double>> d2_per_dim)
     {
         ards_.push_back(
             ArdEntry{.slot = slot, .d2_per_dim = std::vector<MatrixRef<double>>(d2_per_dim.begin(), d2_per_dim.end())}
+        );
+        return *this;
+    }
+
+    /// @brief Appends per-dimension float-precision ARD squared-distance tables for `slot`.
+    /// @details Used without conversion on `SinglePrecision` models and widened on `DoublePrecision` or
+    /// `MixedPrecision` models.
+    /// @param[in] slot ARD slot identifier.
+    /// @param[in] d2_per_dim Span of per-dimension squared-distance matrix views in float precision.
+    /// @return Reference to `*this` for fluent chaining.
+    DistanceSource& DistanceSource::bind_ard(SlotId slot, std::span<const MatrixRef<float>> d2_per_dim)
+    {
+        ards_.push_back(
+            ArdEntry{.slot = slot, .d2_per_dim = std::vector<MatrixRef<float>>(d2_per_dim.begin(), d2_per_dim.end())}
         );
         return *this;
     }
@@ -1804,11 +1964,21 @@ namespace cxxgpr
         return *this;
     }
 
+    /// @brief Opts in to skipping element-level value checks when caller guarantees table validity.
+    /// @details Keeps all structural, slot, shape, and dimension checks active.
+    /// @param[in] skip True to skip element validation, false to run full element validation.
+    /// @return Reference to `*this` for fluent chaining.
+    DistanceSource& DistanceSource::assume_valid(bool skip) noexcept
+    {
+        assume_valid_ = skip;
+        return *this;
+    }
+
     // --- CheckedDistanceStore<T> ---
 
     /// @brief Internal storage backing a validated (and optionally repaired) `CheckedDistanceStore<T>`.
-    /// @details Holds slot metadata, shape flags, dense scalar squared-distance tables, and packed lower-triangular
-    /// (for square) or dense column-major (for cross) per-dimension ARD blocks.
+    /// @details Holds slot metadata, shape flags, packed lower-triangular or dense scalar squared-distance tables (or
+    /// zero-copy borrowed caller views), and packed lower-triangular or dense/borrowed per-dimension ARD blocks.
     /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> struct CheckedDistanceStore<T>::Impl
     {
@@ -1820,40 +1990,46 @@ namespace cxxgpr
         std::size_t n_cols = 0;
         /// @brief True for square training distance stores, false for rectangular cross stores.
         bool square = true;
-        // Per scalar slot: dense n_rows x n_cols column-major data.
-        /// @brief Dense column-major squared-distance tables indexed by scalar slot `at`.
+        // Per scalar slot: either borrowed view, packed lower triangle n*(n+1)/2, or dense n_rows*n_cols.
+        /// @brief Dense or packed lower-triangular scalar squared-distance storage indexed by scalar slot `at`.
         std::vector<std::vector<T>> scalar_tables;
+        /// @brief Per-scalar-slot flag (`1` when `scalar_tables[at]` holds packed lower-triangular entries).
+        std::vector<std::uint8_t> scalar_is_packed;
+        /// @brief Per-scalar-slot zero-copy borrowed caller view (`data() != nullptr` when active).
+        std::vector<MatrixRef<T>> scalar_borrowed;
         // Per ARD slot (when square): packed lower triangles m * per_dim + p.
-        // Per ARD slot (when cross): dims * n_rows * n_cols dense blocks.
+        // Per ARD slot (when cross): dims * n_rows * n_cols dense blocks or borrowed views.
         /// @brief Feature dimensionality stored per ARD slot indexed by ARD slot `at`.
         std::vector<std::size_t> ard_dims;
         /// @brief Packed lower-triangular (square) or dense block (cross) ARD squared-distance arrays.
         std::vector<std::vector<T>> ard_data;
+        /// @brief Per-ARD-slot zero-copy borrowed caller views for rectangular cross evaluations.
+        std::vector<std::vector<MatrixRef<T>>> ard_borrowed;
     };
 
     /// @brief Constructs a `CheckedDistanceStore<T>` from its validated internal state.
     /// @details Internal constructor called by `DistanceStoreBuilder::build`.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] impl Owning pointer to validated distance store state.
+    /// @param[in] impl Reference-counted pointer to validated distance store state.
     template <KernelScalarConcept T>
-    CheckedDistanceStore<T>::CheckedDistanceStore(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))
+    CheckedDistanceStore<T>::CheckedDistanceStore(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(impl))
     {
     }
 
-    /// @brief Destroys the `CheckedDistanceStore<T>` and its internal buffers.
+    /// @brief Destroys the `CheckedDistanceStore<T>` and releases its shared internal reference.
     /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
     template <KernelScalarConcept T> CheckedDistanceStore<T>::~CheckedDistanceStore() = default;
 
-    /// @brief Move-constructs a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @brief Move-constructs a `CheckedDistanceStore<T>`, transferring the shared store pointer.
     /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete so the defaulted move can
-    /// destroy and relocate the owning pointer.
+    /// destroy and relocate the handle.
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] other Store instance to move from.
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>::CheckedDistanceStore(CheckedDistanceStore&& other) noexcept = default;
 
-    /// @brief Move-assigns a `CheckedDistanceStore<T>`, transferring the validated tables.
+    /// @brief Move-assigns a `CheckedDistanceStore<T>`, transferring the shared store pointer.
     /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
     /// @param[in] other Store instance to move from.
@@ -1861,56 +2037,49 @@ namespace cxxgpr
     template <KernelScalarConcept T>
     CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(CheckedDistanceStore&& other) noexcept = default;
 
-    /// @brief Copy-constructs a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
-    /// @details Duplicates `Impl` vectors including scalar and ARD tables.
+    /// @brief Copy-constructs a `CheckedDistanceStore<T>`, sharing the immutable validated tables in $O(1)$ time.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Store instance to copy.
+    /// @param[in] other Store instance to copy from.
     template <KernelScalarConcept T>
-    CheckedDistanceStore<T>::CheckedDistanceStore(const CheckedDistanceStore& other) :
-        impl_(std::make_unique<Impl>(*other.impl_))
-    {
-    }
+    CheckedDistanceStore<T>::CheckedDistanceStore(const CheckedDistanceStore& other) noexcept = default;
 
-    /// @brief Copy-assigns a `CheckedDistanceStore<T>` with an independent deep copy of stored tables.
-    /// @details Guards against self-assignment before cloning `other.impl_`.
+    /// @brief Copy-assigns a `CheckedDistanceStore<T>`, sharing the immutable validated tables in $O(1)$ time.
+    /// @details Defined out-of-line where `CheckedDistanceStore<T>::Impl` is complete.
     /// @tparam T Storage floating-point scalar type.
-    /// @param[in] other Store instance to copy.
-    /// @return Reference to `*this`.
+    /// @param[in] other Store instance to copy from.
+    /// @return Reference to this store.
     template <KernelScalarConcept T>
-    CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(const CheckedDistanceStore& other)
-    {
-        if (this != &other)
-        {
-            impl_ = std::make_unique<Impl>(*other.impl_);
-        }
-        return *this;
-    }
+    CheckedDistanceStore<T>& CheckedDistanceStore<T>::operator=(const CheckedDistanceStore& other) noexcept = default;
 
     /// @brief Returns the row count of each stored squared-distance block.
-    /// @details Equals training point count for square stores or first point set size for cross stores.
+    /// @details Equals training point count for square stores or first point set size for cross stores,
+    /// or `0` for moved-from stores.
     /// @tparam T Storage floating-point scalar type.
     /// @return Row count `n_rows`.
     template <KernelScalarConcept T> std::size_t CheckedDistanceStore<T>::rows() const noexcept
     {
-        return impl_->n_rows;
+        return impl_ ? impl_->n_rows : 0U;
     }
 
     /// @brief Returns the column count of each stored squared-distance block.
-    /// @details Equals training point count for square stores or query point set size for cross stores.
+    /// @details Equals training point count for square stores or query point set size for cross stores,
+    /// or `0` for moved-from stores.
     /// @tparam T Storage floating-point scalar type.
     /// @return Column count `n_cols`.
     template <KernelScalarConcept T> std::size_t CheckedDistanceStore<T>::cols() const noexcept
     {
-        return impl_->n_cols;
+        return impl_ ? impl_->n_cols : 0U;
     }
 
     /// @brief Returns true if this store holds square training distance blocks.
-    /// @details Distinguishes `prepare_square` outputs from rectangular `prepare_cross` outputs.
+    /// @details Distinguishes `prepare_square` outputs from rectangular `prepare_cross` outputs; returns false when
+    /// moved-from.
     /// @tparam T Storage floating-point scalar type.
-    /// @return True when square training store, false when rectangular cross store.
+    /// @return True when square training store, false when rectangular cross store or moved-from.
     template <KernelScalarConcept T> bool CheckedDistanceStore<T>::is_square() const noexcept
     {
-        return impl_->square;
+        return impl_ && impl_->square;
     }
 
     // --- CompiledDistanceKernel<T>::Impl ---
@@ -2038,6 +2207,8 @@ namespace cxxgpr
         std::vector<SlotDescriptor> slots;
         /// @brief Count of distinct scalar distance slots referenced by the kernel.
         std::size_t num_scalar_slots = 0;
+        /// @brief Per-scalar-slot flag (`1` when a `CustomKernel` leaf reads that slot and requires dense layout).
+        std::vector<std::uint8_t> scalar_slot_needs_dense;
         /// @brief Count of distinct ARD distance slots referenced by the kernel.
         std::size_t num_ard_slots = 0;
         /// @brief Root term of the compiled and associatively flattened kernel expression tree.
@@ -2064,6 +2235,7 @@ namespace cxxgpr
             bindings(other.bindings),
             slots(other.slots),
             num_scalar_slots(other.num_scalar_slots),
+            scalar_slot_needs_dense(other.scalar_slot_needs_dense),
             num_ard_slots(other.num_ard_slots),
             root(clone_term_iterative(other.root)),
             has_coord_points(other.has_coord_points),
@@ -2438,12 +2610,14 @@ namespace cxxgpr
                             ParameterBinding{.index = next_param_idx++, .leaf_id = leaf_idx, .local_index = local}
                         );
                     }
+                    const std::size_t slot_at = find_slot_at(out.slots, s->slot);
+                    if (std::holds_alternative<CustomKernel>(s->leaf) && slot_at < out.scalar_slot_needs_dense.size())
+                    {
+                        out.scalar_slot_needs_dense[slot_at] = 1U;
+                    }
                     emit_term(
                         SuppliedScalarRef{
-                            .leaf_idx = leaf_idx,
-                            .slot_at = find_slot_at(out.slots, s->slot),
-                            .param_begin = p_begin,
-                            .param_count = p_count
+                            .leaf_idx = leaf_idx, .slot_at = slot_at, .param_begin = p_begin, .param_count = p_count
                         }
                     );
                     continue;
@@ -2545,6 +2719,10 @@ namespace cxxgpr
             const CheckedDistanceStore<T>& store, bool expect_square, MatrixRef<T> out
         ) const
         {
+            if (!store.impl_ || store.rows() == 0 || store.cols() == 0)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
             if (store.impl_->kernel_slots != slots)
             {
                 return std::unexpected(
@@ -2560,15 +2738,86 @@ namespace cxxgpr
                     )
                 );
             }
-            if (store.rows() == 0 || store.cols() == 0)
+            if (expect_square)
             {
-                return std::unexpected(GprError::empty_input());
+                for (std::size_t at = 0; at < scalar_slot_needs_dense.size(); ++at)
+                {
+                    if (scalar_slot_needs_dense[at] != 0U && at < store.impl_->scalar_is_packed.size()
+                        && store.impl_->scalar_is_packed[at] != 0U)
+                    {
+                        return std::unexpected(
+                            GprError::unsupported_kernel_operation(
+                                "packed distance store cannot serve a CustomKernel slot"
+                            )
+                        );
+                    }
+                }
             }
             if (out.rows() != store.rows() || out.cols() != store.cols())
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
             }
             return {};
+        }
+
+        /// @brief Resolves one scalar slot of a square store as either a dense `MatrixRef` or a packed lower span.
+        /// @param[in] slot_at Zero-based scalar slot index.
+        /// @param[in] store Validated square `CheckedDistanceStore`.
+        /// @return Pair of `{dense_view, packed_span}` where exactly one member is populated.
+        [[nodiscard]] static std::pair<MatrixRef<T>, std::span<const T>> scalar_square_view(
+            std::size_t slot_at, const CheckedDistanceStore<T>& store
+        ) noexcept
+        {
+            const auto& impl = *store.impl_;
+            if (slot_at < impl.scalar_borrowed.size() && impl.scalar_borrowed[slot_at].data() != nullptr)
+            {
+                return {impl.scalar_borrowed[slot_at], {}};
+            }
+            if (slot_at < impl.scalar_is_packed.size() && impl.scalar_is_packed[slot_at] != 0U)
+            {
+                return {MatrixRef<T>{}, std::span<const T>(impl.scalar_tables[slot_at])};
+            }
+            return {MatrixRef<T>(impl.scalar_tables[slot_at].data(), store.rows(), store.cols()), {}};
+        }
+
+        /// @brief Resolves one scalar slot of a rectangular cross store (borrowed caller view or owned buffer).
+        /// @param[in] slot_at Zero-based scalar slot index.
+        /// @param[in] store Validated cross `CheckedDistanceStore`.
+        /// @return Non-owning rectangular `MatrixRef<T>` over the cross distance block.
+        [[nodiscard]] static MatrixRef<T> scalar_cross_view(
+            std::size_t slot_at, const CheckedDistanceStore<T>& store
+        ) noexcept
+        {
+            const auto& impl = *store.impl_;
+            if (slot_at < impl.scalar_borrowed.size() && impl.scalar_borrowed[slot_at].data() != nullptr)
+            {
+                return impl.scalar_borrowed[slot_at];
+            }
+            return MatrixRef<T>(impl.scalar_tables[slot_at].data(), store.rows(), store.cols());
+        }
+
+        /// @brief Evaluates one scalar leaf in square mode, dispatching seamlessly across borrowed, packed, and dense
+        /// storage.
+        /// @param[in] kl Compiled leaf variant.
+        /// @param[in] slot_at Zero-based scalar slot index.
+        /// @param[in] store Validated square `CheckedDistanceStore`.
+        /// @param[out] out Output square Gram matrix view.
+        /// @param[in] uplo Active matrix triangle.
+        /// @return Empty expected on success, or GprError on evaluation error.
+        [[nodiscard]] std::expected<void, GprError> apply_scalar_square_slot(
+            const KernelLeaf& kl,
+            std::size_t slot_at,
+            const CheckedDistanceStore<T>& store,
+            MatrixMut<T> out,
+            Triangle uplo
+        ) const
+        {
+            const auto [dense, packed] = scalar_square_view(slot_at, store);
+            if (!packed.empty())
+            {
+                return detail::leaf_apply_dist_packed(kl, packed, store.rows(), out, uplo, exp_mode, false);
+            }
+            return detail::leaf_apply_dist(kl, dense, out, uplo, exp_mode, false);
         }
 
         /// @brief Checks that coordinate ARD leaves match the feature dimension @p x_dim.
@@ -2688,12 +2937,9 @@ namespace cxxgpr
             }
             for (std::size_t col = 0; col < x->cols(); ++col)
             {
-                for (std::size_t row = 0; row < x->rows(); ++row)
+                if (!detail::all_finite_simd(&(*x)(0U, col), x->rows()))
                 {
-                    if (!std::isfinite((*x)(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -2706,55 +2952,121 @@ namespace cxxgpr
         /// @details Avoids inner-loop floating-point divisions across `(n, n)` packed lower-triangular slabs.
         /// @param[in] packed Packed lower-triangular per-dimension squared distance buffer.
         /// @param[in] n Square matrix order.
-        /// @param[in] per_dim Number of packed entries per dimension (@c n*(n+1)/2).
+        /// @brief Lightweight non-owning adapter over packed or borrowed square ARD squared differences.
+        struct ArdSquareView
+        {
+            /// @brief Packed lower-triangular `(dx_d)^2` buffer when non-empty.
+            std::span<const T> packed{};
+            /// @brief Borrowed per-dimension column-major `(n, n)` views when non-empty.
+            std::span<const MatrixRef<T>> borrowed{};
+            /// @brief Square matrix order `n`.
+            std::size_t n{0U};
+            /// @brief Packed entry count per dimension `n * (n + 1) / 2`.
+            std::size_t per_dim{0U};
+
+            /// @brief Returns true when backed by borrowed per-dimension matrices.
+            /// @return True when @c borrowed is non-empty.
+            [[nodiscard]] bool is_borrowed() const noexcept { return !borrowed.empty(); }
+
+            /// @brief Reads symmetric squared difference for dimension @p dim and pair `(row, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] row Zero-based row index.
+            /// @param[in] col Zero-based column index.
+            /// @return Stored `(x_{row, dim} - x_{col, dim})^2` entry.
+            [[nodiscard]] T at(std::size_t dim, std::size_t row, std::size_t col) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    if (row < col)
+                    {
+                        std::swap(row, col);
+                    }
+                    return borrowed[dim](row, col);
+                }
+                return packed[(dim * per_dim) + packed_lower_index(n, row, col)];
+            }
+
+            /// @brief Returns contiguous pointer to lower-triangular column slice starting at `(row_begin, col)`.
+            /// @param[in] dim Zero-based feature dimension index.
+            /// @param[in] col Zero-based column index.
+            /// @param[in] row_begin Starting row index (`row_begin >= col`).
+            /// @return Pointer to contiguous column entries `[row_begin .. n - 1]`.
+            [[nodiscard]] const T* lower_col_ptr(std::size_t dim, std::size_t col, std::size_t row_begin) const noexcept
+            {
+                if (is_borrowed())
+                {
+                    return &borrowed[dim](row_begin, col);
+                }
+                const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
+                return &packed[(dim * per_dim) + col_packed_base];
+            }
+        };
+
+        /// @brief Constructs an `ArdSquareView` for ARD slot @p slot_at from @p store.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] slot_at Zero-based ARD slot index.
+        /// @return Adapter reading borrowed views if active, otherwise packed storage.
+        [[nodiscard]] static ArdSquareView make_ard_square_view(
+            const CheckedDistanceStore<T>& store, std::size_t slot_at
+        ) noexcept
+        {
+            const std::size_t n = store.rows();
+            const std::size_t per_dim = (n * (n + 1U)) / 2U;
+            const auto& impl = *store.impl_;
+            if (slot_at < impl.ard_borrowed.size() && !impl.ard_borrowed[slot_at].empty())
+            {
+                return ArdSquareView{
+                    .packed = {},
+                    .borrowed = std::span<const MatrixRef<T>>(impl.ard_borrowed[slot_at]),
+                    .n = n,
+                    .per_dim = per_dim,
+                };
+            }
+            return ArdSquareView{
+                .packed = std::span<const T>(impl.ard_data[slot_at]),
+                .borrowed = {},
+                .n = n,
+                .per_dim = per_dim,
+            };
+        }
+
+        /// @brief Computes scaled squared distance $\sum_m (\Delta x_m)^2 / \ell_m^2$ for pair `(row, col)`.
+        /// @param[in] ard Packed or borrowed ARD square view.
         /// @param[in] weights Precomputed inverse-squared lengthscales $1 / \ell_m^2$.
         /// @param[in] row Matrix row index.
         /// @param[in] col Matrix column index.
         /// @return Total ARD-weighted squared distance $s^2$.
         [[nodiscard]] static T ard_scaled_sq_packed_weights(
-            std::span<const T> packed,
-            std::size_t n,
-            std::size_t per_dim,
-            ArdWeightView<T> weights,
-            std::size_t row,
-            std::size_t col
+            const ArdSquareView& ard, ArdWeightView<T> weights, std::size_t row, std::size_t col
         ) noexcept
         {
             if (row == col)
             {
                 return T{0};
             }
-            const std::size_t p = packed_lower_index(n, row, col);
             T acc = T{0};
             for (std::size_t m = 0; m < weights.size(); ++m)
             {
-                acc += packed[(m * per_dim) + p] * weights[m];
+                acc += ard.at(m, row, col) * weights[m];
             }
             return acc;
         }
 
-        /// @brief Accumulates packed ARD lower column slices into `out` and applies `slice_fn`.
-        /// @details Requires `uplo` to be `Lower` or `Full` so packed storage is unit-stride contiguous within each
-        /// column. Mirrors lower entries to upper triangle when `Full`.
+        /// @brief Accumulates packed or borrowed ARD lower column slices into `out` and applies `slice_fn`.
+        /// @details Requires `uplo` to be `Lower` or `Full` so lower-triangular columns are unit-stride contiguous.
+        /// Mirrors lower entries to upper triangle when `Full`.
         /// @tparam SliceFn Callable invoked as `slice_fn(col_ptr, len)`.
-        /// @param[in] packed Packed lower-triangular per-dimension squared distance buffer.
-        /// @param[in] n Square matrix order.
-        /// @param[in] per_dim Number of packed entries per dimension.
+        /// @param[in] ard Packed or borrowed ARD square view.
         /// @param[in] weights Precomputed per-dimension weights.
         /// @param[out] out Destination Gram matrix.
         /// @param[in] uplo Triangle mode (`Lower` or `Full`).
         /// @param[in] slice_fn In-place transformation applied to each populated lower column slice.
         template <typename SliceFn>
         void eval_supplied_ard_lower_cols(
-            std::span<const T> packed,
-            std::size_t n,
-            std::size_t per_dim,
-            ArdWeightView<T> weights,
-            MatrixMut<T> out,
-            Triangle uplo,
-            SliceFn&& slice_fn
+            const ArdSquareView& ard, ArdWeightView<T> weights, MatrixMut<T> out, Triangle uplo, SliceFn&& slice_fn
         ) const
         {
+            const std::size_t n = ard.n;
             if (n == 0U || weights.empty())
             {
                 return;
@@ -2767,12 +3079,11 @@ namespace cxxgpr
                 {
                     return;
                 }
-                const std::size_t col_packed_base = ((col * ((2U * n) - col - 1U)) / 2U) + row_begin;
                 T* col_ptr = &out(row_begin, col);
-                detail::scale_set_slice(col_ptr, &packed[col_packed_base], weights[0U], len);
+                detail::scale_set_slice(col_ptr, ard.lower_col_ptr(0U, col, row_begin), weights[0U], len);
                 for (std::size_t m = 1U; m < weights.size(); ++m)
                 {
-                    detail::axpy_slice(col_ptr, &packed[(m * per_dim) + col_packed_base], weights[m], len);
+                    detail::axpy_slice(col_ptr, ard.lower_col_ptr(m, col, row_begin), weights[m], len);
                 }
                 out(col, col) = T{0};
                 slice_fn(col_ptr, len);
@@ -2783,7 +3094,7 @@ namespace cxxgpr
 
         /// @brief Evaluates a supplied-ARD leaf over the specified triangle of a square @c CheckedDistanceStore.
         /// @param[in] ref Compiled supplied-ARD leaf reference.
-        /// @param[in] store Pre-validated square supplied-distance store containing packed ARD slabs.
+        /// @param[in] store Pre-validated square supplied-distance store containing packed or borrowed ARD tables.
         /// @param[out] out Output matrix receiving kernel entries on @p uplo.
         /// @param[in] uplo Triangle mode specifying which entries to populate.
         void eval_supplied_ard_square(
@@ -2791,8 +3102,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -2803,7 +3113,7 @@ namespace cxxgpr
                     if (uplo != Triangle::Upper)
                     {
                         eval_supplied_ard_lower_cols(
-                            packed, n, per_dim, weights, out, uplo, [this](T* col_ptr, std::size_t len) noexcept
+                            ard, weights, out, uplo, [this](T* col_ptr, std::size_t len) noexcept
                         { detail::exp_scaled_nonpos_in_place(col_ptr, len, T{-0.5}, exp_mode); }
                         );
                         return;
@@ -2811,7 +3121,7 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         out(row, col) = eval_kernel_exp(-T{0.5} * s2, exp_mode);
                     }
                     );
@@ -2829,7 +3139,7 @@ namespace cxxgpr
                     if (uplo != Triangle::Upper)
                     {
                         eval_supplied_ard_lower_cols(
-                            packed, n, per_dim, weights, out, uplo, [this, c, nu](T* col_ptr, std::size_t len) noexcept
+                            ard, weights, out, uplo, [this, c, nu](T* col_ptr, std::size_t len) noexcept
                         { detail::matern_s2_in_place(col_ptr, len, c, nu, exp_mode); }
                         );
                         return;
@@ -2837,7 +3147,7 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         const T u = u2 > T{0} ? std::sqrt(u2) : T{0};
                         out(row, col) = eval_matern_u_d(u, nu, exp_mode);
                     }
@@ -2855,7 +3165,7 @@ namespace cxxgpr
                 if (uplo != Triangle::Upper)
                 {
                     eval_supplied_ard_lower_cols(
-                        packed, n, per_dim, weights, out, uplo, [this, alpha](T* col_ptr, std::size_t len) noexcept
+                        ard, weights, out, uplo, [this, alpha](T* col_ptr, std::size_t len) noexcept
                     { transform_rq_slice_in_place(col_ptr, len, alpha, exp_mode); }
                     );
                     return;
@@ -2863,7 +3173,7 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const T w = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T w = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     out(row, col) = eval_kernel_exp(-alpha * std::log1p(w), exp_mode);
                 }
                 );
@@ -2886,7 +3196,13 @@ namespace cxxgpr
                 return;
             }
             const std::size_t block_len = n_rows * n_cols;
-            const std::span<const T> blocks(store.impl_->ard_data[ref.slot_at]);
+            const bool use_borrowed =
+                ref.slot_at < store.impl_->ard_borrowed.size() && !store.impl_->ard_borrowed[ref.slot_at].empty();
+            const std::span<const T> blocks =
+                use_borrowed ? std::span<const T>{} : std::span<const T>(store.impl_->ard_data[ref.slot_at]);
+            const std::span<const MatrixRef<T>> borrowed_dims = use_borrowed
+                ? std::span<const MatrixRef<T>>(store.impl_->ard_borrowed[ref.slot_at])
+                : std::span<const MatrixRef<T>>{};
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             auto run_cross = [&](ArdWeightView<T> weights, auto&& slice_fn)
@@ -2900,10 +3216,13 @@ namespace cxxgpr
                     const auto col = static_cast<std::size_t>(col_s);
                     const std::size_t col_offset = col * n_rows;
                     T* col_ptr = &out(0U, col);
-                    detail::scale_set_slice(col_ptr, &blocks[col_offset], weights[0U], n_rows);
+                    const T* dim0_col = use_borrowed ? &borrowed_dims[0U](0U, col) : &blocks[col_offset];
+                    detail::scale_set_slice(col_ptr, dim0_col, weights[0U], n_rows);
                     for (std::size_t m = 1U; m < weights.size(); ++m)
                     {
-                        detail::axpy_slice(col_ptr, &blocks[(m * block_len) + col_offset], weights[m], n_rows);
+                        const T* dim_col =
+                            use_borrowed ? &borrowed_dims[m](0U, col) : &blocks[(m * block_len) + col_offset];
+                        detail::axpy_slice(col_ptr, dim_col, weights[m], n_rows);
                     }
                     slice_fn(col_ptr, n_rows);
                 }
@@ -2964,8 +3283,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -2978,9 +3296,8 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
-                        const T sp2 = packed[(local_idx * per_dim) + p] * inv_l2;
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
+                        const T sp2 = ard.at(local_idx, row, col) * inv_l2;
                         d_k(row, col) = sp2 * eval_kernel_exp_jet(-T{0.5} * s2, exp_mode).d1;
                     }
                     );
@@ -3001,15 +3318,14 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (u2 <= T{0})
                         {
                             d_k(row, col) = T{0};
                             return;
                         }
                         const T u = std::sqrt(u2);
-                        const T wp = (c * packed[(local_idx * per_dim) + p] * inv_l2) / u2;
+                        const T wp = (c * ard.at(local_idx, row, col) * inv_l2) / u2;
                         d_k(row, col) = eval_matern_grad_g1_d(u, nu, exp_mode) * wp;
                     }
                     );
@@ -3027,15 +3343,14 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const T d1_exp = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode).d1;
                     if (local_idx < alpha_idx)
                     {
                         // d(-alpha * log(1 + w)) / d(log l_p) = s_p^2 / (1 + w).
-                        const T sp2 = packed[(local_idx * per_dim) + p] * inv_l2;
+                        const T sp2 = ard.at(local_idx, row, col) * inv_l2;
                         d_k(row, col) = (sp2 / b) * d1_exp;
                     }
                     else
@@ -3068,8 +3383,7 @@ namespace cxxgpr
         ) const
         {
             const std::size_t n = store.rows();
-            const std::size_t per_dim = (n * (n + 1U)) / 2U;
-            const std::span<const T> packed(store.impl_->ard_data[ref.slot_at]);
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
             const std::span<const double> ls(cached_ls[ref.leaf_idx]);
             const auto& leaf = leaves[ref.leaf_idx];
             if (std::holds_alternative<RbfArdKernel>(leaf))
@@ -3082,10 +3396,9 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                         const ExpJet<T> jet = eval_kernel_exp_jet(-T{0.5} * s2, exp_mode);
-                        const T si2 = packed[(i * per_dim) + p] * inv_li2;
+                        const T si2 = ard.at(i, row, col) * inv_li2;
                         if (i == j)
                         {
                             // Diagonal second derivative includes -2*s_i^2*jet.d1 from d(s_i^2)/d(log l_i) = -2*s_i^2.
@@ -3093,7 +3406,7 @@ namespace cxxgpr
                         }
                         else
                         {
-                            const T sj2 = packed[(j * per_dim) + p] * inv_lj2;
+                            const T sj2 = ard.at(j, row, col) * inv_lj2;
                             d2_k(row, col) = si2 * sj2 * jet.d2;
                         }
                     }
@@ -3114,16 +3427,15 @@ namespace cxxgpr
                     visit_triangle<T>(
                         n, uplo, [&](std::size_t row, std::size_t col)
                     {
-                        const std::size_t p = packed_lower_index(n, row, col);
-                        const T u2 = c * ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                        const T u2 = c * ard_scaled_sq_packed_weights(ard, weights, row, col);
                         if (u2 <= T{0})
                         {
                             d2_k(row, col) = T{0};
                             return;
                         }
                         const T u = std::sqrt(u2);
-                        const T wi = (c * packed[(i * per_dim) + p] * inv_li2) / u2;
-                        const T wj = (c * packed[(j * per_dim) + p] * inv_lj2) / u2;
+                        const T wi = (c * ard.at(i, row, col) * inv_li2) / u2;
+                        const T wj = (c * ard.at(j, row, col) * inv_lj2) / u2;
                         // Mixed Matérn ARD Hessian splits into cross-dimension term plus diagonal -2*g1(u)*w_i.
                         T val = eval_matern_ard_cross_d(u, nu, exp_mode) * wi * wj;
                         if (i == j)
@@ -3146,8 +3458,7 @@ namespace cxxgpr
                 visit_triangle<T>(
                     n, uplo, [&](std::size_t row, std::size_t col)
                 {
-                    const std::size_t p = packed_lower_index(n, row, col);
-                    const T s2 = ard_scaled_sq_packed_weights(packed, n, per_dim, weights, row, col);
+                    const T s2 = ard_scaled_sq_packed_weights(ard, weights, row, col);
                     const T w = s2 / (T{2} * alpha);
                     const T b = T{1} + w;
                     const ExpJet<T> jet = eval_kernel_exp_jet(-alpha * std::log1p(w), exp_mode);
@@ -3162,14 +3473,14 @@ namespace cxxgpr
                     {
                         // Mixed (log alpha, log l_k) derivative: df/d(log l_k) * d_alpha(f) + w*df/(b*b).
                         const std::size_t ls_idx = (i == alpha_idx) ? j : i;
-                        const T s_ls2 = packed[(ls_idx * per_dim) + p] * weights[ls_idx];
+                        const T s_ls2 = ard.at(ls_idx, row, col) * weights[ls_idx];
                         d2_k(row, col) = (s_ls2 / b) * ((g_alpha * jet.d2) + ((w / b) * jet.d1));
                     }
                     else
                     {
                         // Lengthscale-lengthscale Hessian mixes outer chain, 1/alpha term, and diagonal -2*s_i^2/b.
-                        const T si2 = packed[(i * per_dim) + p] * weights[i];
-                        const T sj2 = packed[(j * per_dim) + p] * weights[j];
+                        const T si2 = ard.at(i, row, col) * weights[i];
+                        const T sj2 = ard.at(j, row, col) * weights[j];
                         const T sq_term = (si2 * sj2) / (b * b);
                         T val = (sq_term * jet.d2) + ((sq_term / alpha) * jet.d1);
                         if (i == j)
@@ -3295,8 +3606,9 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode), err);
+                return capture_expected(
+                    apply_scalar_square_slot(leaves[s->leaf_idx], s->slot_at, store, out, uplo), err
+                );
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -3306,9 +3618,10 @@ namespace cxxgpr
                 if (slot < ard_s2_ready.size() && per_dim > 0U && (ard_s2_buf.size() / per_dim) > slot)
                 {
                     std::span<T> out_s2 = ard_s2_buf.subspan(slot * per_dim, per_dim);
-                    const std::span<const T> packed(store.impl_->ard_data[a->slot_at]);
+                    const ArdSquareView ard = make_ard_square_view(store, a->slot_at);
                     auto res = detail::leaf_apply_ard_packed(
-                        leaves[a->leaf_idx], cached_ls[a->leaf_idx], packed, n, out, uplo, exp_mode, out_s2
+                        leaves[a->leaf_idx], cached_ls[a->leaf_idx], ard.packed, n, out, uplo, exp_mode, out_s2,
+                        ard.borrowed
                     );
                     if (res.has_value())
                     {
@@ -3409,6 +3722,56 @@ namespace cxxgpr
             {
                 return fail_empty_composite(ctx.err);
             }
+            if (!is_sum)
+            {
+                // Fold all ConstantKernel multipliers into a single scalar post-scale across varying factors.
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_term_square_rec(child, out, scratch, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (is_leaf_term(child))
+                    {
+                        if (!eval_term_square_rec(child, scratch, out, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, scratch.as_ref(), ctx.uplo);
+                    }
+                    else
+                    {
+                        if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                        {
+                            return false;
+                        }
+                        const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                        if (!eval_term_square_rec(child, buf, scratch, level_idx + 1U, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, ctx.uplo);
+                    return true;
+                }
+                scale_region(out, scale, ctx.uplo);
+                return true;
+            }
             if (!eval_term_square_rec(terms[0], out, scratch, level_idx, ctx))
             {
                 return false;
@@ -3421,14 +3784,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), ctx.uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), ctx.uplo);
-                    }
+                    add_into(out, scratch.as_ref(), ctx.uplo);
                 }
                 else
                 {
@@ -3441,14 +3797,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), ctx.uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), ctx.uplo);
-                    }
+                    add_into(out, buf.as_ref(), ctx.uplo);
                 }
             }
             return true;
@@ -3501,6 +3850,53 @@ namespace cxxgpr
                 );
             }
             return {};
+        }
+
+        /// @brief Returns true if `term` is a `CoordLeafRef` wrapping a `ConstantKernel`.
+        /// @param[in] term Compiled distance AST node.
+        /// @return True when `term` is a constant amplitude leaf.
+        [[nodiscard]] bool is_constant_term(const Term& term) const noexcept
+        {
+            if (const auto* c = std::get_if<CoordLeafRef>(&term))
+            {
+                return std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx]);
+            }
+            return false;
+        }
+
+        /// @brief Counts non-constant child factors in a product's term list.
+        /// @param[in] terms Child factors of a `ProductTerm`.
+        /// @return Number of spatially varying factors.
+        [[nodiscard]] std::size_t varying_factors(std::span<const Term> terms) const noexcept
+        {
+            std::size_t count = 0U;
+            for (const Term& t : terms)
+            {
+                if (!is_constant_term(t))
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        /// @brief Computes the scalar product of all `ConstantKernel` direct child factors in `terms`.
+        /// @param[in] terms Child factors of a `ProductTerm`.
+        /// @return Combined constant multiplier cast to `T`.
+        [[nodiscard]] T constant_scale(std::span<const Term> terms) const noexcept
+        {
+            T scale = T{1};
+            for (const Term& t : terms)
+            {
+                if (const auto* c = std::get_if<CoordLeafRef>(&t))
+                {
+                    if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
+                    {
+                        scale *= static_cast<T>(ck->constant());
+                    }
+                }
+            }
+            return scale;
         }
 
         /// @brief Computes parameter index range `[begin, end)` for any compiled distance AST node.
@@ -3620,12 +4016,15 @@ namespace cxxgpr
                 }
                 else if (const auto* prod = std::get_if<ProductTerm>(cur.node))
                 {
-                    const auto [pb, pe] = param_range_of(*cur.node);
-                    const std::size_t next_d = (pe > pb) ? (cur.depth + 1U) : cur.depth;
+                    const std::size_t varying = varying_factors(prod->terms);
+                    const std::size_t next_d = (varying >= 2U) ? (cur.depth + 1U) : cur.depth;
                     mx = std::max(mx, next_d);
                     for (const auto& child : prod->terms)
                     {
-                        dstack.push_back({&child, next_d});
+                        if (!is_constant_term(child))
+                        {
+                            dstack.push_back({&child, next_d});
+                        }
                     }
                 }
             }
@@ -3663,10 +4062,10 @@ namespace cxxgpr
             const KernelLeaf& kl = leaves[leaf_idx];
             if (meta.kind == LeafKind::SuppliedArd)
             {
-                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                const ArdSquareView ard = make_ard_square_view(store, meta.slot_at);
                 return detail::leaf_apply_ard_incremental(
-                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), out, uplo, exp_mode, ard_s2_cache,
-                    prev_ls, s2_valid, inc_steps, commit_s2
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, ard.packed, store.rows(), out, uplo, exp_mode,
+                    ard_s2_cache, prev_ls, s2_valid, inc_steps, commit_s2, ard.borrowed
                 );
             }
             if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
@@ -3682,8 +4081,7 @@ namespace cxxgpr
             }
             if (meta.kind == LeafKind::SuppliedScalar)
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[meta.slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_apply_dist(kl, dist, out, uplo, exp_mode);
+                return apply_scalar_square_slot(kl, meta.slot_at, store, out, uplo);
             }
             std::optional<GprError> err;
             const CoordLeafRef ref{
@@ -3721,10 +4119,10 @@ namespace cxxgpr
             const KernelLeaf& kl = leaves[leaf_idx];
             if (meta.kind == LeafKind::SuppliedArd)
             {
-                const std::span<const T> packed(store.impl_->ard_data[meta.slot_at]);
+                const ArdSquareView ard = make_ard_square_view(store, meta.slot_at);
                 return detail::leaf_commit_ard_s2(
-                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, packed, store.rows(), ard_s2_cache, prev_ls, s2_valid,
-                    inc_steps
+                    kl, cached_ls[leaf_idx], MatrixRef<T>{}, ard.packed, store.rows(), ard_s2_cache, prev_ls, s2_valid,
+                    inc_steps, ard.borrowed
                 );
             }
             if (meta.kind == LeafKind::Coord && meta.ard_dims > 0U)
@@ -3786,6 +4184,50 @@ namespace cxxgpr
             {
                 return fail_empty_composite(err);
             }
+            if (!is_sum)
+            {
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_combine_term_rec(child, leaf_grams, out, uplo, scratch, nested, level_idx, err))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    MatrixMut<T> rhs = scratch;
+                    std::size_t sub_level = level_idx;
+                    if (!is_leaf_term(child))
+                    {
+                        if (!ensure_nested_ok(nested, level_idx, out.rows(), out.cols(), err))
+                        {
+                            return false;
+                        }
+                        rhs = nested.level(level_idx, out.rows(), out.cols());
+                        sub_level = level_idx + 1U;
+                    }
+                    if (!eval_combine_term_rec(child, leaf_grams, rhs, uplo, scratch, nested, sub_level, err))
+                    {
+                        return false;
+                    }
+                    mul_into(out, rhs.as_ref(), uplo);
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, uplo);
+                    return true;
+                }
+                scale_region(out, scale, uplo);
+                return true;
+            }
             if (!eval_combine_term_rec(terms[0], leaf_grams, out, uplo, scratch, nested, level_idx, err))
             {
                 return false;
@@ -3807,14 +4249,7 @@ namespace cxxgpr
                 {
                     return false;
                 }
-                if (is_sum)
-                {
-                    add_into(out, rhs.as_ref(), uplo);
-                }
-                else
-                {
-                    mul_into(out, rhs.as_ref(), uplo);
-                }
+                add_into(out, rhs.as_ref(), uplo);
             }
             return true;
         }
@@ -3846,13 +4281,16 @@ namespace cxxgpr
             std::optional<GprError>& err;
         };
 
-        /// @brief Contracts one leaf derivative against `weight` without returning `std::expected` on stack.
+        /// @brief Contracts one leaf derivative against `weight` (and optionally leaf value) without `std::expected` on
+        /// stack.
         /// @param[in] term Leaf AST node to contract.
         /// @param[in] weight Incoming symmetric adjoint matrix `weight` (lower triangle read).
+        /// @param[in] need_value True when $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ is requested back.
+        /// @param[out] out_val Receives $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ when @p need_value is true.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_leaf(
-            const Term& term, const MatrixRef<T>& weight, const WalkDistCtx& ctx
+            const Term& term, const MatrixRef<T>& weight, bool need_value, double& out_val, const WalkDistCtx& ctx
         ) const
         {
             const std::size_t n = ctx.store.rows();
@@ -3860,36 +4298,52 @@ namespace cxxgpr
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
                 const KernelLeaf& kl = leaves[s->leaf_idx];
-                const MatrixRef<T> dist(ctx.store.impl_->scalar_tables[s->slot_at].data(), n, n);
+                const auto [dist, dist_packed] = scalar_square_view(s->slot_at, ctx.store);
                 const std::span<double> out_slice = ctx.out_grads.subspan(s->param_begin, s->param_count);
-                if (std::holds_alternative<CustomKernel>(kl))
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
                 {
                     for (std::size_t p = 0U; p < s->param_count; ++p)
                     {
                         if (!capture_expected(
-                                detail::leaf_grad_dist(kl, dist, ctx.scratch_a, p, Triangle::Lower, exp_mode), ctx.err
+                                custom->template term<T>().grad(dist, ctx.scratch_a, p, Triangle::Lower), ctx.err
                             ))
                         {
                             return false;
                         }
                         out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
                     }
+                    if (need_value)
+                    {
+                        if (!capture_expected(
+                                custom->template term<T>().apply(dist, ctx.scratch_a, Triangle::Lower), ctx.err
+                            ))
+                        {
+                            return false;
+                        }
+                        out_val = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+                    }
+                    else
+                    {
+                        out_val = 0.0;
+                    }
                     return true;
                 }
                 auto res = detail::leaf_iso_weighted_grads(
-                    kl, MatrixRef<T>{}, dist, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                    kl, MatrixRef<T>{}, dist, weight, ctx.scratch_a, ctx.col_partials, out_slice, need_value, exp_mode,
+                    dist_packed
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
                 const KernelLeaf& kl = leaves[a->leaf_idx];
-                const std::span<const T> packed(ctx.store.impl_->ard_data[a->slot_at]);
+                const ArdSquareView ard = make_ard_square_view(ctx.store, a->slot_at);
                 const std::span<double> out_slice = ctx.out_grads.subspan(a->param_begin, a->param_count);
                 std::span<const T> precomputed_s2{};
                 const std::size_t slot = leaf_meta[a->leaf_idx].ard_slot;
@@ -3899,14 +4353,15 @@ namespace cxxgpr
                     precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
                 }
                 auto res = detail::leaf_ard_weighted_grads(
-                    kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, packed, weight, ctx.scratch_a, ctx.col_partials,
-                    out_slice, false, exp_mode, precomputed_s2
+                    kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, ard.packed, weight, ctx.scratch_a, ctx.col_partials,
+                    out_slice, need_value, exp_mode, precomputed_s2, ard.borrowed
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             const auto& c = std::get<CoordLeafRef>(term);
@@ -3914,12 +4369,16 @@ namespace cxxgpr
             const std::span<double> out_slice = ctx.out_grads.subspan(c.param_begin, c.param_count);
             if (const auto* ck = std::get_if<ConstantKernel>(&kl))
             {
-                out_slice[0] = ck->constant() * lower_sum(weight, ctx.col_partials);
+                const double val = ck->constant() * lower_sum(weight, ctx.col_partials);
+                out_slice[0] = val;
+                out_val = val;
                 return true;
             }
             if (const auto* wk = std::get_if<WhiteKernel>(&kl))
             {
-                out_slice[0] = wk->variance() * lower_diag_sum(weight);
+                const double val = wk->variance() * lower_diag_sum(weight);
+                out_slice[0] = val;
+                out_val = val;
                 return true;
             }
             if (!ctx.x.has_value())
@@ -3937,14 +4396,15 @@ namespace cxxgpr
                     precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
                 }
                 auto res = detail::leaf_ard_weighted_grads(
-                    kl, cached_ls[c.leaf_idx], *ctx.x, {}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false,
-                    exp_mode, precomputed_s2
+                    kl, cached_ls[c.leaf_idx], *ctx.x, {}, weight, ctx.scratch_a, ctx.col_partials, out_slice,
+                    need_value, exp_mode, precomputed_s2
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
@@ -3952,13 +4412,14 @@ namespace cxxgpr
                 || std::holds_alternative<LinearKernel>(kl))
             {
                 auto res = detail::leaf_iso_weighted_grads(
-                    kl, *ctx.x, MatrixRef<T>{}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                    kl, *ctx.x, MatrixRef<T>{}, weight, ctx.scratch_a, ctx.col_partials, out_slice, need_value, exp_mode
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             const auto& custom = std::get<CustomKernel>(kl);
@@ -3978,23 +4439,38 @@ namespace cxxgpr
                 }
                 out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
             }
+            if (need_value)
+            {
+                if (!capture_expected(
+                        custom.template term<T>().apply(dist_buf.as_ref(), ctx.scratch_a, Triangle::Lower), ctx.err
+                    ))
+                {
+                    return false;
+                }
+                out_val = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+            }
+            else
+            {
+                out_val = 0.0;
+            }
             return true;
         }
 
         /// @brief Builds the effective product-child adjoint matrix out-of-line to keep recursive frames minimal.
-        /// @details Evaluates all sibling product factors other than @p skip_idx and multiplies them into a
-        /// lower-triangular scratch matrix drawn from @p ctx.work_bufs at @p work_cursor.
+        /// @details Folds constant product scale `scale` into `w_eff` and multiplies only non-constant sibling factors.
         /// @param[in] p Enclosing product term node.
         /// @param[in] skip_idx Child index whose effective adjoint matrix is being formed.
         /// @param[in] weight Incoming effective adjoint matrix applied to @p p.
+        /// @param[in] scale Product of direct `ConstantKernel` child factors in @p p.
         /// @param[in] work_cursor Buffer slot level inside @p ctx.work_bufs for the child adjoint matrix.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @param[out] out_weff Populated immutable view of the built child adjoint matrix.
-        /// @return True on success, false after recording @p ctx.err.
+        /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_dist_build_weff(
             const ProductTerm& p,
             std::size_t skip_idx,
             const MatrixRef<T>& weight,
+            T scale,
             std::size_t work_cursor,
             const WalkDistCtx& ctx,
             MatrixRef<T>& out_weff
@@ -4017,9 +4493,10 @@ namespace cxxgpr
             };
             auto w_eff = ctx.work_bufs.level(work_cursor, n, n);
             copy_triangle(w_eff, weight, Triangle::Lower);
+            scale_region(w_eff, scale, Triangle::Lower);
             for (std::size_t k = 0U; k < p.terms.size(); ++k)
             {
-                if (k == skip_idx)
+                if (k == skip_idx || is_constant_term(p.terms[k]))
                 {
                     continue;
                 }
@@ -4033,49 +4510,185 @@ namespace cxxgpr
             return true;
         }
 
-        /// @brief Recursive body of `walk_weighted_dist` propagating effective adjoint weights top-down.
+        /// @brief Computes all-constant product adjoint contractions out-of-line.
+        /// @param[in] p Product term containing only constant factors.
+        /// @param[in] weight Incoming lower-triangular adjoint weight matrix.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] ctx Shared contraction walk context.
+        /// @param[out] out_val Receives $\langle W, K_{\text{prod}} \rangle_F$.
+        CXXGPR_NOINLINE void walk_weighted_const_product(
+            const ProductTerm& p, const MatrixRef<T>& weight, T scale, const WalkDistCtx& ctx, double& out_val
+        ) const
+        {
+            const double val = static_cast<double>(scale) * lower_sum(weight, ctx.col_partials);
+            for (const Term& f : p.terms)
+            {
+                const auto [fb, fe] = param_range_of(f);
+                if (fe > fb)
+                {
+                    ctx.out_grads[fb] = val;
+                }
+            }
+            out_val = val;
+        }
+
+        /// @brief Scales a single varying factor's gradients by `scale` and populates constant sibling gradients.
+        /// @param[in] p Product term with one varying factor.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] vb Inclusive parameter index of the varying factor.
+        /// @param[in] ve Exclusive parameter index of the varying factor.
+        /// @param[in] has_const True if `p` contains constant factors.
+        /// @param[in] ctx Shared contraction walk context.
+        /// @param[in,out] val Contracted scalar value scaled in place by `scale`.
+        CXXGPR_NOINLINE void walk_weighted_finish_single_varying(
+            const ProductTerm& p,
+            T scale,
+            std::size_t vb,
+            std::size_t ve,
+            bool has_const,
+            const WalkDistCtx& ctx,
+            double& val
+        ) const
+        {
+            if (has_const && scale != T{1})
+            {
+                const auto scale_d = static_cast<double>(scale);
+                val *= scale_d;
+                for (std::size_t idx = vb; idx < ve; ++idx)
+                {
+                    ctx.out_grads[idx] *= scale_d;
+                }
+            }
+            if (has_const)
+            {
+                for (const Term& f : p.terms)
+                {
+                    if (is_constant_term(f))
+                    {
+                        const auto [fb, fe] = param_range_of(f);
+                        if (fe > fb)
+                        {
+                            ctx.out_grads[fb] = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// @brief Recursive body of `walk_weighted_dist` folding constants and propagating adjoint weights top-down.
         /// @param[in] term Compiled AST node being walked.
         /// @param[in] weight Incoming effective adjoint matrix applied to `term`.
         /// @param[in] work_cursor Next available level inside `ctx.work_bufs`.
+        /// @param[in] need_value True when caller requires $\langle \text{weight}, K_{\text{term}} \rangle_F$.
+        /// @param[out] out_val Receives $\langle \text{weight}, K_{\text{term}} \rangle_F$ when @p need_value is true.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] bool walk_weighted_dist_rec(
-            const Term& term, const MatrixRef<T>& weight, std::size_t work_cursor, const WalkDistCtx& ctx
+            const Term& term,
+            const MatrixRef<T>& weight,
+            std::size_t work_cursor,
+            bool need_value,
+            double& out_val,
+            const WalkDistCtx& ctx
         ) const
         {
             if (is_leaf_term(term))
             {
-                return walk_weighted_leaf(term, weight, ctx);
+                return walk_weighted_leaf(term, weight, need_value, out_val, ctx);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
+                double total = 0.0;
                 for (std::size_t idx = 0U; idx < s->terms.size(); ++idx)
                 {
-                    if (!walk_weighted_dist_rec(s->terms[idx], weight, work_cursor, ctx))
+                    double child_val = 0.0;
+                    if (!walk_weighted_dist_rec(s->terms[idx], weight, work_cursor, need_value, child_val, ctx))
                     {
                         return false;
                     }
+                    total += child_val;
                 }
+                out_val = total;
                 return true;
             }
             const auto& p = std::get<ProductTerm>(term);
+            const std::size_t varying = varying_factors(p.terms);
+            const T scale = constant_scale(p.terms);
+            const bool has_const = (varying < p.terms.size());
+
+            if (varying == 0U)
+            {
+                walk_weighted_const_product(p, weight, scale, ctx, out_val);
+                return true;
+            }
+
+            if (varying == 1U)
+            {
+                double val = 0.0;
+                std::size_t vb = 0U;
+                std::size_t ve = 0U;
+                for (const Term& f : p.terms)
+                {
+                    if (!is_constant_term(f))
+                    {
+                        std::tie(vb, ve) = param_range_of(f);
+                        if (!walk_weighted_dist_rec(f, weight, work_cursor, need_value || has_const, val, ctx))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+                }
+                walk_weighted_finish_single_varying(p, scale, vb, ve, has_const, ctx, val);
+                out_val = val;
+                return true;
+            }
+
+            double prod_val = 0.0;
+            bool walked_first_varying = false;
             for (std::size_t m = 0U; m < p.terms.size(); ++m)
             {
+                if (is_constant_term(p.terms[m]))
+                {
+                    continue;
+                }
                 const auto [cb, ce] = param_range_of(p.terms[m]);
-                if (cb == ce)
+                const bool want_val = !walked_first_varying && (need_value || has_const);
+                walked_first_varying = true;
+                if (cb == ce && !want_val)
                 {
                     continue;
                 }
                 MatrixRef<T> w_eff_ref{};
-                if (!walk_weighted_dist_build_weff(p, m, weight, work_cursor, ctx, w_eff_ref))
+                if (!walk_weighted_dist_build_weff(p, m, weight, scale, work_cursor, ctx, w_eff_ref))
                 {
                     return false;
                 }
-                if (!walk_weighted_dist_rec(p.terms[m], w_eff_ref, work_cursor + 1U, ctx))
+                double child_val = 0.0;
+                if (!walk_weighted_dist_rec(p.terms[m], w_eff_ref, work_cursor + 1U, want_val, child_val, ctx))
                 {
                     return false;
+                }
+                if (want_val)
+                {
+                    prod_val = child_val;
                 }
             }
+            if (has_const)
+            {
+                for (const Term& f : p.terms)
+                {
+                    if (is_constant_term(f))
+                    {
+                        const auto [fb, fe] = param_range_of(f);
+                        if (fe > fb)
+                        {
+                            ctx.out_grads[fb] = prod_val;
+                        }
+                    }
+                }
+            }
+            out_val = prod_val;
             return true;
         }
 
@@ -4102,8 +4715,10 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode), err);
+                const MatrixRef<T> dist = scalar_cross_view(s->slot_at, store);
+                return capture_expected(
+                    detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode, false), err
+                );
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -4181,6 +4796,55 @@ namespace cxxgpr
             {
                 return fail_empty_composite(ctx.err);
             }
+            if (!is_sum)
+            {
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_term_cross_rec(child, out, scratch, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (is_leaf_term(child))
+                    {
+                        if (!eval_term_cross_rec(child, scratch, out, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, scratch.as_ref(), Triangle::Full);
+                    }
+                    else
+                    {
+                        if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                        {
+                            return false;
+                        }
+                        const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                        if (!eval_term_cross_rec(child, buf, scratch, level_idx + 1U, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, buf.as_ref(), Triangle::Full);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, Triangle::Full);
+                    return true;
+                }
+                scale_region(out, scale, Triangle::Full);
+                return true;
+            }
             if (!eval_term_cross_rec(terms[0], out, scratch, level_idx, ctx))
             {
                 return false;
@@ -4193,14 +4857,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), Triangle::Full);
-                    }
+                    add_into(out, scratch.as_ref(), Triangle::Full);
                 }
                 else
                 {
@@ -4213,14 +4870,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), Triangle::Full);
-                    }
+                    add_into(out, buf.as_ref(), Triangle::Full);
                 }
             }
             return true;
@@ -4421,11 +5071,16 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(
-                    detail::leaf_grad_dist(leaves[s->leaf_idx], dist, d_k, param_idx - s->param_begin, uplo, exp_mode),
-                    err
-                );
+                const auto [dist, dist_packed] = scalar_square_view(s->slot_at, store);
+                auto res = !dist_packed.empty()
+                    ? detail::leaf_grad_dist_packed(
+                          leaves[s->leaf_idx], dist_packed, store.rows(), d_k, param_idx - s->param_begin, uplo,
+                          exp_mode
+                      )
+                    : detail::leaf_grad_dist(
+                          leaves[s->leaf_idx], dist, d_k, param_idx - s->param_begin, uplo, exp_mode
+                      );
+                return capture_expected(std::move(res), err);
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -4634,13 +5289,16 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
-                const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(
-                    detail::leaf_hess_dist(
-                        leaves[s->leaf_idx], dist, d2_k, i - s->param_begin, j - s->param_begin, uplo, exp_mode
-                    ),
-                    err
-                );
+                const auto [dist, dist_packed] = scalar_square_view(s->slot_at, store);
+                auto res = !dist_packed.empty()
+                    ? detail::leaf_hess_dist_packed(
+                          leaves[s->leaf_idx], dist_packed, store.rows(), d2_k, i - s->param_begin, j - s->param_begin,
+                          uplo, exp_mode
+                      )
+                    : detail::leaf_hess_dist(
+                          leaves[s->leaf_idx], dist, d2_k, i - s->param_begin, j - s->param_begin, uplo, exp_mode
+                      );
+                return capture_expected(std::move(res), err);
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -4921,298 +5579,697 @@ namespace cxxgpr
             return cast;
         }
 
-        /// @brief Validates a square pairwise squared-distance matrix and appends it (packed or full) to @p dst.
-        /// @details Performs a finiteness and max-magnitude scan to set @c tol = *tidy_tol * max_abs when tidy mode is
-        /// enabled, validates diagonal-zero, non-negativity, and symmetry in @c k_pair_tile blocks, repairs
-        /// tiny negative or asymmetric entries via midpoint averaging and zero clamping, and writes either packed
-        /// lower-triangular storage (@p pack_lower = @c true) or mirrored column-major storage (@p pack_lower =
-        /// @c false).
-        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @brief Checks finiteness and computes the maximum magnitude of `src` in parallel across columns.
+        /// @tparam SrcT Source scalar type (@c double or @c float).
+        /// @param[in] src Column-major matrix view.
+        /// @param[out] out_max_abs Maximum `std::abs` across all entries when all entries are finite.
+        /// @return `true` when every entry is finite, `false` otherwise.
+        template <typename SrcT>
+        [[nodiscard]] static bool scan_max_abs_and_finite(MatrixRef<SrcT> src, double& out_max_abs) noexcept
+        {
+            const std::size_t n_rows = src.rows();
+            const std::size_t n_cols = src.cols();
+            double max_abs = 0.0;
+
+            if ((n_rows * n_cols) >= 65536U)
+            {
+#ifdef _OPENMP
+                const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+                std::atomic<bool> finite_failed{false};
+#    pragma omp parallel shared(src, max_abs, finite_failed, n_rows, cols_s)
+                {
+                    double local_max = 0.0;
+#    pragma omp for schedule(static)
+                    for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+                    {
+                        if (finite_failed.load(std::memory_order_relaxed))
+                        {
+                            continue;
+                        }
+                        const auto col = static_cast<std::size_t>(col_s);
+                        const SrcT* const col_ptr = &src(0U, col);
+                        if (!detail::all_finite_simd(col_ptr, n_rows))
+                        {
+                            finite_failed.store(true, std::memory_order_relaxed);
+                            continue;
+                        }
+                        for (std::size_t row = 0U; row < n_rows; ++row)
+                        {
+                            local_max = std::max(local_max, static_cast<double>(std::abs(col_ptr[row])));
+                        }
+                    }
+#    pragma omp critical
+                    {
+                        max_abs = std::max(max_abs, local_max);
+                    }
+                }
+                if (finite_failed.load(std::memory_order_relaxed))
+                {
+                    return false;
+                }
+#else
+                for (std::size_t col = 0U; col < n_cols; ++col)
+                {
+                    const SrcT* const col_ptr = &src(0U, col);
+                    if (!detail::all_finite_simd(col_ptr, n_rows))
+                    {
+                        return false;
+                    }
+                    for (std::size_t row = 0U; row < n_rows; ++row)
+                    {
+                        max_abs = std::max(max_abs, static_cast<double>(std::abs(col_ptr[row])));
+                    }
+                }
+#endif
+                out_max_abs = max_abs;
+                return true;
+            }
+
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                const SrcT* const col_ptr = &src(0U, col);
+                if (!detail::all_finite_simd(col_ptr, n_rows))
+                {
+                    return false;
+                }
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    max_abs = std::max(max_abs, static_cast<double>(std::abs(col_ptr[row])));
+                }
+            }
+            out_max_abs = max_abs;
+            return true;
+        }
+
+        /// @brief Sequentially determines the canonical first `GprError` for a failing square distance matrix.
+        /// @details Preserves deterministic error-priority ordering (`non-finite` > `negative` > `nonzero diagonal` >
+        /// `asymmetry` > `overflow`) across arbitrary thread counts.
+        /// @tparam SrcT Source input scalar type (`double` or `float`).
+        /// @tparam DstT Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input square squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
+        /// @brief Computes and validates scaled tidy tolerance `*tidy_tol * max_abs`, rejecting double overflow.
+        /// @param[in] tidy_tol Optional relative tidy tolerance.
+        /// @param[in] max_abs Finite maximum absolute distance entry in the block.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Scaled absolute tolerance (or `0.0` when untidied), or `InvalidDistance` on overflow.
+        [[nodiscard]] static std::expected<double, GprError> compute_tidy_tol(
+            std::optional<double> tidy_tol,
+            double max_abs,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            if (!tidy_tol.has_value())
+            {
+                return 0.0;
+            }
+            const double tol = *tidy_tol * max_abs;
+            if (!std::isfinite(tol))
+            {
+                return std::unexpected(
+                    GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "tidy tolerance overflow")
+                );
+            }
+            return tol;
+        }
+
+        /// @brief Symmetrizes two nearly equal finite distance entries without intermediate `(b - a)` overflow.
+        /// @param[in] a Lower-triangle entry `(i, j)`.
+        /// @param[in] b Upper-triangle entry `(j, i)`.
+        /// @return Non-negative midpoint clamped at `0.0`.
+        [[nodiscard]] static double safe_tidy_mean(double a, double b) noexcept
+        {
+            const double mean = (a == b) ? a : ((a * 0.5) + (b * 0.5));
+            return std::max(0.0, mean);
+        }
+
+        /// @brief Sequentially determines the canonical first `GprError` for a failing square distance matrix.
+        /// @tparam SrcT Source input scalar type (`double` or `float`).
+        /// @tparam DstT Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input square squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
+        template <typename SrcT, KernelScalarConcept DstT>
+        [[nodiscard]] static GprError diagnose_square_block_error(
+            MatrixRef<SrcT> src,
+            std::optional<double> tidy_tol,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            const std::size_t n = src.rows();
+            double max_abs = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    const auto v = static_cast<double>(src(row, col));
+                    if (!std::isfinite(v))
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is not finite"
+                        );
+                    }
+                    max_abs = std::max(std::abs(v), max_abs);
+                }
+            }
+            const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+            if (!tol_exp.has_value())
+            {
+                return tol_exp.error();
+            }
+            const double tol = *tol_exp;
+            if (!tidy_tol.has_value())
+            {
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    const auto diag = static_cast<double>(src(col, col));
+                    if (diag < 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "distance is negative"
+                        );
+                    }
+                    if (diag != 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "diagonal must be zero"
+                        );
+                    }
+                }
+                for (std::size_t j0 = 0U; j0 < n; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
+                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
+                    {
+                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
+                        for (std::size_t j = j0; j < j1; ++j)
+                        {
+                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
+                            {
+                                const auto a = static_cast<double>(src(i, j));
+                                const auto b = static_cast<double>(src(j, i));
+                                if (a < 0.0)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "distance is negative"
+                                    );
+                                }
+                                if (b < 0.0)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{j, i}, "distance is negative"
+                                    );
+                                }
+                                if (a != b)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "square distance matrix is not symmetric"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = 0U; row < n; ++row)
+                    {
+                        if (static_cast<double>(src(row, col)) < -tol)
+                        {
+                            return GprError::invalid_distance(
+                                slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
+                            );
+                        }
+                    }
+                    if (std::abs(static_cast<double>(src(col, col))) > tol)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "nonzero diagonal exceeds tidy tolerance"
+                        );
+                    }
+                }
+                for (std::size_t j0 = 0U; j0 < n; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
+                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
+                    {
+                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
+                        for (std::size_t j = j0; j < j1; ++j)
+                        {
+                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
+                            {
+                                const auto a = static_cast<double>(src(i, j));
+                                const auto b = static_cast<double>(src(j, i));
+                                if (std::abs(a - b) > tol)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "asymmetry exceeds tidy tolerance"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (std::size_t j = 0U; j < n; ++j)
+            {
+                for (std::size_t i = j + 1U; i < n; ++i)
+                {
+                    const auto a = static_cast<double>(src(i, j));
+                    const auto b = static_cast<double>(src(j, i));
+                    const double repaired = safe_tidy_mean(a, b);
+                    auto cast = checked_cast<DstT>(repaired, slot_idx, dim_idx, i, j);
+                    if (!cast.has_value())
+                    {
+                        return std::move(cast).error();
+                    }
+                }
+            }
+            return GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "invalid squared distance");
+        }
+
+        /// @brief Sequentially determines the canonical first `GprError` for a failing rectangular distance matrix.
+        /// @tparam SrcT Source input scalar type (`double` or `float`).
+        /// @tparam DstT Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input rectangular squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance permitting clamping of tiny negative entries.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
+        template <typename SrcT, KernelScalarConcept DstT>
+        [[nodiscard]] static GprError diagnose_rect_block_error(
+            MatrixRef<SrcT> src,
+            std::optional<double> tidy_tol,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            const std::size_t n_rows = src.rows();
+            const std::size_t n_cols = src.cols();
+            double max_abs = 0.0;
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const auto v = static_cast<double>(src(row, col));
+                    if (!std::isfinite(v))
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is not finite"
+                        );
+                    }
+                    max_abs = std::max(std::abs(v), max_abs);
+                }
+            }
+            const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+            if (!tol_exp.has_value())
+            {
+                return tol_exp.error();
+            }
+            const double tol = *tol_exp;
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const auto v = static_cast<double>(src(row, col));
+                    if (!tidy_tol.has_value() && v < 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is negative"
+                        );
+                    }
+                    if (tidy_tol.has_value() && v < -tol)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
+                        );
+                    }
+                    auto cast = checked_cast<DstT>(std::max(0.0, v), slot_idx, dim_idx, row, col);
+                    if (!cast.has_value())
+                    {
+                        return std::move(cast).error();
+                    }
+                }
+            }
+            return GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "invalid squared distance");
+        }
+
+        /// @brief Validates a square squared-distance block and optionally writes it (packed or dense) into @p dst.
+        /// @details Uses fused SIMD/OpenMP validation and tile blocking, supports skipping value scans under
+        /// @c assume_valid, and omits destination writes when zero-copy borrowing is active.
+        /// @tparam SrcT Source input scalar type (@c double or @c float).
+        /// @tparam DstT Target storage scalar type (@c double or @c float).
         /// @param[in] src Input square squared-distance matrix view.
         /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
         /// @param[in] slot_idx Packed slot index for error diagnostics.
         /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
         /// @param[in] pack_lower If @c true, append packed lower triangle; otherwise resize and mirror full @c n x n.
-        /// @param[in,out] dst Destination storage vector populated with validated scalar entries.
+        /// @param[in] skip_value_checks If @c true, omit element validation scans (`assume_valid`).
+        /// @param[in] write_dst If @c true, allocate/populate @p dst; if @c false, validate only for zero-copy reuse.
+        /// @param[in,out] dst Destination storage vector populated when @p write_dst is true.
         /// @return Empty expected value on success, or @c GprError describing the invalid entry or overflow.
-        template <KernelScalarConcept T>
+        template <typename SrcT, KernelScalarConcept DstT>
         [[nodiscard]] static std::expected<void, GprError> validate_and_pack_square_block(
-            MatrixRef<double> src,
+            MatrixRef<SrcT> src,
             std::optional<double> tidy_tol,
             std::optional<std::size_t> slot_idx,
             std::optional<std::size_t> dim_idx,
             bool pack_lower,
-            std::vector<T>& dst
+            bool skip_value_checks,
+            bool write_dst,
+            std::vector<DstT>& dst
         )
         {
+            if (!write_dst && skip_value_checks)
+            {
+                return {};
+            }
+
             const std::size_t n = src.rows();
-            // Pass 1: verify finiteness across all n*n entries and capture max_abs to scale tidy_tol.
-            double max_abs = 0.0;
-            for (std::size_t col = 0; col < n; ++col)
+            std::size_t base_offset = 0U;
+            if (write_dst)
             {
-                for (std::size_t row = 0; row < n; ++row)
+                if (pack_lower)
                 {
-                    const double v = src(row, col);
-                    if (!std::isfinite(v))
+                    const auto per_dim_exp = packed_len(n);
+                    if (!per_dim_exp.has_value())
                     {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is not finite")
-                        );
+                        return std::unexpected(std::move(per_dim_exp).error());
                     }
-                    const double av = std::abs(v);
-                    max_abs = std::max(av, max_abs);
+                    base_offset = dst.size();
+                    dst.resize(base_offset + *per_dim_exp);
+                }
+                else
+                {
+                    const auto len_exp = column_major_len(n, n);
+                    if (!len_exp.has_value())
+                    {
+                        return std::unexpected(std::move(len_exp).error());
+                    }
+                    dst.resize(*len_exp);
                 }
             }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
 
-            if (!tidy_tol.has_value())
+            if (skip_value_checks)
             {
-                // Strict mode: require exact zero diagonal, exact non-negativity, and bitwise symmetry a == b.
-                for (std::size_t col = 0; col < n; ++col)
+                auto copy_cols = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    const double diag = src(col, col);
-                    if (diag < 0.0)
+                    for (std::size_t j = col_begin; j < col_end; ++j)
                     {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{col, col}, "distance is negative")
-                        );
+                        if (pack_lower)
+                        {
+                            const std::size_t diag_p = base_offset + packed_lower_index(n, j, j);
+                            dst[diag_p] = DstT{0};
+                            for (std::size_t i = j + 1U; i < n; ++i)
+                            {
+                                dst[diag_p + (i - j)] = static_cast<DstT>(src(i, j));
+                            }
+                        }
+                        else
+                        {
+                            dst[(j * n) + j] = DstT{0};
+                            for (std::size_t i = j + 1U; i < n; ++i)
+                            {
+                                const auto val = static_cast<DstT>(src(i, j));
+                                dst[(j * n) + i] = val;
+                                dst[(i * n) + j] = val;
+                            }
+                        }
                     }
-                    if (diag != 0.0)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{col, col}, "diagonal must be zero")
-                        );
-                    }
+                };
+                if (n >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n, 0U, copy_cols);
                 }
-                // Walk strict lower triangle in k_pair_tile x k_pair_tile blocks for cache-local transpose reads.
-                for (std::size_t j0 = 0; j0 < n; j0 += k_pair_tile)
+                else
                 {
-                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
+                    copy_cols(0U, n);
+                }
+                return {};
+            }
+
+            std::atomic<bool> failed{false};
+            double tol = 0.0;
+            if (tidy_tol.has_value())
+            {
+                double max_abs = 0.0;
+                if (!scan_max_abs_and_finite<SrcT>(src, max_abs))
+                {
+                    return std::unexpected(diagnose_square_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
+                }
+                const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+                if (!tol_exp.has_value())
+                {
+                    return std::unexpected(tol_exp.error());
+                }
+                tol = *tol_exp;
+            }
+
+            auto process_cols = [&](std::size_t col_begin, std::size_t col_end)
+            {
+                if (failed.load(std::memory_order_relaxed))
+                {
+                    return;
+                }
+                for (std::size_t j0 = col_begin; j0 < col_end; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, col_end);
+                    for (std::size_t j = j0; j < j1; ++j)
+                    {
+                        const auto diag = static_cast<double>(src(j, j));
+                        const bool diag_ok =
+                            tidy_tol.has_value() ? (std::abs(diag) <= tol) : (std::isfinite(diag) && diag == 0.0);
+                        if (!diag_ok)
+                        {
+                            failed.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                        if (write_dst)
+                        {
+                            if (pack_lower)
+                            {
+                                dst[base_offset + packed_lower_index(n, j, j)] = DstT{0};
+                            }
+                            else
+                            {
+                                dst[(j * n) + j] = DstT{0};
+                            }
+                        }
+                    }
                     for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
                     {
                         const std::size_t i1 = std::min(i0 + k_pair_tile, n);
                         for (std::size_t j = j0; j < j1; ++j)
                         {
+                            const std::size_t diag_p =
+                                (write_dst && pack_lower) ? (base_offset + packed_lower_index(n, j, j)) : 0U;
                             for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
                             {
-                                const double a = src(i, j);
-                                const double b = src(j, i);
-                                if (a < 0.0)
+                                const auto a = static_cast<double>(src(i, j));
+                                const auto b = static_cast<double>(src(j, i));
+                                DstT val{0};
+                                if (!tidy_tol.has_value())
                                 {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j}, "distance is negative"
-                                        )
-                                    );
+                                    if (!std::isfinite(a) || !std::isfinite(b) || a < 0.0 || b < 0.0 || a != b)
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                    val = (a == 0.0) ? DstT{0} : static_cast<DstT>(a);
                                 }
-                                if (b < 0.0)
+                                else
                                 {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{j, i}, "distance is negative"
-                                        )
-                                    );
+                                    if (a < -tol || b < -tol || std::abs(a - b) > tol)
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                    const double repaired = safe_tidy_mean(a, b);
+                                    val = (repaired == 0.0) ? DstT{0} : static_cast<DstT>(repaired);
                                 }
-                                if (a != b)
+                                if constexpr (!std::same_as<DstT, double>)
                                 {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j},
-                                            "square distance matrix is not symmetric"
-                                        )
-                                    );
+                                    if (!std::isfinite(val))
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                }
+                                if (write_dst)
+                                {
+                                    if (pack_lower)
+                                    {
+                                        dst[diag_p + (i - j)] = val;
+                                    }
+                                    else
+                                    {
+                                        dst[(j * n) + i] = val;
+                                        dst[(i * n) + j] = val;
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            };
+
+            if (n >= 128U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, process_cols);
             }
             else
             {
-                // Tidy mode: reject violations larger than tol = tidy_rel_tol * max_abs before clamping/symmetrizing.
-                for (std::size_t col = 0; col < n; ++col)
-                {
-                    for (std::size_t row = 0; row < n; ++row)
-                    {
-                        const double v = src(row, col);
-                        if (v < -tol)
-                        {
-                            return std::unexpected(
-                                GprError::invalid_distance(
-                                    slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
-                                )
-                            );
-                        }
-                    }
-                    if (std::abs(src(col, col)) > tol)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(
-                                slot_idx, dim_idx, std::pair{col, col}, "nonzero diagonal exceeds tidy tolerance"
-                            )
-                        );
-                    }
-                }
-                for (std::size_t j0 = 0; j0 < n; j0 += k_pair_tile)
-                {
-                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
-                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
-                    {
-                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
-                        for (std::size_t j = j0; j < j1; ++j)
-                        {
-                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
-                            {
-                                const double gap = std::abs(src(i, j) - src(j, i));
-                                if (gap > tol)
-                                {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j}, "asymmetry exceeds tidy tolerance"
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                process_cols(0U, n);
             }
 
-            // Force diagonal to zero, average off-diagonal pairs a + 0.5*(b - a) for midpoint accuracy,
-            // and clamp any values in [-tol, 0) up to 0 before checked narrowing cast to T.
-            if (pack_lower)
+            if (failed.load(std::memory_order_relaxed))
             {
-                const auto per_dim_exp = packed_len(n);
-                if (!per_dim_exp.has_value())
-                {
-                    return std::unexpected(std::move(per_dim_exp).error());
-                }
-                const std::size_t per_dim = *per_dim_exp;
-                const std::size_t base_offset = dst.size();
-                dst.resize(base_offset + per_dim);
-                for (std::size_t j = 0; j < n; ++j)
-                {
-                    const std::size_t diag_p = packed_lower_index(n, j, j);
-                    dst[base_offset + diag_p] = T{0};
-                    for (std::size_t i = j + 1U; i < n; ++i)
-                    {
-                        const double a = src(i, j);
-                        const double b = src(j, i);
-                        const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                        const double repaired = std::max(0.0, mean);
-                        auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, i, j);
-                        if (!cast.has_value())
-                        {
-                            return std::unexpected(std::move(cast).error());
-                        }
-                        dst[base_offset + packed_lower_index(n, i, j)] = *cast;
-                    }
-                }
-            }
-            else
-            {
-                const auto len_exp = column_major_len(n, n);
-                if (!len_exp.has_value())
-                {
-                    return std::unexpected(std::move(len_exp).error());
-                }
-                dst.resize(*len_exp);
-                for (std::size_t j = 0; j < n; ++j)
-                {
-                    dst[(j * n) + j] = T{0};
-                    for (std::size_t i = j + 1U; i < n; ++i)
-                    {
-                        const double a = src(i, j);
-                        const double b = src(j, i);
-                        const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                        const double repaired = std::max(0.0, mean);
-                        auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, i, j);
-                        if (!cast.has_value())
-                        {
-                            return std::unexpected(std::move(cast).error());
-                        }
-                        dst[(j * n) + i] = *cast;
-                        dst[(i * n) + j] = *cast;
-                    }
-                }
+                return std::unexpected(diagnose_square_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
             }
             return {};
         }
 
-        /// @brief Validates a rectangular cross squared-distance block and appends its column-major entries to @p dst.
-        /// @details Enforces finiteness across all entries and checks non-negativity strictly or within
-        /// @c -(*tidy_tol * max_abs), clamping tiny negative values to zero before narrowing to @p T.
-        /// @tparam T Target storage scalar type (@c double or @c float).
+        /// @brief Validates a rectangular cross squared-distance block and optionally appends entries to @p dst.
+        /// @details Runs SIMD finiteness validation and OpenMP column-parallel checking/conversion (or skips
+        /// element scans under @c assume_valid), omitting destination writes when zero-copy borrowing is active.
+        /// @tparam SrcT Source input scalar type (@c double or @c float).
+        /// @tparam DstT Target storage scalar type (@c double or @c float).
         /// @param[in] src Input rectangular squared-distance matrix view.
         /// @param[in] tidy_tol Optional relative tolerance permitting clamping of tiny negative entries.
         /// @param[in] slot_idx Packed slot index for error diagnostics.
         /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
-        /// @param[in,out] dst Destination column-major buffer to which validated entries are appended.
+        /// @param[in] skip_value_checks If @c true, omit element validation scans (`assume_valid`).
+        /// @param[in] write_dst If @c true, allocate/append @p dst; if @c false, validate only for zero-copy reuse.
+        /// @param[in,out] dst Destination column-major buffer populated when @p write_dst is true.
         /// @return Empty expected value on success, or @c GprError describing invalid entries or overflow.
-        template <KernelScalarConcept T>
+        template <typename SrcT, KernelScalarConcept DstT>
         [[nodiscard]] static std::expected<void, GprError> validate_and_copy_rect_block(
-            MatrixRef<double> src,
+            MatrixRef<SrcT> src,
             std::optional<double> tidy_tol,
             std::optional<std::size_t> slot_idx,
             std::optional<std::size_t> dim_idx,
-            std::vector<T>& dst
+            bool skip_value_checks,
+            bool write_dst,
+            std::vector<DstT>& dst
         )
         {
+            if (!write_dst && skip_value_checks)
+            {
+                return {};
+            }
+
             const std::size_t n_rows = src.rows();
             const std::size_t n_cols = src.cols();
-            // Pass 1: check finiteness across all entries and record max_abs for relative tidy tolerance.
-            double max_abs = 0.0;
-            for (std::size_t col = 0; col < n_cols; ++col)
-            {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    const double v = src(row, col);
-                    if (!std::isfinite(v))
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is not finite")
-                        );
-                    }
-                    const double av = std::abs(v);
-                    max_abs = std::max(av, max_abs);
-                }
-            }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
-            const std::size_t base_offset = dst.size();
             const auto len_exp = column_major_len(n_rows, n_cols);
             if (!len_exp.has_value())
             {
                 return std::unexpected(std::move(len_exp).error());
             }
-            dst.resize(base_offset + *len_exp);
-            // Pass 2: validate non-negativity (strict or within -tol), clamp [-tol, 0) to 0, and narrow to T.
-            for (std::size_t col = 0; col < n_cols; ++col)
+            std::size_t base_offset = 0U;
+            if (write_dst)
             {
-                for (std::size_t row = 0; row < n_rows; ++row)
+                base_offset = dst.size();
+                dst.resize(base_offset + *len_exp);
+            }
+
+            if (skip_value_checks)
+            {
+                const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (*len_exp >= 65536U)
+#endif
+                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
                 {
-                    const double v = src(row, col);
-                    if (!tidy_tol.has_value() && v < 0.0)
+                    const auto col = static_cast<std::size_t>(col_s);
+                    const SrcT* const src_col = &src(0U, col);
+                    DstT* const dst_col = &dst[base_offset + (col * n_rows)];
+                    for (std::size_t row = 0U; row < n_rows; ++row)
                     {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is negative")
-                        );
+                        dst_col[row] = static_cast<DstT>(src_col[row]);
                     }
-                    if (tidy_tol.has_value() && v < -tol)
+                }
+                return {};
+            }
+
+            double tol = 0.0;
+            if (tidy_tol.has_value())
+            {
+                double max_abs = 0.0;
+                if (!scan_max_abs_and_finite<SrcT>(src, max_abs))
+                {
+                    return std::unexpected(diagnose_rect_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
+                }
+                const auto tol_exp = compute_tidy_tol(tidy_tol, max_abs, slot_idx, dim_idx);
+                if (!tol_exp.has_value())
+                {
+                    return std::unexpected(tol_exp.error());
+                }
+                tol = *tol_exp;
+            }
+
+            std::atomic<bool> failed{false};
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (*len_exp >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                if (failed.load(std::memory_order_relaxed))
+                {
+                    continue;
+                }
+                const auto col = static_cast<std::size_t>(col_s);
+                const SrcT* const src_col = &src(0U, col);
+                if (!tidy_tol.has_value() && !detail::all_finite_simd(src_col, n_rows))
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                    continue;
+                }
+                DstT* const dst_col = write_dst ? &dst[base_offset + (col * n_rows)] : nullptr;
+                const double min_val = tidy_tol.has_value() ? -tol : 0.0;
+                bool col_bad = false;
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const auto v = static_cast<double>(src_col[row]);
+                    if (!(v >= min_val))
                     {
-                        return std::unexpected(
-                            GprError::invalid_distance(
-                                slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
-                            )
-                        );
+                        col_bad = true;
+                        break;
                     }
                     const double repaired = std::max(0.0, v);
-                    auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, row, col);
-                    if (!cast.has_value())
+                    const DstT val = (repaired == 0.0) ? DstT{0} : static_cast<DstT>(repaired);
+                    if constexpr (!std::same_as<DstT, double>)
                     {
-                        return std::unexpected(std::move(cast).error());
+                        if (!std::isfinite(val))
+                        {
+                            col_bad = true;
+                            break;
+                        }
                     }
-                    dst[base_offset + (col * n_rows) + row] = *cast;
+                    if (write_dst)
+                    {
+                        dst_col[row] = val;
+                    }
                 }
+                if (col_bad)
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
+            if (failed.load(std::memory_order_relaxed))
+            {
+                return std::unexpected(diagnose_rect_block_error<SrcT, DstT>(src, tidy_tol, slot_idx, dim_idx));
             }
             return {};
         }
@@ -5269,6 +6326,10 @@ namespace cxxgpr
             const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
         )
         {
+            if (source.assume_valid_ && source.tidy_rel_tol_.has_value())
+            {
+                return std::unexpected(GprError::invalid_config("assume_valid and tidy cannot both be enabled"));
+            }
             if (source.tidy_rel_tol_.has_value())
             {
                 const double tol = *source.tidy_rel_tol_;
@@ -5327,32 +6388,46 @@ namespace cxxgpr
                 return std::unexpected(GprError::unsupported_kernel_operation("kernel has no supplied distance slots"));
             }
 
+            const auto mat_shape = [](const auto& var)
+            {
+                return std::visit(
+                    [](const auto& mat) noexcept
+                {
+                    return std::pair{
+                        mat.data() != nullptr, detail::DistanceTableShape{mat.rows(), mat.cols()}
+                    };
+                }, var
+                );
+            };
+            const auto check_non_empty_ard = [](const auto& vec)
+            {
+                return !vec.empty() && std::ranges::all_of(vec, [](const auto& blk) noexcept {
+                    return blk.data() != nullptr && blk.rows() > 0U && blk.cols() > 0U;
+                });
+            };
+
             // Every table must be non-empty before any shape comparison.
             for (const auto& entry : source.scalars_)
             {
-                if (entry.d2.rows() == 0U || entry.d2.cols() == 0U)
+                const auto [has_data, s] = mat_shape(entry.d2);
+                if (!has_data || s.rows == 0U || s.cols == 0U)
                 {
                     return std::unexpected(GprError::empty_input());
                 }
             }
             for (const auto& entry : source.ards_)
             {
-                if (entry.d2_per_dim.empty())
+                if (!std::visit(check_non_empty_ard, entry.d2_per_dim))
                 {
                     return std::unexpected(GprError::empty_input());
                 }
-                for (const auto& blk : entry.d2_per_dim)
-                {
-                    if (blk.rows() == 0U || blk.cols() == 0U)
-                    {
-                        return std::unexpected(GprError::empty_input());
-                    }
-                }
             }
 
-            const MatrixRef<double>& first =
-                source.scalars_.empty() ? source.ards_[0].d2_per_dim[0] : source.scalars_[0].d2;
-            const detail::DistanceTableShape shape{.rows = first.rows(), .cols = first.cols()};
+            const detail::DistanceTableShape shape = !source.scalars_.empty()
+                ? mat_shape(source.scalars_[0].d2).second
+                : std::visit([](const auto& vec) noexcept {
+                return detail::DistanceTableShape{vec[0].rows(), vec[0].cols()};
+            }, source.ards_[0].d2_per_dim);
 
             // Size products of the stored blocks, using the dimension counts the kernel expects.
             const auto block_len = is_square ? packed_len(shape.rows) : column_major_len(shape.rows, shape.cols);
@@ -5383,19 +6458,25 @@ namespace cxxgpr
             }
             for (const auto& entry : source.scalars_)
             {
-                if (entry.d2.rows() != shape.rows || entry.d2.cols() != shape.cols)
+                const auto s = mat_shape(entry.d2).second;
+                if (s.rows != shape.rows || s.cols != shape.cols)
                 {
                     return std::unexpected(GprError::length_mismatch("scalar distance block shape mismatch"));
                 }
             }
             for (const auto& entry : source.ards_)
             {
-                for (const auto& blk : entry.d2_per_dim)
+                const bool matched = std::visit(
+                    [&shape](const auto& vec)
                 {
-                    if (blk.rows() != shape.rows || blk.cols() != shape.cols)
-                    {
-                        return std::unexpected(GprError::length_mismatch("ARD distance block shape mismatch"));
-                    }
+                    return std::ranges::all_of(vec, [&shape](const auto& blk) noexcept {
+                        return blk.rows() == shape.rows && blk.cols() == shape.cols;
+                    });
+                }, entry.d2_per_dim
+                );
+                if (!matched)
+                {
+                    return std::unexpected(GprError::length_mismatch("ARD distance block shape mismatch"));
                 }
             }
             return shape;
@@ -5415,23 +6496,26 @@ namespace cxxgpr
             {
                 const auto* desc = find_desc(kernel.slots(), entry.slot);
                 const std::size_t expected_dims = (desc != nullptr) ? desc->ard_dims.value_or(0U) : 0U;
-                if (entry.d2_per_dim.size() != expected_dims)
+                const std::size_t supplied_dims =
+                    std::visit([](const auto& vec) noexcept { return vec.size(); }, entry.d2_per_dim);
+                if (supplied_dims != expected_dims)
                 {
-                    return std::unexpected(GprError::dimension_mismatch(entry.d2_per_dim.size(), expected_dims));
+                    return std::unexpected(GprError::dimension_mismatch(supplied_dims, expected_dims));
                 }
             }
             return {};
         }
 
-        /// @brief Validates the table values of @p source and packs them into @p impl, reusing its capacity.
-        /// @details Requires that check_structure() and check_ard_counts() accepted @p source. Every destination
-        /// vector is cleared and refilled, so a store whose capacity already covers the shape is refilled without
-        /// allocating. On failure @p impl holds partial data and must be refilled before use.
+        /// @brief Validates (unless @c assume_valid is set) and stores/borrows tables of @p source into @p impl.
+        /// @details Requires that check_structure() and check_ard_counts() accepted @p source. Owned destination
+        /// vectors are cleared and refilled, preserving capacity across calls. When @p allow_borrow is true and a bound
+        /// entry scalar matches @c T without @c tidy(), caller views are borrowed directly without table copies.
         /// @tparam T Storage scalar type.
         /// @param[in] kernel Compiled kernel defining the expected slots.
-        /// @param[in] source Supply to validate and pack.
+        /// @param[in] source Supply to validate and pack or borrow.
         /// @param[in] shape Common table shape returned by check_structure().
         /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @param[in] allow_borrow True when transient zero-copy borrowing of compatible caller views is allowed.
         /// @param[in,out] impl Store state refilled in place.
         /// @return Empty expected, or InvalidDistance for the first invalid entry.
         template <KernelScalarConcept T>
@@ -5440,17 +6524,23 @@ namespace cxxgpr
             const DistanceSource& source,
             detail::DistanceTableShape shape,
             bool is_square,
+            bool allow_borrow,
             CheckedDistanceStore<T>::Impl& impl
         )
         {
             const auto& kslots = kernel.slots();
+            const std::size_t num_scalar = kernel.impl_->num_scalar_slots;
+            const std::size_t num_ard = kernel.impl_->num_ard_slots;
             impl.kernel_slots = kslots;
             impl.n_rows = shape.rows;
             impl.n_cols = shape.cols;
             impl.square = is_square;
-            impl.scalar_tables.resize(kernel.impl_->num_scalar_slots);
-            impl.ard_dims.resize(kernel.impl_->num_ard_slots, 0U);
-            impl.ard_data.resize(kernel.impl_->num_ard_slots);
+            impl.scalar_tables.resize(num_scalar);
+            impl.scalar_is_packed.assign(num_scalar, 0U);
+            impl.scalar_borrowed.assign(num_scalar, MatrixRef<T>{});
+            impl.ard_dims.assign(num_ard, 0U);
+            impl.ard_data.resize(num_ard);
+            impl.ard_borrowed.resize(num_ard);
             for (auto& table : impl.scalar_tables)
             {
                 table.clear();
@@ -5459,64 +6549,108 @@ namespace cxxgpr
             {
                 table.clear();
             }
+            for (auto& views : impl.ard_borrowed)
+            {
+                views.clear();
+            }
 
+            const bool skip_checks = source.assume_valid_;
             for (const auto& entry : source.scalars_)
             {
                 const auto* desc = find_desc(kslots, entry.slot);
-                if (is_square)
+                const std::size_t at = desc->at;
+                const bool pack_lower = is_square && (kernel.impl_->scalar_slot_needs_dense[at] == 0U);
+                std::expected<void, GprError> res;
+                std::visit(
+                    [&](auto mat)
                 {
-                    if (auto res = validate_and_pack_square_block<T>(
-                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, false, impl.scalar_tables[desc->at]
-                        );
-                        !res.has_value())
+                    using SrcT = std::remove_const_t<std::remove_pointer_t<decltype(mat.data())>>;
+                    const bool can_borrow = allow_borrow && !source.tidy_rel_tol_.has_value() && std::same_as<SrcT, T>;
+                    if constexpr (std::same_as<SrcT, T>)
                     {
-                        return std::unexpected(std::move(res).error());
+                        if (can_borrow)
+                        {
+                            impl.scalar_borrowed[at] = mat;
+                        }
                     }
-                }
-                else
+                    if (!can_borrow)
+                    {
+                        impl.scalar_is_packed[at] = pack_lower ? 1U : 0U;
+                    }
+                    if (is_square)
+                    {
+                        res = validate_and_pack_square_block<SrcT, T>(
+                            mat, source.tidy_rel_tol_, at, std::nullopt, pack_lower, skip_checks, !can_borrow,
+                            impl.scalar_tables[at]
+                        );
+                    }
+                    else
+                    {
+                        res = validate_and_copy_rect_block<SrcT, T>(
+                            mat, source.tidy_rel_tol_, at, std::nullopt, skip_checks, !can_borrow,
+                            impl.scalar_tables[at]
+                        );
+                    }
+                }, entry.d2
+                );
+                if (!res.has_value())
                 {
-                    if (auto res = validate_and_copy_rect_block<T>(
-                            entry.d2, source.tidy_rel_tol_, desc->at, std::nullopt, impl.scalar_tables[desc->at]
-                        );
-                        !res.has_value())
-                    {
-                        return std::unexpected(std::move(res).error());
-                    }
+                    return res;
                 }
             }
 
             for (const auto& entry : source.ards_)
             {
                 const auto* desc = find_desc(kslots, entry.slot);
-                const std::size_t dims = entry.d2_per_dim.size();
-                impl.ard_dims[desc->at] = dims;
-                // check_structure() verified that these products do not overflow.
-                const std::size_t block = is_square ? packed_len(shape.rows).value_or(0U)
-                                                    : column_major_len(shape.rows, shape.cols).value_or(0U);
-                impl.ard_data[desc->at].reserve(block * dims);
-                for (std::size_t dim = 0; dim < dims; ++dim)
+                const std::size_t at = desc->at;
+                std::expected<void, GprError> res;
+                std::visit(
+                    [&](const auto& vec)
                 {
-                    const auto& blk = entry.d2_per_dim[dim];
-                    if (is_square)
+                    using VecMat = std::decay_t<decltype(vec)>::value_type;
+                    using SrcT = std::remove_const_t<std::remove_pointer_t<decltype(vec[0].data())>>;
+                    const std::size_t dims = vec.size();
+                    impl.ard_dims[at] = dims;
+                    const bool can_borrow = allow_borrow && !source.tidy_rel_tol_.has_value() && std::same_as<SrcT, T>;
+                    if constexpr (std::same_as<VecMat, MatrixRef<T>>)
                     {
-                        if (auto res = validate_and_pack_square_block<T>(
-                                blk, source.tidy_rel_tol_, desc->at, dim, true, impl.ard_data[desc->at]
-                            );
-                            !res.has_value())
+                        if (can_borrow)
                         {
-                            return std::unexpected(std::move(res).error());
+                            impl.ard_borrowed[at].assign(vec.begin(), vec.end());
                         }
                     }
-                    else
+                    if (!can_borrow)
                     {
-                        if (auto res = validate_and_copy_rect_block<T>(
-                                blk, source.tidy_rel_tol_, desc->at, dim, impl.ard_data[desc->at]
-                            );
-                            !res.has_value())
+                        // check_structure() verified that these products do not overflow.
+                        const std::size_t block = is_square ? packed_len(shape.rows).value_or(0U)
+                                                            : column_major_len(shape.rows, shape.cols).value_or(0U);
+                        impl.ard_data[at].reserve(block * dims);
+                    }
+                    for (std::size_t dim = 0; dim < dims; ++dim)
+                    {
+                        const auto& blk = vec[dim];
+                        if (is_square)
                         {
-                            return std::unexpected(std::move(res).error());
+                            res = validate_and_pack_square_block<SrcT, T>(
+                                blk, source.tidy_rel_tol_, at, dim, true, skip_checks, !can_borrow, impl.ard_data[at]
+                            );
+                        }
+                        else
+                        {
+                            res = validate_and_copy_rect_block<SrcT, T>(
+                                blk, source.tidy_rel_tol_, at, dim, skip_checks, !can_borrow, impl.ard_data[at]
+                            );
+                        }
+                        if (!res.has_value())
+                        {
+                            return;
                         }
                     }
+                }, entry.d2_per_dim
+                );
+                if (!res.has_value())
+                {
+                    return res;
                 }
             }
             return {};
@@ -5529,10 +6663,14 @@ namespace cxxgpr
         /// @param[in] kernel Compiled mixed distance kernel defining expected slot signatures.
         /// @param[in] source Unchecked builder source supplying pairwise scalar and per-dimension ARD blocks.
         /// @param[in] is_square @c true for training square distance stores, @c false for rectangular cross stores.
+        /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
         /// @return Immutable @c CheckedDistanceStore on success, or a structured @c GprError explaining the failure.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build(
-            const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, bool is_square
+            const CompiledDistanceKernel<T>& kernel,
+            const DistanceSource& source,
+            bool is_square,
+            bool allow_borrow = false
         )
         {
             auto shape = check_structure(kernel, source, is_square);
@@ -5544,18 +6682,20 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(counts).error());
             }
-            return build_shaped(kernel, source, *shape, is_square);
+            return build_shaped(kernel, source, *shape, is_square, allow_borrow);
         }
 
         /// @brief Validates the values of @p source into @p store, reusing the store's storage when present.
         /// @details The caller has already run check_structure() and check_ard_counts() on @p source. The first
-        /// call creates the store; later calls refill it in place and allocate only when the shape grows.
+        /// call creates the store; later calls refill it in place and allocate only when the shape grows. If the
+        /// internal @c Impl is shared with another owner (@c use_count() > 1), a fresh @c Impl is allocated.
         /// @tparam T Storage scalar type.
         /// @param[in] kernel Compiled kernel defining the expected slots.
         /// @param[in] source Supply to validate and pack.
         /// @param[in] shape Common table shape returned by check_structure().
         /// @param[in] is_square True for a training (square) supply, false for a cross supply.
         /// @param[in,out] store Reusable store; holds partial data after a failure.
+        /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
         /// @return Pointer to the refilled store (never null), or InvalidDistance for the first invalid entry.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<const CheckedDistanceStore<T>*, GprError> build_into(
@@ -5563,15 +6703,17 @@ namespace cxxgpr
             const DistanceSource& source,
             detail::DistanceTableShape shape,
             bool is_square,
-            std::optional<CheckedDistanceStore<T>>& store
+            std::optional<CheckedDistanceStore<T>>& store,
+            bool allow_borrow
         )
         {
-            if (!store.has_value())
+            if (!store.has_value() || !store->impl_ || store->impl_.use_count() > 1)
             {
-                store = CheckedDistanceStore<T>(std::make_unique<typename CheckedDistanceStore<T>::Impl>());
+                store = CheckedDistanceStore<T>(std::make_shared<typename CheckedDistanceStore<T>::Impl>());
             }
             auto& filled = *store;
-            if (auto packed = pack_values(kernel, source, shape, is_square, *filled.impl_); !packed.has_value())
+            if (auto packed = pack_values(kernel, source, shape, is_square, allow_borrow, *filled.impl_);
+                !packed.has_value())
             {
                 return std::unexpected(std::move(packed).error());
             }
@@ -5584,21 +6726,262 @@ namespace cxxgpr
         /// @param[in] source Supply to validate and pack.
         /// @param[in] shape Common table shape returned by check_structure().
         /// @param[in] is_square True for a training (square) supply, false for a cross supply.
+        /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
         /// @return New store, or InvalidDistance for the first invalid entry.
         template <KernelScalarConcept T>
         [[nodiscard]] static std::expected<CheckedDistanceStore<T>, GprError> build_shaped(
             const CompiledDistanceKernel<T>& kernel,
             const DistanceSource& source,
             detail::DistanceTableShape shape,
-            bool is_square
+            bool is_square,
+            bool allow_borrow
         )
         {
-            auto impl = std::make_unique<typename CheckedDistanceStore<T>::Impl>();
-            if (auto packed = pack_values(kernel, source, shape, is_square, *impl); !packed.has_value())
+            auto impl = std::make_shared<typename CheckedDistanceStore<T>::Impl>();
+            if (auto packed = pack_values(kernel, source, shape, is_square, allow_borrow, *impl); !packed.has_value())
             {
                 return std::unexpected(std::move(packed).error());
             }
             return CheckedDistanceStore<T>(std::move(impl));
+        }
+
+        /// @brief Validates that a pre-validated @c CheckedDistanceStore matches @p kernel and square/cross mode.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled kernel defining the expected slots.
+        /// @param[in] store Pre-validated store supplied by caller.
+        /// @param[in] is_square True for square training stores, false for cross stores.
+        /// @return Store shape on success, or EmptyInput / UnsupportedKernelOperation on mismatch.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<detail::DistanceTableShape, GprError> validate_store_for_kernel(
+            const CompiledDistanceKernel<T>& kernel, const CheckedDistanceStore<T>& store, bool is_square
+        )
+        {
+            if (!store.impl_ || store.impl_->n_rows == 0U || store.impl_->n_cols == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (store.impl_->kernel_slots != kernel.slots())
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("distance store does not match this kernel's slots")
+                );
+            }
+            if (store.impl_->square != is_square)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation(
+                        is_square ? "expected square training distance store"
+                                  : "expected rectangular cross distance store"
+                    )
+                );
+            }
+            if (is_square)
+            {
+                const auto& needs_dense = kernel.impl_->scalar_slot_needs_dense;
+                for (std::size_t at = 0; at < needs_dense.size(); ++at)
+                {
+                    if (needs_dense[at] != 0U && at < store.impl_->scalar_is_packed.size()
+                        && store.impl_->scalar_is_packed[at] != 0U)
+                    {
+                        return std::unexpected(
+                            GprError::unsupported_kernel_operation(
+                                "packed distance store cannot serve a CustomKernel slot"
+                            )
+                        );
+                    }
+                }
+            }
+            return detail::DistanceTableShape{.rows = store.impl_->n_rows, .cols = store.impl_->n_cols};
+        }
+
+        /// @brief Creates an internal shared handle referencing @p store's validated state without copying buffers.
+        /// @tparam T Storage scalar type.
+        /// @param[in] store Pre-validated store to share.
+        /// @return Shared handle referencing @p store's `Impl`, or nullptr if @p store is moved-from.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::shared_ptr<const CheckedDistanceStore<T>> share_store(
+            const CheckedDistanceStore<T>& store
+        )
+        {
+            if (!store.impl_)
+            {
+                return nullptr;
+            }
+            return std::shared_ptr<const CheckedDistanceStore<T>>(new CheckedDistanceStore<T>(store.impl_));
+        }
+
+        /// @brief Widens a pre-validated float training store into an owned double store for refinement.
+        /// @param[in] kernel64 Double-precision compiled kernel matching the store's slots.
+        /// @param[in] store32 Pre-validated single-precision training store.
+        /// @return Owned double-precision store preserving packed/dense layout for @p kernel64.
+        [[nodiscard]] static std::expected<CheckedDistanceStore<double>, GprError> promote_to_double(
+            const CompiledDistanceKernel<double>& kernel64, const CheckedDistanceStore<float>& store32
+        )
+        {
+            if (!store32.impl_ || store32.impl_->n_rows == 0U || store32.impl_->n_cols == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            const auto& src = *store32.impl_;
+            if (src.kernel_slots != kernel64.slots())
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("distance store does not match this kernel's slots")
+                );
+            }
+            const std::size_t n = src.n_rows;
+            const std::size_t cols = src.n_cols;
+            auto impl = std::make_shared<CheckedDistanceStore<double>::Impl>();
+            impl->kernel_slots = src.kernel_slots;
+            impl->n_rows = n;
+            impl->n_cols = cols;
+            impl->square = src.square;
+            const std::size_t num_scalar = src.scalar_tables.size();
+            const std::size_t num_ard = src.ard_data.size();
+            impl->scalar_tables.resize(num_scalar);
+            impl->scalar_is_packed.assign(num_scalar, 0U);
+            impl->scalar_borrowed.assign(num_scalar, MatrixRef<double>{});
+            impl->ard_dims = src.ard_dims;
+            impl->ard_data.resize(num_ard);
+            impl->ard_borrowed.resize(num_ard);
+
+            for (std::size_t at = 0U; at < num_scalar; ++at)
+            {
+                const bool want_packed = src.square && (at < kernel64.impl_->scalar_slot_needs_dense.size())
+                    && (kernel64.impl_->scalar_slot_needs_dense[at] == 0U);
+                impl->scalar_is_packed[at] = want_packed ? 1U : 0U;
+                auto& dst_tbl = impl->scalar_tables[at];
+                const bool has_borrow =
+                    (at < src.scalar_borrowed.size()) && (src.scalar_borrowed[at].data() != nullptr);
+                const bool src_packed = (at < src.scalar_is_packed.size()) && (src.scalar_is_packed[at] != 0U);
+
+                if (has_borrow)
+                {
+                    const auto view = src.scalar_borrowed[at];
+                    if (want_packed)
+                    {
+                        dst_tbl.resize(packed_len(n).value_or(0U));
+                        for (std::size_t j = 0U; j < n; ++j)
+                        {
+                            const std::size_t dp = packed_lower_index(n, j, j);
+                            for (std::size_t i = j; i < n; ++i)
+                            {
+                                dst_tbl[dp + (i - j)] = static_cast<double>(view(i, j));
+                            }
+                        }
+                    }
+                    else
+                    {
+                        dst_tbl.resize(n * cols);
+                        for (std::size_t j = 0U; j < cols; ++j)
+                        {
+                            for (std::size_t i = 0U; i < n; ++i)
+                            {
+                                dst_tbl[(j * n) + i] = static_cast<double>(view(i, j));
+                            }
+                        }
+                    }
+                }
+                else if (src_packed)
+                {
+                    const auto& src_tbl = src.scalar_tables[at];
+                    if (want_packed)
+                    {
+                        dst_tbl.resize(src_tbl.size());
+                        for (std::size_t idx = 0U; idx < src_tbl.size(); ++idx)
+                        {
+                            dst_tbl[idx] = static_cast<double>(src_tbl[idx]);
+                        }
+                    }
+                    else
+                    {
+                        dst_tbl.resize(n * n);
+                        for (std::size_t j = 0U; j < n; ++j)
+                        {
+                            const std::size_t dp = packed_lower_index(n, j, j);
+                            dst_tbl[(j * n) + j] = static_cast<double>(src_tbl[dp]);
+                            for (std::size_t i = j + 1U; i < n; ++i)
+                            {
+                                const auto v = static_cast<double>(src_tbl[dp + (i - j)]);
+                                dst_tbl[(j * n) + i] = v;
+                                dst_tbl[(i * n) + j] = v;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    const auto& src_tbl = src.scalar_tables[at];
+                    if (want_packed)
+                    {
+                        dst_tbl.resize(packed_len(n).value_or(0U));
+                        for (std::size_t j = 0U; j < n; ++j)
+                        {
+                            const std::size_t dp = packed_lower_index(n, j, j);
+                            for (std::size_t i = j; i < n; ++i)
+                            {
+                                dst_tbl[dp + (i - j)] = static_cast<double>(src_tbl[(j * n) + i]);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        dst_tbl.resize(src_tbl.size());
+                        for (std::size_t idx = 0U; idx < src_tbl.size(); ++idx)
+                        {
+                            dst_tbl[idx] = static_cast<double>(src_tbl[idx]);
+                        }
+                    }
+                }
+            }
+
+            for (std::size_t at = 0U; at < num_ard; ++at)
+            {
+                auto& dst_ard = impl->ard_data[at];
+                if (at < src.ard_borrowed.size() && !src.ard_borrowed[at].empty())
+                {
+                    if (src.square)
+                    {
+                        const std::size_t per_dim = packed_len(n).value_or(0U);
+                        dst_ard.reserve(per_dim * src.ard_borrowed[at].size());
+                        for (const auto& blk : src.ard_borrowed[at])
+                        {
+                            for (std::size_t j = 0U; j < n; ++j)
+                            {
+                                for (std::size_t i = j; i < n; ++i)
+                                {
+                                    dst_ard.push_back(static_cast<double>(blk(i, j)));
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        const std::size_t blk_len = n * cols;
+                        dst_ard.reserve(blk_len * src.ard_borrowed[at].size());
+                        for (const auto& blk : src.ard_borrowed[at])
+                        {
+                            for (std::size_t j = 0U; j < cols; ++j)
+                            {
+                                for (std::size_t i = 0U; i < n; ++i)
+                                {
+                                    dst_ard.push_back(static_cast<double>(blk(i, j)));
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    const auto& src_ard = src.ard_data[at];
+                    dst_ard.resize(src_ard.size());
+                    for (std::size_t idx = 0U; idx < src_ard.size(); ++idx)
+                    {
+                        dst_ard[idx] = static_cast<double>(src_ard[idx]);
+                    }
+                }
+            }
+            return CheckedDistanceStore<double>(std::move(impl));
         }
 
         /// @brief Checks the column count of a point matrix against the coordinate leaves of @p kernel.
@@ -5829,7 +7212,8 @@ namespace cxxgpr
                 .ard_s2_ready = ard_s2_ready,
                 .err = err,
             };
-            if (!kernel.impl_->walk_weighted_dist_rec(kernel.impl_->root, weight_lower, 0U, ctx))
+            double unused_val = 0.0;
+            if (!kernel.impl_->walk_weighted_dist_rec(kernel.impl_->root, weight_lower, 0U, false, unused_val, ctx))
             {
                 return std::unexpected(
                     err.has_value() ? std::move(*err)
@@ -6048,6 +7432,7 @@ namespace cxxgpr
         auto impl = std::make_unique<typename CompiledDistanceKernel<T>::Impl>();
         impl->slots = slots();
         impl->num_scalar_slots = num_scalar_slots();
+        impl->scalar_slot_needs_dense.assign(impl->num_scalar_slots, 0U);
         impl->num_ard_slots = num_ard_slots();
         std::size_t next_param = 0;
         impl->root = CompiledDistanceKernel<T>::Impl::template compile_node<Mode>(*root_, *impl, next_param);
@@ -6547,25 +7932,63 @@ namespace cxxgpr
         {
             const auto& impl = *store.impl_;
             const std::size_t n = impl.n_rows;
-            const std::size_t packed_len = n * (n + 1U) / 2U;
+            const std::size_t per_blk = packed_len(n).value_or(0U);
             std::vector<std::vector<T>> out;
             out.reserve(impl.kernel_slots.size());
             for (const auto& slot : impl.kernel_slots)
             {
                 if (slot.ard_dims.has_value())
                 {
-                    out.push_back(impl.ard_data[slot.at]);
+                    if (slot.at < impl.ard_borrowed.size() && !impl.ard_borrowed[slot.at].empty())
+                    {
+                        std::vector<T> packed_ard;
+                        packed_ard.reserve(per_blk * impl.ard_borrowed[slot.at].size());
+                        for (const auto& view : impl.ard_borrowed[slot.at])
+                        {
+                            for (std::size_t j = 0U; j < n; ++j)
+                            {
+                                for (std::size_t i = j; i < n; ++i)
+                                {
+                                    packed_ard.push_back(view(i, j));
+                                }
+                            }
+                        }
+                        out.push_back(std::move(packed_ard));
+                    }
+                    else
+                    {
+                        out.push_back(impl.ard_data[slot.at]);
+                    }
                     continue;
                 }
-                const auto& dense = impl.scalar_tables[slot.at];
-                std::vector<T> packed_table(packed_len);
-                std::size_t pos = 0;
-                for (std::size_t j = 0; j < n; ++j)
+                if (slot.at < impl.scalar_is_packed.size() && impl.scalar_is_packed[slot.at] != 0U)
                 {
-                    // Column j contributes rows j..n-1, so positions follow j*n - j*(j-1)/2 + (i-j).
-                    for (std::size_t i = j; i < n; ++i)
+                    out.push_back(impl.scalar_tables[slot.at]);
+                    continue;
+                }
+                std::vector<T> packed_table(per_blk);
+                std::size_t pos = 0;
+                if (slot.at < impl.scalar_borrowed.size() && impl.scalar_borrowed[slot.at].data() != nullptr)
+                {
+                    const auto view = impl.scalar_borrowed[slot.at];
+                    for (std::size_t j = 0; j < n; ++j)
                     {
-                        packed_table[pos++] = dense[(j * n) + i];
+                        for (std::size_t i = j; i < n; ++i)
+                        {
+                            packed_table[pos++] = view(i, j);
+                        }
+                    }
+                }
+                else
+                {
+                    const auto& dense = impl.scalar_tables[slot.at];
+                    for (std::size_t j = 0; j < n; ++j)
+                    {
+                        // Column j contributes rows j..n-1, so positions follow j*n - j*(j-1)/2 + (i-j).
+                        for (std::size_t i = j; i < n; ++i)
+                        {
+                            packed_table[pos++] = dense[(j * n) + i];
+                        }
                     }
                 }
                 out.push_back(std::move(packed_table));
@@ -6966,6 +8389,7 @@ namespace cxxgpr
     /// @param[in] shape Shape from the structure check.
     /// @param[in] is_square True for a square store.
     /// @param[in,out] store Reusable store.
+    /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
     /// @return Pointer to the refilled store, or InvalidDistance.
     template <KernelScalarConcept T>
     std::expected<const CheckedDistanceStore<T>*, GprError> detail::fill_distance_store(
@@ -6973,10 +8397,11 @@ namespace cxxgpr
         const DistanceSource& source,
         DistanceTableShape shape,
         bool is_square,
-        std::optional<CheckedDistanceStore<T>>& store
+        std::optional<CheckedDistanceStore<T>>& store,
+        bool allow_borrow
     )
     {
-        return DistanceStoreBuilder::build_into(kernel, source, shape, is_square, store);
+        return DistanceStoreBuilder::build_into(kernel, source, shape, is_square, store, allow_borrow);
     }
 
     /// @brief Validates table values into a new store; see distance_store.hpp.
@@ -6985,13 +8410,53 @@ namespace cxxgpr
     /// @param[in] source Supply to validate.
     /// @param[in] shape Shape from the structure check.
     /// @param[in] is_square True for a square store.
+    /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
     /// @return New store, or InvalidDistance.
     template <KernelScalarConcept T>
     std::expected<CheckedDistanceStore<T>, GprError> detail::make_distance_store(
-        const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, DistanceTableShape shape, bool is_square
+        const CompiledDistanceKernel<T>& kernel,
+        const DistanceSource& source,
+        DistanceTableShape shape,
+        bool is_square,
+        bool allow_borrow
     )
     {
-        return DistanceStoreBuilder::build_shaped(kernel, source, shape, is_square);
+        return DistanceStoreBuilder::build_shaped(kernel, source, shape, is_square, allow_borrow);
+    }
+
+    /// @brief Validates a pre-validated @c CheckedDistanceStore against @p kernel; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel.
+    /// @param[in] store Pre-validated store.
+    /// @param[in] is_square True for square training stores, false for cross stores.
+    /// @return Store shape, or GprError.
+    template <KernelScalarConcept T>
+    std::expected<detail::DistanceTableShape, GprError> detail::validate_store_for_kernel(
+        const CompiledDistanceKernel<T>& kernel, const CheckedDistanceStore<T>& store, bool is_square
+    )
+    {
+        return DistanceStoreBuilder::validate_store_for_kernel(kernel, store, is_square);
+    }
+
+    /// @brief Widens a float training store to double for residual refinement; see distance_store.hpp.
+    /// @param[in] kernel64 Double-precision compiled kernel.
+    /// @param[in] store32 Single-precision store.
+    /// @return Double-precision store, or GprError.
+    std::expected<CheckedDistanceStore<double>, GprError> detail::promote_store_to_double(
+        const CompiledDistanceKernel<double>& kernel64, const CheckedDistanceStore<float>& store32
+    )
+    {
+        return DistanceStoreBuilder::promote_to_double(kernel64, store32);
+    }
+
+    /// @brief Creates an internal shared handle referencing @p store; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] store Pre-validated store.
+    /// @return Shared handle referencing @p store, or null when moved-from.
+    template <KernelScalarConcept T>
+    std::shared_ptr<const CheckedDistanceStore<T>> detail::share_distance_store(const CheckedDistanceStore<T>& store)
+    {
+        return DistanceStoreBuilder::share_store(store);
     }
 
     /// @brief Evaluates the kernel diagonal with reusable scratch; see distance_store.hpp.
@@ -7265,24 +8730,38 @@ namespace cxxgpr
         const CompiledDistanceKernel<float>&, std::size_t
     );
     template std::expected<CheckedDistanceStore<double>, GprError> detail::make_distance_store<double>(
-        const CompiledDistanceKernel<double>&, const DistanceSource&, DistanceTableShape, bool
+        const CompiledDistanceKernel<double>&, const DistanceSource&, DistanceTableShape, bool, bool
     );
     template std::expected<const CheckedDistanceStore<double>*, GprError> detail::fill_distance_store<double>(
         const CompiledDistanceKernel<double>&,
         const DistanceSource&,
         DistanceTableShape,
         bool,
-        std::optional<CheckedDistanceStore<double>>&
+        std::optional<CheckedDistanceStore<double>>&,
+        bool
     );
     template std::expected<CheckedDistanceStore<float>, GprError> detail::make_distance_store<float>(
-        const CompiledDistanceKernel<float>&, const DistanceSource&, DistanceTableShape, bool
+        const CompiledDistanceKernel<float>&, const DistanceSource&, DistanceTableShape, bool, bool
     );
     template std::expected<const CheckedDistanceStore<float>*, GprError> detail::fill_distance_store<float>(
         const CompiledDistanceKernel<float>&,
         const DistanceSource&,
         DistanceTableShape,
         bool,
-        std::optional<CheckedDistanceStore<float>>&
+        std::optional<CheckedDistanceStore<float>>&,
+        bool
+    );
+    template std::expected<detail::DistanceTableShape, GprError> detail::validate_store_for_kernel<double>(
+        const CompiledDistanceKernel<double>&, const CheckedDistanceStore<double>&, bool
+    );
+    template std::expected<detail::DistanceTableShape, GprError> detail::validate_store_for_kernel<float>(
+        const CompiledDistanceKernel<float>&, const CheckedDistanceStore<float>&, bool
+    );
+    template std::shared_ptr<const CheckedDistanceStore<double>> detail::share_distance_store<double>(
+        const CheckedDistanceStore<double>&
+    );
+    template std::shared_ptr<const CheckedDistanceStore<float>> detail::share_distance_store<float>(
+        const CheckedDistanceStore<float>&
     );
     template std::expected<void, GprError> detail::fill_distance_diag<double>(
         const CompiledDistanceKernel<double>&,

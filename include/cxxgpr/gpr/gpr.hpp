@@ -31,6 +31,7 @@
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 /// @brief Top-level namespace for the cxxgpr Gaussian process regression library.
@@ -143,13 +144,19 @@ namespace cxxgpr
             void* ctx, optimizer::TwiceDifferentiable& obj, std::span<const double> initial_params
         );
 
+        /// @brief Variant referencing either a double- or float-precision column-major point matrix.
+        using PointMatrixRef = std::variant<MatrixRef<double>, MatrixRef<float>>;
+
+        /// @brief Variant referencing either a double- or float-precision target span.
+        using TargetSpanRef = std::variant<std::span<const double>, std::span<const float>>;
+
         /// @brief Validates training inputs, fits transforms, optionally optimizes hyperparameters, and builds
         /// FittedPayload.
         /// @details Instantiated explicitly in gpr_engine.cpp for all four supported precision policies.
         /// @tparam P Precision policy determining storage, MLL, and refinement arithmetic.
         /// @param[in] cfg Borrowed trainer configuration and transform prototypes.
-        /// @param[in] x Column-major training feature matrix (n x d).
-        /// @param[in] y Training target vector of length n.
+        /// @param[in] x Column-major training feature matrix (n x d) in double or float precision.
+        /// @param[in] y Training target vector of length n in double or float precision.
         /// @param[in] optimize_cb Callback bridging to the concrete optimizer type O.
         /// @param[in,out] optimize_ctx Opaque pointer to the concrete optimizer instance.
         /// @return Constructed FittedPayload<P> on success, or GprError on validation, optimization, or Cholesky
@@ -161,8 +168,8 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<FittedPayload<P>, GprError> train_or_factor_payload(
             const TrainConfig<P>& cfg,
-            MatrixRef<double> x,
-            std::span<const double> y,
+            PointMatrixRef x,
+            TargetSpanRef y,
             OptimizeCallback optimize_cb,
             void* optimize_ctx
         );
@@ -171,7 +178,7 @@ namespace cxxgpr
         /// @details Reuses workspace buffers to avoid heap allocations once warmed up on a batch at least as large.
         /// @tparam P Precision policy matching payload.
         /// @param[in] payload Fitted model payload containing factor, weights, and transforms.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs Column-major query feature matrix (m x d) in double or float precision.
         /// @param[in] options Prediction variance options.
         /// @param[in,out] workspace Mutable query workspace resized if needed.
         /// @param[out] out Destination prediction buffers populated on the original target scale.
@@ -183,7 +190,7 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> fitted_predict_into(
             const FittedPayload<P>& payload,
-            MatrixRef<double> xs,
+            PointMatrixRef xs,
             const PredictOptions& options,
             QueryWorkspace<P>& workspace,
             Prediction<typename P::Refine>& out
@@ -194,7 +201,7 @@ namespace cxxgpr
         /// and applies inverse target scaling to both mean and covariance.
         /// @tparam P Precision policy matching payload.
         /// @param[in] payload Fitted model payload.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs Column-major query feature matrix (m x d) in double or float precision.
         /// @param[in] options Prediction variance options.
         /// @param[in,out] workspace Mutable query workspace reused for query transform and kernel blocks.
         /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
@@ -204,7 +211,7 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<PredictiveCovariance<typename P::Refine>, GprError> fitted_predict_covariance(
             const FittedPayload<P>& payload,
-            MatrixRef<double> xs,
+            PointMatrixRef xs,
             const PredictOptions& options,
             QueryWorkspace<P>& workspace
         );
@@ -213,7 +220,7 @@ namespace cxxgpr
         /// @details Uses seed and optional jitter override for predictive covariance Cholesky decomposition.
         /// @tparam P Precision policy matching payload.
         /// @param[in] payload Fitted model payload.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs Column-major query feature matrix (m x d) in double or float precision.
         /// @param[in] n_draws Number of posterior draws to generate.
         /// @param[in] seed Deterministic PRNG seed.
         /// @param[in] options Prediction variance options.
@@ -227,7 +234,7 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<std::vector<typename P::Refine>, GprError> fitted_sample(
             const FittedPayload<P>& payload,
-            MatrixRef<double> xs,
+            PointMatrixRef xs,
             std::size_t n_draws,
             std::uint64_t seed,
             const PredictOptions& options,
@@ -284,53 +291,49 @@ namespace cxxgpr
 
         extern template std::expected<FittedPayload<DoublePrecision>, GprError> train_or_factor_payload<
             DoublePrecision>(
-            const TrainConfig<DoublePrecision>&, MatrixRef<double>, std::span<const double>, OptimizeCallback, void*
+            const TrainConfig<DoublePrecision>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
         );
         extern template std::expected<FittedPayload<SinglePrecision>, GprError> train_or_factor_payload<
             SinglePrecision>(
-            const TrainConfig<SinglePrecision>&, MatrixRef<double>, std::span<const double>, OptimizeCallback, void*
+            const TrainConfig<SinglePrecision>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
         );
         extern template std::expected<FittedPayload<MixedPrecision<PromoteStorage>>, GprError> train_or_factor_payload<
             MixedPrecision<PromoteStorage>>(
-            const TrainConfig<MixedPrecision<PromoteStorage>>&,
-            MatrixRef<double>,
-            std::span<const double>,
-            OptimizeCallback,
-            void*
+            const TrainConfig<MixedPrecision<PromoteStorage>>&, PointMatrixRef, TargetSpanRef, OptimizeCallback, void*
         );
         extern template std::expected<FittedPayload<MixedPrecision<ReevaluateKernel>>, GprError>
             train_or_factor_payload<MixedPrecision<ReevaluateKernel>>(
                 const TrainConfig<MixedPrecision<ReevaluateKernel>>&,
-                MatrixRef<double>,
-                std::span<const double>,
+                PointMatrixRef,
+                TargetSpanRef,
                 OptimizeCallback,
                 void*
             );
 
         extern template std::expected<void, GprError> fitted_predict_into<DoublePrecision>(
             const FittedPayload<DoublePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<DoublePrecision>&,
             Prediction<double>&
         );
         extern template std::expected<void, GprError> fitted_predict_into<SinglePrecision>(
             const FittedPayload<SinglePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<SinglePrecision>&,
             Prediction<float>&
         );
         extern template std::expected<void, GprError> fitted_predict_into<MixedPrecision<PromoteStorage>>(
             const FittedPayload<MixedPrecision<PromoteStorage>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<MixedPrecision<PromoteStorage>>&,
             Prediction<double>&
         );
         extern template std::expected<void, GprError> fitted_predict_into<MixedPrecision<ReevaluateKernel>>(
             const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<MixedPrecision<ReevaluateKernel>>&,
             Prediction<double>&
@@ -339,34 +342,34 @@ namespace cxxgpr
         extern template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<
             DoublePrecision>(
             const FittedPayload<DoublePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<DoublePrecision>&
         );
         extern template std::expected<PredictiveCovariance<float>, GprError> fitted_predict_covariance<SinglePrecision>(
             const FittedPayload<SinglePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<SinglePrecision>&
         );
         extern template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<
             MixedPrecision<PromoteStorage>>(
             const FittedPayload<MixedPrecision<PromoteStorage>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<MixedPrecision<PromoteStorage>>&
         );
         extern template std::expected<PredictiveCovariance<double>, GprError> fitted_predict_covariance<
             MixedPrecision<ReevaluateKernel>>(
             const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             const PredictOptions&,
             QueryWorkspace<MixedPrecision<ReevaluateKernel>>&
         );
 
         extern template std::expected<std::vector<double>, GprError> fitted_sample<DoublePrecision>(
             const FittedPayload<DoublePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             std::size_t,
             std::uint64_t,
             const PredictOptions&,
@@ -375,7 +378,7 @@ namespace cxxgpr
         );
         extern template std::expected<std::vector<float>, GprError> fitted_sample<SinglePrecision>(
             const FittedPayload<SinglePrecision>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             std::size_t,
             std::uint64_t,
             const PredictOptions&,
@@ -384,7 +387,7 @@ namespace cxxgpr
         );
         extern template std::expected<std::vector<double>, GprError> fitted_sample<MixedPrecision<PromoteStorage>>(
             const FittedPayload<MixedPrecision<PromoteStorage>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             std::size_t,
             std::uint64_t,
             const PredictOptions&,
@@ -393,7 +396,7 @@ namespace cxxgpr
         );
         extern template std::expected<std::vector<double>, GprError> fitted_sample<MixedPrecision<ReevaluateKernel>>(
             const FittedPayload<MixedPrecision<ReevaluateKernel>>&,
-            MatrixRef<double>,
+            PointMatrixRef,
             std::size_t,
             std::uint64_t,
             const PredictOptions&,
@@ -664,7 +667,40 @@ namespace cxxgpr
             MatrixRef<double> x, std::span<const double> y
         ) const
         {
-            return run_impl(x, y, /*optimize=*/true);
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/true);
+        }
+
+        /// @brief Fits transforms and optimizes hyperparameters on single-precision features and targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            MatrixRef<float> x, std::span<const float> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/true);
+        }
+
+        /// @brief Fits transforms and optimizes hyperparameters on single-precision features and double targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Double training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            MatrixRef<float> x, std::span<const double> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/true);
+        }
+
+        /// @brief Fits transforms and optimizes hyperparameters on double features and single-precision targets.
+        /// @param[in] x Column-major double training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            MatrixRef<double> x, std::span<const float> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/true);
         }
 
         /// @brief Fits transforms and optimizes hyperparameters from a raw column-major feature span.
@@ -692,6 +728,60 @@ namespace cxxgpr
             return fit(*view, y);
         }
 
+        /// @brief Fits transforms and optimizes hyperparameters from single-precision feature and target spans.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return fit(*view, y);
+        }
+
+        /// @brief Fits transforms and optimizes hyperparameters from float feature span and double targets.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Double training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return fit(*view, y);
+        }
+
+        /// @brief Fits transforms and optimizes hyperparameters from double feature span and float targets.
+        /// @param[in] x_col_major Contiguous column-major double feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> fit(
+            std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return fit(*view, y);
+        }
+
         /// @brief Fits transforms and factors the exact system at the current hyperparameters without running
         /// optimization iterations, leaving *this unchanged on failure.
         /// @details Computes Cholesky factor L, refined weights alpha, and MLL at the initial parameters.
@@ -706,7 +796,40 @@ namespace cxxgpr
             MatrixRef<double> x, std::span<const double> y
         ) const
         {
-            return run_impl(x, y, /*optimize=*/false);
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/false);
+        }
+
+        /// @brief Fits transforms and factors at current hyperparameters on float features and float targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            MatrixRef<float> x, std::span<const float> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/false);
+        }
+
+        /// @brief Fits transforms and factors at current hyperparameters on float features and double targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Double training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            MatrixRef<float> x, std::span<const double> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/false);
+        }
+
+        /// @brief Fits transforms and factors at current hyperparameters on double features and float targets.
+        /// @param[in] x Column-major double training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            MatrixRef<double> x, std::span<const float> y
+        ) const
+        {
+            return run_impl(detail::PointMatrixRef(x), detail::TargetSpanRef(y), /*optimize=*/false);
         }
 
         /// @brief Fits transforms and factors the exact system from a raw column-major feature span.
@@ -724,6 +847,60 @@ namespace cxxgpr
         /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
             std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return factor(*view, y);
+        }
+
+        /// @brief Fits transforms and factors from single-precision feature and target spans.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return factor(*view, y);
+        }
+
+        /// @brief Fits transforms and factors from float feature span and double targets.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Double training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return factor(*view, y);
+        }
+
+        /// @brief Fits transforms and factors from double feature span and float targets.
+        /// @param[in] x_col_major Contiguous column-major double feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly constructed FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> factor(
+            std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
         ) const
         {
             auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
@@ -773,7 +950,7 @@ namespace cxxgpr
         /// @param[in] optimize True to optimize hyperparameters (ignored when O is optimizer::Fixed).
         /// @return Constructed FittedGpr on success, or GprError leaving *this unchanged.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> run_impl(
-            MatrixRef<double> x, std::span<const double> y, bool optimize
+            detail::PointMatrixRef x, detail::TargetSpanRef y, bool optimize
         ) const
         {
             // Assemble borrowed configuration without mutating any member on *this.
@@ -915,6 +1092,17 @@ namespace cxxgpr
             return predict_with(xs, options);
         }
 
+        /// @brief Computes posterior mean and diagonal variance for single-precision query features.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] options Optional prediction variance controls.
+        /// @return Prediction<Refine> on the original target scale, or GprError on validation failure.
+        [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
+            MatrixRef<float> xs, const PredictOptions& options = {}
+        ) const
+        {
+            return predict_with(xs, options);
+        }
+
         /// @brief Computes posterior mean and diagonal variance from a raw column-major query span.
         /// @details Checks the length of xs against n_rows * n_cols, wraps it as a MatrixRef<double> with leading
         /// dimension n_rows, and calls predict_with().
@@ -931,6 +1119,24 @@ namespace cxxgpr
         /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
+        ) const
+        {
+            auto view = detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict_with(*view, options);
+        }
+
+        /// @brief Computes posterior mean and diagonal variance from a raw float column-major query span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] options Optional prediction variance controls.
+        /// @return Prediction<Refine> on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
+            std::span<const float> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
         {
             auto view = detail::matrix_view_from_span(xs, n_rows, n_cols);
@@ -963,6 +1169,22 @@ namespace cxxgpr
             return out;
         }
 
+        /// @brief Computes posterior mean and diagonal variance with explicit PredictOptions on float queries.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
+        /// @return Prediction<Refine> on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict_with(
+            MatrixRef<float> xs, const PredictOptions& options
+        ) const
+        {
+            Prediction<Refine> out;
+            if (auto res = predict_with_into(xs, options, out); !res.has_value())
+            {
+                return std::unexpected(std::move(res).error());
+            }
+            return out;
+        }
+
         /// @ingroup cxxgpr_gpr
         /// @brief Computes posterior mean and diagonal variance into out (zero heap allocations after warmup
         /// on matching query shape).
@@ -981,6 +1203,20 @@ namespace cxxgpr
         /// @see cxxgpr::predict_covariance_into()
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<Refine>& out, const PredictOptions& options = {}
+        ) const
+        {
+            return predict_with_into(xs, options, out);
+        }
+
+        /// @brief Computes posterior mean and diagonal variance into out for single-precision query features.
+        /// @details Widens @p xs into @c QueryWorkspace::query_xs so repeated calls with at most @p m queries
+        /// perform zero heap allocations after warm-up.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
+        /// @param[in] options Optional prediction variance controls.
+        /// @return Empty expected on success, or GprError on validation or transform failure.
+        [[nodiscard]] std::expected<void, GprError> predict_into(
+            MatrixRef<float> xs, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
         {
             return predict_with_into(xs, options, out);
@@ -1017,6 +1253,29 @@ namespace cxxgpr
             return predict_with_into(*view, options, out);
         }
 
+        /// @brief Computes posterior mean and diagonal variance into out from a raw float column-major span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
+        /// @param[in] options Optional prediction variance controls.
+        /// @return Empty expected on success, or GprError on validation or transform failure.
+        [[nodiscard]] std::expected<void, GprError> predict_into(
+            std::span<const float> xs,
+            std::size_t n_rows,
+            std::size_t n_cols,
+            Prediction<Refine>& out,
+            const PredictOptions& options = {}
+        ) const
+        {
+            auto view = detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict_with_into(*view, options, out);
+        }
+
         /// @brief Computes posterior mean and diagonal variance into out with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_predict_into<P>() using mutable query_ws_.
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
@@ -1031,7 +1290,19 @@ namespace cxxgpr
             MatrixRef<double> xs, const PredictOptions& options, Prediction<Refine>& out
         ) const
         {
-            return detail::fitted_predict_into<P>(payload_, xs, options, query_ws_, out);
+            return detail::fitted_predict_into<P>(payload_, detail::PointMatrixRef(xs), options, query_ws_, out);
+        }
+
+        /// @brief Computes posterior mean and diagonal variance into out with explicit PredictOptions on floats.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
+        /// @param[out] out Destination prediction buffers populated on the original target scale.
+        /// @return Empty expected on success, or GprError on validation or transform failure.
+        [[nodiscard]] std::expected<void, GprError> predict_with_into(
+            MatrixRef<float> xs, const PredictOptions& options, Prediction<Refine>& out
+        ) const
+        {
+            return detail::fitted_predict_into<P>(payload_, detail::PointMatrixRef(xs), options, query_ws_, out);
         }
 
         /// @brief Computes posterior mean and full m x m posterior covariance matrix on the original scale.
@@ -1044,6 +1315,17 @@ namespace cxxgpr
         /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
             MatrixRef<double> xs, const PredictOptions& options = {}
+        ) const
+        {
+            return predict_covariance_with(xs, options);
+        }
+
+        /// @brief Computes posterior mean and full m x m posterior covariance for float query features.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] options Optional prediction variance controls.
+        /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
+            MatrixRef<float> xs, const PredictOptions& options = {}
         ) const
         {
             return predict_covariance_with(xs, options);
@@ -1074,6 +1356,24 @@ namespace cxxgpr
             return predict_covariance_with(*view, options);
         }
 
+        /// @brief Computes posterior mean and full m x m posterior covariance from a raw float span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] options Optional prediction variance controls.
+        /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
+            std::span<const float> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
+        ) const
+        {
+            auto view = detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict_covariance_with(*view, options);
+        }
+
         /// @brief Computes posterior mean and full m x m posterior covariance with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_predict_covariance<P>() using mutable query_ws_.
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
@@ -1086,7 +1386,18 @@ namespace cxxgpr
             MatrixRef<double> xs, const PredictOptions& options
         ) const
         {
-            return detail::fitted_predict_covariance<P>(payload_, xs, options, query_ws_);
+            return detail::fitted_predict_covariance<P>(payload_, detail::PointMatrixRef(xs), options, query_ws_);
+        }
+
+        /// @brief Computes posterior mean and full m x m posterior covariance with explicit PredictOptions on floats.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] options Prediction variance controls.
+        /// @return PredictiveCovariance<Refine> on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance_with(
+            MatrixRef<float> xs, const PredictOptions& options
+        ) const
+        {
+            return detail::fitted_predict_covariance<P>(payload_, detail::PointMatrixRef(xs), options, query_ws_);
         }
 
         /// @brief Draws n_draws deterministic posterior samples on the original target scale.
@@ -1103,6 +1414,24 @@ namespace cxxgpr
         /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
             MatrixRef<double> xs,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {},
+            std::optional<JitterPolicy> jitter = std::nullopt
+        ) const
+        {
+            return sample_with(xs, n_draws, seed, options, std::move(jitter));
+        }
+
+        /// @brief Draws n_draws deterministic posterior samples on single-precision query features.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Optional prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
+        /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
+            MatrixRef<float> xs,
             std::size_t n_draws,
             std::uint64_t seed,
             const PredictOptions& options = {},
@@ -1147,6 +1476,33 @@ namespace cxxgpr
             return sample_with(*view, n_draws, seed, options, std::move(jitter));
         }
 
+        /// @brief Draws n_draws deterministic posterior samples from a raw float column-major query span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must equal n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Optional prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
+        /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
+            std::span<const float> xs,
+            std::size_t n_rows,
+            std::size_t n_cols,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {},
+            std::optional<JitterPolicy> jitter = std::nullopt
+        ) const
+        {
+            auto view = detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return sample_with(*view, n_draws, seed, options, std::move(jitter));
+        }
+
         /// @brief Draws n_draws deterministic posterior samples with explicit PredictOptions.
         /// @details Forwards directly to detail::fitted_sample<P>() using mutable query_ws_.
         /// @param[in] xs Column-major query feature matrix (m x n_features()).
@@ -1167,7 +1523,29 @@ namespace cxxgpr
             std::optional<JitterPolicy> jitter = std::nullopt
         ) const
         {
-            return detail::fitted_sample<P>(payload_, xs, n_draws, seed, options, query_ws_, std::move(jitter));
+            return detail::fitted_sample<P>(
+                payload_, detail::PointMatrixRef(xs), n_draws, seed, options, query_ws_, std::move(jitter)
+            );
+        }
+
+        /// @brief Draws n_draws deterministic posterior samples with explicit PredictOptions on float queries.
+        /// @param[in] xs Column-major float query feature matrix (m x n_features()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
+        /// @return Column-major sample matrix (m x n_draws) on the original scale, or GprError on failure.
+        [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample_with(
+            MatrixRef<float> xs,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options,
+            std::optional<JitterPolicy> jitter = std::nullopt
+        ) const
+        {
+            return detail::fitted_sample<P>(
+                payload_, detail::PointMatrixRef(xs), n_draws, seed, options, query_ws_, std::move(jitter)
+            );
         }
 
         /// @brief Computes closed-form Leave-One-Out predictive mean and variance on the original target
@@ -1221,6 +1599,39 @@ namespace cxxgpr
             return into_trainer().fit(x, y);
         }
 
+        /// @brief Re-optimizes a new model on float features and float targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            MatrixRef<float> x, std::span<const float> y
+        ) const
+        {
+            return into_trainer().fit(x, y);
+        }
+
+        /// @brief Re-optimizes a new model on float features and double targets.
+        /// @param[in] x Column-major float training feature matrix (n x d).
+        /// @param[in] y Double training target vector of length n.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            MatrixRef<float> x, std::span<const double> y
+        ) const
+        {
+            return into_trainer().fit(x, y);
+        }
+
+        /// @brief Re-optimizes a new model on double features and float targets.
+        /// @param[in] x Column-major double training feature matrix (n x d).
+        /// @param[in] y Float training target vector of length n.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            MatrixRef<double> x, std::span<const float> y
+        ) const
+        {
+            return into_trainer().fit(x, y);
+        }
+
         /// @brief Re-optimizes a new model from a raw column-major feature span.
         /// @details Checks the length of x_col_major against n_rows * n_cols, wraps it as a MatrixRef<double> with
         /// leading dimension n_rows, and calls refit().
@@ -1236,6 +1647,60 @@ namespace cxxgpr
         /// @retval GprErrorCode::CholeskyFailed When Cholesky decomposition fails after jitter retries.
         [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
             std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return refit(*view, y);
+        }
+
+        /// @brief Re-optimizes a new model from single-precision feature and target spans.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return refit(*view, y);
+        }
+
+        /// @brief Re-optimizes a new model from float feature span and double targets.
+        /// @param[in] x_col_major Contiguous column-major float feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Double training target vector of length n_rows.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            std::span<const float> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        ) const
+        {
+            auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return refit(*view, y);
+        }
+
+        /// @brief Re-optimizes a new model from double feature span and float targets.
+        /// @param[in] x_col_major Contiguous column-major double feature buffer of length n_rows * n_cols.
+        /// @param[in] n_rows Number of training samples n.
+        /// @param[in] n_cols Number of feature columns d.
+        /// @param[in] y Float training target vector of length n_rows.
+        /// @return Newly fitted FittedGpr on success, or GprError leaving *this unchanged.
+        [[nodiscard]] std::expected<FittedGpr<O, P, K>, GprError> refit(
+            std::span<const double> x_col_major, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
         ) const
         {
             auto view = detail::training_view_from_span(x_col_major, n_rows, n_cols, y);

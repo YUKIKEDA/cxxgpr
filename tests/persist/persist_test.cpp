@@ -2450,4 +2450,84 @@ namespace
         EXPECT_TRUE(cxxgpr::persist::LoadedGpr::load(dir_with_factor.path, reg).has_value());
     }
 
+    /// @brief Verifies LoadedGpr single-precision query overloads match widened double queries and allocate zero bytes.
+    /// @details Confirms predict(), predict_into(), predict_covariance(), and sample() across MatrixRef<float> and
+    /// checked float spans produce results bit-identical to double-widened inputs and pass NoAllocationScope.
+    TEST(PersistModelsTest, LoadedGprFloatQueriesMatchDoubleAndAllocateZeroOnPredictInto)
+    {
+        // Spec: FMT-08, DES-16
+        const std::vector<double> x_train{0.0, 0.3, 0.7, 1.1, 1.5, 1.9, 0.2, 0.8, 0.4, 1.2, 0.6, 1.4};
+        const std::vector<double> y_train{1.0, 1.2, 0.85, 0.4, 0.1, 0.25};
+        constexpr std::size_t n = 6U;
+        constexpr std::size_t d = 2U;
+
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.1).value())
+            * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.9).value());
+        const auto fitted = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(0.03).value().factor(
+            x_train, n, d, y_train
+        );
+        ASSERT_TRUE(fitted.has_value());
+
+        const TempDirGuard dir("loaded_float_queries");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*fitted, dir.path).has_value());
+        const auto loaded = cxxgpr::persist::LoadedGpr::load(dir.path);
+        ASSERT_TRUE(loaded.has_value());
+
+        const std::vector<float> xq_f{0.15F, 0.85F, 1.65F, 0.35F, 0.95F, 1.25F};
+        const std::vector<double> xq_d(xq_f.begin(), xq_f.end());
+        constexpr std::size_t m = 3U;
+
+        const cxxgpr::MatrixRef<float> xq_ref_f(xq_f.data(), m, d);
+        const cxxgpr::MatrixRef<double> xq_ref_d(xq_d.data(), m, d);
+        const cxxgpr::PredictOptions opts{cxxgpr::VarianceKind::Latent};
+
+        const auto pred_d = loaded->predict(xq_ref_d, opts);
+        const auto pred_f_mat = loaded->predict(xq_ref_f, opts);
+        const auto pred_f_span = loaded->predict(std::span<const float>(xq_f), m, d, opts);
+        ASSERT_TRUE(pred_d.has_value());
+        ASSERT_TRUE(pred_f_mat.has_value());
+        ASSERT_TRUE(pred_f_span.has_value());
+        EXPECT_EQ(*pred_d, *pred_f_mat);
+        EXPECT_EQ(*pred_d, *pred_f_span);
+
+        cxxgpr::Prediction<double> pred_out;
+        ASSERT_TRUE(loaded->predict_into(xq_ref_f, pred_out, opts).has_value());
+        {
+            const cxxgpr::test_support::NoAllocationScope no_alloc;
+            ASSERT_TRUE(loaded->predict_into(xq_ref_f, pred_out, opts).has_value());
+        }
+        EXPECT_EQ(pred_out, *pred_d);
+
+        const auto cov_d = loaded->predict_covariance(xq_ref_d, opts);
+        const auto cov_d_span = loaded->predict_covariance(std::span<const double>(xq_d), m, d, opts);
+        const auto cov_f_mat = loaded->predict_covariance(xq_ref_f, opts);
+        const auto cov_f_span = loaded->predict_covariance(std::span<const float>(xq_f), m, d, opts);
+        ASSERT_TRUE(cov_d.has_value());
+        ASSERT_TRUE(cov_d_span.has_value());
+        ASSERT_TRUE(cov_f_mat.has_value());
+        ASSERT_TRUE(cov_f_span.has_value());
+        EXPECT_EQ(*cov_d, *cov_d_span);
+        EXPECT_EQ(*cov_d, *cov_f_mat);
+        EXPECT_EQ(*cov_d, *cov_f_span);
+
+        const auto samp_d = loaded->sample(xq_ref_d, 3U, 42U, opts);
+        const auto samp_d_span = loaded->sample(std::span<const double>(xq_d), m, d, 3U, 42U, opts);
+        const auto samp_f_mat = loaded->sample(xq_ref_f, 3U, 42U, opts);
+        const auto samp_f_span = loaded->sample(std::span<const float>(xq_f), m, d, 3U, 42U, opts);
+        ASSERT_TRUE(samp_d.has_value());
+        ASSERT_TRUE(samp_d_span.has_value());
+        ASSERT_TRUE(samp_f_mat.has_value());
+        ASSERT_TRUE(samp_f_span.has_value());
+        EXPECT_EQ(*samp_d, *samp_d_span);
+        EXPECT_EQ(*samp_d, *samp_f_mat);
+        EXPECT_EQ(*samp_d, *samp_f_span);
+
+        const auto bad_cov = loaded->predict_covariance(std::span<const double>(xq_d), m + 1U, d, opts);
+        ASSERT_FALSE(bad_cov.has_value());
+        EXPECT_EQ(bad_cov.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+        const auto bad_samp = loaded->sample(std::span<const double>(xq_d), m + 1U, d, 3U, 42U, opts);
+        ASSERT_FALSE(bad_samp.has_value());
+        EXPECT_EQ(bad_samp.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
+    }
+
 }  // namespace

@@ -29,12 +29,14 @@ For one feature, the column-major buffer and the vector of values are the same t
 
 ## Pass data to the library
 
-Every model entry point comes in two forms that differ only in how the matrix is passed:
+Every model entry point accepts both `double` and `float` inputs (`MatrixRef<double>`, `MatrixRef<float>`, `std::span<const double>` and `std::span<const float>`), and comes in two matrix forms:
 
 | Form | Example | Use when |
 |---|---|---|
-| Span plus shape | `fit(x, n_rows, n_cols, y)` | You own a contiguous buffer such as `std::vector<double>` or `std::array<double, N>`. |
-| `MatrixRef<double>` | `fit(MatrixRef<double>(...), y)` | The matrix is already a view over memory you own. |
+| Span plus shape | `fit(x, n_rows, n_cols, y)` | You own a contiguous `double` or `float` buffer such as `std::vector` or `std::array`. |
+| `MatrixRef<double>` / `MatrixRef<float>` | `fit(MatrixRef<float>(...), y)` | The matrix is already a view over memory you own. |
+
+Single-precision matrices and target vectors are promoted consistently at the boundary when the model computes or refines in `double`, and keep the same zero-allocation behavior on warmed `predict_into` calls. This applies to `Gpr`, `FittedGpr`, `LoadedGpr`, `DistanceGpr`, `FittedDistanceGpr` and `LoadedDistanceGpr<WithPoints>`.
 
 The span form assumes a tightly packed matrix with column stride equal to `n_rows`. Both forms return `std::expected`; for example a target vector whose length differs from the row count gives `GprErrorCode::LengthMismatch`, empty data gives `GprErrorCode::EmptyInput`, and NaN or infinity gives `GprErrorCode::NonFiniteInput`.
 

@@ -22,13 +22,16 @@
 #include "cxxgpr/workspace/buffers.hpp"
 #include "cxxgpr/workspace/leaf_cache.hpp"
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
 #include <optional>
 #include <span>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 /// @brief Root namespace of the cxxgpr Gaussian Process Regression library.
@@ -179,12 +182,22 @@ namespace cxxgpr
             const transform::UnfittedTargetTransform& target_transform;
             /// @brief Exponential evaluation backend.
             KernelExp kernel_exp;
+            /// @brief True when the fitted model retains validated training distance tables (required for persistence).
+            bool retain_distances = true;
             /// @brief True to optimize hyperparameters, false to factor at the initial values.
             bool optimize;
             /// @brief True when the caller's optimizer tracks parameter change indices (enables incremental leaf
             /// caching).
             bool use_change_indices = false;
+            /// @brief True when optimization uses only objective values or no optimization runs (reuses Cholesky
+            /// buffer).
+            bool value_only = false;
         };
+
+        /// @brief Variant referencing either a caller DistanceSource or a pre-validated CheckedDistanceStore.
+        /// @tparam Storage Kernel storage scalar type.
+        template <typename Storage>
+        using DistanceTableRef = std::variant<const DistanceSource*, const CheckedDistanceStore<Storage>*>;
 
         /// @brief Trains or factors a supplied-distance model and returns its fitted payload.
         /// @details Validates the inputs, fits and applies the transforms, validates the distance tables once,
@@ -208,9 +221,9 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P, DistanceModeConcept C>
         [[nodiscard]] std::expected<DistanceFittedPayload<P, C>, GprError> train_distance_payload(
             const DistanceTrainConfig<C>& cfg,
-            const DistanceSource& train,
-            std::optional<MatrixRef<double>> x,
-            std::span<const double> y,
+            DistanceTableRef<typename P::Storage> train,
+            std::optional<PointMatrixRef> x,
+            TargetSpanRef y,
             std::expected<optimizer::OptimizerResult, GprError> (*optimize_cb)(
                 void*, optimizer::TwiceDifferentiable&, std::span<const double>
             ),
@@ -271,8 +284,8 @@ namespace cxxgpr
         [[nodiscard]] std::expected<void, GprError> predict_distance_into(
             const DistanceFittedPayload<P, C>& payload,
             DistanceQueryScratch<typename P::Storage>& scratch,
-            const DistanceSource& cross,
-            std::optional<MatrixRef<double>> xq,
+            DistanceTableRef<typename P::Storage> cross,
+            std::optional<PointMatrixRef> xq,
             const PredictOptions& options,
             Prediction<typename P::Refine>& out
         );
@@ -291,9 +304,9 @@ namespace cxxgpr
         [[nodiscard]] std::expected<PredictiveCovariance<typename P::Refine>, GprError> predict_distance_covariance(
             const DistanceFittedPayload<P, C>& payload,
             DistanceQueryScratch<typename P::Storage>& scratch,
-            const DistanceSource& cross,
-            const DistanceSource& query,
-            std::optional<MatrixRef<double>> xq,
+            DistanceTableRef<typename P::Storage> cross,
+            DistanceTableRef<typename P::Storage> query,
+            std::optional<PointMatrixRef> xq,
             const PredictOptions& options
         );
 
@@ -313,9 +326,9 @@ namespace cxxgpr
         [[nodiscard]] std::expected<std::vector<typename P::Refine>, GprError> sample_distance(
             const DistanceFittedPayload<P, C>& payload,
             DistanceQueryScratch<typename P::Storage>& scratch,
-            const DistanceSource& cross,
-            const DistanceSource& query,
-            std::optional<MatrixRef<double>> xq,
+            DistanceTableRef<typename P::Storage> cross,
+            DistanceTableRef<typename P::Storage> query,
+            std::optional<PointMatrixRef> xq,
             std::size_t n_draws,
             std::uint64_t seed,
             const PredictOptions& options
@@ -333,6 +346,13 @@ namespace cxxgpr
         );
 
     }  // namespace detail
+
+    /// @brief Constrains a supplied-distance input argument to DistanceSource or CheckedDistanceStore<Storage>.
+    /// @tparam D Candidate input type.
+    /// @tparam Storage Storage scalar type required when passing a CheckedDistanceStore.
+    template <typename D, typename Storage>
+    concept DistanceInputConcept = std::same_as<std::remove_cvref_t<D>, DistanceSource>
+        || std::same_as<std::remove_cvref_t<D>, CheckedDistanceStore<Storage>>;
 
     /// @brief Fitted Gaussian process on supplied squared distances, able to predict, sample and cross-validate.
     /// @details Copies share the immutable fitted state and own independent query buffers. The query methods are
@@ -392,21 +412,25 @@ namespace cxxgpr
         /// @details The inputs are checked in this order, and the first failure is returned: the structure of the
         /// tables (slots, emptiness, size products, shapes), their row count, the number of ARD tables, and only
         /// then the table values. A failure leaves the fitted state unchanged.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables of squared distances from training points to query points,
         /// bound to the slots of kernel().
         /// @param[in] options Variance selection.
         /// @return Prediction on the original target scale, or GprError.
-        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of cross is invalid.
-        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of cross is invalid or combined with
+        /// assume_valid().
+        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel or an
+        /// incompatible store.
         /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
-        /// @retval GprErrorCode::EmptyInput When a table is empty.
+        /// @retval GprErrorCode::EmptyInput When a table or store is empty or moved-from.
         /// @retval GprErrorCode::LengthMismatch When the tables differ in shape or do not have n_train() rows.
         /// @retval GprErrorCode::DimensionMismatch When an ARD slot supplies the wrong number of tables.
         /// @retval GprErrorCode::InvalidDistance When a table entry is non-finite or negative.
         /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf before its
         /// clamp at zero.
+        template <DistanceInputConcept<Storage> CrossT>
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
-            const DistanceSource& cross, const PredictOptions& options = {}
+            const CrossT& cross, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, DistanceOnly>
         {
@@ -422,12 +446,16 @@ namespace cxxgpr
         /// @details Checks, in this order: empty xq, the structure of the tables, their row count and the rows of
         /// xq, the number of ARD tables and the columns of xq, the finiteness of xq, and the table values. A
         /// failure leaves the fitted state unchanged.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables of squared distances from training points to query points.
-        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] xq Query coordinates, m x d, in double precision.
         /// @param[in] options Variance selection.
         /// @return Prediction on the original target scale, or GprError.
-        /// @retval GprErrorCode::EmptyInput When xq or a table is empty.
-        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel.
+        /// @retval GprErrorCode::EmptyInput When xq, a table, or a store is empty or moved-from.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of cross is invalid or combined with
+        /// assume_valid().
+        /// @retval GprErrorCode::UnsupportedKernelOperation When cross binds a slot of another kernel or an
+        /// incompatible store.
         /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
         /// @retval GprErrorCode::LengthMismatch When the tables differ in shape, do not have n_train() rows, or
         /// xq.rows() differs from the table columns.
@@ -437,8 +465,29 @@ namespace cxxgpr
         /// @retval GprErrorCode::InvalidDistance When a table entry is non-finite or negative.
         /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf before its
         /// clamp at zero.
+        template <DistanceInputConcept<Storage> CrossT>
         [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
-            const DistanceSource& cross, MatrixRef<double> xq, const PredictOptions& options = {}
+            const CrossT& cross, MatrixRef<double> xq, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            Prediction<Refine> out;
+            if (auto res = predict_into(cross, xq, out, options); !res.has_value())
+            {
+                return std::unexpected(std::move(res).error());
+            }
+            return out;
+        }
+
+        /// @brief Posterior mean and diagonal variance at m query points with single-precision coordinates.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] cross Rectangular n x m tables of squared distances from training points to query points.
+        /// @param[in] xq Query coordinates, m x d, in float precision.
+        /// @param[in] options Variance selection.
+        /// @return Prediction on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT>
+        [[nodiscard]] std::expected<Prediction<Refine>, GprError> predict(
+            const CrossT& cross, MatrixRef<float> xq, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, WithPoints>
         {
@@ -454,78 +503,135 @@ namespace cxxgpr
         /// @details The validated cross tables, the dense query buffers and out grow to the largest query count
         /// seen. After one call with m queries, a call with the same slots and at most m queries performs no heap
         /// allocation; only the first call and a call with more queries (or more ARD dimensions) allocate.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[out] out Prediction buffers.
         /// @param[in] options Variance selection.
         /// @return Empty expected on success, or GprError (see predict()).
         /// @note Copies of a model own separate workspaces; one object must not be queried from two threads at once.
+        template <DistanceInputConcept<Storage> CrossT>
         [[nodiscard]] std::expected<void, GprError> predict_into(
-            const DistanceSource& cross, Prediction<Refine>& out, const PredictOptions& options = {}
+            const CrossT& cross, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, DistanceOnly>
         {
-            return detail::predict_distance_into<P, C>(*payload_, scratch_, cross, std::nullopt, options, out);
+            return detail::predict_distance_into<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross), std::nullopt, options, out
+            );
         }
 
         /// @brief Same as predict() for a WithPoints model, writing into out and reusing the query workspace.
         /// @details Allocates nothing after a warm-up call with the same slots and at least as many queries; see
         /// the DistanceOnly overload.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
-        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] xq Query coordinates, m x d, in double precision.
         /// @param[out] out Prediction buffers.
         /// @param[in] options Variance selection.
         /// @return Empty expected on success, or GprError (see predict()).
+        template <DistanceInputConcept<Storage> CrossT>
         [[nodiscard]] std::expected<void, GprError> predict_into(
-            const DistanceSource& cross,
-            MatrixRef<double> xq,
-            Prediction<Refine>& out,
-            const PredictOptions& options = {}
+            const CrossT& cross, MatrixRef<double> xq, Prediction<Refine>& out, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, WithPoints>
         {
-            return detail::predict_distance_into<P, C>(*payload_, scratch_, cross, xq, options, out);
+            return detail::predict_distance_into<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross), detail::PointMatrixRef(xq), options, out
+            );
+        }
+
+        /// @brief Same as predict_into() for a WithPoints model accepting single-precision query coordinates.
+        /// @details Widens @p xq into the monotonically grown query scratch buffer so repeated calls with at most
+        /// @p m queries perform zero heap allocations after warm-up.
+        /// @tparam CrossT Supplied distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] cross Rectangular n x m tables from training points to query points.
+        /// @param[in] xq Query coordinates, m x d, in float precision.
+        /// @param[out] out Prediction buffers.
+        /// @param[in] options Variance selection.
+        /// @return Empty expected on success, or GprError (see predict()).
+        template <DistanceInputConcept<Storage> CrossT>
+        [[nodiscard]] std::expected<void, GprError> predict_into(
+            const CrossT& cross, MatrixRef<float> xq, Prediction<Refine>& out, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return detail::predict_distance_into<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross), detail::PointMatrixRef(xq), options, out
+            );
         }
 
         /// @brief Joint posterior mean and full covariance at m query points.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[in] query Square m x m tables of squared distances between the query points.
         /// @param[in] options Variance selection (Observation adds the noise variance to the diagonal).
         /// @return Mean and covariance on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
-            const DistanceSource& cross, const DistanceSource& query, const PredictOptions& options = {}
+            const CrossT& cross, const QueryT& query, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, DistanceOnly>
         {
-            return detail::predict_distance_covariance<P, C>(*payload_, scratch_, cross, query, std::nullopt, options);
+            return detail::predict_distance_covariance<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), std::nullopt, options
+            );
         }
 
-        /// @brief Joint posterior mean and full covariance for a WithPoints model.
+        /// @brief Joint posterior mean and full covariance for a WithPoints model with double coordinates.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[in] query Square m x m tables between the query points.
-        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] xq Query coordinates, m x d, in double precision.
         /// @param[in] options Variance selection.
         /// @return Mean and covariance on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
         [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
-            const DistanceSource& cross,
-            const DistanceSource& query,
-            MatrixRef<double> xq,
-            const PredictOptions& options = {}
+            const CrossT& cross, const QueryT& query, MatrixRef<double> xq, const PredictOptions& options = {}
         ) const
             requires std::same_as<C, WithPoints>
         {
-            return detail::predict_distance_covariance<P, C>(*payload_, scratch_, cross, query, xq, options);
+            return detail::predict_distance_covariance<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), detail::PointMatrixRef(xq), options
+            );
+        }
+
+        /// @brief Joint posterior mean and full covariance for a WithPoints model with single-precision coordinates.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] cross Rectangular n x m tables from training points to query points.
+        /// @param[in] query Square m x m tables between the query points.
+        /// @param[in] xq Query coordinates, m x d, in float precision.
+        /// @param[in] options Variance selection.
+        /// @return Mean and covariance on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
+        [[nodiscard]] std::expected<PredictiveCovariance<Refine>, GprError> predict_covariance(
+            const CrossT& cross, const QueryT& query, MatrixRef<float> xq, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return detail::predict_distance_covariance<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), detail::PointMatrixRef(xq), options
+            );
         }
 
         /// @brief Draws deterministic posterior samples at m query points.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[in] query Square m x m tables between the query points.
         /// @param[in] n_draws Number of samples.
         /// @param[in] seed Seed of the Xoshiro256++ generator.
         /// @param[in] options Variance selection.
         /// @return Column-major m x n_draws samples on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
-            const DistanceSource& cross,
-            const DistanceSource& query,
+            const CrossT& cross,
+            const QueryT& query,
             std::size_t n_draws,
             std::uint64_t seed,
             const PredictOptions& options = {}
@@ -533,21 +639,25 @@ namespace cxxgpr
             requires std::same_as<C, DistanceOnly>
         {
             return detail::sample_distance<P, C>(
-                *payload_, scratch_, cross, query, std::nullopt, n_draws, seed, options
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), std::nullopt, n_draws, seed, options
             );
         }
 
-        /// @brief Draws deterministic posterior samples for a WithPoints model.
+        /// @brief Draws deterministic posterior samples for a WithPoints model with double coordinates.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] cross Rectangular n x m tables from training points to query points.
         /// @param[in] query Square m x m tables between the query points.
-        /// @param[in] xq Query coordinates, m x d.
+        /// @param[in] xq Query coordinates, m x d, in double precision.
         /// @param[in] n_draws Number of samples.
         /// @param[in] seed Seed of the Xoshiro256++ generator.
         /// @param[in] options Variance selection.
         /// @return Column-major m x n_draws samples on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
         [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
-            const DistanceSource& cross,
-            const DistanceSource& query,
+            const CrossT& cross,
+            const QueryT& query,
             MatrixRef<double> xq,
             std::size_t n_draws,
             std::uint64_t seed,
@@ -555,7 +665,37 @@ namespace cxxgpr
         ) const
             requires std::same_as<C, WithPoints>
         {
-            return detail::sample_distance<P, C>(*payload_, scratch_, cross, query, xq, n_draws, seed, options);
+            return detail::sample_distance<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), detail::PointMatrixRef(xq), n_draws, seed, options
+            );
+        }
+
+        /// @brief Draws deterministic posterior samples for a WithPoints model with single-precision coordinates.
+        /// @tparam CrossT Supplied cross-distance container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @tparam QueryT Supplied query-to-query container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] cross Rectangular n x m tables from training points to query points.
+        /// @param[in] query Square m x m tables between the query points.
+        /// @param[in] xq Query coordinates, m x d, in float precision.
+        /// @param[in] n_draws Number of samples.
+        /// @param[in] seed Seed of the Xoshiro256++ generator.
+        /// @param[in] options Variance selection.
+        /// @return Column-major m x n_draws samples on the original target scale, or GprError.
+        template <DistanceInputConcept<Storage> CrossT, DistanceInputConcept<Storage> QueryT>
+        [[nodiscard]] std::expected<std::vector<Refine>, GprError> sample(
+            const CrossT& cross,
+            const QueryT& query,
+            MatrixRef<float> xq,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return detail::sample_distance<P, C>(
+                *payload_, scratch_, detail::DistanceTableRef<Storage>(&cross),
+                detail::DistanceTableRef<Storage>(&query), detail::PointMatrixRef(xq), n_draws, seed, options
+            );
         }
 
         /// @brief Closed-form leave-one-out means and variances at the training points.
@@ -566,28 +706,102 @@ namespace cxxgpr
             return detail::loo_distance<P, C>(*payload_, options);
         }
 
+        /// @brief Returns true when this fitted model retained its training distance tables for persistence.
+        /// @return True if trained with distance retention enabled, false when trained with
+        /// @c with_retain_distances(false).
+        [[nodiscard]] bool retains_distances() const noexcept { return payload_ && payload_->store != nullptr; }
+
         /// @brief Returns a trainer initialized with the fitted hyperparameters and this model's configuration.
         /// @return Unfitted DistanceGpr warm-started at the fitted hyperparameters.
         [[nodiscard]] DistanceGpr<O, P, C> into_trainer() const;
 
         /// @brief Fits a new model on new tables, warm-started from this model's hyperparameters.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the new training points.
-        /// @param[in] y New targets.
+        /// @param[in] y New training targets in double precision.
         /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
-            const DistanceSource& train, std::span<const double> y
+            const TrainT& train, std::span<const double> y
         ) const
-            requires std::same_as<C, DistanceOnly>;
+            requires std::same_as<C, DistanceOnly>
+        {
+            return into_trainer().fit(train, y);
+        }
+
+        /// @brief Fits a new model on new tables and float targets, warm-started from this model's hyperparameters.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the new training points.
+        /// @param[in] y New training targets in single precision.
+        /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
+            const TrainT& train, std::span<const float> y
+        ) const
+            requires std::same_as<C, DistanceOnly>
+        {
+            return into_trainer().fit(train, y);
+        }
 
         /// @brief Fits a new WithPoints model on new tables and coordinates, warm-started from this model.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the new training points.
-        /// @param[in] x New training coordinates, n x d.
-        /// @param[in] y New targets.
+        /// @param[in] x New training coordinates, n x d, in double precision.
+        /// @param[in] y New targets in double precision.
         /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
-            const DistanceSource& train, MatrixRef<double> x, std::span<const double> y
+            const TrainT& train, MatrixRef<double> x, std::span<const double> y
         ) const
-            requires std::same_as<C, WithPoints>;
+            requires std::same_as<C, WithPoints>
+        {
+            return into_trainer().fit(train, x, y);
+        }
+
+        /// @brief Fits a new WithPoints model on float coordinates and double targets, warm-started.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the new training points.
+        /// @param[in] x New training coordinates, n x d, in float precision.
+        /// @param[in] y New targets in double precision.
+        /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
+            const TrainT& train, MatrixRef<float> x, std::span<const double> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return into_trainer().fit(train, x, y);
+        }
+
+        /// @brief Fits a new WithPoints model on double coordinates and float targets, warm-started.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the new training points.
+        /// @param[in] x New training coordinates, n x d, in double precision.
+        /// @param[in] y New targets in single precision.
+        /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
+            const TrainT& train, MatrixRef<double> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return into_trainer().fit(train, x, y);
+        }
+
+        /// @brief Fits a new WithPoints model on float coordinates and float targets, warm-started.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the new training points.
+        /// @param[in] x New training coordinates, n x d, in float precision.
+        /// @param[in] y New targets in single precision.
+        /// @return Newly fitted model, or GprError; this model is unchanged either way.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr, GprError> refit(
+            const TrainT& train, MatrixRef<float> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return into_trainer().fit(train, x, y);
+        }
 
         /// @brief Returns the kernel carrying the fitted hyperparameters (its slots define the table bindings).
         /// @return Fitted kernel.
@@ -700,9 +914,14 @@ namespace cxxgpr
     class DistanceGpr
     {
     public:
+        /// @brief Storage scalar type.
+        using Storage = typename P::Storage;
+        /// @brief Refinement and output scalar type.
+        using Refine = typename P::Refine;
+
         /// @brief Constructs a trainer from a distance kernel and an optimizer.
-        /// @details Initializes the noise variance to 1e-2, identity transforms, a fixed zero jitter offset and
-        /// accurate exponential math.
+        /// @details Initializes the noise variance to 1e-2, identity transforms, a fixed zero jitter offset,
+        /// accurate exponential math, and training distance retention enabled.
         /// @param[in] kernel Kernel whose parameters are the initial hyperparameters and whose slots define the
         /// distance tables.
         /// @param[in] optimizer Hyperparameter optimizer.
@@ -724,7 +943,8 @@ namespace cxxgpr
             jitter_(other.jitter_),
             input_transform_(other.input_transform_->clone()),
             target_transform_(other.target_transform_->clone()),
-            kernel_exp_(other.kernel_exp_)
+            kernel_exp_(other.kernel_exp_),
+            retain_distances_(other.retain_distances_)
         {
         }
 
@@ -742,6 +962,16 @@ namespace cxxgpr
         /// @return Not applicable; the operator is deleted.
         DistanceGpr& operator=(DistanceGpr&&) = delete;
 
+        /// @brief Returns a trainer with a replaced Gaussian observation noise likelihood (carrying custom bounds).
+        /// @param[in] likelihood Validated GaussianLikelihood specifying initial noise variance and interval.
+        /// @return New trainer configured with @p likelihood.
+        [[nodiscard]] DistanceGpr with_likelihood(GaussianLikelihood likelihood) const
+        {
+            DistanceGpr copy(*this);
+            copy.likelihood_ = likelihood;
+            return copy;
+        }
+
         /// @brief Returns a trainer with a different initial observation noise variance.
         /// @param[in] noise_variance Initial noise variance inside the open interval of the likelihood.
         /// @return New trainer, or GprError.
@@ -753,8 +983,18 @@ namespace cxxgpr
             {
                 return std::unexpected(std::move(lik).error());
             }
+            return with_likelihood(*lik);
+        }
+
+        /// @brief Returns a trainer controlling whether fitted models retain the training distance tables.
+        /// @details When @p retain is false, fit() and factor() borrow caller views on compatible inputs and omit
+        /// storing the training distance store on the fitted payload; persistence fails with NotPersistable.
+        /// @param[in] retain True (default) to retain training distance tables, false to omit them.
+        /// @return New trainer configured with distance retention policy @p retain.
+        [[nodiscard]] DistanceGpr with_retain_distances(bool retain = true) const
+        {
             DistanceGpr copy(*this);
-            copy.likelihood_ = *lik;
+            copy.retain_distances_ = retain;
             return copy;
         }
 
@@ -813,20 +1053,24 @@ namespace cxxgpr
             next.input_transform_ = input_transform_->clone();
             next.target_transform_ = target_transform_->clone();
             next.kernel_exp_ = kernel_exp_;
+            next.retain_distances_ = retain_distances_;
             return next;
         }
 
         /// @brief Optimizes the hyperparameters and fits the model on supplied training distances.
-        /// @param[in] train Square tables of squared distances between the training points, bound to the slots of
-        /// the kernel.
-        /// @param[in] y Training targets, one per training point.
-        /// @return Fitted model, or GprError leaving this trainer unchanged.
         /// @details Checks, in this order: empty y, the structure of the tables (slots, emptiness, size products,
         /// shapes), y.size() against the table order, the number of ARD tables, the finiteness of y, and only then
         /// the table values; the table is validated once, not per objective evaluation.
-        /// @retval GprErrorCode::EmptyInput When y or a table is empty.
-        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of train is invalid.
-        /// @retval GprErrorCode::UnsupportedKernelOperation When train binds a slot of another kernel.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points, bound to the slots of
+        /// the kernel.
+        /// @param[in] y Training targets, one per training point, in double precision.
+        /// @return Fitted model, or GprError leaving this trainer unchanged.
+        /// @retval GprErrorCode::EmptyInput When y, a table, or a store is empty or moved-from.
+        /// @retval GprErrorCode::InvalidConfig When the tidy tolerance of train is invalid or combined with
+        /// assume_valid().
+        /// @retval GprErrorCode::UnsupportedKernelOperation When train binds a slot of another kernel or an
+        /// incompatible store.
         /// @retval GprErrorCode::DistanceSlot When a slot is missing, duplicated or of the wrong kind.
         /// @retval GprErrorCode::LengthMismatch When a table is not square, the tables differ in shape, or y.size()
         /// differs from the table order.
@@ -835,56 +1079,197 @@ namespace cxxgpr
         /// @retval GprErrorCode::InvalidDistance When a table is non-finite, negative, asymmetric or nonzero on the
         /// diagonal (unless repaired with DistanceSource::tidy()).
         /// @retval GprErrorCode::CholeskyFailed When factorization fails after the jitter policy is exhausted.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
-            const DistanceSource& train, std::span<const double> y
+            const TrainT& train, std::span<const double> y
         ) const
             requires std::same_as<C, DistanceOnly>
         {
-            return run(train, std::nullopt, y, true);
+            return run(detail::DistanceTableRef<Storage>(&train), std::nullopt, detail::TargetSpanRef(y), true);
         }
 
-        /// @brief Optimizes the hyperparameters and fits a WithPoints model.
+        /// @brief Optimizes the hyperparameters and fits the model on supplied training distances and float targets.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] y Training targets, one per training point, in float precision.
+        /// @return Fitted model, or GprError leaving this trainer unchanged.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
+            const TrainT& train, std::span<const float> y
+        ) const
+            requires std::same_as<C, DistanceOnly>
+        {
+            return run(detail::DistanceTableRef<Storage>(&train), std::nullopt, detail::TargetSpanRef(y), true);
+        }
+
+        /// @brief Optimizes the hyperparameters and fits a WithPoints model on double coordinates and targets.
         /// @details Checks as the DistanceOnly overload, with x added: empty x with y, x.rows() with the table
         /// order, x.cols() against the coordinate leaves with the ARD table counts, and the finiteness of x with y.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the training points.
-        /// @param[in] x Training coordinates, n x d, for the coordinate leaves of the kernel.
-        /// @param[in] y Training targets.
+        /// @param[in] x Training coordinates, n x d, in double precision.
+        /// @param[in] y Training targets in double precision.
         /// @return Fitted model, or GprError leaving this trainer unchanged.
-        /// @retval GprErrorCode::EmptyInput When y, x or a table is empty.
+        /// @retval GprErrorCode::EmptyInput When y, x, a table, or a store is empty or moved-from.
         /// @retval GprErrorCode::LengthMismatch When x.rows() or y.size() differs from the table order.
         /// @retval GprErrorCode::DimensionMismatch When x.cols() does not match an ARD coordinate leaf.
         /// @retval GprErrorCode::NonFiniteInput When y or x contains NaN or Inf.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
-            const DistanceSource& train, MatrixRef<double> x, std::span<const double> y
+            const TrainT& train, MatrixRef<double> x, std::span<const double> y
         ) const
             requires std::same_as<C, WithPoints>
         {
-            return run(train, x, y, true);
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), true
+            );
+        }
+
+        /// @brief Optimizes the hyperparameters and fits a WithPoints model on float coordinates and double targets.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in float precision.
+        /// @param[in] y Training targets in double precision.
+        /// @return Fitted model, or GprError leaving this trainer unchanged.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
+            const TrainT& train, MatrixRef<float> x, std::span<const double> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), true
+            );
+        }
+
+        /// @brief Optimizes the hyperparameters and fits a WithPoints model on double coordinates and float targets.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in double precision.
+        /// @param[in] y Training targets in float precision.
+        /// @return Fitted model, or GprError leaving this trainer unchanged.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
+            const TrainT& train, MatrixRef<double> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), true
+            );
+        }
+
+        /// @brief Optimizes the hyperparameters and fits a WithPoints model on float coordinates and float targets.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in float precision.
+        /// @param[in] y Training targets in float precision.
+        /// @return Fitted model, or GprError leaving this trainer unchanged.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> fit(
+            const TrainT& train, MatrixRef<float> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), true
+            );
         }
 
         /// @brief Factorizes at the current hyperparameters without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the training points.
-        /// @param[in] y Training targets.
+        /// @param[in] y Training targets in double precision.
         /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
-            const DistanceSource& train, std::span<const double> y
+            const TrainT& train, std::span<const double> y
         ) const
             requires std::same_as<C, DistanceOnly>
         {
-            return run(train, std::nullopt, y, false);
+            return run(detail::DistanceTableRef<Storage>(&train), std::nullopt, detail::TargetSpanRef(y), false);
+        }
+
+        /// @brief Factorizes at the current hyperparameters with single-precision targets without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] y Training targets in float precision.
+        /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
+            const TrainT& train, std::span<const float> y
+        ) const
+            requires std::same_as<C, DistanceOnly>
+        {
+            return run(detail::DistanceTableRef<Storage>(&train), std::nullopt, detail::TargetSpanRef(y), false);
         }
 
         /// @brief Factorizes a WithPoints model at the current hyperparameters without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
         /// @param[in] train Square tables of squared distances between the training points.
-        /// @param[in] x Training coordinates, n x d.
-        /// @param[in] y Training targets.
+        /// @param[in] x Training coordinates, n x d, in double precision.
+        /// @param[in] y Training targets in double precision.
         /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
-            const DistanceSource& train, MatrixRef<double> x, std::span<const double> y
+            const TrainT& train, MatrixRef<double> x, std::span<const double> y
         ) const
             requires std::same_as<C, WithPoints>
         {
-            return run(train, x, y, false);
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), false
+            );
+        }
+
+        /// @brief Factorizes a WithPoints model on float coordinates and double targets without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in float precision.
+        /// @param[in] y Training targets in double precision.
+        /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
+            const TrainT& train, MatrixRef<float> x, std::span<const double> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), false
+            );
+        }
+
+        /// @brief Factorizes a WithPoints model on double coordinates and float targets without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in double precision.
+        /// @param[in] y Training targets in float precision.
+        /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
+            const TrainT& train, MatrixRef<double> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), false
+            );
+        }
+
+        /// @brief Factorizes a WithPoints model on float coordinates and float targets without optimizing.
+        /// @tparam TrainT Supplied training table container (@c DistanceSource or @c CheckedDistanceStore<Storage>).
+        /// @param[in] train Square tables of squared distances between the training points.
+        /// @param[in] x Training coordinates, n x d, in float precision.
+        /// @param[in] y Training targets in float precision.
+        /// @return Fitted model with a trivial optimizer trajectory, or GprError.
+        template <DistanceInputConcept<Storage> TrainT>
+        [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> factor(
+            const TrainT& train, MatrixRef<float> x, std::span<const float> y
+        ) const
+            requires std::same_as<C, WithPoints>
+        {
+            return run(
+                detail::DistanceTableRef<Storage>(&train), detail::PointMatrixRef(x), detail::TargetSpanRef(y), false
+            );
         }
 
         /// @brief Returns the kernel carrying the initial hyperparameters.
@@ -899,6 +1284,10 @@ namespace cxxgpr
         /// @return Jitter policy.
         [[nodiscard]] const JitterPolicy& jitter() const noexcept { return jitter_; }
 
+        /// @brief Returns whether fitted models retain training distance tables.
+        /// @return True when training tables are retained on fitted models (required for persistence).
+        [[nodiscard]] bool retains_distances() const noexcept { return retain_distances_; }
+
         /// @brief Returns the optimizer.
         /// @return Optimizer instance.
         [[nodiscard]] const O& optimizer() const noexcept { return optimizer_; }
@@ -908,13 +1297,16 @@ namespace cxxgpr
         friend class FittedDistanceGpr<O, P, C>;
 
         /// @brief Trains a fitted model, optionally optimizing the hyperparameters first.
-        /// @param[in] train Supplied squared distances of the training set.
+        /// @param[in] train Supplied squared distances or pre-validated store of the training set.
         /// @param[in] x Optional training points (present in the with-points mode).
         /// @param[in] y Training targets.
         /// @param[in] optimize Whether to run the optimizer before the final fit.
         /// @return Fitted model, or GprError.
         [[nodiscard]] std::expected<FittedDistanceGpr<O, P, C>, GprError> run(
-            const DistanceSource& train, std::optional<MatrixRef<double>> x, std::span<const double> y, bool optimize
+            detail::DistanceTableRef<Storage> train,
+            std::optional<detail::PointMatrixRef> x,
+            detail::TargetSpanRef y,
+            bool optimize
         ) const
         {
             const detail::DistanceTrainConfig<C> cfg{
@@ -924,8 +1316,11 @@ namespace cxxgpr
                 .input_transform = *input_transform_,
                 .target_transform = *target_transform_,
                 .kernel_exp = kernel_exp_,
+                .retain_distances = retain_distances_,
                 .optimize = optimize && !std::same_as<O, optimizer::Fixed>,
                 .use_change_indices = optimizer_uses_change_indices_v<O>,
+                .value_only = !optimize || std::same_as<O, optimizer::Fixed> || std::same_as<O, optimizer::NelderMead>
+                    || std::same_as<O, optimizer::FastSimulatedAnnealing>,
             };
             auto cb = [](void* ctx, optimizer::TwiceDifferentiable& obj,
                           std::span<const double> init) -> std::expected<optimizer::OptimizerResult, GprError>
@@ -957,6 +1352,8 @@ namespace cxxgpr
         std::unique_ptr<transform::UnfittedTargetTransform> target_transform_;
         /// @brief Kernel exponential evaluation mode.
         KernelExp kernel_exp_{KernelExp::Accurate};
+        /// @brief Whether fitted models retain the validated training distance store.
+        bool retain_distances_{true};
     };
 
     /// @brief Converts the fitted model back into a trainer carrying the fitted hyperparameters.
@@ -974,40 +1371,8 @@ namespace cxxgpr
             input_transform_ ? input_transform_->clone() : std::make_unique<transform::IdentityInput>();
         trainer.target_transform_ = target_transform_->clone();
         trainer.kernel_exp_ = kernel_exp_;
+        trainer.retain_distances_ = retains_distances();
         return trainer;
-    }
-
-    /// @brief Refits on new supplied distances starting from the fitted hyperparameters (distance-only mode).
-    /// @param[in] train Supplied squared distances of the new training set.
-    /// @param[in] y New training targets.
-    /// @return Refitted model, or GprError.
-    /// @tparam O Optimizer type.
-    /// @tparam P Precision policy.
-    /// @tparam C Distance mode (distance only, or distances with points).
-    template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
-    std::expected<FittedDistanceGpr<O, P, C>, GprError> FittedDistanceGpr<O, P, C>::refit(
-        const DistanceSource& train, std::span<const double> y
-    ) const
-        requires std::same_as<C, DistanceOnly>
-    {
-        return into_trainer().fit(train, y);
-    }
-
-    /// @brief Refits on new supplied distances and points starting from the fitted hyperparameters (with-points mode).
-    /// @param[in] train Supplied squared distances of the new training set.
-    /// @param[in] x New training points.
-    /// @param[in] y New training targets.
-    /// @return Refitted model, or GprError.
-    /// @tparam O Optimizer type.
-    /// @tparam P Precision policy.
-    /// @tparam C Distance mode (distance only, or distances with points).
-    template <typename O, PrecisionPolicyConcept P, DistanceModeConcept C>
-    std::expected<FittedDistanceGpr<O, P, C>, GprError> FittedDistanceGpr<O, P, C>::refit(
-        const DistanceSource& train, MatrixRef<double> x, std::span<const double> y
-    ) const
-        requires std::same_as<C, WithPoints>
-    {
-        return into_trainer().fit(train, x, y);
     }
 
 }  // namespace cxxgpr

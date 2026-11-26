@@ -1143,4 +1143,208 @@ namespace
         ASSERT_TRUE(ran);
     }
 
+    /// @brief Verifies float coordinate and target overloads on Gpr and FittedGpr across precision policies.
+    /// @details Confirms exact parity against double-widened versions of identical float data, zero heap
+    /// allocations during warmed predict_into() / predict_with_into() with MatrixRef<float>, and DES-02 error
+    /// precedence on checked float span overloads.
+    TEST(GprModelsTest, FloatInputsMatchWidenedDoubleAndPreservePrecedenceAndZeroAlloc)
+    {
+        // Spec: DES-02, DES-16, REQ-02, REQ-09
+        const std::vector<float> x_f{0.0F, 0.25F, 0.5F, 0.75F, 1.0F, 1.25F, 0.1F, 0.4F, 0.2F, 0.9F, 0.6F, 1.1F};
+        const std::vector<float> y_f{1.1F, 0.95F, 0.6F, 0.2F, -0.15F, 0.35F};
+        const std::vector<float> xq_f{0.15F, 0.65F, 1.15F, 0.3F, 0.7F, 0.95F};
+        constexpr std::size_t n = 6U;
+        constexpr std::size_t m = 3U;
+        constexpr std::size_t d = 2U;
+
+        const std::vector<double> x_d(x_f.begin(), x_f.end());
+        const std::vector<double> y_d(y_f.begin(), y_f.end());
+        const std::vector<double> xq_d(xq_f.begin(), xq_f.end());
+
+        const auto spec = (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.2).value())
+                              * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value()))
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.02).value());
+
+        auto check_policy = [&]<cxxgpr::PrecisionPolicyConcept P>()
+        {
+            using Refine = typename P::Refine;
+            const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).with_noise_variance(0.05).value();
+
+            const cxxgpr::MatrixRef<float> x_ref_f(x_f.data(), n, d);
+            const cxxgpr::MatrixRef<double> x_ref_d(x_d.data(), n, d);
+            const cxxgpr::MatrixRef<float> xq_ref_f(xq_f.data(), m, d);
+            const cxxgpr::MatrixRef<double> xq_ref_d(xq_d.data(), m, d);
+
+            const auto fit_d = trainer.factor(x_ref_d, y_d);
+            const auto fit_f_mat = trainer.factor(x_ref_f, std::span<const float>(y_f));
+            const auto fit_f_span = trainer.factor(std::span<const float>(x_f), n, d, std::span<const float>(y_f));
+            const auto fit_f_opt = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs, P>(spec).with_noise_variance(0.05).value().fit(
+                x_ref_f, std::span<const float>(y_f)
+            );
+            const auto fit_mixed_xy = trainer.factor(x_ref_f, y_d);
+            const auto fit_mixed_yx = trainer.factor(x_ref_d, std::span<const float>(y_f));
+            ASSERT_TRUE(fit_d.has_value());
+            ASSERT_TRUE(fit_f_mat.has_value());
+            ASSERT_TRUE(fit_f_span.has_value());
+            ASSERT_TRUE(fit_f_opt.has_value());
+            ASSERT_TRUE(fit_mixed_xy.has_value());
+            ASSERT_TRUE(fit_mixed_yx.has_value());
+
+            const auto fit_opt_d =
+                cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs, P>(spec).with_noise_variance(0.05).value().fit(x_ref_d, y_d);
+            ASSERT_TRUE(fit_opt_d.has_value());
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_opt_d->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_f_opt->neg_log_marginal_likelihood())
+            );
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_d->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_f_mat->neg_log_marginal_likelihood())
+            );
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_d->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_f_span->neg_log_marginal_likelihood())
+            );
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_d->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_mixed_xy->neg_log_marginal_likelihood())
+            );
+            EXPECT_EQ(
+                std::bit_cast<std::uint64_t>(fit_d->neg_log_marginal_likelihood()),
+                std::bit_cast<std::uint64_t>(fit_mixed_yx->neg_log_marginal_likelihood())
+            );
+
+            // predict, predict_with, predict_into, predict_with_into, predict_covariance, predict_covariance_with,
+            // sample, sample_with, refit parity.
+            const auto pred_d = fit_d->predict(xq_ref_d);
+            const auto pred_f_mat = fit_f_mat->predict(xq_ref_f);
+            const auto pred_f_span = fit_f_span->predict(std::span<const float>(xq_f), m, d);
+            const cxxgpr::PredictOptions latent_opts{cxxgpr::VarianceKind::Latent};
+            const auto pred_with_d = fit_d->predict_with(xq_ref_d, latent_opts);
+            const auto pred_with_f = fit_f_mat->predict_with(xq_ref_f, latent_opts);
+            ASSERT_TRUE(pred_d.has_value());
+            ASSERT_TRUE(pred_f_mat.has_value());
+            ASSERT_TRUE(pred_f_span.has_value());
+            ASSERT_TRUE(pred_with_d.has_value());
+            ASSERT_TRUE(pred_with_f.has_value());
+            EXPECT_EQ(*pred_d, *pred_f_mat);
+            EXPECT_EQ(*pred_d, *pred_f_span);
+            EXPECT_EQ(*pred_with_d, *pred_with_f);
+
+            cxxgpr::Prediction<Refine> warm_out;
+            ASSERT_TRUE(fit_f_mat->predict_into(xq_ref_f, warm_out).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                ASSERT_TRUE(fit_f_mat->predict_into(xq_ref_f, warm_out).has_value());
+                ASSERT_TRUE(fit_f_mat->predict_with_into(xq_ref_f, latent_opts, warm_out).has_value());
+            }
+            EXPECT_EQ(warm_out, *pred_with_d);
+
+            const auto cov_d = fit_d->predict_covariance(xq_ref_d);
+            const auto cov_f = fit_f_mat->predict_covariance(xq_ref_f);
+            const auto cov_with_d = fit_d->predict_covariance_with(xq_ref_d, latent_opts);
+            const auto cov_with_f = fit_f_mat->predict_covariance_with(xq_ref_f, latent_opts);
+            const auto cov_f_span = fit_f_mat->predict_covariance(std::span<const float>(xq_f), m, d);
+            ASSERT_TRUE(cov_d.has_value());
+            ASSERT_TRUE(cov_f.has_value());
+            ASSERT_TRUE(cov_with_d.has_value());
+            ASSERT_TRUE(cov_with_f.has_value());
+            ASSERT_TRUE(cov_f_span.has_value());
+            EXPECT_EQ(*cov_d, *cov_f);
+            EXPECT_EQ(*cov_d, *cov_f_span);
+            EXPECT_EQ(*cov_with_d, *cov_with_f);
+
+            const auto samp_d = fit_d->sample(xq_ref_d, 4U, 99U);
+            const auto samp_f = fit_f_mat->sample(xq_ref_f, 4U, 99U);
+            const auto samp_f_span = fit_f_mat->sample(std::span<const float>(xq_f), m, d, 4U, 99U);
+            const auto samp_with_d = fit_d->sample_with(xq_ref_d, 4U, 99U, latent_opts);
+            const auto samp_with_f = fit_f_mat->sample_with(xq_ref_f, 4U, 99U, latent_opts);
+            ASSERT_TRUE(samp_d.has_value());
+            ASSERT_TRUE(samp_f.has_value());
+            ASSERT_TRUE(samp_f_span.has_value());
+            ASSERT_TRUE(samp_with_d.has_value());
+            ASSERT_TRUE(samp_with_f.has_value());
+            EXPECT_EQ(*samp_d, *samp_f);
+            EXPECT_EQ(*samp_d, *samp_f_span);
+            EXPECT_EQ(*samp_with_d, *samp_with_f);
+
+            const auto refit_d = fit_opt_d->refit(x_ref_d, y_d);
+            const auto refit_f_mat = fit_f_opt->refit(x_ref_f, std::span<const float>(y_f));
+            const auto refit_f_span = fit_f_opt->refit(std::span<const float>(x_f), n, d, std::span<const float>(y_f));
+            const auto refit_mixed_xy = fit_f_opt->refit(x_ref_f, y_d);
+            const auto refit_mixed_yx = fit_f_opt->refit(x_ref_d, std::span<const float>(y_f));
+            ASSERT_TRUE(refit_d.has_value());
+            ASSERT_TRUE(refit_f_mat.has_value());
+            ASSERT_TRUE(refit_f_span.has_value());
+            ASSERT_TRUE(refit_mixed_xy.has_value());
+            ASSERT_TRUE(refit_mixed_yx.has_value());
+            EXPECT_EQ(refit_d->predict(xq_ref_d).value(), refit_f_mat->predict(xq_ref_f).value());
+            EXPECT_EQ(refit_d->predict(xq_ref_d).value(), refit_f_span->predict(xq_ref_f).value());
+            EXPECT_EQ(refit_d->predict(xq_ref_d).value(), refit_mixed_xy->predict(xq_ref_f).value());
+            EXPECT_EQ(refit_d->predict(xq_ref_d).value(), refit_mixed_yx->predict(xq_ref_f).value());
+        };
+
+        check_policy.template operator()<cxxgpr::DoublePrecision>();
+        check_policy.template operator()<cxxgpr::SinglePrecision>();
+        check_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>();
+
+        // Negative validation precedence on float span overloads: EmptyInput -> SizeOverflow -> LengthMismatch ->
+        // DimensionMismatch -> NonFiniteInput.
+        const auto trainer = cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(0.05).value();
+        EXPECT_EQ(
+            trainer.factor(std::span<const float>{}, 0U, d, std::span<const float>(y_f)).error().code(),
+            cxxgpr::GprErrorCode::EmptyInput
+        );
+        EXPECT_EQ(
+            trainer
+                .factor(
+                    std::span<const float>(x_f), std::numeric_limits<std::size_t>::max(), 2U,
+                    std::span<const float>(y_f)
+                )
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::SizeOverflow
+        );
+        EXPECT_EQ(
+            trainer.factor(std::span<const float>(x_f.data(), x_f.size() - 1U), n, d, std::span<const float>(y_f))
+                .error()
+                .code(),
+            cxxgpr::GprErrorCode::LengthMismatch
+        );
+
+        std::vector<float> bad_x_f = x_f;
+        bad_x_f[2] = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_EQ(
+            trainer.factor(std::span<const float>(bad_x_f), n, d, std::span<const float>(y_f)).error().code(),
+            cxxgpr::GprErrorCode::NonFiniteInput
+        );
+        std::vector<float> bad_y_f = y_f;
+        bad_y_f[1] = std::numeric_limits<float>::infinity();
+        EXPECT_EQ(
+            trainer.factor(std::span<const float>(x_f), n, d, std::span<const float>(bad_y_f)).error().code(),
+            cxxgpr::GprErrorCode::NonFiniteInput
+        );
+
+        const auto fitted = trainer.factor(std::span<const float>(x_f), n, d, std::span<const float>(y_f)).value();
+        EXPECT_EQ(fitted.predict(std::span<const float>{}, 0U, d).error().code(), cxxgpr::GprErrorCode::EmptyInput);
+        EXPECT_EQ(
+            fitted.predict(std::span<const float>(xq_f), std::numeric_limits<std::size_t>::max(), 2U).error().code(),
+            cxxgpr::GprErrorCode::SizeOverflow
+        );
+        EXPECT_EQ(
+            fitted.predict(std::span<const float>(xq_f.data(), xq_f.size() - 1U), m, d).error().code(),
+            cxxgpr::GprErrorCode::LengthMismatch
+        );
+        const std::vector<float> wrong_dim_q(m * (d + 1U), 0.1F);
+        EXPECT_EQ(
+            fitted.predict(std::span<const float>(wrong_dim_q), m, d + 1U).error().code(),
+            cxxgpr::GprErrorCode::DimensionMismatch
+        );
+        std::vector<float> nan_q = xq_f;
+        nan_q[0] = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_EQ(
+            fitted.predict(std::span<const float>(nan_q), m, d).error().code(), cxxgpr::GprErrorCode::NonFiniteInput
+        );
+    }
+
 }  // namespace

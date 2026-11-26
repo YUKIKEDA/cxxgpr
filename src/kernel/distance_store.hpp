@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -68,13 +69,16 @@ namespace cxxgpr::detail
     /// @brief Validates the table values of a supply into a reusable store.
     /// @details Requires that check_distance_structure() returned @p shape and check_distance_ard_counts()
     /// accepted @p source. The first call creates the store; later calls refill it in place and allocate only when
-    /// the tables grow. After a failure the store holds partial data and must be refilled before use.
+    /// the tables grow. When @p allow_borrow is true and the bound input scalar matches @c T without @c tidy(),
+    /// scalar blocks (and cross ARD blocks) borrow caller views directly without copying. After a failure the store
+    /// holds partial data and must be refilled before use.
     /// @tparam T Storage scalar type.
     /// @param[in] kernel Compiled kernel.
     /// @param[in] source Supply to validate.
     /// @param[in] shape Shape returned by check_distance_structure().
     /// @param[in] is_square True for a training-shaped (square) store, false for a cross store.
     /// @param[in,out] store Reusable store.
+    /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted.
     /// @return Pointer to the refilled store (never null), or InvalidDistance for the first invalid entry.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<const CheckedDistanceStore<T>*, GprError> fill_distance_store(
@@ -82,7 +86,8 @@ namespace cxxgpr::detail
         const DistanceSource& source,
         DistanceTableShape shape,
         bool is_square,
-        std::optional<CheckedDistanceStore<T>>& store
+        std::optional<CheckedDistanceStore<T>>& store,
+        bool allow_borrow = false
     );
 
     /// @brief Validates the table values of a supply into a new store.
@@ -93,10 +98,46 @@ namespace cxxgpr::detail
     /// @param[in] source Supply to validate.
     /// @param[in] shape Shape returned by check_distance_structure().
     /// @param[in] is_square True for a training-shaped (square) store, false for a cross store.
+    /// @param[in] allow_borrow True when zero-copy borrowing of matching caller views is permitted for transient use.
     /// @return New store, or InvalidDistance for the first invalid entry.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<CheckedDistanceStore<T>, GprError> make_distance_store(
-        const CompiledDistanceKernel<T>& kernel, const DistanceSource& source, DistanceTableShape shape, bool is_square
+        const CompiledDistanceKernel<T>& kernel,
+        const DistanceSource& source,
+        DistanceTableShape shape,
+        bool is_square,
+        bool allow_borrow = false
+    );
+
+    /// @brief Validates that a caller-supplied pre-validated @c CheckedDistanceStore matches @p kernel and shape mode.
+    /// @details Returns EmptyInput for empty or moved-from stores and UnsupportedKernelOperation on slot/mode mismatch.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled kernel defining the expected slots.
+    /// @param[in] store Pre-validated store supplied by caller.
+    /// @param[in] is_square True for square training stores, false for cross stores.
+    /// @return Store dimensions on success, or GprError on empty or incompatible store.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<DistanceTableShape, GprError> validate_store_for_kernel(
+        const CompiledDistanceKernel<T>& kernel, const CheckedDistanceStore<T>& store, bool is_square
+    );
+
+    /// @brief Widens a pre-validated @c float store into a @c double store for mixed-precision residual refinement.
+    /// @details Preserves packed lower-triangular layout where allowed by @p kernel64; expands to dense if a
+    /// @c CustomKernel leaf requires a full matrix view.
+    /// @param[in] kernel64 Double-precision compiled kernel matching the store's slots.
+    /// @param[in] store32 Validated single-precision training store.
+    /// @return Double-precision store with identical validated entries, or GprError on empty/allocation error.
+    [[nodiscard]] std::expected<CheckedDistanceStore<double>, GprError> promote_store_to_double(
+        const CompiledDistanceKernel<double>& kernel64, const CheckedDistanceStore<float>& store32
+    );
+
+    /// @brief Creates a shared handle referencing @p store's immutable validated state without copying tables.
+    /// @tparam T Storage scalar type.
+    /// @param[in] store Pre-validated store to share internally.
+    /// @return Shared handle referencing @p store's internal state, or null when @p store is moved-from.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::shared_ptr<const CheckedDistanceStore<T>> share_distance_store(
+        const CheckedDistanceStore<T>& store
     );
 
     /// @brief Evaluates the kernel diagonal with a caller-owned, grow-only scratch vector.

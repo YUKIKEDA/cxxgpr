@@ -36,7 +36,7 @@
 
 ## 手順 2: 学習する
 
-スロットごとに表を `DistanceSource` へ結び付けてから `fit` を呼ぶ。表は 1 度だけ検査され、有限・非負・対称・対角が 0 でなければならない。`DistanceSource::tidy` を呼べば、決められた範囲の修復を許す。
+スロットごとに表を `DistanceSource` へ結び付ける（または `prepare_square` で事前検証した `CheckedDistanceStore` を渡す）ことで、`fit` を呼べる。`DistanceSource` 経由の表は、規定範囲の修復を許す `DistanceSource::tidy` や、すでに検証済みの表で値検査を省く `DistanceSource::assume_valid(true)` を指定しない限り、有限・非負・対称・対角が 0 かどうかを 1 度だけ検査する。`MatrixRef<double>` と `MatrixRef<float>` の距離表、`std::span<const double>` と `std::span<const float>` の目的変数、`WithPoints` モデルでの `MatrixRef<float>` 座標もそのまま渡せる。
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp
@@ -44,9 +44,11 @@
 :end-before: // [end]
 ```
 
-`with_noise_variance` は引数を検査し、`Gpr` と同じく `std::expected` を返す。ほかの設定メソッドは `with_jitter`、`with_kernel_exp`、`with_target_transform`、`with_optimizer` で、`WithPoints` のカーネルに限り `with_input_transform` もある。getter は `kernel`、`likelihood`、`jitter`、`optimizer` である。
+`with_noise_variance` は引数を検査し、`Gpr` と同じく `std::expected` を返す。`with_likelihood(GaussianLikelihood)` は、独自の上下限区間を持つノイズ尤度をそのまま設定する。ほかの設定メソッドは `with_jitter`、`with_kernel_exp`、`with_retain_distances`、`with_target_transform`、`with_optimizer` で、`WithPoints` のカーネルに限り `with_input_transform` もある。getter は `kernel`、`likelihood`、`jitter`、`optimizer`、`retains_distances` である。
 
-`fit` は周辺尤度を最大化して、カーネルのハイパーパラメータとノイズ分散を最適化する。最適化せずに現在のハイパーパラメータのまま分解したいときは `factor` を呼ぶ。`WithPoints` のカーネルでは、どちらも座標を追加の引数に取る（`fit(train, x, y)`、`factor(train, x, y)`）。
+学習済みモデルを保存する予定がない場合は、`with_retain_distances(false)` を指定すると、条件を満たす呼び出し側の表をコピーせず一時的に借用し、学習済みモデル内に距離表を保持しない（`retains_distances() == false`）。なお、距離表を保持しないモデルを `save` / `save_with_factor` で保存しようとすると `PersistFailed(PersistErrorKind::NotPersistable)` で失敗する。
+
+`fit` は周辺尤度を最大化して、カーネルのハイパーパラメータとノイズ分散を最適化する。最適化せずに現在のハイパーパラメータのまま分解したいときは `factor` を呼ぶ。`WithPoints` のカーネルでは、どちらも座標を追加の引数に取る（`fit(train, x, y)`、`factor(train, x, y)`）。`DistanceSource` だけでなく事前検証済みの `CheckedDistanceStore<Storage>`（`DistanceInputConcept` を満たす入力）も、`fit`・`factor`・`refit`・`predict`・`predict_into`・`predict_covariance`・`sample` へそのまま渡せる。
 
 :::{note}
 既定の精度ポリシーは倍精度である。`DistanceGpr<Lbfgs, MixedPrecision<ReevaluateKernel>>` など {doc}`optimize-performance` の各ポリシーも同じように使え、`refinement_summary` を報告する。
@@ -54,7 +56,7 @@
 
 ## 手順 3: 予測する
 
-すべての学習点から予測点への二乗距離の表（n × m、行が学習点）を作り、同じスロットへ結び付ける。スロットが複数あるカーネルでは、それぞれに表が要る。
+すべての学習点から予測点への二乗距離の表（n × m、行が学習点）を作り、同じスロットへ結び付ける（または `prepare_cross` で作った `CheckedDistanceStore<Storage>` を渡す）。スロットが複数あるカーネルでは、それぞれに表が要る。
 
 ```{literalinclude} /../examples/distance_model.cpp
 :language: cpp
@@ -62,7 +64,7 @@
 :end-before: // [end]
 ```
 
-`predict` は元の目的変数の尺度で、平均と周辺分散を返す。`predict_into` は自分で持つ `Prediction` へ書き込み、モデルの問い合わせ用作業領域を使い回す。m 点で一度呼んだ後は、同じスロットで m 点以下の呼び出しはメモリを確保しない。`WithPoints` のモデルでは、表の後ろに予測点の座標を渡す（`predict(cross, xq)`）。
+`predict` は元の目的変数の尺度で、平均と周辺分散を返す。`predict_into` は自分で持つ `Prediction` へ書き込み、モデルの問い合わせ用作業領域を使い回す。m 点で一度呼んだ後は、同じスロットで m 点以下の呼び出し（`MatrixRef<float>` の問い合わせ座標や `CheckedDistanceStore` を渡す場合も含む）はメモリを確保しない。`WithPoints` のモデルでは、表の後ろに予測点の座標を渡す（`predict(cross, xq)`）。
 
 ## 手順 4: 共分散・サンプル・交差検証
 
@@ -110,7 +112,8 @@
 
 | シンボル | 用途 |
 |---|---|
-| `DistanceGpr` | `DistanceKernel` の学習器。`fit`、`factor`、`with_*` の設定 |
-| `FittedDistanceGpr` | 学習済みモデル。`predict`、`predict_into`、`predict_covariance`、`sample`、`loo_predict`、`into_trainer`、`refit` |
+| `DistanceInputConcept` | `DistanceSource` または `CheckedDistanceStore<Storage>` を受け付けるコンセプト |
+| `DistanceGpr` | `DistanceKernel` の学習器。`fit`、`factor`、`with_*` の設定（`with_likelihood`、`with_retain_distances` を含む） |
+| `FittedDistanceGpr` | 学習済みモデル。`predict`、`predict_into`、`predict_covariance`、`sample`、`loo_predict`、`retains_distances`、`into_trainer`、`refit` |
 
 距離モデルの保存と読み込みは {doc}`persist-models` を参照。
