@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+### 追加
+
+- `DistanceGpr::with_likelihood(GaussianLikelihood)`（カスタム観測ノイズ区間・初期値の指定）および `with_retain_distances(bool)` / `retains_distances()`（学習済み距離テーブルの保持制御。非保持モデルの永続化は `PersistErrorKind::NotPersistable` を返却）を追加。
+- `DistanceSource::assume_valid(bool)` / `assumes_valid()`（構造検査を維持しつつ値走査のみを省略する明示的オプトイン、`tidy()` 併用時は `InvalidConfig`）を追加。
+- `DistanceGpr` / `FittedDistanceGpr` で事前検証済み `CheckedDistanceStore<Storage>` を学習・予測・共分散・標本抽出・再学習へ直接渡せるオーバーロードを追加し、`CheckedDistanceStore<T>` を共有不変保持による $O(1)$ コピー可能型として提供。
+- `Gpr` / `FittedGpr` / `LoadedGpr` / `DistanceGpr` / `FittedDistanceGpr` / `LoadedDistanceGpr` / `DistanceSource` 全般に `float` 精度の入力行列（`MatrixRef<float>`・検査付き `std::span<const float>`）・ターゲット（`std::span<const float>`）・供給距離テーブル入力を追加（`SinglePrecision` 距離テーブルは変換なしで直接消費、`predict_into` はウォームアップ後の確保ゼロを維持）。
+- `LoadedGpr::predict_covariance` / `sample` に検査付き `std::span<const double>` オーバーロードを追加。
+
+### 変更
+
+- 供給二乗距離経路を最適化（定数乗算カーネル畳み込み、並列・SIMD 値検証、BLAS ベースの事後共分散評価、遅延因子バッファ確保）。
+- `with_retain_distances(false)` かつ `tidy` 未指定で入力型が `Storage` と一致する場合、スカラー・ARD 双方の正方および交差距離テーブルをゼロコピー借用して評価する経路を導入。組込み葉のみに結合された所有正方スカラーテーブルを下三角パック化（メモリ半減）し、`CustomKernel` 結合スロットのみ密配置を維持。
+
+### 修正
+
+- `DistanceSource::tidy(rel_tol)` で `*tidy_tol * max_abs` の `+Inf` 溢れを `InvalidDistance` として検出し、対称化平均での `(b - a)` 溢れを回避。
+- 供給距離の構造検査で非零寸法かつ `data() == nullptr` の `MatrixRef` を `EmptyInput` として拒否し、`WithPoints` 座標コピーに `checked_mul` による `SizeOverflow` 検査を追加。
+
 ## [0.2.0] - 2026-11-26
 
 ### 追加
