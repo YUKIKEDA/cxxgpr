@@ -318,20 +318,21 @@ namespace cxxgpr::detail
             }
         }
 
-        /// @brief Validates dimensions and finiteness of a square squared-distance matrix and output view.
-        /// @details Enforces empty-input, squareness, shape-match, and active-triangle finiteness checks in
+        /// @brief Validates dimensions and optional finiteness of a square squared-distance matrix and output view.
+        /// @details Enforces empty-input, squareness, shape-match, and optional active-triangle finiteness checks in
         /// deterministic order before leaf evaluation.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in] dist Input squared Euclidean distance matrix.
         /// @param[in] out Target output matrix view.
         /// @param[in] uplo Triangle of `dist` and `out` that will be read and written.
+        /// @param[in] validate_entries When true, verifies active-triangle entries of `dist` are finite.
         /// @return Empty expected on success, or an input/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `dist` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `dist` is non-square or `out` has a different shape.
-        /// @retval GprErrorCode::NonFiniteInput If any entry in the active triangle of `dist` is non-finite.
+        /// @retval GprErrorCode::NonFiniteInput If `validate_entries` is true and an active entry is non-finite.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> validate_square_dist(
-            MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo
+            MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, bool validate_entries = true
         )
         {
             // Enforce deterministic validation order: empty -> squareness -> output shape -> finiteness.
@@ -349,6 +350,10 @@ namespace cxxgpr::detail
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
             }
+            if (!validate_entries)
+            {
+                return {};
+            }
             // Scan only the active triangle so callers do not need to populate the opposite half.
             const std::size_t n = dist.rows();
             for (std::size_t col = 0; col < n; ++col)
@@ -363,17 +368,22 @@ namespace cxxgpr::detail
             return {};
         }
 
-        /// @brief Validates dimensions and finiteness of a rectangular cross squared-distance matrix and output view.
-        /// @details Checks non-emptiness, exact shape agreement with `out`, and finiteness of all entries in `dist`.
+        /// @brief Validates dimensions and optional finiteness of a rectangular cross squared-distance matrix and
+        /// output view.
+        /// @details Checks non-emptiness, exact shape agreement with `out`, and optional finiteness of all entries in
+        /// `dist`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in] dist Input rectangular squared-distance matrix.
         /// @param[in] out Target cross-covariance output matrix view.
+        /// @param[in] validate_entries When true, verifies all entries of `dist` are finite.
         /// @return Empty expected on success, or an input/shape validation error.
         /// @retval GprErrorCode::EmptyInput If `dist` has zero rows or columns.
         /// @retval GprErrorCode::LengthMismatch If `out` shape differs from `dist`.
-        /// @retval GprErrorCode::NonFiniteInput If any entry of `dist` is non-finite.
+        /// @retval GprErrorCode::NonFiniteInput If `validate_entries` is true and any entry of `dist` is non-finite.
         template <KernelScalarConcept T>
-        [[nodiscard]] std::expected<void, GprError> validate_cross_dist(MatrixRef<T> dist, MatrixMut<T> out)
+        [[nodiscard]] std::expected<void, GprError> validate_cross_dist(
+            MatrixRef<T> dist, MatrixMut<T> out, bool validate_entries = true
+        )
         {
             // Check empty input and shape match before scanning every matrix entry for finiteness.
             if (dist.rows() == 0 || dist.cols() == 0)
@@ -383,6 +393,10 @@ namespace cxxgpr::detail
             if (out.rows() != dist.rows() || out.cols() != dist.cols())
             {
                 return std::unexpected(GprError::length_mismatch("output matrix shape mismatch"));
+            }
+            if (!validate_entries)
+            {
+                return {};
             }
             if (dist.is_contiguous())
             {
@@ -1067,15 +1081,21 @@ namespace cxxgpr::detail
         /// @param[out] out Target square Gram matrix.
         /// @param[in] uplo Active matrix triangle to populate.
         /// @param[in] exp_mode Exponential evaluation backend.
+        /// @param[in] validate_entries When true, verifies active entries of `dist` are finite before evaluation.
         /// @return Empty expected on success, or validation/operation error.
         /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> eval_leaf_dist(
-            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, KernelExp exp_mode
+            const KernelLeaf& leaf,
+            MatrixRef<T> dist,
+            MatrixMut<T> out,
+            Triangle uplo,
+            KernelExp exp_mode,
+            bool validate_entries
         )
         {
-            // Validate distance matrix shape and active-triangle finiteness before dispatching.
-            if (auto v = validate_square_dist(dist, out, uplo); !v.has_value())
+            // Validate distance matrix shape and optional active-triangle finiteness before dispatching.
+            if (auto v = validate_square_dist(dist, out, uplo, validate_entries); !v.has_value())
             {
                 return v;
             }
@@ -1389,15 +1409,16 @@ namespace cxxgpr::detail
         /// @param[in] dist Rectangular squared-distance matrix of shape `(n1, n2)`.
         /// @param[out] out Target cross-covariance matrix of shape `(n1, n2)`.
         /// @param[in] exp_mode Exponential evaluation backend.
+        /// @param[in] validate_entries When true, verifies all entries of `dist` are finite before evaluation.
         /// @return Empty expected on success, or validation/operation error.
         /// @retval GprErrorCode::UnsupportedKernelOperation If `leaf` requires point coordinates.
         template <KernelScalarConcept T>
         [[nodiscard]] std::expected<void, GprError> eval_leaf_cross_dist(
-            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode
+            const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode, bool validate_entries
         )
         {
             // Validate rectangular cross distance matrix and output shape.
-            if (auto v = validate_cross_dist(dist, out); !v.has_value())
+            if (auto v = validate_cross_dist(dist, out, validate_entries); !v.has_value())
             {
                 return v;
             }
@@ -2154,13 +2175,19 @@ namespace cxxgpr::detail
     /// @param[out] out Output Gram matrix view.
     /// @param[in] uplo Active matrix triangle to fill.
     /// @param[in] exp_mode Exponential evaluation backend.
+    /// @param[in] validate_entries When true, checks that active entries of `dist` are finite.
     /// @return Empty expected on success, or validation/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_dist(
-        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, Triangle uplo, KernelExp exp_mode
+        const KernelLeaf& leaf,
+        MatrixRef<T> dist,
+        MatrixMut<T> out,
+        Triangle uplo,
+        KernelExp exp_mode,
+        bool validate_entries
     )
     {
-        return eval_leaf_dist(leaf, dist, out, uplo, exp_mode);
+        return eval_leaf_dist(leaf, dist, out, uplo, exp_mode, validate_entries);
     }
 
     /// @brief Evaluates a square Gram matrix triangle for `leaf` from point coordinates.
@@ -2195,13 +2222,14 @@ namespace cxxgpr::detail
     /// @param[in] dist Input rectangular squared-distance matrix.
     /// @param[out] out Output cross-covariance matrix.
     /// @param[in] exp_mode Exponential evaluation backend.
+    /// @param[in] validate_entries When true, checks that all entries of `dist` are finite.
     /// @return Empty expected on success, or validation/operation error.
     template <KernelScalarConcept T>
     std::expected<void, GprError> leaf_apply_cross_dist(
-        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode
+        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode, bool validate_entries
     )
     {
-        return eval_leaf_cross_dist(leaf, dist, out, exp_mode);
+        return eval_leaf_cross_dist(leaf, dist, out, exp_mode, validate_entries);
     }
 
     /// @brief Evaluates a rectangular cross-covariance matrix for `leaf` from point coordinates.
@@ -2999,10 +3027,10 @@ namespace cxxgpr::detail
     }
 
     template std::expected<void, GprError> leaf_apply_dist<double>(
-        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, Triangle, KernelExp
+        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, Triangle, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_dist<float>(
-        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, Triangle, KernelExp
+        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, Triangle, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_points<double>(
         const KernelLeaf&,
@@ -3023,10 +3051,10 @@ namespace cxxgpr::detail
         std::span<float>
     );
     template std::expected<void, GprError> leaf_apply_cross_dist<double>(
-        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, KernelExp
+        const KernelLeaf&, MatrixRef<double>, MatrixMut<double>, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_cross_dist<float>(
-        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp
+        const KernelLeaf&, MatrixRef<float>, MatrixMut<float>, KernelExp, bool
     );
     template std::expected<void, GprError> leaf_apply_cross_points<double>(
         const KernelLeaf&,

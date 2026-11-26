@@ -1854,4 +1854,197 @@ namespace
         EXPECT_EQ(probe_allocs, 0U);
     }
 
+    /// @brief Verifies ConstantKernel-folded composite products in DistanceGpr training and inference.
+    /// @details Confirms parity against coordinate Gpr across fit(Lbfgs), factor, predict_into, and predict_covariance
+    /// for DistanceOnly `Constant * Constant * Rbf` and WithPoints `Constant * Rbf * Matern + Linear`, plus zero
+    /// allocations during optimization.
+    TEST(DistanceGprTest, ConstantFoldedCompositeModelParityAndZeroAllocFit)
+    {
+        // Spec: REQ-05, DES-10, DES-21
+        const Data data = make_data(14U, 5U, 2U);
+        const Tables t = euclid_tables(data);
+        const cxxgpr::ScalarDistance slot;
+
+        cxxgpr::DistanceSource train_src;
+        cxxgpr::DistanceSource cross_src;
+        cxxgpr::DistanceSource query_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), data.n, data.n));
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), data.n, data.m));
+        query_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.query.data(), data.m, data.m));
+
+        const auto c1 = cxxgpr::ConstantKernel::create(1.8).value();
+        const auto c2 = cxxgpr::ConstantKernel::create(0.7).value();
+        const auto rbf = cxxgpr::RbfKernel::create(1.1).value();
+        const auto m52 = cxxgpr::MaternKernel::create(0.9, cxxgpr::MaternNu::FiveHalves).value();
+        const auto lin = cxxgpr::LinearKernel::create(0.4).value();
+        const auto lbfgs = cxxgpr::optimizer::Lbfgs().with_max_iterations(15U);
+
+        // Case 1: DistanceOnly Constant * Constant * Rbf.
+        {
+            const auto dist_k =
+                (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c2))
+                * slot.rbf(rbf);
+            const auto coord_k = (cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(c2)) * cxxgpr::KernelSpec(rbf);
+
+            const auto dist_fit = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs>(dist_k, lbfgs)
+                                      .with_noise_variance(0.05)
+                                      .value()
+                                      .fit(train_src, data.y);
+            const auto coord_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_k, lbfgs)
+                                       .with_noise_variance(0.05)
+                                       .value()
+                                       .fit(data.x, data.n, data.d, data.y);
+            ASSERT_TRUE(dist_fit.has_value()) << dist_fit.error().message();
+            ASSERT_TRUE(coord_fit.has_value()) << coord_fit.error().message();
+            EXPECT_NEAR(dist_fit->neg_log_marginal_likelihood(), coord_fit->neg_log_marginal_likelihood(), 1e-8);
+            EXPECT_LT(rel_diff(dist_fit->optimizer_result().params, coord_fit->optimizer_result().params), 1e-7);
+
+            const auto dist_fac =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(dist_k).with_noise_variance(0.05).value().factor(
+                    train_src, data.y
+                );
+            const auto coord_fac =
+                cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(coord_k).with_noise_variance(0.05).value().factor(
+                    data.x, data.n, data.d, data.y
+                );
+            ASSERT_TRUE(dist_fac.has_value()) << dist_fac.error().message();
+            ASSERT_TRUE(coord_fac.has_value()) << coord_fac.error().message();
+            EXPECT_NEAR(dist_fac->neg_log_marginal_likelihood(), coord_fac->neg_log_marginal_likelihood(), 1e-10);
+
+            cxxgpr::Prediction<double> pred_out;
+            ASSERT_TRUE(dist_fit->predict_into(cross_src, pred_out).has_value());
+            const auto coord_pred = coord_fit->predict(data.q, data.m, data.d);
+            ASSERT_TRUE(coord_pred.has_value());
+            EXPECT_LT(rel_diff(pred_out.mean, coord_pred->mean), 1e-8);
+            EXPECT_LT(rel_diff(pred_out.variance, coord_pred->variance), 1e-8);
+
+            const auto dist_cov = dist_fit->predict_covariance(cross_src, query_src);
+            const auto coord_cov = coord_fit->predict_covariance(data.q, data.m, data.d);
+            ASSERT_TRUE(dist_cov.has_value()) << dist_cov.error().message();
+            ASSERT_TRUE(coord_cov.has_value());
+            EXPECT_LT(rel_diff(dist_cov->covariance, coord_cov->covariance), 1e-7);
+
+            std::size_t probe_allocs = 999U;
+            const auto probed =
+                cxxgpr::DistanceGpr<AllocationProbeOptimizer>(dist_k, AllocationProbeOptimizer{&probe_allocs})
+                    .with_noise_variance(0.05)
+                    .value()
+                    .fit(train_src, data.y);
+            ASSERT_TRUE(probed.has_value()) << probed.error().message();
+            EXPECT_EQ(probe_allocs, 0U);
+        }
+
+        // Case 2: WithPoints (Constant * Rbf * Matern) + Linear.
+        {
+            const auto dist_k = ((cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c1) * slot.rbf(rbf)) * slot.matern(m52))
+                + cxxgpr::KernelSpec(lin);
+            const auto coord_k = ((cxxgpr::KernelSpec(c1) * cxxgpr::KernelSpec(rbf)) * cxxgpr::KernelSpec(m52))
+                + cxxgpr::KernelSpec(lin);
+
+            const cxxgpr::MatrixRef<double> x_ref(data.x.data(), data.n, data.d);
+            const cxxgpr::MatrixRef<double> q_ref(data.q.data(), data.m, data.d);
+            const auto dist_fit =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(
+                    dist_k, lbfgs
+                )
+                    .with_noise_variance(0.05)
+                    .value()
+                    .fit(train_src, x_ref, data.y);
+            const auto coord_fit = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(coord_k, lbfgs)
+                                       .with_noise_variance(0.05)
+                                       .value()
+                                       .fit(data.x, data.n, data.d, data.y);
+            ASSERT_TRUE(dist_fit.has_value()) << dist_fit.error().message();
+            ASSERT_TRUE(coord_fit.has_value()) << coord_fit.error().message();
+            EXPECT_NEAR(dist_fit->neg_log_marginal_likelihood(), coord_fit->neg_log_marginal_likelihood(), 1e-8);
+
+            cxxgpr::Prediction<double> pred_out;
+            ASSERT_TRUE(dist_fit->predict_into(cross_src, q_ref, pred_out).has_value());
+            const auto coord_pred = coord_fit->predict(data.q, data.m, data.d);
+            ASSERT_TRUE(coord_pred.has_value());
+            EXPECT_LT(rel_diff(pred_out.mean, coord_pred->mean), 1e-8);
+            EXPECT_LT(rel_diff(pred_out.variance, coord_pred->variance), 1e-8);
+
+            const auto dist_cov = dist_fit->predict_covariance(cross_src, query_src, q_ref);
+            const auto coord_cov = coord_fit->predict_covariance(data.q, data.m, data.d);
+            ASSERT_TRUE(dist_cov.has_value()) << dist_cov.error().message();
+            ASSERT_TRUE(coord_cov.has_value());
+            EXPECT_LT(rel_diff(dist_cov->covariance, coord_cov->covariance), 1e-7);
+        }
+    }
+
+#ifdef _OPENMP
+    /// @brief Verifies bitwise determinism of DistanceStoreBuilder and apply across OpenMP thread counts.
+    /// @details Prepares and evaluates a Constant * Rbf + Matern kernel on n = 140 points under 1 and 4 OpenMP threads
+    /// and asserts identical bit patterns for packed square/cross stores and evaluated Gram matrices.
+    TEST(DistanceGprTest, ParallelDistanceOperationsBitwiseDeterministicAcrossThreads)
+    {
+        // Spec: REQ-05, DES-10, DES-21
+        struct ThreadCountGuard
+        {
+            /// @brief Saved OpenMP thread limit prior to test modification.
+            int prev = omp_get_max_threads();
+
+            /// @brief Restores the original OpenMP thread limit when the scope exits.
+            ~ThreadCountGuard() { omp_set_num_threads(prev); }
+        };
+
+        const ThreadCountGuard guard;
+
+        constexpr std::size_t n = 140U;
+        const Data data = make_data(n, 32U, 2U);
+        const Tables t = euclid_tables(data);
+
+        const cxxgpr::ScalarDistance slot;
+        const auto c = cxxgpr::ConstantKernel::create(1.7).value();
+        const auto rbf = cxxgpr::RbfKernel::create(1.25).value();
+        const auto m32 = cxxgpr::MaternKernel::create(0.85, cxxgpr::MaternNu::ThreeHalves).value();
+        const auto dist_k = (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(c) * slot.rbf(rbf)) + slot.matern(m32);
+        const auto compiled = dist_k.compile<double>();
+
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), n, n));
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), n, data.m));
+
+        auto eval_with_threads = [&](int threads)
+        {
+            omp_set_num_threads(threads);
+            const auto sq_store = compiled.prepare_square(train_src);
+            const auto cx_store = compiled.prepare_cross(cross_src);
+            EXPECT_TRUE(sq_store.has_value());
+            EXPECT_TRUE(cx_store.has_value());
+
+            auto nested = compiled.make_nested_buffers(n, n);
+            std::vector<double> gram(n * n, 0.0);
+            std::vector<double> cross_out(n * data.m, 0.0);
+            std::vector<double> scratch_sq(n * n, 0.0);
+            std::vector<double> scratch_cx(n * data.m, 0.0);
+
+            if (sq_store.has_value() && cx_store.has_value())
+            {
+                EXPECT_TRUE(compiled
+                        .apply(
+                            *sq_store, std::nullopt, cxxgpr::MatrixMut<double>(gram.data(), n, n),
+                            cxxgpr::Triangle::Full, cxxgpr::MatrixMut<double>(scratch_sq.data(), n, n), nested
+                        )
+                        .has_value());
+                EXPECT_TRUE(compiled
+                        .apply_cross(
+                            *cx_store, std::nullopt, std::nullopt,
+                            cxxgpr::MatrixMut<double>(cross_out.data(), n, data.m),
+                            cxxgpr::MatrixMut<double>(scratch_cx.data(), n, data.m), nested
+                        )
+                        .has_value());
+            }
+            return std::pair{gram, cross_out};
+        };
+
+        const auto [gram_1, cross_1] = eval_with_threads(1);
+        const auto [gram_4, cross_4] = eval_with_threads(4);
+        EXPECT_TRUE(bits_equal(gram_1, gram_4));
+        EXPECT_TRUE(bits_equal(cross_1, cross_4));
+    }
+#endif
+
 }  // namespace

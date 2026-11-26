@@ -20,6 +20,7 @@
 #include <utility>
 #include <variant>
 
+#include "core/finite_simd.hpp"
 #include "core/noinline.hpp"
 #include "kernel/distance_desc.hpp"
 #include "kernel/distance_store.hpp"
@@ -52,48 +53,90 @@ namespace cxxgpr
             return ((c * n) - tri) + (r - c);
         }
 
+        /// @brief Applies an in-place element-wise binary operation `op(dst(r, c), src(r, c))` over region `uplo`.
+        /// @details Uses area-balanced `linalg::parallel_for_lower_blocks` (`n_cols >= 128U`) for square `Lower`
+        /// triangles and OpenMP column splitting for `Upper` or `Full`/`rect` matrices when large enough.
+        /// @tparam T Storage floating-point scalar type.
+        /// @tparam Op Callable invoked as `op(dst_elem, src_elem)`.
+        /// @param[in,out] dst Destination matrix view modified in place.
+        /// @param[in] src Source matrix view of identical shape.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        /// @param[in] op Element-wise binary mutator.
+        template <KernelScalarConcept T, typename Op>
+        void apply_binary_op(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo, Op&& op) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
+                {
+                    for (std::size_t col = col_begin; col < col_end; ++col)
+                    {
+                        T* const d_col = &dst(0U, col);
+                        const T* const s_col = &src(0U, col);
+                        for (std::size_t row = col; row < n_rows; ++row)
+                        {
+                            op(d_col[row], s_col[row]);
+                        }
+                    }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
+                }
+                return;
+            }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+            if (uplo == Triangle::Upper && n_rows == n_cols)
+            {
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 128U)
+#endif
+                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+                {
+                    const auto col = static_cast<std::size_t>(col_s);
+                    T* const d_col = &dst(0U, col);
+                    const T* const s_col = &src(0U, col);
+                    for (std::size_t row = 0U; row <= col; ++row)
+                    {
+                        op(d_col[row], s_col[row]);
+                    }
+                }
+                return;
+            }
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                const auto col = static_cast<std::size_t>(col_s);
+                T* const d_col = &dst(0U, col);
+                const T* const s_col = &src(0U, col);
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    op(d_col[row], s_col[row]);
+                }
+            }
+        }
+
         /// @brief Accumulates `dst += src` over the active matrix region `uplo`.
-        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @details Delegates column-parallel addition across `Lower`, `Upper`, or `Full` to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] dst Destination matrix modified in place.
         /// @param[in] src Summand matrix view.
         /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void add_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
-            const std::size_t n_rows = dst.rows();
-            const std::size_t n_cols = dst.cols();
-            if (uplo == Triangle::Lower && n_rows == n_cols)
-            {
-                for (std::size_t col = 0; col < n_cols; ++col)
-                {
-                    for (std::size_t row = col; row < n_rows; ++row)
-                    {
-                        dst(row, col) += src(row, col);
-                    }
-                }
-                return;
-            }
-            if (uplo == Triangle::Upper && n_rows == n_cols)
-            {
-                for (std::size_t col = 0; col < n_cols; ++col)
-                {
-                    for (std::size_t row = 0; row <= col; ++row)
-                    {
-                        dst(row, col) += src(row, col);
-                    }
-                }
-                return;
-            }
-            for (std::size_t col = 0; col < n_cols; ++col)
-            {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    dst(row, col) += src(row, col);
-                }
-            }
+            apply_binary_op(dst, src, uplo, [](T& d, T s) { d += s; });
         }
 
         /// @brief Copies matrix triangle (or full matrix) `src` into `dst`.
+        /// @details Parallelizes contiguous column slice copies across `Lower`, `Upper`, or `Full`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[out] dst Destination matrix view.
         /// @param[in] src Source matrix view.
@@ -104,22 +147,42 @@ namespace cxxgpr
             const std::size_t n_cols = dst.cols();
             if (uplo == Triangle::Lower && n_rows == n_cols)
             {
-                for (std::size_t col = 0U; col < n_cols; ++col)
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    std::copy_n(&src(col, col), n_rows - col, &dst(col, col));
+                    for (std::size_t col = col_begin; col < col_end; ++col)
+                    {
+                        std::copy_n(&src(col, col), n_rows - col, &dst(col, col));
+                    }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
             if (uplo == Triangle::Upper && n_rows == n_cols)
             {
-                for (std::size_t col = 0U; col < n_cols; ++col)
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (n_cols >= 128U)
+#endif
+                for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
                 {
+                    const auto col = static_cast<std::size_t>(col_s);
                     std::copy_n(&src(0U, col), col + 1U, &dst(0U, col));
                 }
                 return;
             }
-            for (std::size_t col = 0U; col < n_cols; ++col)
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
+                const auto col = static_cast<std::size_t>(col_s);
                 std::copy_n(&src(0U, col), n_rows, &dst(0U, col));
             }
         }
@@ -204,48 +267,107 @@ namespace cxxgpr
         }
 
         /// @brief Multiplies `dst *= src` element-wise over the active matrix region `uplo`.
-        /// @details Loops over column-major slices restricted to `Lower`, `Upper`, or `Full`.
+        /// @details Delegates column-parallel Hadamard product across `Lower`, `Upper`, or `Full` to `apply_binary_op`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] dst Destination matrix scaled in place.
         /// @param[in] src Multiplier matrix view.
         /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
         template <KernelScalarConcept T> void mul_into(MatrixMut<T> dst, MatrixRef<T> src, Triangle uplo) noexcept
         {
+            apply_binary_op(dst, src, uplo, [](T& d, T s) { d *= s; });
+        }
+
+        /// @brief Scales all active entries in `dst` over `uplo` by scalar `scale` in place.
+        /// @details Uses vectorized `scale_set_slice` per contiguous column slice and OpenMP parallelism when large
+        /// enough.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in,out] dst Target matrix view scaled in place.
+        /// @param[in] scale Scalar multiplier (no-op when `scale == 1`).
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void scale_region(MatrixMut<T> dst, T scale, Triangle uplo) noexcept
+        {
+            if (scale == T{1})
+            {
+                return;
+            }
             const std::size_t n_rows = dst.rows();
             const std::size_t n_cols = dst.cols();
             if (uplo == Triangle::Lower && n_rows == n_cols)
             {
-                for (std::size_t col = 0; col < n_cols; ++col)
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    for (std::size_t row = col; row < n_rows; ++row)
+                    for (std::size_t col = col_begin; col < col_end; ++col)
                     {
-                        dst(row, col) *= src(row, col);
+                        T* const col_ptr = &dst(col, col);
+                        detail::scale_set_slice(col_ptr, col_ptr, scale, n_rows - col);
                     }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
-            if (uplo == Triangle::Upper && n_rows == n_cols)
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
-                for (std::size_t col = 0; col < n_cols; ++col)
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                T* const col_ptr = &dst(0U, col);
+                detail::scale_set_slice(col_ptr, col_ptr, scale, len);
+            }
+        }
+
+        /// @brief Populates all active entries in `dst` over `uplo` with scalar constant `val`.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[out] dst Destination matrix view populated in place.
+        /// @param[in] val Constant fill scalar.
+        /// @param[in] uplo Active matrix region (`Lower`, `Upper`, or `Full`).
+        template <KernelScalarConcept T> void fill_region(MatrixMut<T> dst, T val, Triangle uplo) noexcept
+        {
+            const std::size_t n_rows = dst.rows();
+            const std::size_t n_cols = dst.cols();
+            if (uplo == Triangle::Lower && n_rows == n_cols)
+            {
+                auto run_range = [&](std::size_t col_begin, std::size_t col_end)
                 {
-                    for (std::size_t row = 0; row <= col; ++row)
+                    for (std::size_t col = col_begin; col < col_end; ++col)
                     {
-                        dst(row, col) *= src(row, col);
+                        std::fill_n(&dst(col, col), n_rows - col, val);
                     }
+                };
+                if (n_cols >= 128U)
+                {
+                    linalg::parallel_for_lower_blocks(n_cols, 0U, run_range);
+                }
+                else
+                {
+                    run_range(0U, n_cols);
                 }
                 return;
             }
-            for (std::size_t col = 0; col < n_cols; ++col)
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n_rows * n_cols) >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
             {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    dst(row, col) *= src(row, col);
-                }
+                const auto col = static_cast<std::size_t>(col_s);
+                const std::size_t len = (uplo == Triangle::Upper && n_rows == n_cols) ? (col + 1U) : n_rows;
+                std::fill_n(&dst(0U, col), len, val);
             }
         }
 
         /// @brief Mirrors strictly lower entries of a square column-major matrix into its upper triangle when `Full`.
-        /// @details No-op for `Triangle::Lower` and `Triangle::Upper`.
+        /// @details No-op for `Triangle::Lower` and `Triangle::Upper`. Parallelizes disjoint lower-column sweeps when
+        /// `n >= 128U`.
         /// @tparam T Storage floating-point scalar type.
         /// @param[in,out] out Target square matrix view.
         /// @param[in] uplo Active matrix region (`Full` triggers mirroring).
@@ -256,14 +378,26 @@ namespace cxxgpr
                 return;
             }
             const std::size_t n = out.rows();
-            for (std::size_t col = 0U; col < n; ++col)
+            auto run_range = [&](std::size_t col_begin, std::size_t col_end)
             {
-                for (std::size_t row = col + 1U; row < n; ++row)
+                for (std::size_t col = col_begin; col < col_end; ++col)
                 {
-                    const std::size_t r1 = row;
-                    const std::size_t r2 = col;
-                    out(r2, r1) = out(r1, r2);
+                    const T* const src_col = &out(0U, col);
+                    for (std::size_t row = col + 1U; row < n; ++row)
+                    {
+                        const std::size_t dst_row = col;
+                        const std::size_t dst_col = row;
+                        out(dst_row, dst_col) = src_col[row];
+                    }
                 }
+            };
+            if (n >= 128U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, run_range);
+            }
+            else
+            {
+                run_range(0U, n);
             }
         }
 
@@ -2688,12 +2822,9 @@ namespace cxxgpr
             }
             for (std::size_t col = 0; col < x->cols(); ++col)
             {
-                for (std::size_t row = 0; row < x->rows(); ++row)
+                if (!detail::all_finite_simd(&(*x)(0U, col), x->rows()))
                 {
-                    if (!std::isfinite((*x)(row, col)))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
+                    return std::unexpected(GprError::non_finite_input());
                 }
             }
             return {};
@@ -3296,7 +3427,9 @@ namespace cxxgpr
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
                 const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode), err);
+                return capture_expected(
+                    detail::leaf_apply_dist(leaves[s->leaf_idx], dist, out, uplo, exp_mode, false), err
+                );
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -3409,6 +3542,56 @@ namespace cxxgpr
             {
                 return fail_empty_composite(ctx.err);
             }
+            if (!is_sum)
+            {
+                // Fold all ConstantKernel multipliers into a single scalar post-scale across varying factors.
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_term_square_rec(child, out, scratch, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (is_leaf_term(child))
+                    {
+                        if (!eval_term_square_rec(child, scratch, out, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, scratch.as_ref(), ctx.uplo);
+                    }
+                    else
+                    {
+                        if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                        {
+                            return false;
+                        }
+                        const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                        if (!eval_term_square_rec(child, buf, scratch, level_idx + 1U, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, buf.as_ref(), ctx.uplo);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, ctx.uplo);
+                    return true;
+                }
+                scale_region(out, scale, ctx.uplo);
+                return true;
+            }
             if (!eval_term_square_rec(terms[0], out, scratch, level_idx, ctx))
             {
                 return false;
@@ -3421,14 +3604,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), ctx.uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), ctx.uplo);
-                    }
+                    add_into(out, scratch.as_ref(), ctx.uplo);
                 }
                 else
                 {
@@ -3441,14 +3617,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), ctx.uplo);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), ctx.uplo);
-                    }
+                    add_into(out, buf.as_ref(), ctx.uplo);
                 }
             }
             return true;
@@ -3501,6 +3670,53 @@ namespace cxxgpr
                 );
             }
             return {};
+        }
+
+        /// @brief Returns true if `term` is a `CoordLeafRef` wrapping a `ConstantKernel`.
+        /// @param[in] term Compiled distance AST node.
+        /// @return True when `term` is a constant amplitude leaf.
+        [[nodiscard]] bool is_constant_term(const Term& term) const noexcept
+        {
+            if (const auto* c = std::get_if<CoordLeafRef>(&term))
+            {
+                return std::holds_alternative<ConstantKernel>(leaves[c->leaf_idx]);
+            }
+            return false;
+        }
+
+        /// @brief Counts non-constant child factors in a product's term list.
+        /// @param[in] terms Child factors of a `ProductTerm`.
+        /// @return Number of spatially varying factors.
+        [[nodiscard]] std::size_t varying_factors(std::span<const Term> terms) const noexcept
+        {
+            std::size_t count = 0U;
+            for (const Term& t : terms)
+            {
+                if (!is_constant_term(t))
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        /// @brief Computes the scalar product of all `ConstantKernel` direct child factors in `terms`.
+        /// @param[in] terms Child factors of a `ProductTerm`.
+        /// @return Combined constant multiplier cast to `T`.
+        [[nodiscard]] T constant_scale(std::span<const Term> terms) const noexcept
+        {
+            T scale = T{1};
+            for (const Term& t : terms)
+            {
+                if (const auto* c = std::get_if<CoordLeafRef>(&t))
+                {
+                    if (const auto* ck = std::get_if<ConstantKernel>(&leaves[c->leaf_idx]))
+                    {
+                        scale *= static_cast<T>(ck->constant());
+                    }
+                }
+            }
+            return scale;
         }
 
         /// @brief Computes parameter index range `[begin, end)` for any compiled distance AST node.
@@ -3620,12 +3836,15 @@ namespace cxxgpr
                 }
                 else if (const auto* prod = std::get_if<ProductTerm>(cur.node))
                 {
-                    const auto [pb, pe] = param_range_of(*cur.node);
-                    const std::size_t next_d = (pe > pb) ? (cur.depth + 1U) : cur.depth;
+                    const std::size_t varying = varying_factors(prod->terms);
+                    const std::size_t next_d = (varying >= 2U) ? (cur.depth + 1U) : cur.depth;
                     mx = std::max(mx, next_d);
                     for (const auto& child : prod->terms)
                     {
-                        dstack.push_back({&child, next_d});
+                        if (!is_constant_term(child))
+                        {
+                            dstack.push_back({&child, next_d});
+                        }
                     }
                 }
             }
@@ -3683,7 +3902,7 @@ namespace cxxgpr
             if (meta.kind == LeafKind::SuppliedScalar)
             {
                 const MatrixRef<T> dist(store.impl_->scalar_tables[meta.slot_at].data(), store.rows(), store.cols());
-                return detail::leaf_apply_dist(kl, dist, out, uplo, exp_mode);
+                return detail::leaf_apply_dist(kl, dist, out, uplo, exp_mode, false);
             }
             std::optional<GprError> err;
             const CoordLeafRef ref{
@@ -3786,6 +4005,50 @@ namespace cxxgpr
             {
                 return fail_empty_composite(err);
             }
+            if (!is_sum)
+            {
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_combine_term_rec(child, leaf_grams, out, uplo, scratch, nested, level_idx, err))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    MatrixMut<T> rhs = scratch;
+                    std::size_t sub_level = level_idx;
+                    if (!is_leaf_term(child))
+                    {
+                        if (!ensure_nested_ok(nested, level_idx, out.rows(), out.cols(), err))
+                        {
+                            return false;
+                        }
+                        rhs = nested.level(level_idx, out.rows(), out.cols());
+                        sub_level = level_idx + 1U;
+                    }
+                    if (!eval_combine_term_rec(child, leaf_grams, rhs, uplo, scratch, nested, sub_level, err))
+                    {
+                        return false;
+                    }
+                    mul_into(out, rhs.as_ref(), uplo);
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, uplo);
+                    return true;
+                }
+                scale_region(out, scale, uplo);
+                return true;
+            }
             if (!eval_combine_term_rec(terms[0], leaf_grams, out, uplo, scratch, nested, level_idx, err))
             {
                 return false;
@@ -3807,14 +4070,7 @@ namespace cxxgpr
                 {
                     return false;
                 }
-                if (is_sum)
-                {
-                    add_into(out, rhs.as_ref(), uplo);
-                }
-                else
-                {
-                    mul_into(out, rhs.as_ref(), uplo);
-                }
+                add_into(out, rhs.as_ref(), uplo);
             }
             return true;
         }
@@ -3846,13 +4102,16 @@ namespace cxxgpr
             std::optional<GprError>& err;
         };
 
-        /// @brief Contracts one leaf derivative against `weight` without returning `std::expected` on stack.
+        /// @brief Contracts one leaf derivative against `weight` (and optionally leaf value) without `std::expected` on
+        /// stack.
         /// @param[in] term Leaf AST node to contract.
         /// @param[in] weight Incoming symmetric adjoint matrix `weight` (lower triangle read).
+        /// @param[in] need_value True when $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ is requested back.
+        /// @param[out] out_val Receives $\langle \text{weight}, K_{\text{leaf}} \rangle_F$ when @p need_value is true.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_leaf(
-            const Term& term, const MatrixRef<T>& weight, const WalkDistCtx& ctx
+            const Term& term, const MatrixRef<T>& weight, bool need_value, double& out_val, const WalkDistCtx& ctx
         ) const
         {
             const std::size_t n = ctx.store.rows();
@@ -3862,28 +4121,43 @@ namespace cxxgpr
                 const KernelLeaf& kl = leaves[s->leaf_idx];
                 const MatrixRef<T> dist(ctx.store.impl_->scalar_tables[s->slot_at].data(), n, n);
                 const std::span<double> out_slice = ctx.out_grads.subspan(s->param_begin, s->param_count);
-                if (std::holds_alternative<CustomKernel>(kl))
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
                 {
                     for (std::size_t p = 0U; p < s->param_count; ++p)
                     {
                         if (!capture_expected(
-                                detail::leaf_grad_dist(kl, dist, ctx.scratch_a, p, Triangle::Lower, exp_mode), ctx.err
+                                custom->template term<T>().grad(dist, ctx.scratch_a, p, Triangle::Lower), ctx.err
                             ))
                         {
                             return false;
                         }
                         out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
                     }
+                    if (need_value)
+                    {
+                        if (!capture_expected(
+                                custom->template term<T>().apply(dist, ctx.scratch_a, Triangle::Lower), ctx.err
+                            ))
+                        {
+                            return false;
+                        }
+                        out_val = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+                    }
+                    else
+                    {
+                        out_val = 0.0;
+                    }
                     return true;
                 }
                 auto res = detail::leaf_iso_weighted_grads(
-                    kl, MatrixRef<T>{}, dist, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                    kl, MatrixRef<T>{}, dist, weight, ctx.scratch_a, ctx.col_partials, out_slice, need_value, exp_mode
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
@@ -3900,13 +4174,14 @@ namespace cxxgpr
                 }
                 auto res = detail::leaf_ard_weighted_grads(
                     kl, cached_ls[a->leaf_idx], MatrixRef<T>{}, packed, weight, ctx.scratch_a, ctx.col_partials,
-                    out_slice, false, exp_mode, precomputed_s2
+                    out_slice, need_value, exp_mode, precomputed_s2
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             const auto& c = std::get<CoordLeafRef>(term);
@@ -3914,12 +4189,16 @@ namespace cxxgpr
             const std::span<double> out_slice = ctx.out_grads.subspan(c.param_begin, c.param_count);
             if (const auto* ck = std::get_if<ConstantKernel>(&kl))
             {
-                out_slice[0] = ck->constant() * lower_sum(weight, ctx.col_partials);
+                const double val = ck->constant() * lower_sum(weight, ctx.col_partials);
+                out_slice[0] = val;
+                out_val = val;
                 return true;
             }
             if (const auto* wk = std::get_if<WhiteKernel>(&kl))
             {
-                out_slice[0] = wk->variance() * lower_diag_sum(weight);
+                const double val = wk->variance() * lower_diag_sum(weight);
+                out_slice[0] = val;
+                out_val = val;
                 return true;
             }
             if (!ctx.x.has_value())
@@ -3937,14 +4216,15 @@ namespace cxxgpr
                     precomputed_s2 = ctx.ard_s2_buf.subspan(slot * per_dim, per_dim);
                 }
                 auto res = detail::leaf_ard_weighted_grads(
-                    kl, cached_ls[c.leaf_idx], *ctx.x, {}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false,
-                    exp_mode, precomputed_s2
+                    kl, cached_ls[c.leaf_idx], *ctx.x, {}, weight, ctx.scratch_a, ctx.col_partials, out_slice,
+                    need_value, exp_mode, precomputed_s2
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             if (std::holds_alternative<RbfKernel>(kl) || std::holds_alternative<MaternKernel>(kl)
@@ -3952,13 +4232,14 @@ namespace cxxgpr
                 || std::holds_alternative<LinearKernel>(kl))
             {
                 auto res = detail::leaf_iso_weighted_grads(
-                    kl, *ctx.x, MatrixRef<T>{}, weight, ctx.scratch_a, ctx.col_partials, out_slice, false, exp_mode
+                    kl, *ctx.x, MatrixRef<T>{}, weight, ctx.scratch_a, ctx.col_partials, out_slice, need_value, exp_mode
                 );
                 if (!res.has_value())
                 {
                     ctx.err = std::move(res).error();
                     return false;
                 }
+                out_val = *res;
                 return true;
             }
             const auto& custom = std::get<CustomKernel>(kl);
@@ -3978,23 +4259,38 @@ namespace cxxgpr
                 }
                 out_slice[p] = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
             }
+            if (need_value)
+            {
+                if (!capture_expected(
+                        custom.template term<T>().apply(dist_buf.as_ref(), ctx.scratch_a, Triangle::Lower), ctx.err
+                    ))
+                {
+                    return false;
+                }
+                out_val = lower_frobenius(weight, ctx.scratch_a.as_ref(), ctx.col_partials);
+            }
+            else
+            {
+                out_val = 0.0;
+            }
             return true;
         }
 
         /// @brief Builds the effective product-child adjoint matrix out-of-line to keep recursive frames minimal.
-        /// @details Evaluates all sibling product factors other than @p skip_idx and multiplies them into a
-        /// lower-triangular scratch matrix drawn from @p ctx.work_bufs at @p work_cursor.
+        /// @details Folds constant product scale `scale` into `w_eff` and multiplies only non-constant sibling factors.
         /// @param[in] p Enclosing product term node.
         /// @param[in] skip_idx Child index whose effective adjoint matrix is being formed.
         /// @param[in] weight Incoming effective adjoint matrix applied to @p p.
+        /// @param[in] scale Product of direct `ConstantKernel` child factors in @p p.
         /// @param[in] work_cursor Buffer slot level inside @p ctx.work_bufs for the child adjoint matrix.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @param[out] out_weff Populated immutable view of the built child adjoint matrix.
-        /// @return True on success, false after recording @p ctx.err.
+        /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] CXXGPR_NOINLINE bool walk_weighted_dist_build_weff(
             const ProductTerm& p,
             std::size_t skip_idx,
             const MatrixRef<T>& weight,
+            T scale,
             std::size_t work_cursor,
             const WalkDistCtx& ctx,
             MatrixRef<T>& out_weff
@@ -4017,9 +4313,10 @@ namespace cxxgpr
             };
             auto w_eff = ctx.work_bufs.level(work_cursor, n, n);
             copy_triangle(w_eff, weight, Triangle::Lower);
+            scale_region(w_eff, scale, Triangle::Lower);
             for (std::size_t k = 0U; k < p.terms.size(); ++k)
             {
-                if (k == skip_idx)
+                if (k == skip_idx || is_constant_term(p.terms[k]))
                 {
                     continue;
                 }
@@ -4033,49 +4330,185 @@ namespace cxxgpr
             return true;
         }
 
-        /// @brief Recursive body of `walk_weighted_dist` propagating effective adjoint weights top-down.
+        /// @brief Computes all-constant product adjoint contractions out-of-line.
+        /// @param[in] p Product term containing only constant factors.
+        /// @param[in] weight Incoming lower-triangular adjoint weight matrix.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] ctx Shared contraction walk context.
+        /// @param[out] out_val Receives $\langle W, K_{\text{prod}} \rangle_F$.
+        CXXGPR_NOINLINE void walk_weighted_const_product(
+            const ProductTerm& p, const MatrixRef<T>& weight, T scale, const WalkDistCtx& ctx, double& out_val
+        ) const
+        {
+            const double val = static_cast<double>(scale) * lower_sum(weight, ctx.col_partials);
+            for (const Term& f : p.terms)
+            {
+                const auto [fb, fe] = param_range_of(f);
+                if (fe > fb)
+                {
+                    ctx.out_grads[fb] = val;
+                }
+            }
+            out_val = val;
+        }
+
+        /// @brief Scales a single varying factor's gradients by `scale` and populates constant sibling gradients.
+        /// @param[in] p Product term with one varying factor.
+        /// @param[in] scale Product of constant factor values.
+        /// @param[in] vb Inclusive parameter index of the varying factor.
+        /// @param[in] ve Exclusive parameter index of the varying factor.
+        /// @param[in] has_const True if `p` contains constant factors.
+        /// @param[in] ctx Shared contraction walk context.
+        /// @param[in,out] val Contracted scalar value scaled in place by `scale`.
+        CXXGPR_NOINLINE void walk_weighted_finish_single_varying(
+            const ProductTerm& p,
+            T scale,
+            std::size_t vb,
+            std::size_t ve,
+            bool has_const,
+            const WalkDistCtx& ctx,
+            double& val
+        ) const
+        {
+            if (has_const && scale != T{1})
+            {
+                const auto scale_d = static_cast<double>(scale);
+                val *= scale_d;
+                for (std::size_t idx = vb; idx < ve; ++idx)
+                {
+                    ctx.out_grads[idx] *= scale_d;
+                }
+            }
+            if (has_const)
+            {
+                for (const Term& f : p.terms)
+                {
+                    if (is_constant_term(f))
+                    {
+                        const auto [fb, fe] = param_range_of(f);
+                        if (fe > fb)
+                        {
+                            ctx.out_grads[fb] = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// @brief Recursive body of `walk_weighted_dist` folding constants and propagating adjoint weights top-down.
         /// @param[in] term Compiled AST node being walked.
         /// @param[in] weight Incoming effective adjoint matrix applied to `term`.
         /// @param[in] work_cursor Next available level inside `ctx.work_bufs`.
+        /// @param[in] need_value True when caller requires $\langle \text{weight}, K_{\text{term}} \rangle_F$.
+        /// @param[out] out_val Receives $\langle \text{weight}, K_{\text{term}} \rangle_F$ when @p need_value is true.
         /// @param[in] ctx Shared contraction walk context holding store, scratch, and outputs.
         /// @return True on success, false after recording `ctx.err`.
         [[nodiscard]] bool walk_weighted_dist_rec(
-            const Term& term, const MatrixRef<T>& weight, std::size_t work_cursor, const WalkDistCtx& ctx
+            const Term& term,
+            const MatrixRef<T>& weight,
+            std::size_t work_cursor,
+            bool need_value,
+            double& out_val,
+            const WalkDistCtx& ctx
         ) const
         {
             if (is_leaf_term(term))
             {
-                return walk_weighted_leaf(term, weight, ctx);
+                return walk_weighted_leaf(term, weight, need_value, out_val, ctx);
             }
             if (const auto* s = std::get_if<SumTerm>(&term))
             {
+                double total = 0.0;
                 for (std::size_t idx = 0U; idx < s->terms.size(); ++idx)
                 {
-                    if (!walk_weighted_dist_rec(s->terms[idx], weight, work_cursor, ctx))
+                    double child_val = 0.0;
+                    if (!walk_weighted_dist_rec(s->terms[idx], weight, work_cursor, need_value, child_val, ctx))
                     {
                         return false;
                     }
+                    total += child_val;
                 }
+                out_val = total;
                 return true;
             }
             const auto& p = std::get<ProductTerm>(term);
+            const std::size_t varying = varying_factors(p.terms);
+            const T scale = constant_scale(p.terms);
+            const bool has_const = (varying < p.terms.size());
+
+            if (varying == 0U)
+            {
+                walk_weighted_const_product(p, weight, scale, ctx, out_val);
+                return true;
+            }
+
+            if (varying == 1U)
+            {
+                double val = 0.0;
+                std::size_t vb = 0U;
+                std::size_t ve = 0U;
+                for (const Term& f : p.terms)
+                {
+                    if (!is_constant_term(f))
+                    {
+                        std::tie(vb, ve) = param_range_of(f);
+                        if (!walk_weighted_dist_rec(f, weight, work_cursor, need_value || has_const, val, ctx))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+                }
+                walk_weighted_finish_single_varying(p, scale, vb, ve, has_const, ctx, val);
+                out_val = val;
+                return true;
+            }
+
+            double prod_val = 0.0;
+            bool walked_first_varying = false;
             for (std::size_t m = 0U; m < p.terms.size(); ++m)
             {
+                if (is_constant_term(p.terms[m]))
+                {
+                    continue;
+                }
                 const auto [cb, ce] = param_range_of(p.terms[m]);
-                if (cb == ce)
+                const bool want_val = !walked_first_varying && (need_value || has_const);
+                walked_first_varying = true;
+                if (cb == ce && !want_val)
                 {
                     continue;
                 }
                 MatrixRef<T> w_eff_ref{};
-                if (!walk_weighted_dist_build_weff(p, m, weight, work_cursor, ctx, w_eff_ref))
+                if (!walk_weighted_dist_build_weff(p, m, weight, scale, work_cursor, ctx, w_eff_ref))
                 {
                     return false;
                 }
-                if (!walk_weighted_dist_rec(p.terms[m], w_eff_ref, work_cursor + 1U, ctx))
+                double child_val = 0.0;
+                if (!walk_weighted_dist_rec(p.terms[m], w_eff_ref, work_cursor + 1U, want_val, child_val, ctx))
                 {
                     return false;
+                }
+                if (want_val)
+                {
+                    prod_val = child_val;
                 }
             }
+            if (has_const)
+            {
+                for (const Term& f : p.terms)
+                {
+                    if (is_constant_term(f))
+                    {
+                        const auto [fb, fe] = param_range_of(f);
+                        if (fe > fb)
+                        {
+                            ctx.out_grads[fb] = prod_val;
+                        }
+                    }
+                }
+            }
+            out_val = prod_val;
             return true;
         }
 
@@ -4103,7 +4536,9 @@ namespace cxxgpr
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
                 const MatrixRef<T> dist(store.impl_->scalar_tables[s->slot_at].data(), store.rows(), store.cols());
-                return capture_expected(detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode), err);
+                return capture_expected(
+                    detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode, false), err
+                );
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
@@ -4181,6 +4616,55 @@ namespace cxxgpr
             {
                 return fail_empty_composite(ctx.err);
             }
+            if (!is_sum)
+            {
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_term_cross_rec(child, out, scratch, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (is_leaf_term(child))
+                    {
+                        if (!eval_term_cross_rec(child, scratch, out, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, scratch.as_ref(), Triangle::Full);
+                    }
+                    else
+                    {
+                        if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                        {
+                            return false;
+                        }
+                        const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                        if (!eval_term_cross_rec(child, buf, scratch, level_idx + 1U, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, buf.as_ref(), Triangle::Full);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, Triangle::Full);
+                    return true;
+                }
+                scale_region(out, scale, Triangle::Full);
+                return true;
+            }
             if (!eval_term_cross_rec(terms[0], out, scratch, level_idx, ctx))
             {
                 return false;
@@ -4193,14 +4677,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, scratch.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, scratch.as_ref(), Triangle::Full);
-                    }
+                    add_into(out, scratch.as_ref(), Triangle::Full);
                 }
                 else
                 {
@@ -4213,14 +4690,7 @@ namespace cxxgpr
                     {
                         return false;
                     }
-                    if (is_sum)
-                    {
-                        add_into(out, buf.as_ref(), Triangle::Full);
-                    }
-                    else
-                    {
-                        mul_into(out, buf.as_ref(), Triangle::Full);
-                    }
+                    add_into(out, buf.as_ref(), Triangle::Full);
                 }
             }
             return true;
@@ -4921,12 +5391,295 @@ namespace cxxgpr
             return cast;
         }
 
+        /// @brief Checks finiteness and computes the maximum magnitude of `src` in parallel across columns.
+        /// @param[in] src Column-major `double` matrix view.
+        /// @param[out] out_max_abs Maximum `std::abs` across all entries when all entries are finite.
+        /// @return `true` when every entry is finite, `false` otherwise.
+        [[nodiscard]] static bool scan_max_abs_and_finite(MatrixRef<double> src, double& out_max_abs) noexcept
+        {
+            const std::size_t n_rows = src.rows();
+            const std::size_t n_cols = src.cols();
+            double max_abs = 0.0;
+
+            if ((n_rows * n_cols) >= 65536U)
+            {
+#ifdef _OPENMP
+                const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+                std::atomic<bool> finite_failed{false};
+#    pragma omp parallel shared(src, max_abs, finite_failed, n_rows, cols_s)
+                {
+                    double local_max = 0.0;
+#    pragma omp for schedule(static)
+                    for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+                    {
+                        if (finite_failed.load(std::memory_order_relaxed))
+                        {
+                            continue;
+                        }
+                        const auto col = static_cast<std::size_t>(col_s);
+                        const double* const col_ptr = &src(0U, col);
+                        if (!detail::all_finite_simd(col_ptr, n_rows))
+                        {
+                            finite_failed.store(true, std::memory_order_relaxed);
+                            continue;
+                        }
+                        for (std::size_t row = 0U; row < n_rows; ++row)
+                        {
+                            local_max = std::max(local_max, std::abs(col_ptr[row]));
+                        }
+                    }
+#    pragma omp critical
+                    {
+                        max_abs = std::max(max_abs, local_max);
+                    }
+                }
+                if (finite_failed.load(std::memory_order_relaxed))
+                {
+                    return false;
+                }
+#else
+                for (std::size_t col = 0U; col < n_cols; ++col)
+                {
+                    const double* const col_ptr = &src(0U, col);
+                    if (!detail::all_finite_simd(col_ptr, n_rows))
+                    {
+                        return false;
+                    }
+                    for (std::size_t row = 0U; row < n_rows; ++row)
+                    {
+                        max_abs = std::max(max_abs, std::abs(col_ptr[row]));
+                    }
+                }
+#endif
+                out_max_abs = max_abs;
+                return true;
+            }
+
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                const double* const col_ptr = &src(0U, col);
+                if (!detail::all_finite_simd(col_ptr, n_rows))
+                {
+                    return false;
+                }
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    max_abs = std::max(max_abs, std::abs(col_ptr[row]));
+                }
+            }
+            out_max_abs = max_abs;
+            return true;
+        }
+
+        /// @brief Sequentially determines the canonical first `GprError` for a failing square distance matrix.
+        /// @details Preserves deterministic error-priority ordering (`non-finite` > `negative` > `nonzero diagonal` >
+        /// `asymmetry` > `overflow`) across arbitrary thread counts.
+        /// @tparam T Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input square squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static GprError diagnose_square_block_error(
+            MatrixRef<double> src,
+            std::optional<double> tidy_tol,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            const std::size_t n = src.rows();
+            double max_abs = 0.0;
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                for (std::size_t row = 0U; row < n; ++row)
+                {
+                    const double v = src(row, col);
+                    if (!std::isfinite(v))
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is not finite"
+                        );
+                    }
+                    max_abs = std::max(std::abs(v), max_abs);
+                }
+            }
+            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
+            if (!tidy_tol.has_value())
+            {
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    const double diag = src(col, col);
+                    if (diag < 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "distance is negative"
+                        );
+                    }
+                    if (diag != 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "diagonal must be zero"
+                        );
+                    }
+                }
+                for (std::size_t j0 = 0U; j0 < n; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
+                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
+                    {
+                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
+                        for (std::size_t j = j0; j < j1; ++j)
+                        {
+                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
+                            {
+                                const double a = src(i, j);
+                                const double b = src(j, i);
+                                if (a < 0.0)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "distance is negative"
+                                    );
+                                }
+                                if (b < 0.0)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{j, i}, "distance is negative"
+                                    );
+                                }
+                                if (a != b)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "square distance matrix is not symmetric"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (std::size_t col = 0U; col < n; ++col)
+                {
+                    for (std::size_t row = 0U; row < n; ++row)
+                    {
+                        if (src(row, col) < -tol)
+                        {
+                            return GprError::invalid_distance(
+                                slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
+                            );
+                        }
+                    }
+                    if (std::abs(src(col, col)) > tol)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{col, col}, "nonzero diagonal exceeds tidy tolerance"
+                        );
+                    }
+                }
+                for (std::size_t j0 = 0U; j0 < n; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
+                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
+                    {
+                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
+                        for (std::size_t j = j0; j < j1; ++j)
+                        {
+                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
+                            {
+                                if (std::abs(src(i, j) - src(j, i)) > tol)
+                                {
+                                    return GprError::invalid_distance(
+                                        slot_idx, dim_idx, std::pair{i, j}, "asymmetry exceeds tidy tolerance"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (std::size_t j = 0U; j < n; ++j)
+            {
+                for (std::size_t i = j + 1U; i < n; ++i)
+                {
+                    const double a = src(i, j);
+                    const double b = src(j, i);
+                    const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
+                    const double repaired = std::max(0.0, mean);
+                    auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, i, j);
+                    if (!cast.has_value())
+                    {
+                        return std::move(cast).error();
+                    }
+                }
+            }
+            return GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "invalid squared distance");
+        }
+
+        /// @brief Sequentially determines the canonical first `GprError` for a failing rectangular distance matrix.
+        /// @tparam T Target storage scalar type (`double` or `float`).
+        /// @param[in] src Input rectangular squared-distance matrix view.
+        /// @param[in] tidy_tol Optional relative tolerance permitting clamping of tiny negative entries.
+        /// @param[in] slot_idx Packed slot index for error diagnostics.
+        /// @param[in] dim_idx Optional ARD dimension index for error diagnostics.
+        /// @return Canonical `GprError` identifying the first failing entry.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static GprError diagnose_rect_block_error(
+            MatrixRef<double> src,
+            std::optional<double> tidy_tol,
+            std::optional<std::size_t> slot_idx,
+            std::optional<std::size_t> dim_idx
+        )
+        {
+            const std::size_t n_rows = src.rows();
+            const std::size_t n_cols = src.cols();
+            double max_abs = 0.0;
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const double v = src(row, col);
+                    if (!std::isfinite(v))
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is not finite"
+                        );
+                    }
+                    max_abs = std::max(std::abs(v), max_abs);
+                }
+            }
+            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
+            for (std::size_t col = 0U; col < n_cols; ++col)
+            {
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const double v = src(row, col);
+                    if (!tidy_tol.has_value() && v < 0.0)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "distance is negative"
+                        );
+                    }
+                    if (tidy_tol.has_value() && v < -tol)
+                    {
+                        return GprError::invalid_distance(
+                            slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
+                        );
+                    }
+                    auto cast = checked_cast<T>(std::max(0.0, v), slot_idx, dim_idx, row, col);
+                    if (!cast.has_value())
+                    {
+                        return std::move(cast).error();
+                    }
+                }
+            }
+            return GprError::invalid_distance(slot_idx, dim_idx, std::pair{0U, 0U}, "invalid squared distance");
+        }
+
         /// @brief Validates a square pairwise squared-distance matrix and appends it (packed or full) to @p dst.
-        /// @details Performs a finiteness and max-magnitude scan to set @c tol = *tidy_tol * max_abs when tidy mode is
-        /// enabled, validates diagonal-zero, non-negativity, and symmetry in @c k_pair_tile blocks, repairs
-        /// tiny negative or asymmetric entries via midpoint averaging and zero clamping, and writes either packed
-        /// lower-triangular storage (@p pack_lower = @c true) or mirrored column-major storage (@p pack_lower =
-        /// @c false).
+        /// @details Uses fused SIMD/OpenMP parallel validation and cache-local @c k_pair_tile blocking, falling back to
+        /// sequential diagnostics on failure so error priority and coordinates stay deterministic.
         /// @tparam T Target storage scalar type (@c double or @c float).
         /// @param[in] src Input square squared-distance matrix view.
         /// @param[in] tidy_tol Optional relative tolerance enabling small negative/diagonal/asymmetry repair.
@@ -4946,140 +5699,7 @@ namespace cxxgpr
         )
         {
             const std::size_t n = src.rows();
-            // Pass 1: verify finiteness across all n*n entries and capture max_abs to scale tidy_tol.
-            double max_abs = 0.0;
-            for (std::size_t col = 0; col < n; ++col)
-            {
-                for (std::size_t row = 0; row < n; ++row)
-                {
-                    const double v = src(row, col);
-                    if (!std::isfinite(v))
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is not finite")
-                        );
-                    }
-                    const double av = std::abs(v);
-                    max_abs = std::max(av, max_abs);
-                }
-            }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
-
-            if (!tidy_tol.has_value())
-            {
-                // Strict mode: require exact zero diagonal, exact non-negativity, and bitwise symmetry a == b.
-                for (std::size_t col = 0; col < n; ++col)
-                {
-                    const double diag = src(col, col);
-                    if (diag < 0.0)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{col, col}, "distance is negative")
-                        );
-                    }
-                    if (diag != 0.0)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{col, col}, "diagonal must be zero")
-                        );
-                    }
-                }
-                // Walk strict lower triangle in k_pair_tile x k_pair_tile blocks for cache-local transpose reads.
-                for (std::size_t j0 = 0; j0 < n; j0 += k_pair_tile)
-                {
-                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
-                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
-                    {
-                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
-                        for (std::size_t j = j0; j < j1; ++j)
-                        {
-                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
-                            {
-                                const double a = src(i, j);
-                                const double b = src(j, i);
-                                if (a < 0.0)
-                                {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j}, "distance is negative"
-                                        )
-                                    );
-                                }
-                                if (b < 0.0)
-                                {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{j, i}, "distance is negative"
-                                        )
-                                    );
-                                }
-                                if (a != b)
-                                {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j},
-                                            "square distance matrix is not symmetric"
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                // Tidy mode: reject violations larger than tol = tidy_rel_tol * max_abs before clamping/symmetrizing.
-                for (std::size_t col = 0; col < n; ++col)
-                {
-                    for (std::size_t row = 0; row < n; ++row)
-                    {
-                        const double v = src(row, col);
-                        if (v < -tol)
-                        {
-                            return std::unexpected(
-                                GprError::invalid_distance(
-                                    slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
-                                )
-                            );
-                        }
-                    }
-                    if (std::abs(src(col, col)) > tol)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(
-                                slot_idx, dim_idx, std::pair{col, col}, "nonzero diagonal exceeds tidy tolerance"
-                            )
-                        );
-                    }
-                }
-                for (std::size_t j0 = 0; j0 < n; j0 += k_pair_tile)
-                {
-                    const std::size_t j1 = std::min(j0 + k_pair_tile, n);
-                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
-                    {
-                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
-                        for (std::size_t j = j0; j < j1; ++j)
-                        {
-                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
-                            {
-                                const double gap = std::abs(src(i, j) - src(j, i));
-                                if (gap > tol)
-                                {
-                                    return std::unexpected(
-                                        GprError::invalid_distance(
-                                            slot_idx, dim_idx, std::pair{i, j}, "asymmetry exceeds tidy tolerance"
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Force diagonal to zero, average off-diagonal pairs a + 0.5*(b - a) for midpoint accuracy,
-            // and clamp any values in [-tol, 0) up to 0 before checked narrowing cast to T.
+            std::size_t base_offset = 0U;
             if (pack_lower)
             {
                 const auto per_dim_exp = packed_len(n);
@@ -5087,27 +5707,8 @@ namespace cxxgpr
                 {
                     return std::unexpected(std::move(per_dim_exp).error());
                 }
-                const std::size_t per_dim = *per_dim_exp;
-                const std::size_t base_offset = dst.size();
-                dst.resize(base_offset + per_dim);
-                for (std::size_t j = 0; j < n; ++j)
-                {
-                    const std::size_t diag_p = packed_lower_index(n, j, j);
-                    dst[base_offset + diag_p] = T{0};
-                    for (std::size_t i = j + 1U; i < n; ++i)
-                    {
-                        const double a = src(i, j);
-                        const double b = src(j, i);
-                        const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                        const double repaired = std::max(0.0, mean);
-                        auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, i, j);
-                        if (!cast.has_value())
-                        {
-                            return std::unexpected(std::move(cast).error());
-                        }
-                        dst[base_offset + packed_lower_index(n, i, j)] = *cast;
-                    }
-                }
+                base_offset = dst.size();
+                dst.resize(base_offset + *per_dim_exp);
             }
             else
             {
@@ -5117,31 +5718,121 @@ namespace cxxgpr
                     return std::unexpected(std::move(len_exp).error());
                 }
                 dst.resize(*len_exp);
-                for (std::size_t j = 0; j < n; ++j)
+            }
+
+            std::atomic<bool> failed{false};
+            double tol = 0.0;
+            if (tidy_tol.has_value())
+            {
+                double max_abs = 0.0;
+                if (!scan_max_abs_and_finite(src, max_abs))
                 {
-                    dst[(j * n) + j] = T{0};
-                    for (std::size_t i = j + 1U; i < n; ++i)
+                    return std::unexpected(diagnose_square_block_error<T>(src, tidy_tol, slot_idx, dim_idx));
+                }
+                tol = *tidy_tol * max_abs;
+            }
+
+            auto process_cols = [&](std::size_t col_begin, std::size_t col_end)
+            {
+                if (failed.load(std::memory_order_relaxed))
+                {
+                    return;
+                }
+                for (std::size_t j0 = col_begin; j0 < col_end; j0 += k_pair_tile)
+                {
+                    const std::size_t j1 = std::min(j0 + k_pair_tile, col_end);
+                    for (std::size_t j = j0; j < j1; ++j)
                     {
-                        const double a = src(i, j);
-                        const double b = src(j, i);
-                        const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
-                        const double repaired = std::max(0.0, mean);
-                        auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, i, j);
-                        if (!cast.has_value())
+                        const double diag = src(j, j);
+                        const bool diag_ok =
+                            tidy_tol.has_value() ? (std::abs(diag) <= tol) : (std::isfinite(diag) && diag == 0.0);
+                        if (!diag_ok)
                         {
-                            return std::unexpected(std::move(cast).error());
+                            failed.store(true, std::memory_order_relaxed);
+                            return;
                         }
-                        dst[(j * n) + i] = *cast;
-                        dst[(i * n) + j] = *cast;
+                        if (pack_lower)
+                        {
+                            dst[base_offset + packed_lower_index(n, j, j)] = T{0};
+                        }
+                        else
+                        {
+                            dst[(j * n) + j] = T{0};
+                        }
+                    }
+                    for (std::size_t i0 = j0; i0 < n; i0 += k_pair_tile)
+                    {
+                        const std::size_t i1 = std::min(i0 + k_pair_tile, n);
+                        for (std::size_t j = j0; j < j1; ++j)
+                        {
+                            const std::size_t diag_p = pack_lower ? (base_offset + packed_lower_index(n, j, j)) : 0U;
+                            for (std::size_t i = std::max(i0, j + 1U); i < i1; ++i)
+                            {
+                                const double a = src(i, j);
+                                const double b = src(j, i);
+                                T val{0};
+                                if (!tidy_tol.has_value())
+                                {
+                                    if (!std::isfinite(a) || !std::isfinite(b) || a < 0.0 || b < 0.0 || a != b)
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                    val = (a == 0.0) ? T{0} : static_cast<T>(a);
+                                }
+                                else
+                                {
+                                    if (a < -tol || b < -tol || std::abs(a - b) > tol)
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                    const double mean = (a == b) ? a : (a + (0.5 * (b - a)));
+                                    const double repaired = std::max(0.0, mean);
+                                    val = (repaired == 0.0) ? T{0} : static_cast<T>(repaired);
+                                }
+                                if constexpr (!std::same_as<T, double>)
+                                {
+                                    if (!std::isfinite(val))
+                                    {
+                                        failed.store(true, std::memory_order_relaxed);
+                                        return;
+                                    }
+                                }
+                                if (pack_lower)
+                                {
+                                    dst[diag_p + (i - j)] = val;
+                                }
+                                else
+                                {
+                                    dst[(j * n) + i] = val;
+                                    dst[(i * n) + j] = val;
+                                }
+                            }
+                        }
                     }
                 }
+            };
+
+            if (n >= 128U)
+            {
+                linalg::parallel_for_lower_blocks(n, 0U, process_cols);
+            }
+            else
+            {
+                process_cols(0U, n);
+            }
+
+            if (failed.load(std::memory_order_relaxed))
+            {
+                return std::unexpected(diagnose_square_block_error<T>(src, tidy_tol, slot_idx, dim_idx));
             }
             return {};
         }
 
         /// @brief Validates a rectangular cross squared-distance block and appends its column-major entries to @p dst.
-        /// @details Enforces finiteness across all entries and checks non-negativity strictly or within
-        /// @c -(*tidy_tol * max_abs), clamping tiny negative values to zero before narrowing to @p T.
+        /// @details Runs SIMD finiteness validation and OpenMP column-parallel checking/conversion, delegating any
+        /// detected violation to `diagnose_rect_block_error` for deterministic reporting.
         /// @tparam T Target storage scalar type (@c double or @c float).
         /// @param[in] src Input rectangular squared-distance matrix view.
         /// @param[in] tidy_tol Optional relative tolerance permitting clamping of tiny negative entries.
@@ -5160,59 +5851,74 @@ namespace cxxgpr
         {
             const std::size_t n_rows = src.rows();
             const std::size_t n_cols = src.cols();
-            // Pass 1: check finiteness across all entries and record max_abs for relative tidy tolerance.
-            double max_abs = 0.0;
-            for (std::size_t col = 0; col < n_cols; ++col)
-            {
-                for (std::size_t row = 0; row < n_rows; ++row)
-                {
-                    const double v = src(row, col);
-                    if (!std::isfinite(v))
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is not finite")
-                        );
-                    }
-                    const double av = std::abs(v);
-                    max_abs = std::max(av, max_abs);
-                }
-            }
-            const double tol = tidy_tol.has_value() ? (*tidy_tol * max_abs) : 0.0;
-            const std::size_t base_offset = dst.size();
             const auto len_exp = column_major_len(n_rows, n_cols);
             if (!len_exp.has_value())
             {
                 return std::unexpected(std::move(len_exp).error());
             }
+            const std::size_t base_offset = dst.size();
             dst.resize(base_offset + *len_exp);
-            // Pass 2: validate non-negativity (strict or within -tol), clamp [-tol, 0) to 0, and narrow to T.
-            for (std::size_t col = 0; col < n_cols; ++col)
+
+            double tol = 0.0;
+            if (tidy_tol.has_value())
             {
-                for (std::size_t row = 0; row < n_rows; ++row)
+                double max_abs = 0.0;
+                if (!scan_max_abs_and_finite(src, max_abs))
                 {
-                    const double v = src(row, col);
-                    if (!tidy_tol.has_value() && v < 0.0)
+                    return std::unexpected(diagnose_rect_block_error<T>(src, tidy_tol, slot_idx, dim_idx));
+                }
+                tol = *tidy_tol * max_abs;
+            }
+
+            std::atomic<bool> failed{false};
+            const auto cols_s = static_cast<std::ptrdiff_t>(n_cols);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if (*len_exp >= 65536U)
+#endif
+            for (std::ptrdiff_t col_s = 0; col_s < cols_s; ++col_s)
+            {
+                if (failed.load(std::memory_order_relaxed))
+                {
+                    continue;
+                }
+                const auto col = static_cast<std::size_t>(col_s);
+                const double* const src_col = &src(0U, col);
+                if (!tidy_tol.has_value() && !detail::all_finite_simd(src_col, n_rows))
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                    continue;
+                }
+                T* const dst_col = &dst[base_offset + (col * n_rows)];
+                const double min_val = tidy_tol.has_value() ? -tol : 0.0;
+                bool col_bad = false;
+                for (std::size_t row = 0U; row < n_rows; ++row)
+                {
+                    const double v = src_col[row];
+                    if (!(v >= min_val))
                     {
-                        return std::unexpected(
-                            GprError::invalid_distance(slot_idx, dim_idx, std::pair{row, col}, "distance is negative")
-                        );
-                    }
-                    if (tidy_tol.has_value() && v < -tol)
-                    {
-                        return std::unexpected(
-                            GprError::invalid_distance(
-                                slot_idx, dim_idx, std::pair{row, col}, "negative distance exceeds tidy tolerance"
-                            )
-                        );
+                        col_bad = true;
+                        break;
                     }
                     const double repaired = std::max(0.0, v);
-                    auto cast = checked_cast<T>(repaired, slot_idx, dim_idx, row, col);
-                    if (!cast.has_value())
+                    const T val = (repaired == 0.0) ? T{0} : static_cast<T>(repaired);
+                    if constexpr (!std::same_as<T, double>)
                     {
-                        return std::unexpected(std::move(cast).error());
+                        if (!std::isfinite(val))
+                        {
+                            col_bad = true;
+                            break;
+                        }
                     }
-                    dst[base_offset + (col * n_rows) + row] = *cast;
+                    dst_col[row] = val;
                 }
+                if (col_bad)
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
+            if (failed.load(std::memory_order_relaxed))
+            {
+                return std::unexpected(diagnose_rect_block_error<T>(src, tidy_tol, slot_idx, dim_idx));
             }
             return {};
         }
@@ -5829,7 +6535,8 @@ namespace cxxgpr
                 .ard_s2_ready = ard_s2_ready,
                 .err = err,
             };
-            if (!kernel.impl_->walk_weighted_dist_rec(kernel.impl_->root, weight_lower, 0U, ctx))
+            double unused_val = 0.0;
+            if (!kernel.impl_->walk_weighted_dist_rec(kernel.impl_->root, weight_lower, 0U, false, unused_val, ctx))
             {
                 return std::unexpected(
                     err.has_value() ? std::move(*err)

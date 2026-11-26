@@ -184,6 +184,9 @@ namespace cxxgpr
             /// @brief True when the caller's optimizer tracks parameter change indices (enables incremental leaf
             /// caching).
             bool use_change_indices = false;
+            /// @brief True when optimization uses only objective values or no optimization runs (reuses Cholesky
+            /// buffer).
+            bool value_only = false;
         };
 
         /// @brief Trains or factors a supplied-distance model and returns its fitted payload.
@@ -926,6 +929,8 @@ namespace cxxgpr
                 .kernel_exp = kernel_exp_,
                 .optimize = optimize && !std::same_as<O, optimizer::Fixed>,
                 .use_change_indices = optimizer_uses_change_indices_v<O>,
+                .value_only = !optimize || std::same_as<O, optimizer::Fixed> || std::same_as<O, optimizer::NelderMead>
+                    || std::same_as<O, optimizer::FastSimulatedAnnealing>,
             };
             auto cb = [](void* ctx, optimizer::TwiceDifferentiable& obj,
                           std::span<const double> init) -> std::expected<optimizer::OptimizerResult, GprError>

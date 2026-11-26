@@ -91,10 +91,12 @@ namespace cxxgpr::detail
     /// @param[out] out Column-major n x n destination Gram matrix.
     /// @param[in] uplo Matrix triangle or full region to write.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @param[in] validate_entries When true, verifies active entries of `dist` are finite before evaluation.
     /// @return Empty expected on success or GprError on invalid inputs or unsupported leaf type.
     /// @retval GprErrorCode::EmptyInput When dist is empty.
     /// @retval GprErrorCode::LengthMismatch When dist is non-square or out shape differs from dist.
-    /// @retval GprErrorCode::NonFiniteInput When any active entry of dist is non-finite.
+    /// @retval GprErrorCode::NonFiniteInput When `validate_entries` is true and any active entry of dist is
+    /// non-finite.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf requires point coordinates.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<void, GprError> leaf_apply_dist(
@@ -102,7 +104,8 @@ namespace cxxgpr::detail
         MatrixRef<T> dist,
         MatrixMut<T> out,
         Triangle uplo,
-        KernelExp exp_mode = KernelExp::Accurate
+        KernelExp exp_mode = KernelExp::Accurate,
+        bool validate_entries = true
     );
 
     /// @brief Evaluates a leaf training Gram matrix directly from input point coordinates x.
@@ -139,14 +142,19 @@ namespace cxxgpr::detail
     /// @param[in] dist Column-major n1 x n2 squared-distance matrix.
     /// @param[out] out Column-major n1 x n2 destination cross-covariance matrix.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @param[in] validate_entries When true, verifies all entries of `dist` are finite before evaluation.
     /// @return Empty expected on success or GprError on invalid inputs or coordinate-only leaf.
     /// @retval GprErrorCode::EmptyInput When dist is empty.
     /// @retval GprErrorCode::LengthMismatch When out shape differs from dist.
-    /// @retval GprErrorCode::NonFiniteInput When any entry of dist is non-finite.
+    /// @retval GprErrorCode::NonFiniteInput When `validate_entries` is true and any entry of dist is non-finite.
     /// @retval GprErrorCode::UnsupportedKernelOperation When leaf requires point coordinates.
     template <KernelScalarConcept T>
     [[nodiscard]] std::expected<void, GprError> leaf_apply_cross_dist(
-        const KernelLeaf& leaf, MatrixRef<T> dist, MatrixMut<T> out, KernelExp exp_mode = KernelExp::Accurate
+        const KernelLeaf& leaf,
+        MatrixRef<T> dist,
+        MatrixMut<T> out,
+        KernelExp exp_mode = KernelExp::Accurate,
+        bool validate_entries = true
     );
 
     /// @brief Evaluates a rectangular cross-covariance matrix for a leaf from coordinate matrices x1, x2.

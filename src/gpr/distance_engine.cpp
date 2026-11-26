@@ -20,8 +20,10 @@
 #include <limits>
 #include <numbers>
 
+#include "core/finite_simd.hpp"
 #include "gpr/refine_constants.hpp"
 #include "kernel/distance_store.hpp"
+#include "linalg/blas_backend.hpp"
 #include "linalg/factor_validation.hpp"
 #include "workspace/mll_kernels.hpp"
 #include "workspace/sample_draws.hpp"
@@ -56,17 +58,15 @@ namespace cxxgpr
                 return std::unexpected(GprError::empty_input());
             }
             out.resize(x.rows() * x.cols());
+            const std::size_t n_rows = x.rows();
             for (std::size_t col = 0; col < x.cols(); ++col)
             {
-                for (std::size_t row = 0; row < x.rows(); ++row)
+                const double* const src_col = &x(0U, col);
+                if (!detail::all_finite_simd(src_col, n_rows))
                 {
-                    const double v = x(row, col);
-                    if (!std::isfinite(v))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    out[(col * x.rows()) + row] = v;
+                    return std::unexpected(GprError::non_finite_input());
                 }
+                std::copy_n(src_col, n_rows, out.data() + (col * n_rows));
             }
             return {};
         }
@@ -168,7 +168,11 @@ namespace cxxgpr
                     }
                     return mll;
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
                 }
@@ -201,7 +205,11 @@ namespace cxxgpr
                 {
                     return std::unexpected(std::move(set).error());
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return std::unexpected(std::move(ok).error());
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
                 }
@@ -429,20 +437,31 @@ namespace cxxgpr
                 return likelihood_.set_params(params.subspan(nk, 1U));
             }
 
-            /// @brief Grows the shared scratch (kernel scratch, nested pool, second scratch matrix).
-            /// @return Success, or GprError when preparing the kernel scratch fails.
-            [[nodiscard]] std::expected<void, GprError> ensure_scratch()
+            /// @brief Grows only the scratch needed to evaluate the kernel Gram matrix (no gradient/ARD buffers).
+            /// @return Success, or GprError when preparing nested workspace fails.
+            [[nodiscard]] std::expected<void, GprError> ensure_value_scratch()
             {
                 auto& core = buffers_.core;
                 const std::size_t n = core.order();
+                const std::size_t need_depth = kernel_.nested_depth();
+                if (need_depth > 0U
+                    && (core.nested.depth() < need_depth || core.nested.rows() < n || core.nested.cols() < n))
+                {
+                    core.nested.resize(need_depth, n, n);
+                }
+                return {};
+            }
+
+            /// @brief Grows the lazy scratch needed only for derivatives, Hessians, and leaf caching.
+            /// @return Success, or GprError when preparing gradient buffers fails.
+            [[nodiscard]] std::expected<void, GprError> ensure_grad_scratch()
+            {
+                auto& core = buffers_.core;
                 if (auto ok = core.ensure_kernel_scratch(); !ok.has_value())
                 {
                     return ok;
                 }
-                if (core.nested.depth() < kernel_.nested_depth() || core.nested.rows() < n || core.nested.cols() < n)
-                {
-                    core.nested.resize(kernel_.nested_depth(), n, n);
-                }
+                const std::size_t n = core.order();
                 if (scratch_b_.size() < n * n)
                 {
                     scratch_b_.assign(n * n, Storage{0});
@@ -602,7 +621,7 @@ namespace cxxgpr
                 }
                 if (auto comb = detail::distance_combine_from_leaf_grams(
                         kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
-                        core.kernel_scratch_mut(), core.nested
+                        core.exp_mut(), core.nested
                     );
                     !comb.has_value())
                 {
@@ -702,7 +721,7 @@ namespace cxxgpr
                 }
                 if (auto comb = detail::distance_combine_from_leaf_grams(
                         kernel_, std::span<const MatrixRef<Storage>>(leaf_gram_views_), core.k_mut(), Triangle::Lower,
-                        core.kernel_scratch_mut(), core.nested
+                        core.exp_mut(), core.nested
                     );
                     !comb.has_value())
                 {
@@ -765,24 +784,29 @@ namespace cxxgpr
             [[nodiscard]] std::expected<double, GprError> factor_and_mll(bool capture_ard_s2)
             {
                 auto& core = buffers_.core;
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
                 {
                     return std::unexpected(std::move(ok).error());
+                }
+                if (capture_ard_s2)
+                {
+                    if (auto ok = ensure_grad_scratch(); !ok.has_value())
+                    {
+                        return std::unexpected(std::move(ok).error());
+                    }
                 }
                 core.clear_ard_s2_ready();
                 std::expected<void, GprError> ap;
                 if (capture_ard_s2 && !core.ard_s2_ready.empty())
                 {
                     ap = detail::distance_apply_capturing_s2(
-                        kernel_, store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested,
+                        kernel_, store_, x_, core.k_mut(), Triangle::Lower, core.exp_mut(), core.nested,
                         std::span<Storage>(core.ard_s2_storage), std::span<std::uint8_t>(core.ard_s2_ready)
                     );
                 }
                 else
                 {
-                    ap = kernel_.apply(
-                        store_, x_, core.k_mut(), Triangle::Lower, core.kernel_scratch_mut(), core.nested
-                    );
+                    ap = kernel_.apply(store_, x_, core.k_mut(), Triangle::Lower, core.exp_mut(), core.nested);
                 }
                 if (!ap.has_value())
                 {
@@ -812,6 +836,14 @@ namespace cxxgpr
                 if (out_grad.size() != nk + 1U)
                 {
                     return std::unexpected(GprError::length_mismatch("gradient output length mismatch"));
+                }
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return ok;
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
+                {
+                    return ok;
                 }
                 if (auto wg = detail::distance_weighted_grads(
                         kernel_, store_, x_, buffers_.w_ref(), out_grad.subspan(0, nk), core.kernel_scratch_mut(),
@@ -849,7 +881,11 @@ namespace cxxgpr
                 {
                     return std::unexpected(GprError::length_mismatch("hessian output length mismatch"));
                 }
-                if (auto ok = ensure_scratch(); !ok.has_value())
+                if (auto ok = ensure_value_scratch(); !ok.has_value())
+                {
+                    return ok;
+                }
+                if (auto ok = ensure_grad_scratch(); !ok.has_value())
                 {
                     return ok;
                 }
@@ -1180,28 +1216,38 @@ namespace cxxgpr
                     gram64_.resize(n * n);
                     gram_scratch_.resize(n * n);
                 }
-                auto nested = kernel64_.make_nested_buffers(n, n);
+                const std::size_t need_depth = kernel64_.nested_depth();
+                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < n)
+                {
+                    nested64_.resize(need_depth, n, n);
+                }
                 MatrixMut<double> gram_mut(gram64_.data(), n, n, n);
                 MatrixMut<double> scratch_mut(gram_scratch_.data(), n, n, n);
-                if (auto ap = kernel64_.apply(store64_, x64_, gram_mut, Triangle::Full, scratch_mut, nested);
+                if (auto ap = kernel64_.apply(store64_, x64_, gram_mut, Triangle::Lower, scratch_mut, nested64_);
                     !ap.has_value())
                 {
                     return std::unexpected(std::move(ap).error());
                 }
                 std::ranges::fill(row_abs_, 0.0);
                 std::ranges::fill(sum_, 0.0);
-                for (std::size_t col = 0; col < n; ++col)
+                for (std::size_t col = 0U; col < n; ++col)
                 {
                     const double* g_col = gram64_.data() + (col * n);
                     const double w_col = w[col];
-                    for (std::size_t row = 0; row < n; ++row)
+                    const double diag = g_col[col] + diag_offset_;
+                    sum_[col] += diag * w_col;
+                    row_abs_[col] += std::abs(diag);
+                    for (std::size_t row = col + 1U; row < n; ++row)
                     {
-                        const double entry = g_col[row] + ((row == col) ? diag_offset_ : 0.0);
+                        const double entry = g_col[row];
+                        const double abs_entry = std::abs(entry);
                         sum_[row] += entry * w_col;
-                        row_abs_[row] += std::abs(entry);
+                        sum_[col] += entry * w[row];
+                        row_abs_[row] += abs_entry;
+                        row_abs_[col] += abs_entry;
                     }
                 }
-                for (std::size_t row = 0; row < n; ++row)
+                for (std::size_t row = 0U; row < n; ++row)
                 {
                     r[row] = y64_[row] - sum_[row];
                 }
@@ -1232,6 +1278,8 @@ namespace cxxgpr
             std::vector<double> gram64_;
             /// @brief Scratch matrix for building the Gram matrix.
             std::vector<double> gram_scratch_;
+            /// @brief Cached nested buffers reused across residual checks.
+            NestedBuffers<double> nested64_;
         };
 
     }  // namespace
@@ -1390,7 +1438,8 @@ namespace cxxgpr
             payload.y_transformed[i] = static_cast<Refine>(y_f64[i]);
         }
 
-        auto buffers = FitBuffers<P>::create(n, DistanceCachePolicy::Uncached, CholeskyBuffer::Retain);
+        const auto buffer_policy = cfg.value_only ? CholeskyBuffer::Reuse : CholeskyBuffer::Retain;
+        auto buffers = FitBuffers<P>::create(n, DistanceCachePolicy::Uncached, buffer_policy);
         if (!buffers.has_value())
         {
             return std::unexpected(std::move(buffers).error());
@@ -1490,6 +1539,10 @@ namespace cxxgpr
             MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
             if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
             {
+                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
+                {
+                    return std::unexpected(std::move(ks).error());
+                }
                 // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
                 if (auto ap = compiled->apply(
                         *store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
@@ -1753,12 +1806,7 @@ namespace cxxgpr
             for (std::ptrdiff_t col = 0; col < m_signed; ++col)
             {
                 const Storage* k_col = scratch.k_star.data() + (static_cast<std::size_t>(col) * n);
-                double acc = 0.0;
-                for (std::size_t i = 0; i < n; ++i)
-                {
-                    acc += static_cast<double>(k_col[i]) * static_cast<double>(payload.alpha[i]);
-                }
-                mean_t[static_cast<std::size_t>(col)] = static_cast<Refine>(acc);
+                mean_t[static_cast<std::size_t>(col)] = detail::dot_accum<Refine>(k_col, payload.alpha.data(), n);
             }
 
             const MatrixRef<Storage> l_ref(payload.l_factor.data(), n, n, n);
@@ -1782,33 +1830,49 @@ namespace cxxgpr
             const transform::FittedTargetTransform& tf, std::span<Refine> values, std::vector<double>& tmp
         )
         {
-            tmp.assign(values.begin(), values.end());
-            if (auto r = tf.inverse_transform_mean(tmp); !r.has_value())
+            if constexpr (std::same_as<Refine, double>)
             {
-                return r;
+                (void)tmp;
+                return tf.inverse_transform_mean(values);
             }
-            std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
-            return {};
+            else
+            {
+                tmp.assign(values.begin(), values.end());
+                if (auto r = tf.inverse_transform_mean(tmp); !r.has_value())
+                {
+                    return r;
+                }
+                std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
+                return {};
+            }
         }
 
-        /// @brief Applies the inverse target transform to variances through the double staging buffer.
+        /// @brief Applies the inverse target transform to variances, using direct in-place transform for `double`.
         /// @tparam Refine Output scalar type.
         /// @param[in] tf Fitted target transform.
         /// @param[in,out] values Variances transformed in place.
-        /// @param[in,out] tmp Double staging buffer.
+        /// @param[in,out] tmp Double staging buffer used when `Refine` differs from `double`.
         /// @return Empty expected on success, or GprError.
         template <typename Refine>
         [[nodiscard]] std::expected<void, GprError> inverse_variance(
             const transform::FittedTargetTransform& tf, std::span<Refine> values, std::vector<double>& tmp
         )
         {
-            tmp.assign(values.begin(), values.end());
-            if (auto r = tf.inverse_transform_variance(tmp); !r.has_value())
+            if constexpr (std::same_as<Refine, double>)
             {
-                return r;
+                (void)tmp;
+                return tf.inverse_transform_variance(values);
             }
-            std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
-            return {};
+            else
+            {
+                tmp.assign(values.begin(), values.end());
+                if (auto r = tf.inverse_transform_variance(tmp); !r.has_value())
+                {
+                    return r;
+                }
+                std::ranges::transform(tmp, values.begin(), [](double v) { return static_cast<Refine>(v); });
+                return {};
+            }
         }
 
         /// @brief Computes the joint mean and covariance on the transformed scale (no inverse transform).
@@ -1879,35 +1943,12 @@ namespace cxxgpr
             out.mean = std::move(mean_t);
             out.n_points = m;
             out.variance_kind = options.variance_kind;
-            out.covariance.assign(*mm, Refine{0});
+            out.covariance.resize(*mm);
             const Refine noise = (options.variance_kind == VarianceKind::Observation)
                 ? static_cast<Refine>(payload.likelihood.noise_variance())
                 : Refine{0};
-            const auto m_signed = static_cast<std::ptrdiff_t>(m);
-#ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if ((n * m * m) >= 4194304U)
-#endif
-            for (std::ptrdiff_t col_s = 0; col_s < m_signed; ++col_s)
-            {
-                const auto col = static_cast<std::size_t>(col_s);
-                const Storage* v_col = scratch.k_star.data() + (col * n);
-                for (std::size_t row = col; row < m; ++row)
-                {
-                    const Storage* v_row = scratch.k_star.data() + (row * n);
-                    double acc = 0.0;
-                    for (std::size_t i = 0; i < n; ++i)
-                    {
-                        acc += static_cast<double>(v_row[i]) * static_cast<double>(v_col[i]);
-                    }
-                    auto value = static_cast<Refine>(static_cast<double>(k_qq[(col * m) + row]) - acc);
-                    if (row == col)
-                    {
-                        value += noise;
-                    }
-                    out.covariance[(col * m) + row] = value;
-                    out.covariance[(row * m) + col] = value;
-                }
-            }
+            detail::blas_posterior_cov_lower(n, m, scratch.k_star.data(), k_qq.data(), noise, out.covariance.data(), m);
+            detail::symmetrize_lower_to_upper(m, out.covariance.data(), m);
             return out;
         }
 
@@ -1980,13 +2021,9 @@ namespace cxxgpr
         {
             const auto j = static_cast<std::size_t>(col);
             const Storage* v_col = scratch.k_star.data() + (j * n);
-            double sq = 0.0;
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                sq += static_cast<double>(v_col[i]) * static_cast<double>(v_col[i]);
-            }
+            const auto sq = detail::dot_accum<Refine>(v_col, v_col, n);
             // Store the unclamped latent variance; it is checked and clamped below.
-            out.variance[j] = static_cast<Refine>(static_cast<double>(scratch.k_ss[j]) - sq);
+            out.variance[j] = static_cast<Refine>(scratch.k_ss[j]) - sq;
         }
         // Reject a non-finite latent variance before clamping: max(0, NaN) and max(0, -Inf) would both silently
         // become 0. Then clamp rounding-induced negatives to 0 and add the observation noise.
@@ -2039,14 +2076,24 @@ namespace cxxgpr
         {
             return std::unexpected(std::move(r).error());
         }
-        scratch.var_tmp.assign(cov->covariance.begin(), cov->covariance.end());
-        if (auto r = payload.target_transform->inverse_transform_covariance(scratch.var_tmp); !r.has_value())
+        if constexpr (std::same_as<Refine, double>)
         {
-            return std::unexpected(std::move(r).error());
+            if (auto r = payload.target_transform->inverse_transform_covariance(cov->covariance); !r.has_value())
+            {
+                return std::unexpected(std::move(r).error());
+            }
         }
-        std::ranges::transform(scratch.var_tmp, cov->covariance.begin(), [](double v) {
-            return static_cast<Refine>(v);
-        });
+        else
+        {
+            scratch.var_tmp.assign(cov->covariance.begin(), cov->covariance.end());
+            if (auto r = payload.target_transform->inverse_transform_covariance(scratch.var_tmp); !r.has_value())
+            {
+                return std::unexpected(std::move(r).error());
+            }
+            std::ranges::transform(scratch.var_tmp, cov->covariance.begin(), [](double v) {
+                return static_cast<Refine>(v);
+            });
+        }
         return cov;
     }
 
