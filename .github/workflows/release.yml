@@ -1,15 +1,23 @@
 name: release
 
 # Pushing a tag vX.Y.Z builds the packages and documentation and creates a DRAFT GitHub Release.
-# The draft is published by the repository owner. A manual run (workflow_dispatch) builds
-# everything and uploads the artifacts but never creates a release. Pull requests that change the
-# release machinery run the same dry run.
+# Running workflow_dispatch builds everything cleanly (dry run by default); when run on main with
+# create_draft_release=true, it creates annotated tag vX.Y.Z from CMakeLists.txt after all checks
+# pass and creates the DRAFT GitHub Release (using GITHUB_TOKEN, so pushing the tag does not
+# trigger a duplicate workflow run). The draft is published by the repository owner. Pull requests
+# that change the release machinery run the same dry run.
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      create_draft_release:
+        description: "Create annotated tag vX.Y.Z (from CMakeLists.txt on main) and Draft Release after all checks pass"
+        type: boolean
+        required: false
+        default: false
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -26,15 +34,37 @@ jobs:
   verify-version:
     name: tag matches project version
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: Check the tag against CMakeLists.txt
+        id: check
         env:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-        run: python tools/release/package.py check-version --tag "$TAG"
+          EVENT_NAME: ${{ github.event_name }}
+          CREATE_DRAFT: ${{ inputs.create_draft_release == true }}
+        run: |
+          python tools/release/package.py check-version --tag "$TAG"
+          version=$(python tools/release/package.py version)
+          target_tag="v${version}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CREATE_DRAFT" = "true" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "ERROR: create_draft_release must be triggered on main (got ${GITHUB_REF})."
+              exit 1
+            fi
+            existing=$(git ls-remote --tags origin "refs/tags/${target_tag}")
+            if [ -n "$existing" ]; then
+              echo "ERROR: tag ${target_tag} already exists on origin."
+              exit 1
+            fi
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${target_tag}" >> "$GITHUB_OUTPUT"
 
   package:
     needs: verify-version
@@ -176,9 +206,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [package, docs]
+    needs: [package, docs, verify-version]
     name: create draft release
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.create_draft_release)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -193,10 +223,20 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: python tools/release/package.py checksums --dir out/artifacts
+      - name: Create and push annotated tag (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch' && inputs.create_draft_release
+        env:
+          TAG: ${{ needs.verify-version.outputs.tag }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "${GITHUB_SHA}" -m "cxxgpr ${VERSION}"
+          git push origin "refs/tags/${TAG}"
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify-version.outputs.tag }}
         run: |
           gh release create "$TAG" out/artifacts/* \
             --draft --verify-tag --generate-notes --title "cxxgpr ${TAG#v}"
