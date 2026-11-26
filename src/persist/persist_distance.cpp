@@ -185,6 +185,16 @@ namespace cxxgpr::persist
             [[maybe_unused]] const PersistRegistry& registry
         )
         {
+            const bool missing_store = std::visit([](const auto* p) noexcept { return p == nullptr; }, input.store);
+            if (missing_store)
+            {
+                return std::unexpected(
+                    GprError::persist_failed(
+                        PersistErrorKind::NotPersistable,
+                        "supplied-distance model trained without retained distances cannot be saved"
+                    )
+                );
+            }
             const bool with_points = std::holds_alternative<const DistanceKernel<WithPoints>*>(input.kernel);
             if (input.n_train == 0U || with_points != (input.n_features > 0U) || input.y_raw.size() != input.n_train
                 || input.x_raw.size() != input.n_train * input.n_features)
@@ -440,12 +450,15 @@ namespace cxxgpr::persist
                     .kernel_exp = cfg.kernel_exp,
                     .optimize = false,
                 };
-                std::optional<MatrixRef<double>> x;
+                std::optional<cxxgpr::detail::PointMatrixRef> x;
                 if constexpr (with_points)
                 {
-                    x = MatrixRef<double>(x_raw.data(), n, d, n);
+                    x = cxxgpr::detail::PointMatrixRef(MatrixRef<double>(x_raw.data(), n, d, n));
                 }
-                payload = cxxgpr::detail::train_distance_payload<P, C>(train_cfg, source, x, y_raw, nullptr, nullptr);
+                payload = cxxgpr::detail::train_distance_payload<P, C>(
+                    train_cfg, cxxgpr::detail::DistanceTableRef<Storage>(&source), x,
+                    cxxgpr::detail::TargetSpanRef(y_raw), nullptr, nullptr
+                );
             }
             if (!payload.has_value())
             {
@@ -809,6 +822,21 @@ namespace cxxgpr::persist
         return std::visit([&](const auto& m) { return widen_result(m.predict(cross, xq, options)); }, impl_->model);
     }
 
+    /// @brief Predicts the mean and variance at float query coordinates of a WithPoints model.
+    /// @tparam C Distance mode.
+    /// @param[in] cross Training-to-query tables bound to the slots of kernel().
+    /// @param[in] xq Single-precision query coordinates, m x d.
+    /// @param[in] options Variance selection.
+    /// @return Prediction in double, or GprError.
+    template <DistanceModeConcept C>
+    std::expected<Prediction<double>, GprError> LoadedDistanceGpr<C>::predict(
+        const DistanceSource& cross, MatrixRef<float> xq, const PredictOptions& options
+    ) const
+        requires std::same_as<C, WithPoints>
+    {
+        return std::visit([&](const auto& m) { return widen_result(m.predict(cross, xq, options)); }, impl_->model);
+    }
+
     /// @brief Computes the joint predictive covariance of a DistanceOnly model.
     /// @tparam C Distance mode.
     /// @param[in] cross Training-to-query tables.
@@ -836,6 +864,24 @@ namespace cxxgpr::persist
     template <DistanceModeConcept C>
     std::expected<PredictiveCovariance<double>, GprError> LoadedDistanceGpr<C>::predict_covariance(
         const DistanceSource& cross, const DistanceSource& query, MatrixRef<double> xq, const PredictOptions& options
+    ) const
+        requires std::same_as<C, WithPoints>
+    {
+        return std::visit([&](const auto& m) {
+            return widen_result(m.predict_covariance(cross, query, xq, options));
+        }, impl_->model);
+    }
+
+    /// @brief Computes the joint predictive covariance of a WithPoints model on float coordinates.
+    /// @tparam C Distance mode.
+    /// @param[in] cross Training-to-query tables.
+    /// @param[in] query Query-to-query tables.
+    /// @param[in] xq Single-precision query coordinates, m x d.
+    /// @param[in] options Variance selection.
+    /// @return Mean and covariance in double, or GprError.
+    template <DistanceModeConcept C>
+    std::expected<PredictiveCovariance<double>, GprError> LoadedDistanceGpr<C>::predict_covariance(
+        const DistanceSource& cross, const DistanceSource& query, MatrixRef<float> xq, const PredictOptions& options
     ) const
         requires std::same_as<C, WithPoints>
     {
@@ -881,6 +927,31 @@ namespace cxxgpr::persist
         const DistanceSource& cross,
         const DistanceSource& query,
         MatrixRef<double> xq,
+        std::size_t n_draws,
+        std::uint64_t seed,
+        const PredictOptions& options
+    ) const
+        requires std::same_as<C, WithPoints>
+    {
+        return std::visit([&](const auto& m) {
+            return widen_result(m.sample(cross, query, xq, n_draws, seed, options));
+        }, impl_->model);
+    }
+
+    /// @brief Draws joint posterior samples of a WithPoints model on float coordinates.
+    /// @tparam C Distance mode.
+    /// @param[in] cross Training-to-query tables.
+    /// @param[in] query Query-to-query tables.
+    /// @param[in] xq Single-precision query coordinates, m x d.
+    /// @param[in] n_draws Number of samples.
+    /// @param[in] seed Seed of the deterministic generator.
+    /// @param[in] options Variance selection.
+    /// @return Samples in double, or GprError.
+    template <DistanceModeConcept C>
+    std::expected<std::vector<double>, GprError> LoadedDistanceGpr<C>::sample(
+        const DistanceSource& cross,
+        const DistanceSource& query,
+        MatrixRef<float> xq,
         std::size_t n_draws,
         std::uint64_t seed,
         const PredictOptions& options

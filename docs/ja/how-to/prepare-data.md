@@ -29,12 +29,14 @@ x(1, 1) = 20, buffer = 1 2 3 | 10 20 30
 
 ## データをライブラリに渡す
 
-モデルの入り口はどれも、行列の渡し方だけが違う 2 つの形を持つ。
+モデルの入り口はすべて `double` と `float` の両方（`MatrixRef<double>`、`MatrixRef<float>`、`std::span<const double>`、`std::span<const float>`）を受け取り、行列の渡し方が違う 2 つの形を持つ。
 
 | 形 | 例 | 使う場面 |
 |---|---|---|
-| スパンと形状 | `fit(x, n_rows, n_cols, y)` | `std::vector<double>` や `std::array<double, N>` のような連続バッファを自分が持っている。 |
-| `MatrixRef<double>` | `fit(MatrixRef<double>(...), y)` | 行列がすでに、自分の持つメモリ上のビューになっている。 |
+| スパンと形状 | `fit(x, n_rows, n_cols, y)` | `std::vector` や `std::array` のような `double` / `float` 連続バッファを自分が持っている。 |
+| `MatrixRef<double>` / `MatrixRef<float>` | `fit(MatrixRef<float>(...), y)` | 行列がすでに、自分の持つメモリ上のビューになっている。 |
+
+単精度の行列や目的変数は、モデルが `double` で計算・反復改良を行うときは境界で一貫して倍精度へ昇格され、ウォームアップ後の `predict_into` では同様にヒープ確保なしで動作する。この対応は `Gpr`、`FittedGpr`、`LoadedGpr`、`DistanceGpr`、`FittedDistanceGpr`、`LoadedDistanceGpr<WithPoints>` のすべてで共通である。
 
 スパンの形は、列ストライドが `n_rows` に等しい密な行列を前提にする。どちらの形も `std::expected` を返す。たとえば、目的変数の長さが行数と違えば `GprErrorCode::LengthMismatch`、データが空なら `GprErrorCode::EmptyInput`、NaN や無限大があれば `GprErrorCode::NonFiniteInput` になる。
 

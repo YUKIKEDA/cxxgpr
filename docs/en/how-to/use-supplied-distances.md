@@ -65,7 +65,7 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 
 ## Step 3: validate the tables
 
-`DistanceKernel::compile<T>` gives a `CompiledDistanceKernel<T>`. A `DistanceSource` collects the tables for one call: `bind_scalar(slot, d2)` takes a `MatrixRef<double>` and returns the source itself so calls chain. `prepare_square` validates a square training set and returns a `CheckedDistanceStore<T>`; `prepare_cross` does the same for an $n_1 \times n_2$ query-by-training table.
+`DistanceKernel::compile<T>` gives a `CompiledDistanceKernel<T>`. A `DistanceSource` collects the tables for one call: `bind_scalar(slot, d2)` accepts either `MatrixRef<double>` or `MatrixRef<float>`, and `bind_ard(slot, tables)` accepts a span of `MatrixRef<double>` or `MatrixRef<float>`. Both return the source itself so calls chain. `prepare_square` validates a square training set and returns a `CheckedDistanceStore<T>`; `prepare_cross` does the same for an $n_1 \times n_2$ query-by-training table.
 
 ```{literalinclude} /../examples/supplied_distances.cpp
 :language: cpp
@@ -78,11 +78,13 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 store: 5 x 5, square = true, requires_points = false
 ```
 
-Validation checks slot coverage, shapes, finiteness, non-negativity and, for square tables, a zero diagonal and symmetry, then converts the values to `T`. The store reports `rows`, `cols` and `is_square`. It is copyable and movable, and the same store can be reused for any number of evaluations.
+Validation checks slot coverage, shapes, finiteness, non-negativity and, for square tables, a zero diagonal and symmetry, then converts the values to `T`. For built-in isotropic leaves (`Rbf`, `Matern`, `Periodic`, `RationalQuadratic`), `CheckedDistanceStore<T>` packs scalar square tables in lower-triangular order and shares internal storage when reused. The store reports `rows`, `cols` and `is_square`. It is **move-only** (not copyable), and passing a moved-from store fails with `EmptyInput`; the same store can be reused for any number of evaluations.
 
-### Strict by default, repairable with `tidy`
+### Strict by default, repairable with `tidy`, or bypassable with `assume_valid`
 
 Distances computed from floating-point data often carry rounding noise. `DistanceSource::tidy(rel_tol)` permits small violations relative to the largest entry: negative values down to $-\mathrm{rel\_tol}\cdot\max|d^2|$ are clamped to 0, a diagonal within tolerance is zeroed, and asymmetric pairs within tolerance are averaged. `tidy_tolerance` returns the setting, or `std::nullopt` while validation is strict.
+
+When tables have already been checked (for example in an outer workflow) and value scanning would add avoidable overhead, call `DistanceSource::assume_valid(true)` (`assumes_valid()` reports the flag). This skips element-wise finiteness, non-negativity, symmetry and diagonal checks while still checking slot coverage, shapes and overflows. `assume_valid(true)` and `tidy` are mutually exclusive: combining both fails with `GprErrorCode::InvalidConfig`.
 
 ```{literalinclude} /../examples/supplied_distances.cpp
 :language: cpp
@@ -98,11 +100,11 @@ tidy(1e-9): accepted, tidy_tolerance = 1e-09
 
 | `GprErrorCode` | Cause |
 |---|---|
-| `InvalidDistance` | Non-finite, negative, asymmetric or nonzero-diagonal values beyond tolerance; the error carries the slot and entry |
+| `InvalidDistance` | Non-finite, negative, asymmetric or nonzero-diagonal values beyond tolerance, or `float` range overflow; the error carries the slot and entry |
 | `DistanceSlot` | A slot of the kernel is missing, bound twice, or bound with the wrong shape kind |
 | `UnsupportedKernelOperation` | The source binds a slot the kernel does not use |
 | `EmptyInput`, `LengthMismatch`, `DimensionMismatch` | Empty tables, non-square or unequal shapes, wrong ARD table count |
-| `InvalidConfig` | Negative or non-finite `tidy` tolerance |
+| `InvalidConfig` | Negative or non-finite `tidy` tolerance, or combining `tidy` with `assume_valid(true)` |
 
 ## Step 4: evaluate
 
@@ -224,8 +226,8 @@ The packed ARD layout stores $d$ blocks, one per feature, each holding the lower
 | `ScalarDistance` | Isotropic slot: `slot`, `rbf`, `matern`, `periodic`, `rational_quadratic`, `custom` |
 | `ArdDistance` | ARD slot: `create`, `slot`, `dims`, `rbf_ard`, `matern_ard`, `rational_quadratic_ard` |
 | `DistanceKernel<Mode>` | Expression tree: `with_points`, `num_params`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings`, `slots`, `num_scalar_slots`, `num_ard_slots`, `compile`, `operator+`, `operator*` |
-| `DistanceSource` | `bind_scalar`, `bind_ard`, `tidy`, `tidy_tolerance` |
-| `CheckedDistanceStore<T>` | Validated tables: `rows`, `cols`, `is_square` |
+| `DistanceSource` | `bind_scalar` (`double`/`float`), `bind_ard` (`double`/`float`), `tidy`, `tidy_tolerance`, `assume_valid`, `assumes_valid` |
+| `CheckedDistanceStore<T>` | Move-only validated tables: `rows`, `cols`, `is_square` |
 | `CompiledDistanceKernel<T>` | `num_params`, `num_leaves`, `requires_points`, `nested_depth`, `kernel_exp`, `set_kernel_exp`, `make_nested_buffers`, `get_params`, `set_params`, `bounds_into`, `parameter_bindings`, `slots`, `prepare_square`, `prepare_cross`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess` |
 | `DistanceCachePolicy` | `Cached`, `Uncached` |
 | `DistanceCache<T>` | `build`, `ensure`, `reset`, `policy`, `num_points`, `num_dims`, `has_dist`, `has_ard`, `dist_view`, `dist_mut`, `ard_packed`, `ard_packed_mut` |

@@ -65,7 +65,7 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 
 ## 手順 3: 表を検証する
 
-`DistanceKernel::compile<T>` は `CompiledDistanceKernel<T>` を返す。`DistanceSource` は 1 回の呼び出しで使う表を集める。`bind_scalar(slot, d2)` は `MatrixRef<double>` を受け取り、メソッドチェーンできるよう自身を返す。`prepare_square` は正方の学習集合を検証して `CheckedDistanceStore<T>` を返し、`prepare_cross` は $n_1 \times n_2$（クエリ × 学習）の表について同じことをする。
+`DistanceKernel::compile<T>` は `CompiledDistanceKernel<T>` を返す。`DistanceSource` は 1 回の呼び出しで使う表を集める。`bind_scalar(slot, d2)` は `MatrixRef<double>` と `MatrixRef<float>` のどちらも受け取り、`bind_ard(slot, tables)` は `MatrixRef<double>` または `MatrixRef<float>` のスパンを受け取る。どちらもメソッドチェーンできるよう自身を返す。`prepare_square` は正方の学習集合を検証して `CheckedDistanceStore<T>` を返し、`prepare_cross` は $n_1 \times n_2$（クエリ × 学習）の表について同じことをする。
 
 ```{literalinclude} /../examples/supplied_distances.cpp
 :language: cpp
@@ -78,11 +78,13 @@ num_params = 3, scalar slots = 1, ARD slots = 0
 store: 5 x 5, square = true, requires_points = false
 ```
 
-検証では、スロットの過不足、形、有限性、非負性、そして正方の表では対角が 0 であることと対称性を調べ、値を `T` に変換する。ストアは `rows`、`cols`、`is_square` を報告する。コピーもムーブもでき、同じストアを何度でも評価に使い回せる。
+検証では、スロットの過不足、形、有限性、非負性、そして正方の表では対角が 0 であることと対称性を調べ、値を `T` に変換する。組込みの等方的な葉（`Rbf`、`Matern`、`Periodic`、`RationalQuadratic`）だけを読むスカラー正方表は、下三角順に詰めて保持する。ストアは `rows`、`cols`、`is_square` を報告する。この型は**ムーブ専用**（コピー不可）であり、ムーブ済みのストアを渡すと `EmptyInput` で失敗する。同じストアを何度でも評価に使い回せる。
 
-### 既定は厳格、`tidy` で修復する
+### 既定は厳格、`tidy` で修復、または `assume_valid` で値検査を省略
 
 浮動小数点のデータから計算した距離には、丸めの誤差が乗りやすい。`DistanceSource::tidy(rel_tol)` は、最大要素に対する相対許容差の範囲で小さな違反を許す。$-\mathrm{rel\_tol}\cdot\max|d^2|$ までの負値は 0 に切り上げ、許容差内の対角は 0 にし、許容差内の非対称な組は平均する。`tidy_tolerance` は設定値を返し、厳格なあいだは `std::nullopt` を返す。
+
+呼び出し側ですでに検証済みの表を繰り返し渡す場合など、要素ごとの値検査の負荷を避けたいときは `DistanceSource::assume_valid(true)` を使う（`assumes_valid()` が現在の設定を返す）。この場合もスロットの一致、形、オーバーフローの検査は行うが、有限性・非負性・対称性・対角の要素検査は省く。`assume_valid(true)` と `tidy` は併用できず、同時に指定すると `GprErrorCode::InvalidConfig` になる。
 
 ```{literalinclude} /../examples/supplied_distances.cpp
 :language: cpp
@@ -98,11 +100,11 @@ tidy(1e-9): accepted, tidy_tolerance = 1e-09
 
 | `GprErrorCode` | 原因 |
 |---|---|
-| `InvalidDistance` | 許容差を超える非有限・負・非対称・対角が非 0 の値。エラーはスロットと要素を持つ |
+| `InvalidDistance` | 許容差を超える非有限・負・非対称・対角が非 0 の値、または `float` への変換オーバーフロー。エラーはスロットと要素を持つ |
 | `DistanceSlot` | カーネルのスロットが欠けている、二重に結び付けられている、または表の種別が違う |
 | `UnsupportedKernelOperation` | カーネルが使わないスロットを source が結び付けている |
 | `EmptyInput`、`LengthMismatch`、`DimensionMismatch` | 空の表、非正方または形の不一致、ARD の表の数が違う |
-| `InvalidConfig` | `tidy` の許容差が負または非有限 |
+| `InvalidConfig` | `tidy` の許容差が負または非有限、または `tidy` と `assume_valid(true)` の併用 |
 
 ## 手順 4: 評価する
 
@@ -224,8 +226,8 @@ cache: points = 3, dims = 2, has_dist = true, has_ard = true, packed size = 12
 | `ScalarDistance` | 等方的なスロット: `slot`、`rbf`、`matern`、`periodic`、`rational_quadratic`、`custom` |
 | `ArdDistance` | ARD のスロット: `create`、`slot`、`dims`、`rbf_ard`、`matern_ard`、`rational_quadratic_ard` |
 | `DistanceKernel<Mode>` | 式の木: `with_points`、`num_params`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings`、`slots`、`num_scalar_slots`、`num_ard_slots`、`compile`、`operator+`、`operator*` |
-| `DistanceSource` | `bind_scalar`、`bind_ard`、`tidy`、`tidy_tolerance` |
-| `CheckedDistanceStore<T>` | 検証済みの表: `rows`、`cols`、`is_square` |
+| `DistanceSource` | `bind_scalar`（`double`/`float`）、`bind_ard`（`double`/`float`）、`tidy`、`tidy_tolerance`、`assume_valid`、`assumes_valid` |
+| `CheckedDistanceStore<T>` | ムーブ専用の検証済みの表: `rows`、`cols`、`is_square` |
 | `CompiledDistanceKernel<T>` | `num_params`、`num_leaves`、`requires_points`、`nested_depth`、`kernel_exp`、`set_kernel_exp`、`make_nested_buffers`、`get_params`、`set_params`、`bounds_into`、`parameter_bindings`、`slots`、`prepare_square`、`prepare_cross`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess` |
 | `DistanceCachePolicy` | `Cached`、`Uncached` |
 | `DistanceCache<T>` | `build`、`ensure`、`reset`、`policy`、`num_points`、`num_dims`、`has_dist`、`has_ard`、`dist_view`、`dist_mut`、`ard_packed`、`ard_packed_mut` |

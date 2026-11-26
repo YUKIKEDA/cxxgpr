@@ -35,7 +35,7 @@ Saving does not modify the model. It writes two temporary files, `model.safetens
 
 - A reader never sees a half-written file: each file is replaced as a whole, by a rename.
 - If writing or renaming fails, `save` removes the temporary files and returns `PersistErrorKind::Io`.
-- Models that cannot be saved are detected before anything is written, and the target directory is left untouched: a custom component without a valid `persist_id` gives `PersistErrorKind::NotPersistable` or `PersistErrorKind::InvalidPersistId`, custom state that cannot be written into UTF-8 JSON gives `PersistErrorKind::NotPersistable` (see {ref}`persist-models-custom`), and a `config.json` that would be nested deeper than 128 levels, which `load` would reject, gives `PersistErrorKind::Config`.
+- Models that cannot be saved are detected before anything is written, and the target directory is left untouched: a `FittedDistanceGpr` trained with `with_retain_distances(false)` gives `PersistErrorKind::NotPersistable`, a custom component without a valid `persist_id` gives `PersistErrorKind::NotPersistable` or `PersistErrorKind::InvalidPersistId`, custom state that cannot be written into UTF-8 JSON gives `PersistErrorKind::NotPersistable` (see {ref}`persist-models-custom`), and a `config.json` that would be nested deeper than 128 levels, which `load` would reject, gives `PersistErrorKind::Config`.
 
 :::{warning}
 The two files are renamed one after the other, not as one transaction. If the process is killed between the two renames, or the second rename fails (`save` then returns `PersistErrorKind::Io`), the directory holds the new `model.safetensors` and the old `config.json`; `save` does not put the old `model.safetensors` back. Both files carry a content-based pairing identifier (`save_id` in `config.json` and `cxxgpr.save_id` in `model.safetensors` `__metadata__`), so the loader rejects a pair from different saves with `PersistErrorKind::Tensor` (unless both saves wrote identical content). To keep the previous model readable if a save is interrupted, save into a fresh directory and move the whole directory into place.
@@ -217,7 +217,7 @@ Failures are reported through `GprError`. For persistence errors, `GprError::cod
 | `Config` | `config.json` is malformed | invalid JSON, a missing key, nesting deeper than 128 levels |
 | `Tensor` | `model.safetensors` is invalid | truncated file, wrong shape or `dtype`, a non-finite value, misaligned data |
 | `InvalidPersistId` | a custom identifier is not allowed | empty, reserved prefix, not valid UTF-8, or already registered |
-| `NotPersistable` | the model has a component that cannot be saved | a custom kernel or transform without `persist_id`, or with state that is not JSON and not valid UTF-8 |
+| `NotPersistable` | the model has a component or state that cannot be saved | a `FittedDistanceGpr` trained with `with_retain_distances(false)`, a custom kernel or transform without `persist_id`, or state that is not JSON and not valid UTF-8 |
 | `UnregisteredId` | the file names a custom component that is not registered | `load` without the registry that `save` used |
 | `WrongModel` | the file is not what the caller asked for | precision mismatch in `into_fitted`, or a file written for another model family |
 

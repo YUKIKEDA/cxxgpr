@@ -1349,4 +1349,175 @@ namespace
         }
     }
 
+    /// @brief Verifies saving a FittedDistanceGpr built with with_retain_distances(false) fails with
+    /// PersistFailed(NotPersistable) before creating any output directory.
+    TEST(DistancePersistTest, NonRetainedModelRefusesPersistBeforeCreatingDirectory)
+    {
+        // Spec: FMT-07, DES-21
+        const Fixture f = make_fixture(10, 3);
+        const TempDir parent("non_retained_guard");
+
+        // DistanceOnly: both save() and save_with_factor() refuse and leave destination absent.
+        {
+            const auto kernel = only_kernel();
+            const Binder train(f, 0, kernel.slots());
+            const auto model = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(kernel)
+                                   .with_noise_variance(0.05)
+                                   .value()
+                                   .with_retain_distances(false)
+                                   .factor(train.source(), f.y);
+            ASSERT_TRUE(model.has_value());
+            EXPECT_FALSE(model->retains_distances());
+
+            const auto dir_save = parent.path / "dist_only_save_missing";
+            const auto err_save = cxxgpr::persist::save(*model, dir_save);
+            ASSERT_FALSE(err_save.has_value());
+            EXPECT_EQ(err_save.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(err_save.error().persist_error_kind(), cxxgpr::PersistErrorKind::NotPersistable);
+            EXPECT_FALSE(std::filesystem::exists(dir_save));
+
+            const auto dir_factor = parent.path / "dist_only_factor_missing";
+            const auto err_factor = cxxgpr::persist::save_with_factor(*model, dir_factor);
+            ASSERT_FALSE(err_factor.has_value());
+            EXPECT_EQ(err_factor.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(err_factor.error().persist_error_kind(), cxxgpr::PersistErrorKind::NotPersistable);
+            EXPECT_FALSE(std::filesystem::exists(dir_factor));
+        }
+
+        // WithPoints: both save() and save_with_factor() refuse and leave destination absent.
+        {
+            const auto kernel = points_kernel();
+            const Binder train(f, 0, kernel.slots());
+            const auto model =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(kernel)
+                    .with_noise_variance(0.05)
+                    .value()
+                    .with_retain_distances(false)
+                    .factor(train.source(), cxxgpr::MatrixRef<double>(f.x.data(), f.n, f.d), f.y);
+            ASSERT_TRUE(model.has_value());
+            EXPECT_FALSE(model->retains_distances());
+
+            const auto dir_save = parent.path / "wp_save_missing";
+            const auto err_save = cxxgpr::persist::save(*model, dir_save);
+            ASSERT_FALSE(err_save.has_value());
+            EXPECT_EQ(err_save.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(err_save.error().persist_error_kind(), cxxgpr::PersistErrorKind::NotPersistable);
+            EXPECT_FALSE(std::filesystem::exists(dir_save));
+
+            const auto dir_factor = parent.path / "wp_factor_missing";
+            const auto err_factor = cxxgpr::persist::save_with_factor(*model, dir_factor);
+            ASSERT_FALSE(err_factor.has_value());
+            EXPECT_EQ(err_factor.error().code(), cxxgpr::GprErrorCode::PersistFailed);
+            EXPECT_EQ(err_factor.error().persist_error_kind(), cxxgpr::PersistErrorKind::NotPersistable);
+            EXPECT_FALSE(std::filesystem::exists(dir_factor));
+        }
+    }
+
+    /// @brief Verifies LoadedDistanceGpr<WithPoints> float query overloads match widened doubles and scalar packed
+    /// stores roundtrip identically.
+    TEST(DistancePersistTest, LoadedDistanceWithPointsFloatQueriesAndPackedRoundtrip)
+    {
+        // Spec: FMT-07, FMT-08, DES-16
+        const Fixture f = make_fixture(12, 4);
+
+        // LoadedDistanceGpr<WithPoints> float query overloads match double-widened queries bit-for-bit.
+        {
+            const auto model = fit_model<cxxgpr::DoublePrecision, cxxgpr::WithPoints>(f);
+            ASSERT_TRUE(model.has_value());
+            const TempDir dir("wp_float_queries");
+            ASSERT_TRUE(cxxgpr::persist::save_with_factor(*model, dir.path).has_value());
+            const auto loaded = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::WithPoints>::load(dir.path);
+            ASSERT_TRUE(loaded.has_value());
+
+            const Binder cross(f, 1, loaded->kernel().slots());
+            const Binder query(f, 2, loaded->kernel().slots());
+            std::vector<float> q_f(f.q.size());
+            for (std::size_t idx = 0; idx < f.q.size(); ++idx)
+            {
+                q_f[idx] = static_cast<float>(f.q[idx]);
+            }
+            const std::vector<double> q_w(q_f.begin(), q_f.end());
+            const cxxgpr::MatrixRef<float> q_ref_f(q_f.data(), f.m, f.d);
+            const cxxgpr::MatrixRef<double> q_ref_w(q_w.data(), f.m, f.d);
+            const cxxgpr::PredictOptions opts{cxxgpr::VarianceKind::Latent};
+
+            const auto p_w = loaded->predict(cross.source(), q_ref_w, opts);
+            const auto p_f = loaded->predict(cross.source(), q_ref_f, opts);
+            ASSERT_TRUE(p_w.has_value());
+            ASSERT_TRUE(p_f.has_value());
+            EXPECT_TRUE(identical(p_w->mean, p_f->mean));
+            EXPECT_TRUE(identical(p_w->variance, p_f->variance));
+
+            const auto cov_w = loaded->predict_covariance(cross.source(), query.source(), q_ref_w, opts);
+            const auto cov_f = loaded->predict_covariance(cross.source(), query.source(), q_ref_f, opts);
+            ASSERT_TRUE(cov_w.has_value());
+            ASSERT_TRUE(cov_f.has_value());
+            EXPECT_TRUE(identical(cov_w->covariance, cov_f->covariance));
+
+            const auto s_w = loaded->sample(cross.source(), query.source(), q_ref_w, 3U, 91U, opts);
+            const auto s_f = loaded->sample(cross.source(), query.source(), q_ref_f, 3U, 91U, opts);
+            ASSERT_TRUE(s_w.has_value());
+            ASSERT_TRUE(s_f.has_value());
+            EXPECT_TRUE(identical(*s_w, *s_f));
+        }
+
+        // Packed built-in scalar store roundtrip via save() and save_with_factor().
+        {
+            const auto check_packed = [&]<cxxgpr::PrecisionPolicyConcept P>(const std::string& tag)
+            {
+                const auto model = fit_model<P, cxxgpr::DistanceOnly>(f);
+                ASSERT_TRUE(model.has_value()) << tag;
+                const TempDir dir_no_factor("packed_roundtrip_nf_" + tag);
+                const TempDir dir_with_factor("packed_roundtrip_wf_" + tag);
+                ASSERT_TRUE(cxxgpr::persist::save(*model, dir_no_factor.path).has_value());
+                ASSERT_TRUE(cxxgpr::persist::save_with_factor(*model, dir_with_factor.path).has_value());
+
+                for (const bool with_factor : {false, true})
+                {
+                    const auto& dir_p = with_factor ? dir_with_factor.path : dir_no_factor.path;
+                    const auto loaded = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(dir_p);
+                    ASSERT_TRUE(loaded.has_value()) << tag;
+                    const Binder cross_m(f, 1, model->kernel().slots());
+                    const Binder cross_l(f, 1, loaded->kernel().slots());
+                    const Binder query_m(f, 2, model->kernel().slots());
+                    const Binder query_l(f, 2, loaded->kernel().slots());
+
+                    const auto pm = model->predict(cross_m.source());
+                    const auto pl = loaded->predict(cross_l.source());
+                    ASSERT_TRUE(pm.has_value());
+                    ASSERT_TRUE(pl.has_value());
+                    const auto cm = model->predict_covariance(cross_m.source(), query_m.source());
+                    const auto cl = loaded->predict_covariance(cross_l.source(), query_l.source());
+                    ASSERT_TRUE(cm.has_value());
+                    ASSERT_TRUE(cl.has_value());
+                    const auto lm = model->loo_predict();
+                    const auto ll = loaded->loo_predict();
+                    ASSERT_TRUE(lm.has_value());
+                    ASSERT_TRUE(ll.has_value());
+
+                    if (with_factor)
+                    {
+                        EXPECT_TRUE(identical(pm->mean, pl->mean));
+                        EXPECT_TRUE(identical(pm->variance, pl->variance));
+                        EXPECT_TRUE(identical(cm->covariance, cl->covariance));
+                        EXPECT_TRUE(identical(lm->mean, ll->mean));
+                        EXPECT_TRUE(identical(lm->variance, ll->variance));
+                    }
+                    else
+                    {
+                        const double tol = std::same_as<P, cxxgpr::DoublePrecision> ? 1e-10 : 1e-5;
+                        EXPECT_LT(rel_diff(pm->mean, pl->mean), tol);
+                        EXPECT_LT(rel_diff(pm->variance, pl->variance), tol);
+                        EXPECT_LT(rel_diff(cm->covariance, cl->covariance), tol);
+                        EXPECT_LT(rel_diff(lm->mean, ll->mean), tol);
+                        EXPECT_LT(rel_diff(lm->variance, ll->variance), tol);
+                    }
+                }
+            };
+            check_packed.template operator()<cxxgpr::DoublePrecision>("f64");
+            check_packed.template operator()<cxxgpr::SinglePrecision>("f32");
+            check_packed.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>("mixed");
+        }
+    }
+
 }  // namespace

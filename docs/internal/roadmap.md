@@ -2,7 +2,7 @@
 
 The canonical source for the order and state of work. A row carries only its ID, kind, title, Issue, and state; detailed completion criteria are written in the Issue. Rows are added or removed only after a Grill, and only the PR that finishes a row rewrites "Now".
 
-**Now**: REL-13 is done; REL-14 (Feat) is next.
+**Now**: REL-14 is done (all planned features implemented; first release awaits the owner's decision in [release.md](release.md)).
 
 The goal is to provide the **Exact GPR** model as the C++23 static library `cxxgpr` without compromising numerics, API, persistence, or performance. The work has completed the repository foundation (M0-1), the build, check, and CI foundation (M0-2), the core foundation (M1-1), the precision foundation (M1-2), the linear algebra foundation (M1-3), the preprocessing foundation (M1-4), the M2 kernel foundation (M2-A to M2-E), workspaces with MLL and analytic gradients (M3-A), analytic Hessians with memory/speed-first integration (M3-B), LOO inference with prediction and sampling (M3-C), the in-house optimizers (M4-A), the public model integration (M4-B), persistence (M4-C), the integrated validation and benchmarks (M5-1 to M5-4), the publication preparation (REL-1, REL-2), and the user documentation (REL-3), the release workflow (REL-4), and the specification, training, inference and persistence of the supplied-distance models (REL-5 to REL-7). The first release is the owner's decision; see [release.md](release.md).
 
@@ -106,7 +106,7 @@ flowchart LR
 | REL-11 | Design | Per-save pairing identifier of `config.json` and `model.safetensors` (FMT-09): specification, then implementation for `LoadedGpr` and `LoadedDistanceGpr<C>` after REL-7 and PR #101 merge | #114 | Done |
 | REL-12 | Refactor | Supplied-distance internal performance optimization (kernel folding, SIMD/OpenMP validation, BLAS covariance, lazy factor buffers) | #134 | Done |
 | REL-13 | Design | Supplied-distance & float API specification (`DistanceGpr::with_likelihood`, zero-copy/unchecked supply, `FittedDistanceGpr` distance retention, `float` matrix inputs) | #136 | Done |
-| REL-14 | Feat | Implement REL-13 public API extensions, tests, and bilingual user documentation | — | Todo |
+| REL-14 | Feat | Implement REL-13 public API extensions, tests, and bilingual user documentation | #138 | Done |
 
 ## Out of scope
 

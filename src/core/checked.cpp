@@ -218,6 +218,22 @@ namespace cxxgpr
             return MatrixRef<double>(data.data(), n_rows, n_cols, n_rows);
         }
 
+        /// @brief Wraps a raw single-precision column-major span as a MatrixRef<float> after checking shape.
+        /// @param[in] data Contiguous column-major float matrix data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        std::expected<MatrixRef<float>, GprError> matrix_view_from_span(
+            std::span<const float> data, std::size_t n_rows, std::size_t n_cols
+        )
+        {
+            if (auto len = validate_shape_header(data.size(), n_rows, n_cols, "matrix"); !len.has_value())
+            {
+                return std::unexpected(std::move(len).error());
+            }
+            return MatrixRef<float>(data.data(), n_rows, n_cols, n_rows);
+        }
+
         /// @brief Wraps a raw column-major training span as a MatrixRef, rejecting an empty target vector first.
         /// @details Checks y for emptiness before the shape of x so EmptyInput keeps precedence over SizeOverflow
         /// and LengthMismatch across both arguments, then delegates to matrix_view_from_span().
@@ -234,6 +250,57 @@ namespace cxxgpr
         )
         {
             // An empty target outranks every size error of x in the validation order.
+            if (y.empty())
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            return matrix_view_from_span(x, n_rows, n_cols);
+        }
+
+        /// @brief Wraps a raw float training span with double targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous column-major float training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Double training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        std::expected<MatrixRef<float>, GprError> training_view_from_span(
+            std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        )
+        {
+            if (y.empty())
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            return matrix_view_from_span(x, n_rows, n_cols);
+        }
+
+        /// @brief Wraps a raw double training span with float targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous column-major double training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Float training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        std::expected<MatrixRef<double>, GprError> training_view_from_span(
+            std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        )
+        {
+            if (y.empty())
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            return matrix_view_from_span(x, n_rows, n_cols);
+        }
+
+        /// @brief Wraps a raw float training span with float targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous column-major float training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Float training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        std::expected<MatrixRef<float>, GprError> training_view_from_span(
+            std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        )
+        {
             if (y.empty())
             {
                 return std::unexpected(GprError::empty_input());

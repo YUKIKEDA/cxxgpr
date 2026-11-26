@@ -108,6 +108,33 @@ namespace cxxgpr::detail
         bool validate_entries = true
     );
 
+    /// @brief Evaluates a leaf training Gram matrix from packed lower-triangular scalar squared distances.
+    /// @details Supports built-in isotropic leaves, ConstantKernel, and WhiteKernel; rejects CustomKernel and
+    /// coordinate-only leaves.
+    /// @tparam T Kernel evaluation scalar type (double or float).
+    /// @param[in] leaf Kernel leaf variant to evaluate.
+    /// @param[in] packed_lower Column-major packed lower triangle of n x n squared distances (length n*(n+1)/2).
+    /// @param[in] n Matrix side length.
+    /// @param[out] out Column-major n x n destination Gram matrix.
+    /// @param[in] uplo Matrix triangle or full region to write.
+    /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @param[in] validate_entries When true, verifies packed entries are finite before evaluation.
+    /// @return Empty expected on success or GprError on invalid inputs or unsupported leaf type.
+    /// @retval GprErrorCode::EmptyInput When n == 0 or packed_lower is empty.
+    /// @retval GprErrorCode::LengthMismatch When packed_lower size or out shape disagrees with n.
+    /// @retval GprErrorCode::NonFiniteInput When validate_entries is true and any packed entry is non-finite.
+    /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is CustomKernel or requires point coordinates.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<void, GprError> leaf_apply_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
+        MatrixMut<T> out,
+        Triangle uplo,
+        KernelExp exp_mode = KernelExp::Accurate,
+        bool validate_entries = false
+    );
+
     /// @brief Evaluates a leaf training Gram matrix directly from input point coordinates x.
     /// @details Supports all built-in leaves (isotropic, ARD, Linear, Constant, White); rejects CustomKernel.
     /// @tparam T Kernel evaluation scalar type (double or float).
@@ -228,6 +255,33 @@ namespace cxxgpr::detail
         KernelExp exp_mode = KernelExp::Accurate
     );
 
+    /// @brief Evaluates the first derivative wrt parameter param_idx from packed lower-triangular squared distances.
+    /// @details Supports built-in isotropic leaves, ConstantKernel, and WhiteKernel; rejects CustomKernel and
+    /// coordinate-only leaves.
+    /// @tparam T Kernel evaluation scalar type (double or float).
+    /// @param[in] leaf Kernel leaf variant to differentiate.
+    /// @param[in] packed_lower Column-major packed lower triangle of n x n squared distances (length n*(n+1)/2).
+    /// @param[in] n Matrix side length.
+    /// @param[out] d_k Column-major n x n destination derivative matrix.
+    /// @param[in] param_idx Leaf-local parameter index in [0, leaf_num_params(leaf)).
+    /// @param[in] uplo Matrix triangle or full region to write.
+    /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @return Empty expected on success or GprError on invalid inputs, out-of-range index, or unsupported leaf.
+    /// @retval GprErrorCode::EmptyInput When n == 0 or packed_lower is empty.
+    /// @retval GprErrorCode::LengthMismatch When packed_lower size or d_k shape disagrees with n.
+    /// @retval GprErrorCode::IndexOutOfRange When param_idx >= leaf_num_params(leaf).
+    /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is CustomKernel or requires point coordinates.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<void, GprError> leaf_grad_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
+        MatrixMut<T> d_k,
+        std::size_t param_idx,
+        Triangle uplo,
+        KernelExp exp_mode = KernelExp::Accurate
+    );
+
     /// @brief Evaluates the first derivative dK / d(log theta_{param_idx}) from point coordinates x.
     /// @details Supports all built-in leaves (including ARD and Linear); rejects CustomKernel.
     /// @tparam T Kernel evaluation scalar type (double or float).
@@ -277,6 +331,35 @@ namespace cxxgpr::detail
     [[nodiscard]] std::expected<void, GprError> leaf_hess_dist(
         const KernelLeaf& leaf,
         MatrixRef<T> dist,
+        MatrixMut<T> d2_k,
+        std::size_t i,
+        std::size_t j,
+        Triangle uplo,
+        KernelExp exp_mode = KernelExp::Accurate
+    );
+
+    /// @brief Evaluates the second derivative wrt (i, j) from packed lower-triangular squared distances.
+    /// @details Supports built-in isotropic leaves, ConstantKernel, and WhiteKernel; rejects CustomKernel and
+    /// coordinate-only leaves.
+    /// @tparam T Kernel evaluation scalar type (double or float).
+    /// @param[in] leaf Kernel leaf variant to differentiate.
+    /// @param[in] packed_lower Column-major packed lower triangle of n x n squared distances (length n*(n+1)/2).
+    /// @param[in] n Matrix side length.
+    /// @param[out] d2_k Column-major n x n destination second-derivative matrix.
+    /// @param[in] i First leaf-local parameter index in [0, leaf_num_params(leaf)).
+    /// @param[in] j Second leaf-local parameter index in [0, leaf_num_params(leaf)).
+    /// @param[in] uplo Matrix triangle or full region to write.
+    /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @return Empty expected on success or GprError on invalid inputs, bad indices, or unsupported leaf.
+    /// @retval GprErrorCode::EmptyInput When n == 0 or packed_lower is empty.
+    /// @retval GprErrorCode::LengthMismatch When packed_lower size or d2_k shape disagrees with n.
+    /// @retval GprErrorCode::IndexOutOfRange When i or j >= leaf_num_params(leaf).
+    /// @retval GprErrorCode::UnsupportedKernelOperation When leaf is CustomKernel or requires point coordinates.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<void, GprError> leaf_hess_dist_packed(
+        const KernelLeaf& leaf,
+        std::span<const T> packed_lower,
+        std::size_t n,
         MatrixMut<T> d2_k,
         std::size_t i,
         std::size_t j,
@@ -527,6 +610,7 @@ namespace cxxgpr::detail
     /// @param[out] out_grads Destination span of length leaf_num_params(leaf) receiving <weight, dK/dtheta_p>_F.
     /// @param[in] need_value True when <weight, K_leaf>_F must also be evaluated and returned.
     /// @param[in] exp_mode Exponential evaluation backend (Accurate or FastApprox).
+    /// @param[in] dist_packed Optional column-major packed lower-triangular squared distances (length n*(n+1)/2).
     /// @return <weight, K_leaf>_F when `need_value` is true (otherwise 0.0), or GprError on invalid inputs/buffers.
     /// @retval GprErrorCode::UnsupportedKernelOperation When `leaf` is not isotropic-distance or `LinearKernel`.
     /// @retval GprErrorCode::EmptyInput When `weight`, required `x`, or supplied `dist` is empty/null.
@@ -542,7 +626,8 @@ namespace cxxgpr::detail
         std::span<double> col_partials,
         std::span<double> out_grads,
         bool need_value,
-        KernelExp exp_mode = KernelExp::Accurate
+        KernelExp exp_mode = KernelExp::Accurate,
+        std::span<const T> dist_packed = {}
     );
 
 }  // namespace cxxgpr::detail

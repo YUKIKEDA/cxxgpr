@@ -35,7 +35,7 @@ model.safetensors: 5440 bytes
 
 - 読み手が書きかけのファイルを見ることはない。各ファイルは、リネームによって丸ごと置き換わる。
 - 書き込みやリネームに失敗すると、`save` は一時ファイルを削除し、`PersistErrorKind::Io` を返す。
-- 保存できないモデルは、何かを書く前に検出され、保存先のディレクトリには触れない。有効な `persist_id` を持たない自作の構成要素があると `PersistErrorKind::NotPersistable` か `PersistErrorKind::InvalidPersistId`、UTF-8 の JSON に書けない自作の状態があると `PersistErrorKind::NotPersistable`（{ref}`persist-models-custom` を参照）、`load` が拒む 128 段より深い入れ子の `config.json` になると `PersistErrorKind::Config` を返す。
+- 保存できないモデルは、何かを書く前に検出され、保存先のディレクトリには触れない。`with_retain_distances(false)` で学習した `FittedDistanceGpr` は `PersistErrorKind::NotPersistable`、有効な `persist_id` を持たない自作の構成要素があると `PersistErrorKind::NotPersistable` か `PersistErrorKind::InvalidPersistId`、UTF-8 の JSON に書けない自作の状態があると `PersistErrorKind::NotPersistable`（{ref}`persist-models-custom` を参照）、`load` が拒む 128 段より深い入れ子の `config.json` になると `PersistErrorKind::Config` を返す。
 
 :::{warning}
 2 つのファイルは、1 つのトランザクションではなく、順にリネームされる。2 回のリネームの間にプロセスが強制終了したとき、または 2 回目のリネームに失敗したとき（`save` は `PersistErrorKind::Io` を返す）、ディレクトリには新しい `model.safetensors` と古い `config.json` が残る。`save` は古い `model.safetensors` を元に戻さない。両ファイルには内容ハッシュに基づくペアリング識別子（`config.json` の `save_id` と `model.safetensors` の `__metadata__["cxxgpr.save_id"]`）が書かれるため、ローダーは異なる保存から来た組を `PersistErrorKind::Tensor` で拒む（2 回の保存内容が完全に同一である場合を除く）。中断時も直前のモデルを読み込める状態を保つ必要があるなら、新しいディレクトリへ保存し、ディレクトリごと所定の位置へ移す。
@@ -217,7 +217,7 @@ reserved prefix rejected: true, duplicate rejected: true
 | `Config` | `config.json` が壊れている | JSON が不正、キーが欠けている、入れ子が 128 段を超える |
 | `Tensor` | `model.safetensors` が不正 | ファイルが切り詰められた、形状や `dtype` が違う、有限でない値、アラインメントが合わない |
 | `InvalidPersistId` | 自作の識別子が許されない | 空、予約された接頭辞、有効な UTF-8 でない、すでに登録済み |
-| `NotPersistable` | 保存できない構成要素がある | `persist_id` のない自作のカーネルや変換、JSON でも有効な UTF-8 でもない状態 |
+| `NotPersistable` | 保存できない構成要素または状態がある | `with_retain_distances(false)` で学習した `FittedDistanceGpr`、`persist_id` のない自作のカーネルや変換、JSON でも有効な UTF-8 でもない状態 |
 | `UnregisteredId` | 登録されていない自作の構成要素がファイルにある | `save` で使ったレジストリなしで `load` した |
 | `WrongModel` | ファイルが呼び出し側の求めるものと違う | `into_fitted` での精度の不一致、または別のモデル族のファイル |
 

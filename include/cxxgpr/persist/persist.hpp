@@ -298,6 +298,14 @@ namespace cxxgpr::persist
             MatrixRef<double> xs, const PredictOptions& options = {}
         ) const;
 
+        /// @brief Computes posterior mean and diagonal variance promoted to double precision on float queries.
+        /// @param[in] xs Column-major single-precision query feature matrix (m x d).
+        /// @param[in] options Optional prediction controls.
+        /// @return Double-precision Prediction on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
+            MatrixRef<float> xs, const PredictOptions& options = {}
+        ) const;
+
         /// @brief Computes posterior mean and diagonal variance from a raw column-major span.
         /// @details Checks the length of xs against n_rows * n_cols, wraps it as a MatrixRef<double> with leading
         /// dimension n_rows, and delegates to predict().
@@ -306,14 +314,26 @@ namespace cxxgpr::persist
         /// @param[in] n_cols Number of features per query point (must match d()).
         /// @param[in] options Optional prediction controls.
         /// @return Double-precision Prediction on the original target scale, or GprError on failure.
-        /// @retval GprErrorCode::EmptyInput When xs is empty, or n_rows or n_cols is zero.
-        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
-        /// @retval GprErrorCode::LengthMismatch When xs.size() != n_rows * n_cols.
-        /// @retval GprErrorCode::DimensionMismatch When n_cols != d().
-        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
-        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
             std::span<const double> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
+        ) const
+        {
+            auto view = cxxgpr::detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict(*view, options);
+        }
+
+        /// @brief Computes posterior mean and diagonal variance from a raw single-precision span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must match d()).
+        /// @param[in] options Optional prediction controls.
+        /// @return Double-precision Prediction on the original target scale, or GprError on failure.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
+            std::span<const float> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
         ) const
         {
             auto view = cxxgpr::detail::matrix_view_from_span(xs, n_rows, n_cols);
@@ -330,12 +350,17 @@ namespace cxxgpr::persist
         /// @param[out] out Destination prediction struct populated on success.
         /// @param[in] options Optional prediction controls.
         /// @return Empty expected on success, or GprError on validation or numerical failure.
-        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
-        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
-        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
-        /// @retval GprErrorCode::NonFiniteKernelValue When a latent predictive variance is NaN or +/-Inf.
         [[nodiscard]] std::expected<void, GprError> predict_into(
             MatrixRef<double> xs, Prediction<double>& out, const PredictOptions& options = {}
+        ) const;
+
+        /// @brief Computes posterior mean and diagonal variance into out for single-precision query features.
+        /// @param[in] xs Column-major float query feature matrix (m x d).
+        /// @param[out] out Destination prediction struct populated on success.
+        /// @param[in] options Optional prediction controls.
+        /// @return Empty expected on success, or GprError on validation or numerical failure.
+        [[nodiscard]] std::expected<void, GprError> predict_into(
+            MatrixRef<float> xs, Prediction<double>& out, const PredictOptions& options = {}
         ) const;
 
         /// @brief Computes full m x m posterior covariance matrix (double-promoted).
@@ -344,12 +369,35 @@ namespace cxxgpr::persist
         /// @param[in] xs Column-major query feature matrix (m x d).
         /// @param[in] options Optional prediction controls.
         /// @return Double-precision PredictiveCovariance or GprError on validation or numerical failure.
-        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
-        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
-        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
         [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
             MatrixRef<double> xs, const PredictOptions& options = {}
         ) const;
+
+        /// @brief Computes full m x m posterior covariance matrix for single-precision query features.
+        /// @param[in] xs Column-major float query feature matrix (m x d).
+        /// @param[in] options Optional prediction controls.
+        /// @return Double-precision PredictiveCovariance or GprError on validation or numerical failure.
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
+            MatrixRef<float> xs, const PredictOptions& options = {}
+        ) const;
+
+        /// @brief Computes full m x m posterior covariance from a raw float span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must match d()).
+        /// @param[in] options Optional prediction controls.
+        /// @return Double-precision PredictiveCovariance or GprError on validation or numerical failure.
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
+            std::span<const float> xs, std::size_t n_rows, std::size_t n_cols, const PredictOptions& options = {}
+        ) const
+        {
+            auto view = cxxgpr::detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return predict_covariance(*view, options);
+        }
 
         /// @brief Draws n_draws deterministic posterior samples (double-promoted).
         /// @details Evaluates posterior draws using seed and maps each draw back to the original target scale.
@@ -359,10 +407,6 @@ namespace cxxgpr::persist
         /// @param[in] options Optional prediction controls.
         /// @param[in] jitter Optional override jitter policy for predictive covariance Cholesky stabilization.
         /// @return Column-major sample matrix (m x n_draws) promoted to double, or GprError on failure.
-        /// @retval GprErrorCode::EmptyInput When xs is empty or null.
-        /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d().
-        /// @retval GprErrorCode::NonFiniteInput When xs contains NaN or Inf.
-        /// @retval GprErrorCode::CholeskyFailed When predictive covariance factorization fails.
         [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
             MatrixRef<double> xs,
             std::size_t n_draws,
@@ -370,6 +414,48 @@ namespace cxxgpr::persist
             const PredictOptions& options = {},
             std::optional<JitterPolicy> jitter = std::nullopt
         ) const;
+
+        /// @brief Draws n_draws deterministic posterior samples on single-precision query features.
+        /// @param[in] xs Column-major float query feature matrix (m x d).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed for sampling.
+        /// @param[in] options Optional prediction controls.
+        /// @param[in] jitter Optional override jitter policy for predictive covariance Cholesky stabilization.
+        /// @return Column-major sample matrix (m x n_draws) promoted to double, or GprError on failure.
+        [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
+            MatrixRef<float> xs,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {},
+            std::optional<JitterPolicy> jitter = std::nullopt
+        ) const;
+
+        /// @brief Draws n_draws deterministic posterior samples from a raw single-precision query span.
+        /// @param[in] xs Contiguous column-major float query data of length n_rows * n_cols.
+        /// @param[in] n_rows Number of query points m.
+        /// @param[in] n_cols Number of features per query point (must match d()).
+        /// @param[in] n_draws Number of posterior function draws to generate.
+        /// @param[in] seed Deterministic PRNG seed for sampling.
+        /// @param[in] options Optional prediction controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
+        /// @return Column-major sample matrix (m x n_draws) promoted to double, or GprError on failure.
+        [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
+            std::span<const float> xs,
+            std::size_t n_rows,
+            std::size_t n_cols,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {},
+            std::optional<JitterPolicy> jitter = std::nullopt
+        ) const
+        {
+            auto view = cxxgpr::detail::matrix_view_from_span(xs, n_rows, n_cols);
+            if (!view.has_value())
+            {
+                return std::unexpected(std::move(view).error());
+            }
+            return sample(*view, n_draws, seed, options, std::move(jitter));
+        }
 
         /// @brief Computes closed-form Leave-One-Out prediction on the original target scale
         /// (double-promoted).
@@ -795,6 +881,15 @@ namespace cxxgpr::persist
             bool with_factor
         )
         {
+            if (!model.retains_distances())
+            {
+                return std::unexpected(
+                    GprError::persist_failed(
+                        PersistErrorKind::NotPersistable,
+                        "supplied-distance model trained without retained distances cannot be saved"
+                    )
+                );
+            }
             const auto& payload = *DistanceModelAccess::payload(model);
             std::span<const double> l_f64;
             std::span<const float> l_f32;
@@ -983,6 +1078,16 @@ namespace cxxgpr::persist
         ) const
             requires std::same_as<C, WithPoints>;
 
+        /// @brief Predicts the mean and variance at float query coordinates of a WithPoints model.
+        /// @param[in] cross Training-to-query tables bound to the slots of kernel().
+        /// @param[in] xq Single-precision query coordinates, m x d.
+        /// @param[in] options Variance selection.
+        /// @return Prediction in double, or GprError.
+        [[nodiscard]] std::expected<Prediction<double>, GprError> predict(
+            const DistanceSource& cross, MatrixRef<float> xq, const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
         /// @brief Computes the joint predictive covariance of a DistanceOnly model.
         /// @param[in] cross Training-to-query tables.
         /// @param[in] query Query-to-query tables.
@@ -1003,6 +1108,20 @@ namespace cxxgpr::persist
             const DistanceSource& cross,
             const DistanceSource& query,
             MatrixRef<double> xq,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
+        /// @brief Computes the joint predictive covariance of a WithPoints model on float coordinates.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] xq Single-precision query coordinates, m x d.
+        /// @param[in] options Variance selection.
+        /// @return Mean and covariance in double, or GprError.
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> predict_covariance(
+            const DistanceSource& cross,
+            const DistanceSource& query,
+            MatrixRef<float> xq,
             const PredictOptions& options = {}
         ) const
             requires std::same_as<C, WithPoints>;
@@ -1035,6 +1154,24 @@ namespace cxxgpr::persist
             const DistanceSource& cross,
             const DistanceSource& query,
             MatrixRef<double> xq,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options = {}
+        ) const
+            requires std::same_as<C, WithPoints>;
+
+        /// @brief Draws joint posterior samples of a WithPoints model on float coordinates.
+        /// @param[in] cross Training-to-query tables.
+        /// @param[in] query Query-to-query tables.
+        /// @param[in] xq Single-precision query coordinates, m x d.
+        /// @param[in] n_draws Number of samples.
+        /// @param[in] seed Seed of the deterministic generator.
+        /// @param[in] options Variance selection.
+        /// @return Samples in double, m values per draw, or GprError.
+        [[nodiscard]] std::expected<std::vector<double>, GprError> sample(
+            const DistanceSource& cross,
+            const DistanceSource& query,
+            MatrixRef<float> xq,
             std::size_t n_draws,
             std::uint64_t seed,
             const PredictOptions& options = {}

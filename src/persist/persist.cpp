@@ -23,6 +23,7 @@
 #include <string>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "checkpoint_io.hpp"
@@ -370,7 +371,7 @@ namespace cxxgpr::persist
         /// @param[in] in_tf Restored fitted input feature transform.
         /// @param[in] n Training sample count n.
         /// @param[in] d Training feature dimension d.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs_var Column-major query feature matrix (m x d), double or float.
         /// @return Column-major MatrixRef<Storage> (m x d) backed by st.query_ws.query_x, or GprError.
         /// @retval GprErrorCode::EmptyInput When xs is empty or null.
         /// @retval GprErrorCode::DimensionMismatch When xs.cols() != d.
@@ -381,50 +382,55 @@ namespace cxxgpr::persist
             const transform::FittedInputTransform& in_tf,
             std::size_t n,
             std::size_t d,
-            MatrixRef<double> xs
+            cxxgpr::detail::PointMatrixRef xs_var
         )
         {
             using Storage = P::Storage;
 
-            if (xs.is_empty() || xs.data() == nullptr)
+            return std::visit(
+                [&](auto xs) -> std::expected<MatrixRef<Storage>, GprError>
             {
-                return std::unexpected(GprError::empty_input());
-            }
-            const std::size_t m = xs.rows();
-            if (xs.cols() != d)
-            {
-                return std::unexpected(GprError::dimension_mismatch(xs.cols(), d));
-            }
-            // ensure() rejects an overflowing m * d before any buffer is indexed below.
-            if (auto ens = st.query_ws.ensure(n, m, d, st.compiled_kernel->nested_depth()); !ens.has_value())
-            {
-                return std::unexpected(std::move(ens).error());
-            }
-            // Copy query coordinates column-major while checking finiteness before applying input transform.
-            for (std::size_t col = 0; col < d; ++col)
-            {
-                for (std::size_t row = 0; row < m; ++row)
+                if (xs.is_empty() || xs.data() == nullptr)
                 {
-                    const double val = xs(row, col);
-                    if (!std::isfinite(val))
-                    {
-                        return std::unexpected(GprError::non_finite_input());
-                    }
-                    st.query_ws.query_xs[(col * m) + row] = val;
+                    return std::unexpected(GprError::empty_input());
                 }
-            }
-            // The transform checks its span length against m * d, so pass exactly the staged prefix.
-            const std::size_t md = m * d;
-            const std::span<double> staged(st.query_ws.query_xs.data(), md);
-            if (auto ap = in_tf.apply(staged, m, d); !ap.has_value())
-            {
-                return std::unexpected(std::move(ap).error());
-            }
-            for (std::size_t i = 0; i < md; ++i)
-            {
-                st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
-            }
-            return MatrixRef<Storage>(st.query_ws.query_x.data(), m, d, m);
+                const std::size_t m = xs.rows();
+                if (xs.cols() != d)
+                {
+                    return std::unexpected(GprError::dimension_mismatch(xs.cols(), d));
+                }
+                // ensure() rejects an overflowing m * d before any buffer is indexed below.
+                if (auto ens = st.query_ws.ensure(n, m, d, st.compiled_kernel->nested_depth()); !ens.has_value())
+                {
+                    return std::unexpected(std::move(ens).error());
+                }
+                // Copy/widen query coordinates column-major while checking finiteness before transform.
+                for (std::size_t col = 0; col < d; ++col)
+                {
+                    for (std::size_t row = 0; row < m; ++row)
+                    {
+                        const auto val = static_cast<double>(xs(row, col));
+                        if (!std::isfinite(val))
+                        {
+                            return std::unexpected(GprError::non_finite_input());
+                        }
+                        st.query_ws.query_xs[(col * m) + row] = val;
+                    }
+                }
+                // The transform checks its span length against m * d, so pass exactly the staged prefix.
+                const std::size_t md = m * d;
+                const std::span<double> staged(st.query_ws.query_xs.data(), md);
+                if (auto ap = in_tf.apply(staged, m, d); !ap.has_value())
+                {
+                    return std::unexpected(std::move(ap).error());
+                }
+                for (std::size_t i = 0; i < md; ++i)
+                {
+                    st.query_ws.query_x[i] = static_cast<Storage>(st.query_ws.query_xs[i]);
+                }
+                return MatrixRef<Storage>(st.query_ws.query_x.data(), m, d, m);
+            }, xs_var
+            );
         }
 
         /// @brief Evaluates double-promoted posterior mean and variance on a loaded precision state.
@@ -438,7 +444,7 @@ namespace cxxgpr::persist
         /// @param[in] tgt_tf Restored fitted target transform.
         /// @param[in] n Training sample count n.
         /// @param[in] d Training feature dimension d.
-        /// @param[in] xs Column-major query feature matrix (m x d).
+        /// @param[in] xs Column-major query feature matrix (m x d) in double or float precision.
         /// @param[in] options Prediction variance controls.
         /// @param[out] out Destination double-precision Prediction struct populated on the original target scale.
         /// @return Empty expected on success, or GprError on query validation, prediction, or transform failure.
@@ -450,7 +456,7 @@ namespace cxxgpr::persist
             const transform::FittedTargetTransform& tgt_tf,
             std::size_t n,
             std::size_t d,
-            MatrixRef<double> xs,
+            cxxgpr::detail::PointMatrixRef xs,
             const PredictOptions& options,
             Prediction<double>& out
         )
@@ -506,6 +512,122 @@ namespace cxxgpr::persist
                 return im;
             }
             return tgt_tf.inverse_transform_variance(out.variance);
+        }
+
+        /// @brief Computes double-promoted joint predictive covariance on a loaded precision state.
+        /// @tparam P Precision policy active in st.
+        /// @param[in] st Loaded typed precision state.
+        /// @param[in] lik Restored Gaussian observation noise likelihood.
+        /// @param[in] in_tf Restored fitted input feature transform.
+        /// @param[in] tgt_tf Restored fitted target transform.
+        /// @param[in] n Training sample count n.
+        /// @param[in] d Training feature dimension d.
+        /// @param[in] xs Query coordinates in double or float precision.
+        /// @param[in] options Prediction variance controls.
+        /// @return Double-promoted PredictiveCovariance on original scale, or GprError.
+        template <PrecisionPolicyConcept P>
+        [[nodiscard]] std::expected<PredictiveCovariance<double>, GprError> loaded_predict_cov_typed(
+            const LoadedTypedState<P>& st,
+            const GaussianLikelihood& lik,
+            const transform::FittedInputTransform& in_tf,
+            const transform::FittedTargetTransform& tgt_tf,
+            std::size_t n,
+            std::size_t d,
+            cxxgpr::detail::PointMatrixRef xs,
+            const PredictOptions& options
+        )
+        {
+            using Storage = P::Storage;
+            auto xq = stage_loaded_query(st, in_tf, n, d, xs);
+            if (!xq.has_value())
+            {
+                return std::unexpected(std::move(xq).error());
+            }
+            const MatrixRef<Storage> xq_ref = *xq;
+            const std::size_t m = xq_ref.rows();
+            const MatrixRef<Storage> x_train_ref(st.x_train.data(), n, d, n);
+            const MatrixRef<Storage> l_ref(st.l_view.data(), n, n, n);
+            auto cov_res = cxxgpr::predict_covariance<P>(
+                *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws
+            );
+            if (!cov_res.has_value())
+            {
+                return std::unexpected(std::move(cov_res).error());
+            }
+            PredictiveCovariance<double> out{
+                .mean = std::vector<double>(cov_res->mean.begin(), cov_res->mean.end()),
+                .covariance = std::vector<double>(cov_res->covariance.begin(), cov_res->covariance.end()),
+                .n_points = m,
+                .variance_kind = cov_res->variance_kind,
+            };
+            if (auto im = tgt_tf.inverse_transform_mean(out.mean); !im.has_value())
+            {
+                return std::unexpected(std::move(im).error());
+            }
+            if (auto ic = tgt_tf.inverse_transform_covariance(out.covariance); !ic.has_value())
+            {
+                return std::unexpected(std::move(ic).error());
+            }
+            return out;
+        }
+
+        /// @brief Draws double-promoted posterior samples on a loaded precision state.
+        /// @tparam P Precision policy active in st.
+        /// @param[in] st Loaded typed precision state.
+        /// @param[in] lik Restored Gaussian observation noise likelihood.
+        /// @param[in] in_tf Restored fitted input feature transform.
+        /// @param[in] tgt_tf Restored fitted target transform.
+        /// @param[in] n Training sample count n.
+        /// @param[in] d Training feature dimension d.
+        /// @param[in] xs Query coordinates in double or float precision.
+        /// @param[in] n_draws Number of posterior draws to generate.
+        /// @param[in] seed Deterministic PRNG seed.
+        /// @param[in] options Prediction variance controls.
+        /// @param[in] jitter Optional predictive covariance jitter override.
+        /// @return Double sample matrix (m x n_draws) on original scale, or GprError.
+        template <PrecisionPolicyConcept P>
+        [[nodiscard]] std::expected<std::vector<double>, GprError> loaded_sample_typed(
+            const LoadedTypedState<P>& st,
+            const GaussianLikelihood& lik,
+            const transform::FittedInputTransform& in_tf,
+            const transform::FittedTargetTransform& tgt_tf,
+            std::size_t n,
+            std::size_t d,
+            cxxgpr::detail::PointMatrixRef xs,
+            std::size_t n_draws,
+            std::uint64_t seed,
+            const PredictOptions& options,
+            std::optional<JitterPolicy> jitter
+        )
+        {
+            using Storage = P::Storage;
+            auto xq = stage_loaded_query(st, in_tf, n, d, xs);
+            if (!xq.has_value())
+            {
+                return std::unexpected(std::move(xq).error());
+            }
+            const MatrixRef<Storage> xq_ref = *xq;
+            const std::size_t m = xq_ref.rows();
+            const MatrixRef<Storage> x_train_ref(st.x_train.data(), n, d, n);
+            const MatrixRef<Storage> l_ref(st.l_view.data(), n, n, n);
+            auto raw_draws = cxxgpr::sample<P>(
+                *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed, options,
+                st.query_ws, jitter
+            );
+            if (!raw_draws.has_value())
+            {
+                return std::unexpected(std::move(raw_draws).error());
+            }
+            std::vector<double> out(raw_draws->begin(), raw_draws->end());
+            for (std::size_t draw = 0; draw < n_draws; ++draw)
+            {
+                const std::span<double> slice(out.data() + (draw * m), m);
+                if (auto im = tgt_tf.inverse_transform_mean(slice); !im.has_value())
+                {
+                    return std::unexpected(std::move(im).error());
+                }
+            }
+            return out;
         }
 
     }  // namespace
@@ -954,7 +1076,28 @@ namespace cxxgpr::persist
             *impl_, [&](const auto& st)
         {
             return loaded_predict_typed(
-                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d, xs, options, out
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), options, out
+            );
+        }
+        );
+    }
+
+    /// @brief Computes double-promoted posterior mean and diagonal variance on single-precision queries.
+    /// @param[in] xs Column-major float query feature matrix (m x d).
+    /// @param[out] out Destination double-precision Prediction struct.
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Empty expected on success, or GprError on query validation or transform failure.
+    std::expected<void, GprError> LoadedGpr::predict_into(
+        MatrixRef<float> xs, Prediction<double>& out, const PredictOptions& options
+    ) const
+    {
+        return with_typed_state(
+            *impl_, [&](const auto& st)
+        {
+            return loaded_predict_typed(
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), options, out
             );
         }
         );
@@ -976,6 +1119,22 @@ namespace cxxgpr::persist
         return out;
     }
 
+    /// @brief Allocates and computes double-promoted posterior mean and diagonal variance on float queries.
+    /// @param[in] xs Column-major float query feature matrix (m x d).
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Double-precision Prediction on the original target scale, or GprError on failure.
+    std::expected<Prediction<double>, GprError> LoadedGpr::predict(
+        MatrixRef<float> xs, const PredictOptions& options
+    ) const
+    {
+        Prediction<double> out;
+        if (auto r = predict_into(xs, out, options); !r.has_value())
+        {
+            return std::unexpected(std::move(r).error());
+        }
+        return out;
+    }
+
     /// @brief Computes double-promoted posterior mean and full m x m covariance matrix.
     /// @param[in] xs Column-major query feature matrix (m x d).
     /// @param[in] options Optional prediction variance controls.
@@ -984,46 +1143,34 @@ namespace cxxgpr::persist
         MatrixRef<double> xs, const PredictOptions& options
     ) const
     {
-        auto to_fitted_cov = [&]<PrecisionPolicyConcept P>(
-                                 const LoadedTypedState<P>& st
-                             ) -> std::expected<PredictiveCovariance<double>, GprError>
+        return with_typed_state(
+            *impl_, [&](const auto& st)
         {
-            using Storage = P::Storage;
-            auto xq = stage_loaded_query(st, *impl_->x_transform, impl_->n, impl_->d, xs);
-            if (!xq.has_value())
-            {
-                return std::unexpected(std::move(xq).error());
-            }
-            const MatrixRef<Storage> xq_ref = *xq;
-            const std::size_t m = xq_ref.rows();
-            const MatrixRef<Storage> x_train_ref(st.x_train.data(), impl_->n, impl_->d, impl_->n);
-            const MatrixRef<Storage> l_ref(st.l_view.data(), impl_->n, impl_->n, impl_->n);
-            auto cov_res = cxxgpr::predict_covariance<P>(
-                *st.compiled_kernel, impl_->likelihood, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws
+            return loaded_predict_cov_typed(
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), options
             );
-            if (!cov_res.has_value())
-            {
-                return std::unexpected(std::move(cov_res).error());
-            }
-            // Promote results to double and apply inverse target transforms on the original scale.
-            PredictiveCovariance<double> out{
-                .mean = std::vector<double>(cov_res->mean.begin(), cov_res->mean.end()),
-                .covariance = std::vector<double>(cov_res->covariance.begin(), cov_res->covariance.end()),
-                .n_points = m,
-                .variance_kind = cov_res->variance_kind,
-            };
-            if (auto im = impl_->y_transform->inverse_transform_mean(out.mean); !im.has_value())
-            {
-                return std::unexpected(std::move(im).error());
-            }
-            if (auto ic = impl_->y_transform->inverse_transform_covariance(out.covariance); !ic.has_value())
-            {
-                return std::unexpected(std::move(ic).error());
-            }
-            return out;
-        };
+        }
+        );
+    }
 
-        return with_typed_state(*impl_, to_fitted_cov);
+    /// @brief Computes double-promoted posterior mean and full m x m covariance matrix on float queries.
+    /// @param[in] xs Column-major float query feature matrix (m x d).
+    /// @param[in] options Optional prediction variance controls.
+    /// @return Double-precision PredictiveCovariance on the original target scale, or GprError on failure.
+    std::expected<PredictiveCovariance<double>, GprError> LoadedGpr::predict_covariance(
+        MatrixRef<float> xs, const PredictOptions& options
+    ) const
+    {
+        return with_typed_state(
+            *impl_, [&](const auto& st)
+        {
+            return loaded_predict_cov_typed(
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), options
+            );
+        }
+        );
     }
 
     /// @brief Draws deterministic posterior samples promoted to double precision on the original target scale.
@@ -1041,41 +1188,41 @@ namespace cxxgpr::persist
         std::optional<JitterPolicy> jitter
     ) const
     {
-        auto sample_typed =
-            [&]<PrecisionPolicyConcept P>(const LoadedTypedState<P>& st) -> std::expected<std::vector<double>, GprError>
+        return with_typed_state(
+            *impl_, [&](const auto& st)
         {
-            using Storage = P::Storage;
-            auto xq = stage_loaded_query(st, *impl_->x_transform, impl_->n, impl_->d, xs);
-            if (!xq.has_value())
-            {
-                return std::unexpected(std::move(xq).error());
-            }
-            const MatrixRef<Storage> xq_ref = *xq;
-            const std::size_t m = xq_ref.rows();
-            const MatrixRef<Storage> x_train_ref(st.x_train.data(), impl_->n, impl_->d, impl_->n);
-            const MatrixRef<Storage> l_ref(st.l_view.data(), impl_->n, impl_->n, impl_->n);
-            auto raw_draws = cxxgpr::sample<P>(
-                *st.compiled_kernel, impl_->likelihood, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed,
-                options, st.query_ws, jitter
+            return loaded_sample_typed(
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), n_draws, seed, options, jitter
             );
-            if (!raw_draws.has_value())
-            {
-                return std::unexpected(std::move(raw_draws).error());
-            }
-            // Promote draws to double and apply inverse mean transform per column draw.
-            std::vector<double> out(raw_draws->begin(), raw_draws->end());
-            for (std::size_t draw = 0; draw < n_draws; ++draw)
-            {
-                const std::span<double> slice(out.data() + (draw * m), m);
-                if (auto im = impl_->y_transform->inverse_transform_mean(slice); !im.has_value())
-                {
-                    return std::unexpected(std::move(im).error());
-                }
-            }
-            return out;
-        };
+        }
+        );
+    }
 
-        return with_typed_state(*impl_, sample_typed);
+    /// @brief Draws deterministic posterior samples on single-precision query features.
+    /// @param[in] xs Column-major float query feature matrix (m x d).
+    /// @param[in] n_draws Number of posterior draws to generate.
+    /// @param[in] seed Deterministic PRNG seed.
+    /// @param[in] options Optional prediction variance controls.
+    /// @param[in] jitter Optional predictive covariance jitter override.
+    /// @return Column-major double sample matrix (m x n_draws), or GprError on validation or Cholesky failure.
+    std::expected<std::vector<double>, GprError> LoadedGpr::sample(
+        MatrixRef<float> xs,
+        std::size_t n_draws,
+        std::uint64_t seed,
+        const PredictOptions& options,
+        std::optional<JitterPolicy> jitter
+    ) const
+    {
+        return with_typed_state(
+            *impl_, [&](const auto& st)
+        {
+            return loaded_sample_typed(
+                st, impl_->likelihood, *impl_->x_transform, *impl_->y_transform, impl_->n, impl_->d,
+                cxxgpr::detail::PointMatrixRef(xs), n_draws, seed, options, jitter
+            );
+        }
+        );
     }
 
     /// @brief Computes double-promoted closed-form Leave-One-Out predictive moments on the original scale.

@@ -83,6 +83,16 @@ namespace cxxgpr
             std::span<const double> data, std::size_t n_rows, std::size_t n_cols
         );
 
+        /// @brief Wraps a raw single-precision column-major span as a MatrixRef<float> after checking shape.
+        /// @details Enforces EmptyInput -> SizeOverflow -> LengthMismatch before binding the pointer.
+        /// @param[in] data Contiguous column-major matrix data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        [[nodiscard]] std::expected<MatrixRef<float>, GprError> matrix_view_from_span(
+            std::span<const float> data, std::size_t n_rows, std::size_t n_cols
+        );
+
         /// @brief Wraps a raw column-major training span as a MatrixRef, rejecting an empty target vector first.
         /// @details Reports an empty y before any size error of x, so emptiness of either argument takes
         /// precedence over overflow and length mismatch, then applies matrix_view_from_span() to x. The length
@@ -92,11 +102,38 @@ namespace cxxgpr
         /// @param[in] n_cols Declared number of columns.
         /// @param[in] y Training target vector.
         /// @return View with leading dimension n_rows, or GprError on an empty, overflowing, or mismatched shape.
-        /// @retval GprErrorCode::EmptyInput When x or y is empty, n_rows == 0, or n_cols == 0.
-        /// @retval GprErrorCode::SizeOverflow When n_rows * n_cols overflows std::size_t.
-        /// @retval GprErrorCode::LengthMismatch When x.size() != n_rows * n_cols.
         [[nodiscard]] std::expected<MatrixRef<double>, GprError> training_view_from_span(
             std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        );
+
+        /// @brief Wraps a float training span with double targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous single-precision column-major training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        [[nodiscard]] std::expected<MatrixRef<float>, GprError> training_view_from_span(
+            std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const double> y
+        );
+
+        /// @brief Wraps a double training span with float targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous double-precision column-major training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Single-precision training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        [[nodiscard]] std::expected<MatrixRef<double>, GprError> training_view_from_span(
+            std::span<const double> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
+        );
+
+        /// @brief Wraps a float training span with float targets, rejecting an empty target vector first.
+        /// @param[in] x Contiguous single-precision column-major training feature data.
+        /// @param[in] n_rows Declared number of rows.
+        /// @param[in] n_cols Declared number of columns.
+        /// @param[in] y Single-precision training target vector.
+        /// @return View with leading dimension n_rows, or GprError on empty, overflowing, or mismatched shape.
+        [[nodiscard]] std::expected<MatrixRef<float>, GprError> training_view_from_span(
+            std::span<const float> x, std::size_t n_rows, std::size_t n_cols, std::span<const float> y
         );
 
     }  // namespace detail
