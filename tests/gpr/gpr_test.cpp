@@ -1746,6 +1746,20 @@ namespace
             const auto draws = mp_reev->sample(xq_small_ref, 3U, 77U);
             ASSERT_TRUE(draws.has_value());
             EXPECT_EQ(draws->size(), 3U * m_small);
+
+            // Copy construction must preserve compiled_kernel_f64 and x_train_f64 for double mean prediction.
+            const auto orig_pred = mp_reev->predict(xq_ref);
+            const auto copied = *mp_reev;
+            const auto copied_pred = copied.predict(xq_ref);
+            ASSERT_TRUE(orig_pred.has_value());
+            ASSERT_TRUE(copied_pred.has_value());
+            EXPECT_EQ(*copied_pred, *orig_pred);
+            double max_copied_diff = 0.0;
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                max_copied_diff = std::max(max_copied_diff, std::abs(copied_pred->mean[j] - ref_pred->mean[j]));
+            }
+            EXPECT_LT(max_copied_diff, 1e-10);
         }
 
         // Preconditioner shift + FGMRES-IR must take precedence over Adaptive equation jitter.
