@@ -1791,17 +1791,28 @@ namespace
 
         // Moderate-small noise where unshifted float Cholesky succeeds (shift == 0) but IR escalates to Krylov.
         {
-            const auto esc_lik = make_small_noise_likelihood(1e-6);
+            constexpr std::size_t n_esc = 256U;
+            std::vector<double> x_esc(n_esc);
+            std::vector<double> y_esc(n_esc);
+            for (std::size_t i = 0U; i < n_esc; ++i)
+            {
+                const double xi = static_cast<double>(i) / static_cast<double>(n_esc - 1U);
+                x_esc[i] = xi;
+                y_esc[i] = std::sin(6.283185307179586 * xi) + (0.3 * std::cos(12.566370614359172 * xi));
+            }
+            const cxxgpr::MatrixRef<double> x_esc_ref(x_esc.data(), n_esc, d, n_esc);
+            const auto esc_lik = make_small_noise_likelihood(8e-6);
             const auto esc_fit =
                 cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(spec)
                     .with_likelihood(esc_lik)
                     .with_jitter(zero_jitter)
-                    .factor(x_ref, y);
+                    .factor(x_esc_ref, y_esc);
             ASSERT_TRUE(esc_fit.has_value()) << esc_fit.error().message();
             EXPECT_EQ(esc_fit->factor_jitter(), 0.0);
             const auto esc_summary = esc_fit->refinement_summary();
             ASSERT_TRUE(esc_summary.has_value());
             EXPECT_EQ(esc_summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(esc_summary->used_fallback());
             EXPECT_EQ(esc_summary->preconditioner_shift, 0.0);
             EXPECT_TRUE(esc_summary->used_krylov);
         }
