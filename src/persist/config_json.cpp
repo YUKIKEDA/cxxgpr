@@ -2430,17 +2430,12 @@ namespace cxxgpr::persist::detail
             {
                 return std::unexpected(std::move(nv).error());
             }
-            auto lik = GaussianLikelihood::create(nv->first);
+            auto lik = GaussianLikelihood::create(nv->first, nv->second);
             if (!lik.has_value())
             {
                 return std::unexpected(std::move(lik).error());
             }
-            auto lik_wb = lik->with_bounds(nv->second);
-            if (!lik_wb.has_value())
-            {
-                return std::unexpected(std::move(lik_wb).error());
-            }
-            cfg.likelihood = *lik_wb;
+            cfg.likelihood = *lik;
 
             auto jit = decode_jitter(root["jitter"]);
             if (!jit.has_value())

@@ -163,7 +163,7 @@ The precision policy `P` fixes the scalar type used to store the kernel matrix a
 | `DoublePrecision` | `double` | `double` | `false` | Default. |
 | `SinglePrecision` | `float` | `float` | `false` | Half the memory; results in `float`. |
 | `MixedPrecision<PromoteStorage>` | `float` | `double` | `true` | `float` factor, `double` weights by iterative refinement; residuals promote the stored `float` matrix. |
-| `MixedPrecision<ReevaluateKernel>` | `float` | `double` | `true` | As above, but residuals re-evaluate the kernel entries in `double` instead of promoting the stored `float` values. |
+| `MixedPrecision<ReevaluateKernel>` | `float` | `double` | `true` | As above, using shifted `float` preconditioning with restarted double FGMRES-IR when needed, and evaluating residuals and predictive means via column-blocked `double` kernel re-evaluation. |
 
 `MixedPrecision` takes a `ResidualFormulaConcept` type, either the tag `PromoteStorage` or `ReevaluateKernel`; its default is `PromoteStorage`. `KernelScalarConcept` accepts `float` or `double`. `PrecisionPolicyConcept` (alias `GpScalarConcept`) accepts exactly the four policies above; any other type is rejected at compile time.
 
@@ -177,7 +177,7 @@ The precision policy `P` fixes the scalar type used to store the kernel matrix a
 single neg-MLL 0.7079, mixed neg-MLL 0.7079, refinement iterations 2
 ```
 
-For mixed policies, `FittedGpr::refinement_summary()` holds a `RefinementSummary` (`status`, `iterations`, `final_relative_residual`, `used_fallback()`); for the other two it is `std::nullopt`. `FittedGpr::Storage` and `FittedGpr::Refine` expose the policy's types.
+For mixed policies, `FittedGpr::refinement_summary()` holds a `RefinementSummary` (`status`, `iterations`, `final_relative_residual`, `preconditioner_shift`, `used_krylov`, `used_fallback()`); for the other two it is `std::nullopt`. `FittedGpr::Storage` and `FittedGpr::Refine` expose the policy's types.
 
 Each policy also reports how it is stored on disk: `persist_kind()` returns a `PersistPrecisionKind` (`Double`, `Single`, `MixedPromote`, `MixedReevaluate`), and `to_precision_string` / `to_residual_string` turn it into the strings used in the saved configuration. The tags `PromoteStorage` and `ReevaluateKernel` have `name()` and `reads_storage`.
 

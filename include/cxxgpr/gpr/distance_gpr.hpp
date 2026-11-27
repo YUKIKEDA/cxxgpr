@@ -105,6 +105,8 @@ namespace cxxgpr
             GaussianLikelihood likelihood;
             /// @brief Execution-layer kernel compiled in the storage scalar.
             std::shared_ptr<const CompiledDistanceKernel<Storage>> compiled;
+            /// @brief Double-precision compiled kernel used by MixedPrecision<ReevaluateKernel> prediction.
+            std::shared_ptr<const CompiledDistanceKernel<double>> compiled64;
             /// @brief Validated training distance tables in the storage scalar.
             std::shared_ptr<const CheckedDistanceStore<Storage>> store;
             /// @brief Fitted coordinate transform (WithPoints only, otherwise null).
@@ -117,6 +119,8 @@ namespace cxxgpr
             std::vector<double> y_raw;
             /// @brief Transformed training coordinates in the storage scalar (WithPoints only).
             std::vector<Storage> x_train;
+            /// @brief Double-precision transformed coordinates (WithPoints ReevaluateKernel only).
+            std::vector<double> x_train_f64;
             /// @brief Transformed training targets in the refinement scalar.
             std::vector<Refine> y_transformed;
             /// @brief Lower Cholesky factor of K + (noise + jitter) I, column-major n x n (owned or mapped).
@@ -164,6 +168,18 @@ namespace cxxgpr
             std::vector<double> mean_tmp;
             /// @brief Double-precision staging of the variances for the inverse target transform.
             std::vector<double> var_tmp;
+            /// @brief Reusable double cross-distance store for ReevaluateKernel predictions.
+            std::optional<CheckedDistanceStore<double>> cross_store64;
+            /// @brief Reusable double cross-covariance block (n x min(m, 32)) for ReevaluateKernel predictions.
+            std::vector<double> k_block64;
+            /// @brief Reusable double kernel scratch block (n x min(m, 32)) for ReevaluateKernel predictions.
+            std::vector<double> scratch_block64;
+            /// @brief Reusable double distance block scratch (n x min(m, 32)) for ReevaluateKernel predictions.
+            std::vector<double> dist_block64;
+            /// @brief Reusable double query coordinate block (min(m, 32) x d) for ReevaluateKernel predictions.
+            std::vector<double> xq_block64;
+            /// @brief Reusable double nested tree buffers (depth x n x min(m, 32)) for ReevaluateKernel predictions.
+            NestedBuffers<double> nested64;
         };
 
         /// @brief Borrowed training configuration passed to the out-of-line engine.

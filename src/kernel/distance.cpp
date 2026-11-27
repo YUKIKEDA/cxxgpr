@@ -3181,17 +3181,24 @@ namespace cxxgpr
             );
         }
 
-        /// @brief Evaluates a supplied-ARD leaf over a rectangular cross @c CheckedDistanceStore.
+        /// @brief Evaluates a supplied-ARD leaf over columns `[col_begin, col_end)` of a cross store.
         /// @param[in] ref Compiled supplied-ARD leaf reference.
         /// @param[in] store Pre-validated cross supplied-distance store containing per-dimension blocks.
-        /// @param[out] out Output matrix receiving cross-covariance values.
-        void eval_supplied_ard_cross(
-            const SuppliedArdRef& ref, const CheckedDistanceStore<T>& store, MatrixMut<T> out
+        /// @param[in] col_begin Inclusive starting cross column index.
+        /// @param[in] col_end Exclusive ending cross column index.
+        /// @param[out] out Output matrix receiving cross-covariance block (`n_rows x (col_end - col_begin)`).
+        void eval_supplied_ard_cross_block(
+            const SuppliedArdRef& ref,
+            const CheckedDistanceStore<T>& store,
+            std::size_t col_begin,
+            std::size_t col_end,
+            MatrixMut<T> out
         ) const
         {
             const std::size_t n_rows = store.rows();
             const std::size_t n_cols = store.cols();
-            if (n_rows == 0U || n_cols == 0U)
+            const std::size_t cols_cur = col_end - col_begin;
+            if (n_rows == 0U || cols_cur == 0U)
             {
                 return;
             }
@@ -3207,21 +3214,22 @@ namespace cxxgpr
             const auto& leaf = leaves[ref.leaf_idx];
             auto run_cross = [&](ArdWeightView<T> weights, auto&& slice_fn)
             {
-                const auto n_cols_s = static_cast<std::ptrdiff_t>(n_cols);
+                const auto cols_cur_s = static_cast<std::ptrdiff_t>(cols_cur);
 #ifdef _OPENMP
-#    pragma omp parallel for schedule(static) if (block_len >= 65536U)
+#    pragma omp parallel for schedule(static) if ((n_rows * cols_cur) >= 65536U)
 #endif
-                for (std::ptrdiff_t col_s = 0; col_s < n_cols_s; ++col_s)
+                for (std::ptrdiff_t c_s = 0; c_s < cols_cur_s; ++c_s)
                 {
-                    const auto col = static_cast<std::size_t>(col_s);
-                    const std::size_t col_offset = col * n_rows;
-                    T* col_ptr = &out(0U, col);
-                    const T* dim0_col = use_borrowed ? &borrowed_dims[0U](0U, col) : &blocks[col_offset];
+                    const auto c = static_cast<std::size_t>(c_s);
+                    const std::size_t src_col = col_begin + c;
+                    const std::size_t col_offset = src_col * n_rows;
+                    T* col_ptr = &out(0U, c);
+                    const T* dim0_col = use_borrowed ? &borrowed_dims[0U](0U, src_col) : &blocks[col_offset];
                     detail::scale_set_slice(col_ptr, dim0_col, weights[0U], n_rows);
                     for (std::size_t m = 1U; m < weights.size(); ++m)
                     {
                         const T* dim_col =
-                            use_borrowed ? &borrowed_dims[m](0U, col) : &blocks[(m * block_len) + col_offset];
+                            use_borrowed ? &borrowed_dims[m](0U, src_col) : &blocks[(m * block_len) + col_offset];
                         detail::axpy_slice(col_ptr, dim_col, weights[m], n_rows);
                     }
                     slice_fn(col_ptr, n_rows);
@@ -4697,6 +4705,8 @@ namespace cxxgpr
         /// @param[in] store Pre-validated cross supplied-distance store.
         /// @param[in] x1 Optional left coordinate matrix.
         /// @param[in] x2 Optional right coordinate matrix.
+        /// @param[in] col_begin Inclusive starting cross column index inside @p store.
+        /// @param[in] col_end Exclusive ending cross column index inside @p store.
         /// @param[out] out Destination cross-covariance matrix view.
         /// @param[in,out] nested Multi-level workspace for @c CustomKernel distances.
         /// @param[in] level_idx Current recursion depth into @p nested.
@@ -4707,6 +4717,8 @@ namespace cxxgpr
             const CheckedDistanceStore<T>& store,
             std::optional<MatrixRef<T>> x1,
             std::optional<MatrixRef<T>> x2,
+            std::size_t col_begin,
+            std::size_t col_end,
             MatrixMut<T> out,
             NestedBuffers<T>& nested,
             std::size_t level_idx,
@@ -4715,14 +4727,17 @@ namespace cxxgpr
         {
             if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
             {
-                const MatrixRef<T> dist = scalar_cross_view(s->slot_at, store);
+                const MatrixRef<T> full_dist = scalar_cross_view(s->slot_at, store);
+                const MatrixRef<T> slice(
+                    &full_dist(0U, col_begin), store.rows(), col_end - col_begin, full_dist.col_stride()
+                );
                 return capture_expected(
-                    detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist, out, exp_mode, false), err
+                    detail::leaf_apply_cross_dist(leaves[s->leaf_idx], slice, out, exp_mode, false), err
                 );
             }
             if (const auto* a = std::get_if<SuppliedArdRef>(&term))
             {
-                eval_supplied_ard_cross(*a, store, out);
+                eval_supplied_ard_cross_block(*a, store, col_begin, col_end, out);
                 return true;
             }
             const auto& c = std::get<CoordLeafRef>(term);
@@ -4763,8 +4778,12 @@ namespace cxxgpr
             const CheckedDistanceStore<T>& store;
             /// @brief Optional left coordinate matrix.
             std::optional<MatrixRef<T>> x1;
-            /// @brief Optional right coordinate matrix.
+            /// @brief Optional right coordinate matrix (full or sliced for the column range).
             std::optional<MatrixRef<T>> x2;
+            /// @brief Inclusive starting column index inside @p store.
+            std::size_t col_begin;
+            /// @brief Exclusive ending column index inside @p store.
+            std::size_t col_end;
             /// @brief Multi-level workspace for nested composite nodes.
             NestedBuffers<T>& nested;
             /// @brief Out-of-line error slot.
@@ -4788,7 +4807,9 @@ namespace cxxgpr
         {
             if (is_leaf_term(term))
             {
-                return eval_cross_leaf_step(term, ctx.store, ctx.x1, ctx.x2, out, ctx.nested, level_idx, ctx.err);
+                return eval_cross_leaf_step(
+                    term, ctx.store, ctx.x1, ctx.x2, ctx.col_begin, ctx.col_end, out, ctx.nested, level_idx, ctx.err
+                );
             }
             const bool is_sum = std::holds_alternative<SumTerm>(term);
             const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
@@ -4876,6 +4897,51 @@ namespace cxxgpr
             return true;
         }
 
+        /// @brief Evaluates compiled term @p term on columns `[col_begin, col_end)` of a cross store.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[in] store Pre-validated cross supplied-distance store.
+        /// @param[in] x1 Optional left coordinate matrix.
+        /// @param[in] x2 Optional right coordinate slice for `[col_begin, col_end)`.
+        /// @param[in] col_begin Inclusive starting column index inside @p store.
+        /// @param[in] col_end Exclusive ending column index inside @p store.
+        /// @param[out] out Destination cross-covariance block view.
+        /// @param[in,out] scratch Leaf scratch matrix.
+        /// @param[in,out] nested Multi-level workspace.
+        /// @param[in] level_idx Current recursion depth into @p nested.
+        /// @return Empty expected value on success, or a structured @c GprError on evaluation failure.
+        [[nodiscard]] std::expected<void, GprError> eval_term_cross_block(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x1,
+            std::optional<MatrixRef<T>> x2,
+            std::size_t col_begin,
+            std::size_t col_end,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::size_t level_idx
+        ) const
+        {
+            std::optional<GprError> err;
+            const CrossEvalCtx ctx{
+                .store = store,
+                .x1 = x1,
+                .x2 = x2,
+                .col_begin = col_begin,
+                .col_end = col_end,
+                .nested = nested,
+                .err = err,
+            };
+            if (!eval_term_cross_rec(term, out, scratch, level_idx, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
+            }
+            return {};
+        }
+
         /// @brief Recursively evaluates compiled term @p term on a rectangular cross @c CheckedDistanceStore.
         /// @param[in] term Compiled AST node to evaluate.
         /// @param[in] store Pre-validated cross supplied-distance store.
@@ -4897,22 +4963,7 @@ namespace cxxgpr
             std::size_t level_idx
         ) const
         {
-            std::optional<GprError> err;
-            const CrossEvalCtx ctx{
-                .store = store,
-                .x1 = x1,
-                .x2 = x2,
-                .nested = nested,
-                .err = err,
-            };
-            if (!eval_term_cross_rec(term, out, scratch, level_idx, ctx))
-            {
-                return std::unexpected(
-                    err.has_value() ? std::move(*err)
-                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
-                );
-            }
-            return {};
+            return eval_term_cross_block(term, store, x1, x2, 0U, store.cols(), out, scratch, nested, level_idx);
         }
 
         /// @brief Evaluates a supplied-ARD leaf on square columns `[col_begin, col_end)` into @p out.
@@ -7803,6 +7854,189 @@ namespace cxxgpr
                 kernel.impl_->root, store, x, col_begin, col_end, out, scratch, nested, dist_block, x_block
             );
         }
+
+        /// @brief Widens a pre-validated rectangular float cross store into a reusable double store.
+        /// @param[in] kernel64 Double-precision compiled kernel matching the store's slots.
+        /// @param[in] store32 Pre-validated single-precision rectangular cross store.
+        /// @param[in,out] dst Reusable optional double store populated in place.
+        /// @return Pointer to the populated double store, or GprError on invalid/mismatched/square input.
+        [[nodiscard]] static std::expected<const CheckedDistanceStore<double>*, GprError> promote_cross_into_double(
+            const CompiledDistanceKernel<double>& kernel64,
+            const CheckedDistanceStore<float>& store32,
+            std::optional<CheckedDistanceStore<double>>& dst
+        )
+        {
+            if (!store32.impl_ || store32.impl_->n_rows == 0U || store32.impl_->n_cols == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            const auto& src = *store32.impl_;
+            if (src.kernel_slots != kernel64.slots())
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("distance store does not match this kernel's slots")
+                );
+            }
+            if (src.square)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("expected rectangular cross distance store")
+                );
+            }
+
+            if (!dst.has_value() || !dst->impl_)
+            {
+                dst = CheckedDistanceStore<double>(std::make_shared<CheckedDistanceStore<double>::Impl>());
+            }
+            auto& impl = *dst->impl_;
+            const std::size_t n = src.n_rows;
+            const std::size_t cols = src.n_cols;
+            const std::size_t num_scalar = src.scalar_tables.size();
+            const std::size_t num_ard = src.ard_data.size();
+
+            impl.kernel_slots = src.kernel_slots;
+            impl.n_rows = n;
+            impl.n_cols = cols;
+            impl.square = false;
+            impl.scalar_tables.resize(num_scalar);
+            impl.scalar_is_packed.assign(num_scalar, 0U);
+            impl.scalar_borrowed.assign(num_scalar, MatrixRef<double>{});
+            impl.ard_dims = src.ard_dims;
+            impl.ard_data.resize(num_ard);
+            impl.ard_borrowed.resize(num_ard);
+
+            const std::size_t blk_len = n * cols;
+            for (std::size_t at = 0U; at < num_scalar; ++at)
+            {
+                auto& dst_tbl = impl.scalar_tables[at];
+                dst_tbl.resize(blk_len);
+                const bool has_borrow =
+                    (at < src.scalar_borrowed.size()) && (src.scalar_borrowed[at].data() != nullptr);
+                if (has_borrow)
+                {
+                    const auto view = src.scalar_borrowed[at];
+                    for (std::size_t j = 0U; j < cols; ++j)
+                    {
+                        for (std::size_t i = 0U; i < n; ++i)
+                        {
+                            dst_tbl[(j * n) + i] = static_cast<double>(view(i, j));
+                        }
+                    }
+                }
+                else
+                {
+                    const auto& src_tbl = src.scalar_tables[at];
+                    for (std::size_t idx = 0U; idx < blk_len; ++idx)
+                    {
+                        dst_tbl[idx] = static_cast<double>(src_tbl[idx]);
+                    }
+                }
+            }
+
+            for (std::size_t at = 0U; at < num_ard; ++at)
+            {
+                impl.ard_borrowed[at].clear();
+                auto& dst_ard = impl.ard_data[at];
+                if (at < src.ard_borrowed.size() && !src.ard_borrowed[at].empty())
+                {
+                    const std::size_t dims_count = src.ard_borrowed[at].size();
+                    dst_ard.resize(dims_count * blk_len);
+                    for (std::size_t m_idx = 0U; m_idx < dims_count; ++m_idx)
+                    {
+                        const auto& blk = src.ard_borrowed[at][m_idx];
+                        double* dst_slice = dst_ard.data() + (m_idx * blk_len);
+                        for (std::size_t j = 0U; j < cols; ++j)
+                        {
+                            for (std::size_t i = 0U; i < n; ++i)
+                            {
+                                dst_slice[(j * n) + i] = static_cast<double>(blk(i, j));
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    const auto& src_ard = src.ard_data[at];
+                    dst_ard.resize(src_ard.size());
+                    for (std::size_t idx = 0U; idx < src_ard.size(); ++idx)
+                    {
+                        dst_ard[idx] = static_cast<double>(src_ard[idx]);
+                    }
+                }
+            }
+            return &*dst;
+        }
+
+        /// @brief Evaluates columns `[col_begin, col_end)` of a rectangular cross Gram matrix into @p out.
+        /// @tparam T Storage scalar type.
+        /// @param[in] kernel Compiled distance kernel.
+        /// @param[in] store Pre-validated rectangular cross store.
+        /// @param[in] x1 Optional training coordinate matrix `n x d`.
+        /// @param[in] x2_block Optional query coordinate block `(col_end - col_begin) x d`.
+        /// @param[in] col_begin Inclusive starting column index in `[0, store.cols())`.
+        /// @param[in] col_end Exclusive ending column index in `(col_begin, store.cols()]`.
+        /// @param[out] out Destination `n x (col_end - col_begin)` block view.
+        /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @return Empty expected on success, or validation/workspace/evaluation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> apply_cross_col_block(
+            const CompiledDistanceKernel<T>& kernel,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x1,
+            std::optional<MatrixRef<T>> x2_block,
+            std::size_t col_begin,
+            std::size_t col_end,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested
+        )
+        {
+            if (!store.impl_ || store.rows() == 0U || store.cols() == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (store.impl_->kernel_slots != kernel.impl_->slots)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("distance store does not match this kernel's slots")
+                );
+            }
+            if (store.impl_->square)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("expected rectangular cross distance store")
+                );
+            }
+            if (col_begin >= col_end || col_end > store.cols())
+            {
+                return std::unexpected(GprError::index_out_of_range("cross column block range out of bounds"));
+            }
+            const std::size_t cols_cur = col_end - col_begin;
+            if (out.rows() != store.rows() || out.cols() != cols_cur)
+            {
+                return std::unexpected(GprError::length_mismatch("output block shape mismatch"));
+            }
+            if (auto sc = require_scratch(out.as_ref(), scratch); !sc.has_value())
+            {
+                return sc;
+            }
+            if (auto vp1 = kernel.impl_->validate_optional_points(x1, store.rows()); !vp1.has_value())
+            {
+                return vp1;
+            }
+            if (auto vp2 = kernel.impl_->validate_optional_points(x2_block, cols_cur); !vp2.has_value())
+            {
+                return vp2;
+            }
+            if (x1.has_value() && x2_block.has_value() && x1->cols() != x2_block->cols())
+            {
+                return std::unexpected(GprError::dimension_mismatch(x2_block->cols(), x1->cols()));
+            }
+            return kernel.impl_->eval_term_cross_block(
+                kernel.impl_->root, store, x1, x2_block, col_begin, col_end, out, scratch, nested, 0U
+            );
+        }
     };
 
     // --- CompiledDistanceKernel<T> ---
@@ -8891,6 +9125,20 @@ namespace cxxgpr
         return DistanceStoreBuilder::promote_to_double(kernel64, store32);
     }
 
+    /// @brief Widens a float cross store into a reusable double store; see distance_store.hpp.
+    /// @param[in] kernel64 Double-precision compiled kernel.
+    /// @param[in] store32 Single-precision rectangular cross store.
+    /// @param[in,out] dst Reusable optional double store populated in place.
+    /// @return Pointer to populated double store, or GprError.
+    std::expected<const CheckedDistanceStore<double>*, GprError> detail::promote_cross_store_into_double(
+        const CompiledDistanceKernel<double>& kernel64,
+        const CheckedDistanceStore<float>& store32,
+        std::optional<CheckedDistanceStore<double>>& dst
+    )
+    {
+        return DistanceStoreBuilder::promote_cross_into_double(kernel64, store32, dst);
+    }
+
     /// @brief Creates an internal shared handle referencing @p store; see distance_store.hpp.
     /// @tparam T Storage scalar type.
     /// @param[in] store Pre-validated store.
@@ -9159,6 +9407,36 @@ namespace cxxgpr
         );
     }
 
+    /// @brief Evaluates columns `[col_begin, col_end)` of a rectangular cross Gram matrix; see distance_store.hpp.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled distance kernel.
+    /// @param[in] store Pre-validated rectangular cross store.
+    /// @param[in] x1 Optional training coordinates `n x d`.
+    /// @param[in] x2_block Optional query coordinate slice `(col_end - col_begin) x d`.
+    /// @param[in] col_begin Inclusive starting column index in `[0, store.cols())`.
+    /// @param[in] col_end Exclusive ending column index in `(col_begin, store.cols()]`.
+    /// @param[out] out Destination `n x (col_end - col_begin)` block view.
+    /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @return Empty expected on success, or validation/workspace/evaluation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_apply_cross_col_block(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x1,
+        std::optional<MatrixRef<T>> x2_block,
+        std::size_t col_begin,
+        std::size_t col_end,
+        MatrixMut<T> out,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested
+    )
+    {
+        return DistanceStoreBuilder::apply_cross_col_block(
+            kernel, store, x1, x2_block, col_begin, col_end, out, scratch, nested
+        );
+    }
+
     template class DistanceKernel<DistanceOnly>;
     template class DistanceKernel<WithPoints>;
     template CompiledDistanceKernel<double> DistanceKernel<DistanceOnly>::compile<double>() const;
@@ -9406,6 +9684,28 @@ namespace cxxgpr
         NestedBuffers<float>&,
         std::vector<float>&,
         std::vector<float>&
+    );
+    template std::expected<void, GprError> detail::distance_apply_cross_col_block<double>(
+        const CompiledDistanceKernel<double>&,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        std::optional<MatrixRef<double>>,
+        std::size_t,
+        std::size_t,
+        MatrixMut<double>,
+        MatrixMut<double>,
+        NestedBuffers<double>&
+    );
+    template std::expected<void, GprError> detail::distance_apply_cross_col_block<float>(
+        const CompiledDistanceKernel<float>&,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        std::optional<MatrixRef<float>>,
+        std::size_t,
+        std::size_t,
+        MatrixMut<float>,
+        MatrixMut<float>,
+        NestedBuffers<float>&
     );
 
 }  // namespace cxxgpr

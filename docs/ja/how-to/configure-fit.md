@@ -163,7 +163,7 @@ max_retries 8, multiplier 10.0000, fixed retry 1.0000e-08, fixed has no adaptive
 | `DoublePrecision` | `double` | `double` | `false` | 既定。 |
 | `SinglePrecision` | `float` | `float` | `false` | メモリは半分。結果は `float`。 |
 | `MixedPrecision<PromoteStorage>` | `float` | `double` | `true` | `float` の因子と、反復改良で求めた `double` の重み。残差は保存済みの `float` 行列を昇格して計算する。 |
-| `MixedPrecision<ReevaluateKernel>` | `float` | `double` | `true` | 上と同じだが、残差は保存済みの `float` を使わず、カーネル要素を `double` で再評価する。 |
+| `MixedPrecision<ReevaluateKernel>` | `float` | `double` | `true` | 上と同じだが、必要時にシフトつき `float` 前処理と再始動つき倍精度 FGMRES-IR を使い、残差と予測平均も列ブロックの `double` カーネル再評価で計算する。 |
 
 `MixedPrecision` は `ResidualFormulaConcept` を満たす型を取る。タグ `PromoteStorage` か `ReevaluateKernel` で、既定は `PromoteStorage` である。`KernelScalarConcept` は `float` と `double` を受け付ける。`PrecisionPolicyConcept`（別名 `GpScalarConcept`）は上の 4 つのポリシーだけを受け付け、それ以外の型はコンパイル時に拒否される。
 
@@ -177,7 +177,7 @@ max_retries 8, multiplier 10.0000, fixed retry 1.0000e-08, fixed has no adaptive
 single neg-MLL 0.7079, mixed neg-MLL 0.7079, refinement iterations 2
 ```
 
-混合精度では、`FittedGpr::refinement_summary()` が `RefinementSummary`（`status`、`iterations`、`final_relative_residual`、`used_fallback()`）を保持する。ほかの 2 つでは `std::nullopt` になる。`FittedGpr::Storage` と `FittedGpr::Refine` は、ポリシーの型をそのまま公開する。
+混合精度では、`FittedGpr::refinement_summary()` が `RefinementSummary`（`status`、`iterations`、`final_relative_residual`、`preconditioner_shift`、`used_krylov`、`used_fallback()`）を保持する。ほかの 2 つでは `std::nullopt` になる。`FittedGpr::Storage` と `FittedGpr::Refine` は、ポリシーの型をそのまま公開する。
 
 各ポリシーは、ディスク上の保存形式も持つ。`persist_kind()` は `PersistPrecisionKind`（`Double`、`Single`、`MixedPromote`、`MixedReevaluate`）を返す。`to_precision_string` と `to_residual_string` は、それを保存設定の文字列に変換する。タグ `PromoteStorage` と `ReevaluateKernel` には、`name()` と `reads_storage` がある。
 

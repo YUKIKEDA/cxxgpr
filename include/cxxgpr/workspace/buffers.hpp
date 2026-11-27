@@ -337,6 +337,14 @@ namespace cxxgpr
         std::vector<Storage> query_kss;
         /// @brief Scratch for zero-allocation diagonal tree evaluation (length >= (nested_depth + 1) * m).
         std::vector<Storage> query_diag_scratch;
+        /// @brief Reusable double query coordinate block (min(m, 32) x d) for ReevaluateKernel predictions.
+        std::vector<double> query_x_block_f64;
+        /// @brief Reusable double cross-covariance block (n x min(m, 32)) for ReevaluateKernel predictions.
+        std::vector<double> query_k_block_f64;
+        /// @brief Reusable double cross-evaluation scratch block (n x min(m, 32)) for ReevaluateKernel predictions.
+        std::vector<double> query_scratch_block_f64;
+        /// @brief Reusable double nested tree buffers (depth x n x min(m, 32)) for ReevaluateKernel predictions.
+        NestedBuffers<double> query_nested_f64;
         /// @brief Current training point capacity n.
         std::size_t train_n = 0;
         /// @brief Current query point capacity m.

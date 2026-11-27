@@ -81,6 +81,8 @@ namespace cxxgpr
             GaussianLikelihood likelihood;
             /// @brief Compiled kernel evaluator matching Storage precision and kernel_exp mode.
             std::shared_ptr<const CompiledKernel<Storage>> compiled_kernel;
+            /// @brief Double-precision compiled kernel evaluator used by MixedPrecision<ReevaluateKernel> prediction.
+            std::shared_ptr<const CompiledKernel<double>> compiled_kernel_f64;
             /// @brief Fitted input transform applied to training and query feature matrices.
             std::unique_ptr<transform::FittedInputTransform> input_transform;
             /// @brief Fitted target transform used for inverse prediction mean/variance/covariance scaling.
@@ -91,6 +93,9 @@ namespace cxxgpr
             std::vector<double> y_raw;
             /// @brief Transformed column-major training features cast to Storage precision (n_train * n_features).
             std::vector<Storage> x_train;
+            /// @brief Double-precision transformed training features used by MixedPrecision<ReevaluateKernel>
+            /// prediction.
+            std::vector<double> x_train_f64;
             /// @brief Transformed training targets cast to Refine precision (n_train).
             std::vector<Refine> y_transformed;
             /// @brief Column-major lower-triangular Cholesky factor L of K + (sigma_n^2 + j) I (n_train * n_train).
@@ -252,6 +257,26 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<Prediction<typename P::Refine>, GprError> fitted_loo_predict(
             const FittedPayload<P>& payload, const PredictOptions& options
+        );
+
+        /// @brief Computes double-precision posterior mean contributions mu = K_*^T * alpha in width-32 blocks.
+        /// @details Evaluates cross-covariance K(X_train_f64, X_query_f64) in double-precision column blocks of
+        /// width at most refinement_column_block (32) using reusable workspace buffers without heap allocations after
+        /// warmup, and accumulates dot products in ascending row order.
+        /// @param[in] kernel_f64 Double-precision compiled kernel evaluator.
+        /// @param[in] x_train_f64 Double-precision transformed training features (n x d, column-major).
+        /// @param[in] x_query_f64 Double-precision transformed query features (m x d, column-major).
+        /// @param[in] alpha Double-precision weights vector of length n.
+        /// @param[in,out] ws Reusable query workspace holding pre-sized double column-block scratch.
+        /// @param[out] out_mean Destination transformed-scale posterior mean vector of length m.
+        /// @return Empty expected on success, or GprError if kernel evaluation fails.
+        [[nodiscard]] std::expected<void, GprError> compute_reeval_cross_mean_f64(
+            const CompiledKernel<double>& kernel_f64,
+            MatrixRef<double> x_train_f64,
+            MatrixRef<double> x_query_f64,
+            std::span<const double> alpha,
+            QueryWorkspace<MixedPrecision<ReevaluateKernel>>& ws,
+            std::span<double> out_mean
         );
 
         /// @brief Dispatches hyperparameter optimization to the concrete optimizer policy O.
@@ -1028,11 +1053,13 @@ namespace cxxgpr
                 .kernel_spec = other.payload_.kernel_spec,
                 .likelihood = other.payload_.likelihood,
                 .compiled_kernel = other.payload_.compiled_kernel,
+                .compiled_kernel_f64 = other.payload_.compiled_kernel_f64,
                 .input_transform = other.payload_.input_transform->clone(),
                 .target_transform = other.payload_.target_transform->clone(),
                 .x_raw = other.payload_.x_raw,
                 .y_raw = other.payload_.y_raw,
                 .x_train = other.payload_.x_train,
+                .x_train_f64 = other.payload_.x_train_f64,
                 .y_transformed = other.payload_.y_transformed,
                 .l_factor = other.payload_.l_factor,
                 .alpha = other.payload_.alpha,

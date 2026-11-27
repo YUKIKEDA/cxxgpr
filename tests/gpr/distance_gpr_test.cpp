@@ -3130,4 +3130,469 @@ namespace
         EXPECT_LT(rel_diff(promote_far->alpha(), ref_far->alpha()), 1e-10);
     }
 
+    /// @brief Indefinite custom kernel term returning 1 on zero distance and 2 on positive distance.
+    /// @tparam T Evaluation scalar type (double or float).
+    template <typename T> class DistanceIndefiniteControlTerm final : public cxxgpr::KernelTerm<T>
+    {
+    public:
+        /// @brief Clones this custom distance kernel leaf.
+        /// @return Independent copy of this indefinite kernel leaf.
+        [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override
+        {
+            return std::make_unique<DistanceIndefiniteControlTerm<T>>();
+        }
+
+        /// @brief Returns zero kernel parameters.
+        /// @return Always returns 0.
+        [[nodiscard]] std::size_t num_params() const noexcept override { return 0U; }
+
+        /// @brief Writes zero parameters when @p out is empty.
+        /// @param[out] out Destination parameter span.
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
+        {
+            if (!out.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 params"));
+            }
+            return {};
+        }
+
+        /// @brief Accepts an empty parameter span.
+        /// @param[in] params Input parameter span.
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
+        {
+            if (!params.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 params"));
+            }
+            return {};
+        }
+
+        /// @brief Writes zero parameter bounds when @p out is empty.
+        /// @param[out] out Destination interval span.
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
+        {
+            if (!out.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 bounds"));
+            }
+            return {};
+        }
+
+        /// @brief Evaluates an indefinite square matrix (1 on diagonal, 2 where dist > 0).
+        /// @param[in] dist Square matrix of squared distances.
+        /// @param[out] out Destination matrix populated on @p uplo.
+        /// @param[in] uplo Triangle or full region to fill.
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> apply(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
+        ) const override
+        {
+            const std::size_t n = dist.rows();
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                const std::size_t r_begin = (uplo == cxxgpr::Triangle::Lower) ? col : 0U;
+                const std::size_t r_end = (uplo == cxxgpr::Triangle::Upper) ? (col + 1U) : n;
+                for (std::size_t row = r_begin; row < r_end; ++row)
+                {
+                    out(row, col) = (row == col) ? T{1} : (dist(row, col) > T{0} ? T{2} : T{1});
+                }
+            }
+            return {};
+        }
+
+        /// @brief Evaluates rectangular cross entries matching apply().
+        /// @param[in] dist Rectangular squared-distance matrix.
+        /// @param[out] out Destination cross-kernel matrix.
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> apply_cross(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
+        ) const override
+        {
+            for (std::size_t col = 0U; col < dist.cols(); ++col)
+            {
+                for (std::size_t row = 0U; row < dist.rows(); ++row)
+                {
+                    out(row, col) = (dist(row, col) > T{0}) ? T{2} : T{1};
+                }
+            }
+            return {};
+        }
+
+        /// @brief Fills self-variances with 1.
+        /// @param[out] out Destination diagonal span.
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
+        {
+            std::ranges::fill(out, T{1});
+            return {};
+        }
+
+        /// @brief Rejects gradient calls (no parameters).
+        /// @param[in] dist Unused.
+        /// @param[out] d_k Unused.
+        /// @param[in] param_idx Parameter index.
+        /// @param[in] uplo Unused.
+        /// @return IndexOutOfRange error.
+        std::expected<void, cxxgpr::GprError> grad(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
+        ) const override
+        {
+            (void)dist;
+            (void)d_k;
+            (void)param_idx;
+            (void)uplo;
+            return std::unexpected(cxxgpr::GprError::index_out_of_range("no parameters"));
+        }
+
+        /// @brief Rejects Hessian calls (no parameters).
+        /// @param[in] dist Unused.
+        /// @param[out] d2_k Unused.
+        /// @param[in] i First parameter index.
+        /// @param[in] j Second parameter index.
+        /// @param[in] uplo Unused.
+        /// @return IndexOutOfRange error.
+        std::expected<void, cxxgpr::GprError> hess(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
+        ) const override
+        {
+            (void)dist;
+            (void)d2_k;
+            (void)i;
+            (void)j;
+            (void)uplo;
+            return std::unexpected(cxxgpr::GprError::index_out_of_range("no parameters"));
+        }
+    };
+
+    /// @brief Verifies shifted float preconditioning, Krylov refinement, jitter priority, and double cross mean for
+    /// DistanceGpr (DistanceOnly Scalar/ARD and WithPoints).
+    TEST(DistanceGprTest, MixedPrecisionReevaluateSolvesSmallNoiseWithShiftedPreconditionerAndDoubleMean)
+    {
+        // Spec: REQ-07, DES-04, DES-05, DES-21
+        const auto make_small_noise_likelihood = [](double noise)
+        {
+            auto lik = cxxgpr::GaussianLikelihood::create(1e-4)
+                           .value()
+                           .with_bounds(cxxgpr::Interval::create(1e-20, 1e5).value())
+                           .value();
+            EXPECT_TRUE(lik.set_params(std::array<double, 1>{std::log(noise)}).has_value());
+            return lik;
+        };
+
+        constexpr std::size_t n = 128U;
+        constexpr std::size_t m = 40U;
+        constexpr std::size_t m_small = 10U;
+        const std::size_t full_double_matrix_bytes = n * n * sizeof(double);
+        const auto small_lik = make_small_noise_likelihood(1e-10);
+        const auto zero_jitter = cxxgpr::JitterPolicy::fixed(0.0).value();
+
+        // 1. DistanceOnly Scalar RBF with unretained assume_valid double distance tables.
+        {
+            constexpr std::size_t d = 1U;
+            Data data;
+            data.n = n;
+            data.m = m;
+            data.d = d;
+            data.x.resize(n);
+            data.y.resize(n);
+            data.q.resize(m);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                const double xi = static_cast<double>(i) / static_cast<double>(n - 1U);
+                data.x[i] = xi;
+                data.y[i] = std::sin(6.283185307179586 * xi) + (0.3 * std::cos(12.566370614359172 * xi));
+            }
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                data.q[j] = (static_cast<double>(j) + 0.35) / static_cast<double>(m);
+            }
+            const Tables t = euclid_tables(data);
+            const cxxgpr::ScalarDistance slot;
+            cxxgpr::DistanceSource train_src;
+            train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.train.data(), n, n)).assume_valid(true);
+            cxxgpr::DistanceSource cross_src;
+            cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), n, m)).assume_valid(true);
+            cxxgpr::DistanceSource cross_small_src;
+            cross_small_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(t.cross.data(), n, m_small))
+                .assume_valid(true);
+
+            const auto dk = slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+
+            const auto single_res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::SinglePrecision>(dk)
+                                        .with_likelihood(small_lik)
+                                        .with_jitter(zero_jitter)
+                                        .with_retain_distances(false)
+                                        .factor(train_src, data.y);
+            ASSERT_FALSE(single_res.has_value());
+            EXPECT_EQ(single_res.error().code(), cxxgpr::GprErrorCode::CholeskyFailed);
+
+            const auto ref_f64 = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>(dk)
+                                     .with_likelihood(small_lik)
+                                     .with_jitter(zero_jitter)
+                                     .with_retain_distances(false)
+                                     .factor(train_src, data.y);
+            ASSERT_TRUE(ref_f64.has_value()) << ref_f64.error().message();
+            const auto ref_pred = ref_f64->predict(cross_src);
+            const auto ref_pred_small = ref_f64->predict(cross_small_src);
+            ASSERT_TRUE(ref_pred.has_value());
+            ASSERT_TRUE(ref_pred_small.has_value());
+
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            const auto mp =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk)
+                    .with_likelihood(small_lik)
+                    .with_jitter(zero_jitter)
+                    .with_retain_distances(false)
+                    .factor(train_src, data.y);
+            ASSERT_TRUE(mp.has_value()) << mp.error().message();
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+            EXPECT_EQ(mp->factor_jitter(), 0.0);
+
+            const auto summary = mp->refinement_summary();
+            ASSERT_TRUE(summary.has_value());
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_GT(summary->preconditioner_shift, 0.0);
+            EXPECT_TRUE(summary->used_krylov);
+            EXPECT_LT(summary->final_relative_residual, cxxgpr::refinement_tolerance(n));
+
+            constexpr double ell = 0.25;
+            constexpr double inv_2l2 = 1.0 / (2.0 * ell * ell);
+            double b_inf = 0.0;
+            double r_inf = 0.0;
+            double alpha_inf = 0.0;
+            double y_inf = 0.0;
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                alpha_inf = std::max(alpha_inf, std::abs(mp->alpha()[i]));
+                y_inf = std::max(y_inf, std::abs(data.y[i]));
+                double row_sum = 0.0;
+                double b_alpha_i = 0.0;
+                for (std::size_t j = 0U; j < n; ++j)
+                {
+                    const double entry = std::exp(-t.train[(j * n) + i] * inv_2l2) + (i == j ? 1e-10 : 0.0);
+                    row_sum += std::abs(entry);
+                    b_alpha_i += entry * mp->alpha()[j];
+                }
+                b_inf = std::max(b_inf, row_sum);
+                r_inf = std::max(r_inf, std::abs(data.y[i] - b_alpha_i));
+            }
+            const double rel_res = r_inf / ((b_inf * alpha_inf) + y_inf);
+            EXPECT_LT(rel_res, cxxgpr::refinement_tolerance(n));
+
+            cxxgpr::Prediction<double> out_pred;
+            ASSERT_TRUE(mp->predict_into(cross_src, out_pred).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                ASSERT_TRUE(mp->predict_into(cross_src, out_pred).has_value());
+            }
+            double max_mean_diff = 0.0;
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                max_mean_diff = std::max(max_mean_diff, std::abs(out_pred.mean[j] - ref_pred->mean[j]));
+            }
+            EXPECT_LT(max_mean_diff, 1e-10);
+
+            // Shrunk cross batch must reuse warmed double column-block buffers with zero allocations.
+            ASSERT_TRUE(mp->predict_into(cross_small_src, out_pred).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                ASSERT_TRUE(mp->predict_into(cross_small_src, out_pred).has_value());
+            }
+            double max_small_diff = 0.0;
+            for (std::size_t j = 0U; j < m_small; ++j)
+            {
+                max_small_diff = std::max(max_small_diff, std::abs(out_pred.mean[j] - ref_pred_small->mean[j]));
+            }
+            EXPECT_LT(max_small_diff, 1e-10);
+
+            // Pre-validated CheckedDistanceStore<float> cross supply must also deliver zero-alloc predictions.
+            const auto ck_f32 = dk.compile<float>();
+            const auto cross_store_f32 = ck_f32.prepare_cross(cross_src);
+            ASSERT_TRUE(cross_store_f32.has_value());
+            ASSERT_TRUE(mp->predict_into(*cross_store_f32, out_pred).has_value());
+            {
+                const cxxgpr::test_support::NoAllocationScope no_alloc;
+                ASSERT_TRUE(mp->predict_into(*cross_store_f32, out_pred).has_value());
+            }
+
+            // Adaptive jitter must wait behind preconditioner shifts + FGMRES-IR.
+            const auto adaptive_jit = cxxgpr::JitterPolicy::adaptive(1e-6, 10.0, 5U, 1.0).value();
+            const auto mp_adaptive =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk)
+                    .with_likelihood(small_lik)
+                    .with_jitter(adaptive_jit)
+                    .with_retain_distances(false)
+                    .factor(train_src, data.y);
+            ASSERT_TRUE(mp_adaptive.has_value()) << mp_adaptive.error().message();
+            EXPECT_EQ(mp_adaptive->factor_jitter(), 0.0);
+            ASSERT_TRUE(mp_adaptive->refinement_summary().has_value());
+            EXPECT_EQ(mp_adaptive->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_GT(mp_adaptive->refinement_summary()->preconditioner_shift, 0.0);
+        }
+
+        // 2. DistanceOnly ARD + WithPoints at small noise (1e-10).
+        {
+            constexpr std::size_t d = 2U;
+            Data data;
+            data.n = n;
+            data.m = m;
+            data.d = d;
+            data.x.resize(n * d);
+            data.y.resize(n);
+            data.q.resize(m * d);
+            for (std::size_t i = 0U; i < n; ++i)
+            {
+                const double t0 = static_cast<double>(i) / static_cast<double>(n - 1U);
+                const double t1 = 0.5 * std::sin(3.141592653589793 * t0);
+                data.x[i] = t0;
+                data.x[n + i] = t1;
+                data.y[i] = std::sin(5.0 * t0) + (0.4 * std::cos(3.0 * t1));
+            }
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                const double q0 = (static_cast<double>(j) + 0.25) / static_cast<double>(m);
+                data.q[j] = q0;
+                data.q[m + j] = 0.5 * std::sin(3.141592653589793 * q0);
+            }
+            const Tables tbl = euclid_tables(data);
+            const std::vector<double> ard_train0 = table(data.x, n, data.x, n, d, 0U);
+            const std::vector<double> ard_train1 = table(data.x, n, data.x, n, d, 1U);
+            const std::vector<double> ard_cross0 = table(data.x, n, data.q, m, d, 0U);
+            const std::vector<double> ard_cross1 = table(data.x, n, data.q, m, d, 1U);
+
+            const cxxgpr::ArdDistance ard_slot = cxxgpr::ArdDistance::create(d).value();
+            const std::array<cxxgpr::MatrixRef<double>, 2> ard_train_views{
+                cxxgpr::MatrixRef<double>(ard_train0.data(), n, n),
+                cxxgpr::MatrixRef<double>(ard_train1.data(), n, n),
+            };
+            const std::array<cxxgpr::MatrixRef<double>, 2> ard_cross_views{
+                cxxgpr::MatrixRef<double>(ard_cross0.data(), n, m),
+                cxxgpr::MatrixRef<double>(ard_cross1.data(), n, m),
+            };
+            cxxgpr::DistanceSource ard_train_src;
+            ard_train_src.bind_ard(ard_slot.slot(), ard_train_views).assume_valid(true);
+            cxxgpr::DistanceSource ard_cross_src;
+            ard_cross_src.bind_ard(ard_slot.slot(), ard_cross_views).assume_valid(true);
+
+            const auto ard_dk =
+                ard_slot.rbf_ard(cxxgpr::RbfArdKernel::create(std::array<double, 2>{0.25, 0.35}).value()).value();
+            const auto ref_ard = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>(ard_dk)
+                                     .with_likelihood(small_lik)
+                                     .with_jitter(zero_jitter)
+                                     .with_retain_distances(false)
+                                     .factor(ard_train_src, data.y);
+            const auto mp_ard =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(ard_dk)
+                    .with_likelihood(small_lik)
+                    .with_jitter(zero_jitter)
+                    .with_retain_distances(false)
+                    .factor(ard_train_src, data.y);
+            ASSERT_TRUE(ref_ard.has_value()) << ref_ard.error().message();
+            ASSERT_TRUE(mp_ard.has_value()) << mp_ard.error().message();
+            EXPECT_EQ(mp_ard->factor_jitter(), 0.0);
+            ASSERT_TRUE(mp_ard->refinement_summary().has_value());
+            EXPECT_EQ(mp_ard->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_TRUE(mp_ard->refinement_summary()->used_krylov);
+            const auto p_ref_ard = ref_ard->predict(ard_cross_src);
+            const auto p_mp_ard = mp_ard->predict(ard_cross_src);
+            ASSERT_TRUE(p_ref_ard.has_value());
+            ASSERT_TRUE(p_mp_ard.has_value());
+            double max_ard_diff = 0.0;
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                max_ard_diff = std::max(max_ard_diff, std::abs(p_mp_ard->mean[j] - p_ref_ard->mean[j]));
+            }
+            EXPECT_LT(max_ard_diff, 1e-10);
+
+            // WithPoints: scalar distance + LinearKernel on coordinates.
+            const cxxgpr::ScalarDistance s_slot;
+            cxxgpr::DistanceSource wp_train_src;
+            wp_train_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(tbl.train.data(), n, n))
+                .assume_valid(true);
+            cxxgpr::DistanceSource wp_cross_src;
+            wp_cross_src.bind_scalar(s_slot.slot(), cxxgpr::MatrixRef<double>(tbl.cross.data(), n, m))
+                .assume_valid(true);
+            const auto wp_dk = s_slot.rbf(cxxgpr::RbfKernel::create(0.25).value()).with_points()
+                + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.05).value());
+            const cxxgpr::MatrixRef<double> x_wp_ref(data.x.data(), n, d, n);
+            const cxxgpr::MatrixRef<double> q_wp_ref(data.q.data(), m, d, m);
+
+            const auto single_wp =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::SinglePrecision, cxxgpr::WithPoints>(wp_dk)
+                    .with_likelihood(small_lik)
+                    .with_jitter(zero_jitter)
+                    .with_retain_distances(false)
+                    .factor(wp_train_src, x_wp_ref, data.y);
+            ASSERT_FALSE(single_wp.has_value());
+            EXPECT_EQ(single_wp.error().code(), cxxgpr::GprErrorCode::CholeskyFailed);
+
+            const auto ref_wp =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(wp_dk)
+                    .with_likelihood(small_lik)
+                    .with_jitter(zero_jitter)
+                    .with_retain_distances(false)
+                    .factor(wp_train_src, x_wp_ref, data.y);
+            const auto mp_wp = cxxgpr::DistanceGpr<
+                cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>, cxxgpr::WithPoints>(wp_dk)
+                                   .with_likelihood(small_lik)
+                                   .with_jitter(zero_jitter)
+                                   .with_retain_distances(false)
+                                   .factor(wp_train_src, x_wp_ref, data.y);
+            ASSERT_TRUE(ref_wp.has_value()) << ref_wp.error().message();
+            ASSERT_TRUE(mp_wp.has_value()) << mp_wp.error().message();
+            EXPECT_EQ(mp_wp->factor_jitter(), 0.0);
+            ASSERT_TRUE(mp_wp->refinement_summary().has_value());
+            EXPECT_EQ(mp_wp->refinement_summary()->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_GT(mp_wp->refinement_summary()->preconditioner_shift, 0.0);
+            EXPECT_TRUE(mp_wp->refinement_summary()->used_krylov);
+            EXPECT_LT(mp_wp->refinement_summary()->final_relative_residual, cxxgpr::refinement_tolerance(n));
+
+            const auto p_ref_wp = ref_wp->predict(wp_cross_src, q_wp_ref);
+            const auto p_mp_wp = mp_wp->predict(wp_cross_src, q_wp_ref);
+            ASSERT_TRUE(p_ref_wp.has_value());
+            ASSERT_TRUE(p_mp_wp.has_value());
+            double max_wp_diff = 0.0;
+            for (std::size_t j = 0U; j < m; ++j)
+            {
+                max_wp_diff = std::max(max_wp_diff, std::abs(p_mp_wp->mean[j] - p_ref_wp->mean[j]));
+            }
+            EXPECT_LT(max_wp_diff, 1e-8);
+        }
+
+        // 3. Negative control: genuinely indefinite distance matrix uses JitterPolicy.
+        {
+            const cxxgpr::ScalarDistance slot;
+            auto custom = cxxgpr::CustomKernel::create(
+                std::make_unique<DistanceIndefiniteControlTerm<double>>(),
+                std::make_unique<DistanceIndefiniteControlTerm<float>>()
+            );
+            ASSERT_TRUE(custom.has_value());
+            const auto indef_dk = slot.custom(*custom);
+            const std::vector<double> d2_indef{0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0};
+            const std::array<double, 3> y_indef{1.0, -0.5, 0.25};
+            cxxgpr::DistanceSource indef_src;
+            indef_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_indef.data(), 3U, 3U));
+            const auto indef_lik = make_small_noise_likelihood(1e-4);
+
+            const auto trainer =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
+                    indef_dk
+                )
+                    .with_likelihood(indef_lik);
+            const auto fail_fixed = trainer.with_jitter(zero_jitter).factor(indef_src, y_indef);
+            ASSERT_FALSE(fail_fixed.has_value());
+            EXPECT_EQ(fail_fixed.error().code(), cxxgpr::GprErrorCode::CholeskyFailed);
+
+            const auto indef_jit = cxxgpr::JitterPolicy::adaptive(4.0, 2.0, 4U, 32.0).value();
+            const auto rec = trainer.with_jitter(indef_jit).factor(indef_src, y_indef);
+            ASSERT_TRUE(rec.has_value()) << rec.error().message();
+            EXPECT_GT(rec->factor_jitter(), 0.0);
+        }
+    }
+
 }  // namespace
