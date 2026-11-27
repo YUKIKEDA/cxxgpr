@@ -24,8 +24,10 @@
 #include <variant>
 #include <vector>
 
+#include "gpr/mixed_krylov.hpp"
 #include "gpr/refine_constants.hpp"
 #include "workspace/predict_diagonal.hpp"
+#include "workspace/sample_draws.hpp"
 
 namespace cxxgpr::detail
 {
@@ -443,47 +445,76 @@ namespace cxxgpr::detail
             bool has_valid_factor_{false};
         };
 
-        /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
-        /// blocks of width 32 without materializing the full n x n double matrix.
-        /// @details Evaluates cross-kernel slices B_f64(:, col_begin:col_end) in blocks of at most
-        /// refinement_column_block columns, adds diag_offset along the main diagonal, accumulates B_f64 * w
-        /// and row absolute sums, and writes y_f64 - B_f64 * w into out_r.
+        /// @brief Computes double-precision B_f64 * v (and optionally ||B_f64||_inf) in width-32 column blocks.
+        /// @details Evaluates diagonal entries explicitly via fill_diag() once per solve and streams cross-kernel
+        /// column slices of width at most refinement_column_block without materializing the full n x n matrix.
         /// @param[in] kernel_f64 Double-precision compiled kernel evaluator.
         /// @param[in] x_f64 Double-precision transformed training features (n x d).
-        /// @param[in] y_f64 Double-precision transformed training targets of length n.
         /// @param[in] diag_offset Combined observation noise variance and accepted jitter added to diagonal entries.
-        /// @param[in] w Current candidate solution vector of length n in double precision.
-        /// @param[out] out_r Output double-precision residual vector of length n.
-        /// @return Infinity norm ||B_f64||_inf for backward-error stopping checks, or GprError on evaluation failure.
-        /// @retval GprErrorCode::NonFiniteKernelValue When kernel evaluation produces non-finite entries.
-        [[nodiscard]] std::expected<double, GprError> block_reeval_residual(
+        /// @param[in] v Input vector of length n in double precision.
+        /// @param[out] out_bv Output matrix-vector product B_f64 * v of length n.
+        /// @param[in] compute_b_inf True to compute and return ||B_f64||_inf alongside B_f64 * v.
+        /// @param[in,out] diag_k Cached kernel diagonal vector (populated on first call when empty).
+        /// @param[in,out] diag_scratch Scratch buffer for fill_diag().
+        /// @param[in,out] x_block Reusable block_cols x d coordinate slice buffer.
+        /// @param[in,out] k_block Reusable n x block_cols cross-kernel block buffer.
+        /// @param[in,out] scratch_block Reusable n x block_cols kernel scratch buffer.
+        /// @param[in,out] nested Reusable double-precision nested evaluation buffers.
+        /// @param[in,out] row_abs_sum Reusable n-element buffer accumulating row l1 sums when compute_b_inf is true.
+        /// @return ||B_f64||_inf when compute_b_inf is true, or 0.0 otherwise.
+        [[nodiscard]] std::expected<double, GprError> block_reeval_matvec(
             const CompiledKernel<double>& kernel_f64,
             MatrixRef<double> x_f64,
-            std::span<const double> y_f64,
             double diag_offset,
-            std::span<const double> w,
-            std::span<double> out_r
+            std::span<const double> v,
+            std::span<double> out_bv,
+            bool compute_b_inf,
+            std::vector<double>& diag_k,
+            std::vector<double>& diag_scratch,
+            std::vector<double>& x_block,
+            std::vector<double>& k_block,
+            std::vector<double>& scratch_block,
+            NestedBuffers<double>& nested,
+            std::vector<double>& row_abs_sum
         )
         {
             const std::size_t n = x_f64.rows();
             const std::size_t d = x_f64.cols();
             const std::size_t block_cols = std::min(refinement_column_block, n);
 
-            // Evaluate diagonal entries explicitly so diagonal-only leaves such as WhiteKernel are included.
-            std::vector<double> diag_k(n);
-            std::vector<double> diag_scratch((kernel_f64.nested_depth() + 1U) * n);
-            if (auto dg = kernel_f64.fill_diag(x_f64, diag_k, diag_scratch); !dg.has_value())
+            // Evaluate main kernel diagonal once so diagonal-only leaves such as WhiteKernel are included.
+            if (diag_k.size() < n)
             {
-                return std::unexpected(std::move(dg).error());
+                diag_k.resize(n);
+                diag_scratch.resize((kernel_f64.nested_depth() + 1U) * n);
+                if (auto dg = kernel_f64.fill_diag(x_f64, diag_k, diag_scratch); !dg.has_value())
+                {
+                    return std::unexpected(std::move(dg).error());
+                }
             }
 
-            // Allocate O(n * block_cols) scratch buffers instead of O(n^2) double storage.
-            std::vector<double> x_block(block_cols * d);
-            std::vector<double> k_block(n * block_cols);
-            std::vector<double> scratch_block(n * block_cols);
-            auto nested = kernel_f64.make_nested_buffers(n, block_cols);
-            std::vector<double> matvec(n, 0.0);
-            std::vector<double> row_abs_sum(n, 0.0);
+            if (x_block.size() < block_cols * d)
+            {
+                x_block.resize(block_cols * d);
+            }
+            if (k_block.size() < n * block_cols)
+            {
+                k_block.resize(n * block_cols);
+            }
+            if (scratch_block.size() < n * block_cols)
+            {
+                scratch_block.resize(n * block_cols);
+            }
+            if (nested.depth() < kernel_f64.nested_depth() || nested.rows() < n || nested.cols() < block_cols)
+            {
+                nested.resize(kernel_f64.nested_depth(), n, block_cols);
+            }
+
+            std::ranges::fill(out_bv, 0.0);
+            if (compute_b_inf)
+            {
+                row_abs_sum.assign(n, 0.0);
+            }
 
             for (std::size_t col_begin = 0; col_begin < n; col_begin += block_cols)
             {
@@ -503,41 +534,81 @@ namespace cxxgpr::detail
                 {
                     return std::unexpected(std::move(res).error());
                 }
-                // Accumulate matrix-vector product B_f64 * w and row l1 sums across the block columns.
                 for (std::size_t c = 0; c < cols_cur; ++c)
                 {
                     const std::size_t global_col = col_begin + c;
-                    const double w_col = w[global_col];
+                    const double v_col = v[global_col];
                     for (std::size_t row = 0; row < n; ++row)
                     {
                         const double entry = (row == global_col) ? (diag_k[row] + diag_offset) : k_block[(c * n) + row];
-                        matvec[row] += entry * w_col;
-                        row_abs_sum[row] += std::abs(entry);
+                        out_bv[row] += entry * v_col;
+                        if (compute_b_inf)
+                        {
+                            row_abs_sum[row] += std::abs(entry);
+                        }
                     }
                 }
             }
 
-            // Compute residual r = y_f64 - B_f64 * w and return ||B_f64||_inf.
+            return compute_b_inf ? inf_norm(row_abs_sum) : 0.0;
+        }
+
+        /// @brief Computes double-precision residual r = y_f64 - B_f64 * w and ||B_f64||_inf using column
+        /// blocks of width 32 without materializing the full n x n double matrix.
+        /// @param[in] kernel_f64 Double-precision compiled kernel evaluator.
+        /// @param[in] x_f64 Double-precision transformed training features (n x d).
+        /// @param[in] y_f64 Double-precision transformed training targets of length n.
+        /// @param[in] diag_offset Combined observation noise variance and accepted jitter added to diagonal entries.
+        /// @param[in] w Current candidate solution vector of length n in double precision.
+        /// @param[out] out_r Output double-precision residual vector of length n.
+        /// @return Infinity norm ||B_f64||_inf for backward-error stopping checks, or GprError on evaluation failure.
+        [[nodiscard]] std::expected<double, GprError> block_reeval_residual(
+            const CompiledKernel<double>& kernel_f64,
+            MatrixRef<double> x_f64,
+            std::span<const double> y_f64,
+            double diag_offset,
+            std::span<const double> w,
+            std::span<double> out_r
+        )
+        {
+            const std::size_t n = x_f64.rows();
+            std::vector<double> diag_k;
+            std::vector<double> diag_scratch;
+            std::vector<double> x_block;
+            std::vector<double> k_block;
+            std::vector<double> scratch_block;
+            NestedBuffers<double> nested;
+            std::vector<double> matvec(n, 0.0);
+            std::vector<double> row_abs_sum;
+
+            auto b_inf = block_reeval_matvec(
+                kernel_f64, x_f64, diag_offset, w, matvec, true, diag_k, diag_scratch, x_block, k_block, scratch_block,
+                nested, row_abs_sum
+            );
+            if (!b_inf.has_value())
+            {
+                return std::unexpected(std::move(b_inf).error());
+            }
             for (std::size_t row = 0; row < n; ++row)
             {
                 out_r[row] = y_f64[row] - matvec[row];
             }
-            return inf_norm(row_abs_sum);
+            return *b_inf;
         }
 
-        /// @brief Mixed-precision iterative refinement adapter implementing RefineSystem for GPR solves.
-        /// @details Bridges float Cholesky factor L_f32 (for fast error solves) with either promoted float
+        /// @brief Mixed-precision iterative refinement adapter implementing RefineSystem and Krylov operations.
+        /// @details Bridges float Cholesky factor L_f32 (for fast preconditioning) with either promoted float
         /// matrix residuals (PromoteStorage) or column-blocked double kernel re-evaluation (ReevaluateKernel).
         /// @tparam P Mixed-precision policy specifying Residual formula (PromoteStorage or ReevaluateKernel).
         template <PrecisionPolicyConcept P> class GprRefineSystem final : public RefineSystem
         {
         public:
-            /// @brief Constructs the refinement adapter from double data, float Cholesky factor, and matrix A_f32.
+            /// @brief Constructs the refinement adapter from double data, mutable float Cholesky factor, and A_f32.
             /// @param[in] spec Fitted kernel specification compiled in double precision for re-evaluation/fallback.
             /// @param[in] kernel_exp Exponential backend mode matching the fitted model.
             /// @param[in] x_f64 Double-precision transformed training features (n x d).
             /// @param[in] y_f64 Double-precision transformed training targets of length n.
-            /// @param[in] l_f32 Single-precision lower-triangular Cholesky factor L (n x n).
+            /// @param[in,out] l_f32 Mutable single-precision lower-triangular Cholesky factor L (n x n).
             /// @param[in] a_f32_symm Symmetrized single-precision noisy system matrix A (used by PromoteStorage).
             /// @param[in] diag_offset Combined observation noise variance and accepted jitter added to diagonal.
             GprRefineSystem(
@@ -545,7 +616,7 @@ namespace cxxgpr::detail
                 KernelExp kernel_exp,
                 MatrixRef<double> x_f64,
                 std::span<const double> y_f64,
-                MatrixRef<float> l_f32,
+                MatrixMut<float> l_f32,
                 MatrixRef<float> a_f32_symm,
                 double diag_offset
             ) :
@@ -567,12 +638,9 @@ namespace cxxgpr::detail
             [[nodiscard]] std::span<const double> rhs() const noexcept override { return y_f64_; }
 
             /// @brief Computes residual r = y_f64 - A * w according to P::Residual and returns matrix norm.
-            /// @details Promotes stored float entries for PromoteStorage using preallocated scratch, or recomputes
-            /// double kernel blocks of width 32 via block_reeval_residual() for ReevaluateKernel.
             /// @param[in] w Current double-precision iterate of length n.
             /// @param[out] r Output double-precision residual buffer of length n.
             /// @return Infinity norm of the system matrix used for relative residual scaling, or GprError.
-            /// @retval GprErrorCode::NonFiniteKernelValue When kernel re-evaluation yields non-finite entries.
             [[nodiscard]] std::expected<double, GprError> residual(
                 std::span<const double> w, std::span<double> r
             ) override
@@ -583,25 +651,58 @@ namespace cxxgpr::detail
                 }
                 else
                 {
-                    return block_reeval_residual(kernel_f64_, x_f64_, y_f64_, diag_offset_, w, r);
+                    auto b_inf = matvec_and_inf_norm(w, sum_buf_, true);
+                    if (!b_inf.has_value())
+                    {
+                        return b_inf;
+                    }
+                    for (std::size_t i = 0; i < y_f64_.size(); ++i)
+                    {
+                        r[i] = y_f64_[i] - sum_buf_[i];
+                    }
+                    return b_inf;
                 }
             }
 
+            /// @brief Computes exact blocked double-precision B_f64 * v and optionally ||B_f64||_inf.
+            /// @param[in] v Input vector of length n in double precision.
+            /// @param[out] out_bv Output B_f64 * v buffer of length n.
+            /// @param[in] compute_b_inf True to compute and return ||B_f64||_inf.
+            /// @return ||B_f64||_inf when requested, or 0.0 otherwise.
+            [[nodiscard]] std::expected<double, GprError> matvec_and_inf_norm(
+                std::span<const double> v, std::span<double> out_bv, bool compute_b_inf
+            )
+            {
+                return block_reeval_matvec(
+                    kernel_f64_, x_f64_, diag_offset_, v, out_bv, compute_b_inf, diag_k_, diag_scratch_, x_block_,
+                    k_block_, scratch_block_, nested_, row_abs_buf_
+                );
+            }
+
+            /// @brief Applies scaled float Cholesky preconditioning z = (L_f32 L_f32^T)^{-1} r.
+            /// @param[in] r Input residual or Krylov vector of length n.
+            /// @param[out] z Output preconditioned double vector of length n.
+            /// @return Empty expected on success, or GprError on solve failure or non-finite values.
+            [[nodiscard]] std::expected<void, GprError> apply_preconditioner(
+                std::span<const double> r, std::span<double> z
+            )
+            {
+                return apply_scaled_f32_preconditioner(l_f32_.as_ref(), r, std::span<float>(r_f32_buf_), z);
+            }
+
             /// @brief Applies one iterative refinement update w += (L_f32 L_f32^T)^-1 r.
-            /// @details Casts the double residual r to float, solves via l_f32_, and accumulates the correction
-            /// back into double-precision w.
             /// @param[in] r Double-precision residual vector of length n.
             /// @param[in,out] w In-out double-precision solution vector updated in place.
             /// @return Empty expected on success, or GprError if triangular solve fails.
             [[nodiscard]] std::expected<void, GprError> correct(std::span<const double> r, std::span<double> w) override
             {
-                // Downcast residual to float for fast L_f32 triangular solves, then accumulate in double.
                 const std::size_t n = r.size();
                 for (std::size_t i = 0; i < n; ++i)
                 {
                     r_f32_buf_[i] = static_cast<float>(r[i]);
                 }
-                if (auto solve = linalg::solve_llt_in_place(l_f32_, std::span<float>(r_f32_buf_)); !solve.has_value())
+                if (auto solve = linalg::solve_llt_in_place(l_f32_.as_ref(), std::span<float>(r_f32_buf_));
+                    !solve.has_value())
                 {
                     return solve;
                 }
@@ -613,35 +714,23 @@ namespace cxxgpr::detail
             }
 
             /// @brief Verifies whether iterate w satisfies relative residual tolerance against the true double system.
-            /// @details ReevaluateKernel already checked the true double residual during residual(); PromoteStorage
-            /// performs an additional block_reeval_residual() check against tol.
             /// @param[in] w Candidate double-precision iterate of length n.
             /// @param[in] tol Relative backward-error acceptance threshold.
             /// @return True if iterate is accepted; false triggers full double-precision fallback().
-            /// @retval GprErrorCode::NonFiniteKernelValue When kernel re-evaluation yields non-finite entries.
             [[nodiscard]] std::expected<bool, GprError> accept(std::span<const double> w, double tol) override
             {
                 if constexpr (std::same_as<typename P::Residual, ReevaluateKernel>)
                 {
-                    // ReevaluateKernel residuals are already computed in double against the exact kernel.
                     return true;
                 }
                 else
                 {
-                    // Verify promoted-storage iterate against the true double-precision kernel residual.
                     std::vector<double> r_true(y_f64_.size());
                     auto b_inf = block_reeval_residual(kernel_f64_, x_f64_, y_f64_, diag_offset_, w, r_true);
                     if (!b_inf.has_value())
                     {
                         return std::unexpected(std::move(b_inf).error());
                     }
-                    // The iterate solves the float-stored matrix to double accuracy, so against the exact kernel its
-                    // backward error is the storage error. When every stored entry is within a few float epsilons of
-                    // the true entry, that bounds the relative residual by a few epsilons independent of n, and the
-                    // iterate is accepted. Gating on the double-precision tolerance would reject it, and pay for the
-                    // fallback, unless every entry of the matrix is exactly representable in float. A float
-                    // evaluation that misses the exact kernel by more (for example coordinates far from the origin,
-                    // which lose digits when rounded to float) exceeds the threshold and still falls back.
                     return meets_relative_residual(
                         *b_inf, w, y_f64_, r_true, detail::promote_storage_accept_tolerance(tol)
                     );
@@ -650,14 +739,22 @@ namespace cxxgpr::detail
 
             /// @brief Computes an exact double-precision Cholesky solution when iterative refinement diverges or
             /// stalls.
-            /// @details Materializes the double-precision Gram matrix with diag_offset_, factors it without
-            /// additional jitter retries, and solves directly into w.
+            /// @details Releases refinement block scratch before materializing the full double Gram matrix, then
+            /// updates the lower triangle of l_f32_ from the true double Cholesky factor on success.
             /// @param[out] w Output double-precision weight vector overwritten with A_f64^-1 y_f64.
             /// @return Empty expected on success, or GprError if kernel evaluation or Cholesky fails.
-            /// @retval GprErrorCode::CholeskyFailed When double-precision Cholesky factorization fails.
             [[nodiscard]] std::expected<void, GprError> fallback(std::span<double> w) override
             {
-                // Materialize full double Gram matrix + diag_offset_ as a last-resort exact solve.
+                std::vector<double>{}.swap(diag_k_);
+                std::vector<double>{}.swap(diag_scratch_);
+                std::vector<double>{}.swap(x_block_);
+                std::vector<double>{}.swap(k_block_);
+                std::vector<double>{}.swap(scratch_block_);
+                nested_ = NestedBuffers<double>{};
+                std::vector<float>{}.swap(r_f32_buf_);
+                std::vector<double>{}.swap(row_abs_buf_);
+                std::vector<double>{}.swap(sum_buf_);
+
                 const std::size_t n = x_f64_.rows();
                 std::vector<double> a_f64(n * n);
                 std::vector<double> scratch_f64(n * n);
@@ -678,8 +775,29 @@ namespace cxxgpr::detail
                     return ch;
                 }
                 std::ranges::copy(y_f64_, w.begin());
-                return linalg::solve_llt_in_place(a_mut.as_ref(), w);
+                if (auto sv = linalg::solve_llt_in_place(a_mut.as_ref(), w); !sv.has_value())
+                {
+                    return sv;
+                }
+
+                // Refresh l_f32_ lower triangle from the true double Cholesky factor so L and alpha remain consistent.
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    const auto diag = static_cast<float>(a_mut(col, col));
+                    l_f32_(col, col) = (std::isfinite(diag) && diag > 0.0F) ? diag : std::numeric_limits<float>::min();
+                    for (std::size_t row = col + 1U; row < n; ++row)
+                    {
+                        const auto val = static_cast<float>(a_mut(row, col));
+                        l_f32_(row, col) = std::isfinite(val) ? val : 0.0F;
+                    }
+                }
+                used_f64_fallback_ = true;
+                return {};
             }
+
+            /// @brief Returns true when fallback() succeeded with a full double-precision Cholesky solve.
+            /// @return True iff fallback() completed during this refinement session.
+            [[nodiscard]] bool used_f64_fallback() const noexcept { return used_f64_fallback_; }
 
         private:
             /// @brief Double-precision compiled kernel for blocked residual evaluation and fallback solves.
@@ -688,35 +806,71 @@ namespace cxxgpr::detail
             MatrixRef<double> x_f64_;
             /// @brief Double-precision transformed training targets of length n.
             std::span<const double> y_f64_;
-            /// @brief Single-precision Cholesky factor L_f32 retained from the final fit factorization.
-            MatrixRef<float> l_f32_;
+            /// @brief Mutable single-precision Cholesky factor L_f32 retained from the final fit factorization.
+            MatrixMut<float> l_f32_;
             /// @brief Symmetrized float noisy Gram matrix A_f32 used when P::Residual is PromoteStorage.
             MatrixRef<float> a_f32_;
             /// @brief Combined noise variance and accepted jitter added along the diagonal.
             double diag_offset_{0.0};
             /// @brief Reusable single-precision residual buffer for triangular L_f32 solves.
             std::vector<float> r_f32_buf_;
-            /// @brief Reusable row l1-norm scratch buffer for promoted_residual_into().
+            /// @brief Reusable row l1-norm scratch buffer.
             std::vector<double> row_abs_buf_;
-            /// @brief Reusable double-precision matrix-vector accumulator buffer for promoted_residual_into().
+            /// @brief Reusable double-precision matrix-vector accumulator buffer.
             std::vector<double> sum_buf_;
+            /// @brief Cached double-precision kernel diagonal vector of length n.
+            std::vector<double> diag_k_;
+            /// @brief Scratch vector for double-precision fill_diag().
+            std::vector<double> diag_scratch_;
+            /// @brief Reusable coordinate block buffer for blocked matvecs.
+            std::vector<double> x_block_;
+            /// @brief Reusable cross-kernel block buffer for blocked matvecs.
+            std::vector<double> k_block_;
+            /// @brief Reusable kernel evaluation scratch block for blocked matvecs.
+            std::vector<double> scratch_block_;
+            /// @brief Reusable double-precision nested evaluation buffers for blocked matvecs.
+            NestedBuffers<double> nested_;
+            /// @brief Set true once fallback() overwrote w and l_f32_ from double Cholesky.
+            bool used_f64_fallback_{false};
         };
 
-        /// @brief Executes mixed-precision iterative refinement starting from the float Cholesky solution.
-        /// @details Copies the initial float weights from buffers.core.rhs, builds symmetrized A_f32 in exp_buf
-        /// when using PromoteStorage, invokes refine_in_place(), and records RefinementSummary.
-        /// @tparam P Mixed-precision policy satisfying P::refines_in_f64.
-        /// @param[in] spec Final fitted kernel specification.
-        /// @param[in] kernel_exp Exponential backend mode.
-        /// @param[in] kernel_f32 Final single-precision compiled kernel evaluator.
+        /// @brief Computes negative log marginal likelihood from factor L and weights alpha in double targets.
+        /// @param[in] l_ref Lower-triangular Cholesky factor view of dimension n x n.
+        /// @param[in] y_f64 Transformed training targets in double precision.
+        /// @param[in] alpha Solved weights vector of length n in double precision.
+        /// @return Negative marginal log-likelihood scalar, or GprError if non-finite.
+        [[nodiscard]] std::expected<double, GprError> compute_mll_from_factor_and_alpha(
+            MatrixRef<float> l_ref, std::span<const double> y_f64, std::span<const double> alpha
+        )
+        {
+            auto logdet = linalg::log_det_from_l(l_ref);
+            if (!logdet.has_value())
+            {
+                return std::unexpected(std::move(logdet).error());
+            }
+            const double y_alpha = dot_f64(y_f64, alpha);
+            const double mll =
+                0.5 * (y_alpha + *logdet + (static_cast<double>(y_f64.size()) * std::log(2.0 * std::numbers::pi)));
+            if (!std::isfinite(mll))
+            {
+                return std::unexpected(GprError::non_finite_kernel_value());
+            }
+            return mll;
+        }
+
+        /// @brief Executes PromoteStorage iterative refinement starting from the float Cholesky solution.
+        /// @tparam P Mixed-precision policy (PromoteStorage).
+        /// @param[in] spec Fitted kernel specification compiled in double precision for accept/fallback.
+        /// @param[in] kernel_exp Exponential backend mode matching the fitted model.
+        /// @param[in] kernel_f32 Single-precision compiled kernel evaluator.
         /// @param[in] x_f64 Double-precision transformed training features (n x d).
         /// @param[in] x_f32 Single-precision transformed training features (n x d).
         /// @param[in] y_f64 Double-precision transformed training targets of length n.
-        /// @param[in,out] buffers Training workspace containing L_f32, initial rhs weights, and scratch matrices.
-        /// @param[in] diag_offset Combined noise variance plus accepted factor jitter.
+        /// @param[in,out] buffers Training workspace buffers released progressively before refinement.
+        /// @param[in] diag_offset Observation noise variance plus accepted factor jitter.
         /// @param[out] out_alpha Output refined double-precision weight vector of length n.
-        /// @param[out] out_summary Output optional populated with RefinementSummary diagnostics.
-        /// @return Empty expected on success, or GprError if refinement and fallback both fail.
+        /// @param[out] out_summary Output optional populated with refinement diagnostics.
+        /// @return Empty expected on success, or GprError if kernel evaluation or fallback fails.
         template <PrecisionPolicyConcept P>
         [[nodiscard]] std::expected<void, GprError> run_mixed_precision_refinement(
             const KernelSpec& spec,
@@ -731,7 +885,6 @@ namespace cxxgpr::detail
             std::optional<RefinementSummary>& out_summary
         )
         {
-            // Seed double iterate from the single-precision Cholesky solution stored in buffers.core.rhs.
             const std::size_t n = x_f64.rows();
             out_alpha.resize(n);
             for (std::size_t i = 0; i < n; ++i)
@@ -739,7 +892,6 @@ namespace cxxgpr::detail
                 out_alpha[i] = static_cast<double>(buffers.core.rhs[i]);
             }
 
-            // Release optimization-only buffers before refinement and any double-precision fallback.
             std::vector<float>{}.swap(buffers.w_matrix);
             buffers.dist.reset();
             buffers.core.weighted = NestedBuffers<float>{};
@@ -748,39 +900,28 @@ namespace cxxgpr::detail
             buffers.core.hessian = HessianScratch<float>{};
             std::vector<float>{}.swap(buffers.core.rhs);
 
-            MatrixRef<float> a_f32_ref{};
-            if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
+            if (auto ks = buffers.core.ensure_kernel_scratch(); !ks.has_value())
             {
-                if (auto ks = buffers.core.ensure_kernel_scratch(); !ks.has_value())
-                {
-                    return std::unexpected(std::move(ks).error());
-                }
-                MatrixMut<float> a_f32_mut = buffers.core.exp_mut();
-                // Reconstruct full symmetric A_f32 = K_f32 + (sigma_n^2 + j) I into exp_buf.
-                if (auto ap = kernel_f32.apply_points(
-                        x_f32, a_f32_mut, Triangle::Lower, buffers.core.kernel_scratch_mut(), buffers.core.nested
-                    );
-                    !ap.has_value())
-                {
-                    return ap;
-                }
-                if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
-                {
-                    return dg;
-                }
-                symmetrize_lower(a_f32_mut);
-                a_f32_ref = a_f32_mut.as_ref();
-                std::vector<float>{}.swap(buffers.core.kernel_scratch);
-                buffers.core.nested = NestedBuffers<float>{};
+                return std::unexpected(std::move(ks).error());
             }
-            else
+            MatrixMut<float> a_f32_mut = buffers.core.exp_mut();
+            if (auto ap = kernel_f32.apply_points(
+                    x_f32, a_f32_mut, Triangle::Lower, buffers.core.kernel_scratch_mut(), buffers.core.nested
+                );
+                !ap.has_value())
             {
-                std::vector<float>{}.swap(buffers.core.exp_buf);
-                std::vector<float>{}.swap(buffers.core.kernel_scratch);
-                buffers.core.nested = NestedBuffers<float>{};
+                return ap;
             }
+            if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
+            {
+                return dg;
+            }
+            symmetrize_lower(a_f32_mut);
+            const MatrixRef<float> a_f32_ref = a_f32_mut.as_ref();
+            std::vector<float>{}.swap(buffers.core.kernel_scratch);
+            buffers.core.nested = NestedBuffers<float>{};
 
-            GprRefineSystem<P> sys(spec, kernel_exp, x_f64, y_f64, buffers.core.k_ref(), a_f32_ref, diag_offset);
+            GprRefineSystem<P> sys(spec, kernel_exp, x_f64, y_f64, buffers.core.k_mut(), a_f32_ref, diag_offset);
             std::vector<double> res_scratch(n);
             auto summary = refine_in_place(sys, out_alpha, res_scratch);
             if (!summary.has_value())
@@ -789,6 +930,239 @@ namespace cxxgpr::detail
             }
             out_summary = *summary;
             return {};
+        }
+
+        /// @brief Factors and solves a MixedPrecision<ReevaluateKernel> system using preconditioner shifts and
+        /// restarted FGMRES-IR before resorting to double fallback or equation jitter.
+        /// @tparam P Mixed-precision policy (ReevaluateKernel).
+        /// @param[in] spec Fitted kernel specification compiled in double precision for refinement and fallback.
+        /// @param[in] kernel_exp Exponential backend mode matching the fitted model.
+        /// @param[in] kernel_f32 Single-precision compiled kernel evaluator.
+        /// @param[in] likelihood Observation noise likelihood supplying base noise variance.
+        /// @param[in] jitter_policy Diagonal jitter policy invoked only when true double systems fail Cholesky.
+        /// @param[in] x_f64 Double-precision transformed training features (n x d).
+        /// @param[in] x_f32 Single-precision transformed training features (n x d).
+        /// @param[in] y_f64 Double-precision transformed training targets of length n.
+        /// @param[in,out] buffers Training workspace buffers holding L_f32 and scratch matrices.
+        /// @param[in] existing_unshifted_factor_ready True when buffers already hold valid j = 0 factor L and rhs.
+        /// @param[out] out_alpha Output double-precision solved weights of length n.
+        /// @param[out] out_summary Output optional populated with refinement and Krylov diagnostics.
+        /// @param[in,out] in_out_mll Negative marginal log-likelihood updated if re-factored or fallen back.
+        /// @return Empty expected on success, or GprError if all retries and fallback fail.
+        template <PrecisionPolicyConcept P>
+        [[nodiscard]] std::expected<void, GprError> solve_mixed_reevaluate_payload(
+            const KernelSpec& spec,
+            KernelExp kernel_exp,
+            const CompiledKernel<float>& kernel_f32,
+            const GaussianLikelihood& likelihood,
+            const JitterPolicy& jitter_policy,
+            MatrixRef<double> x_f64,
+            MatrixRef<float> x_f32,
+            std::span<const double> y_f64,
+            FitBuffers<P>& buffers,
+            bool existing_unshifted_factor_ready,
+            std::vector<double>& out_alpha,
+            std::optional<RefinementSummary>& out_summary,
+            double& in_out_mll
+        )
+        {
+            const std::size_t n = x_f64.rows();
+            out_alpha.assign(n, 0.0);
+
+            // Release optimization-only storage prior to refinement or preconditioner retries.
+            std::vector<float>{}.swap(buffers.w_matrix);
+            buffers.dist.reset();
+            buffers.core.weighted = NestedBuffers<float>{};
+            std::vector<float>{}.swap(buffers.core.ard_s2_storage);
+            std::vector<std::uint8_t>{}.swap(buffers.core.ard_s2_ready);
+            buffers.core.hessian = HessianScratch<float>{};
+            std::vector<float>{}.swap(buffers.core.kernel_scratch);
+
+            // Fast path: reuse an already factored j = 0 unshifted float Cholesky when available.
+            if (existing_unshifted_factor_ready)
+            {
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    out_alpha[i] = static_cast<double>(buffers.core.rhs[i]);
+                }
+                std::vector<float>{}.swap(buffers.core.rhs);
+                std::vector<float>{}.swap(buffers.core.exp_buf);
+                buffers.core.nested = NestedBuffers<float>{};
+
+                const double diag_offset = likelihood.noise_variance();
+                GprRefineSystem<P> sys(
+                    spec, kernel_exp, x_f64, y_f64, buffers.core.k_mut(), MatrixRef<float>{}, diag_offset
+                );
+                auto summary = refine_reevaluate_with_krylov(sys, out_alpha, 0.0);
+                if (summary.has_value())
+                {
+                    if (sys.used_f64_fallback())
+                    {
+                        auto mll = compute_mll_from_factor_and_alpha(buffers.core.k_ref(), y_f64, out_alpha);
+                        if (!mll.has_value())
+                        {
+                            return std::unexpected(std::move(mll).error());
+                        }
+                        in_out_mll = *mll;
+                    }
+                    buffers.core.factor_jitter = 0.0;
+                    out_summary = *summary;
+                    return {};
+                }
+                if (summary.error().code() != GprErrorCode::CholeskyFailed)
+                {
+                    return std::unexpected(std::move(summary).error());
+                }
+            }
+            else
+            {
+                std::vector<float>{}.swap(buffers.core.rhs);
+            }
+
+            std::vector<double> jitter_candidates{0.0};
+            JitterSchedule retry_sched = jitter_policy.retry_schedule();
+            while (auto next_j = retry_sched.next())
+            {
+                jitter_candidates.push_back(*next_j);
+            }
+
+            std::vector<float> init_tmp_f32(n, 0.0F);
+            GprError last_chol_err = GprError::cholesky_failed(0.0, n, CholeskyStage::Fit);
+
+            for (const double j : jitter_candidates)
+            {
+                if (buffers.core.exp_buf.size() < n * n)
+                {
+                    buffers.core.exp_buf.assign(n * n, 0.0F);
+                }
+                if (buffers.core.nested.depth() < kernel_f32.nested_depth() || buffers.core.nested.rows() < n
+                    || buffers.core.nested.cols() < n)
+                {
+                    buffers.core.nested.resize(kernel_f32.nested_depth(), n, n);
+                }
+
+                if (auto ap = kernel_f32.apply_points(
+                        x_f32, buffers.core.k_mut(), Triangle::Lower, buffers.core.exp_mut(), buffers.core.nested
+                    );
+                    !ap.has_value())
+                {
+                    return ap;
+                }
+                const double diag_offset = likelihood.noise_variance() + j;
+                if (auto dg = linalg::add_to_diag(buffers.core.k_mut(), static_cast<float>(diag_offset));
+                    !dg.has_value())
+                {
+                    return dg;
+                }
+
+                double precond_shift = 0.0;
+                auto precond_res =
+                    factor_float_with_preconditioner_shift(buffers.core.k_mut(), buffers.core.exp_mut(), precond_shift);
+
+                // Release n x n float scratch prior to Krylov or full-double fallback solves.
+                std::vector<float>{}.swap(buffers.core.exp_buf);
+                buffers.core.nested = NestedBuffers<float>{};
+
+                GprRefineSystem<P> sys(
+                    spec, kernel_exp, x_f64, y_f64, buffers.core.k_mut(), MatrixRef<float>{}, diag_offset
+                );
+
+                if (precond_res.has_value())
+                {
+                    std::optional<double> float_solve_mll;
+                    if (precond_shift == 0.0)
+                    {
+                        std::vector<float> y_f32(n);
+                        for (std::size_t i = 0; i < n; ++i)
+                        {
+                            y_f32[i] = static_cast<float>(y_f64[i]);
+                            init_tmp_f32[i] = y_f32[i];
+                        }
+                        if (auto sv = linalg::solve_llt_in_place(buffers.core.k_ref(), std::span<float>(init_tmp_f32));
+                            sv.has_value())
+                        {
+                            auto logdet_f32 = linalg::log_det_from_l(buffers.core.k_ref());
+                            auto y_alpha_f32 =
+                                linalg::dot(std::span<const float>(y_f32), std::span<const float>(init_tmp_f32));
+                            if (logdet_f32.has_value() && y_alpha_f32.has_value())
+                            {
+                                const double val = 0.5
+                                    * (*y_alpha_f32 + *logdet_f32
+                                        + (static_cast<double>(n) * std::log(2.0 * std::numbers::pi)));
+                                if (std::isfinite(val))
+                                {
+                                    float_solve_mll = val;
+                                }
+                            }
+                        }
+                    }
+                    if (auto init_sv = apply_scaled_f32_preconditioner(
+                            buffers.core.k_ref(), y_f64, std::span<float>(init_tmp_f32), out_alpha
+                        );
+                        !init_sv.has_value())
+                    {
+                        std::ranges::fill(out_alpha, 0.0);
+                    }
+                    auto summary = refine_reevaluate_with_krylov(sys, out_alpha, precond_shift);
+                    if (summary.has_value())
+                    {
+                        if (!sys.used_f64_fallback() && float_solve_mll.has_value())
+                        {
+                            in_out_mll = *float_solve_mll;
+                        }
+                        else
+                        {
+                            auto mll = compute_mll_from_factor_and_alpha(buffers.core.k_ref(), y_f64, out_alpha);
+                            if (!mll.has_value())
+                            {
+                                return std::unexpected(std::move(mll).error());
+                            }
+                            in_out_mll = *mll;
+                        }
+                        buffers.core.factor_jitter = j;
+                        out_summary = *summary;
+                        return {};
+                    }
+                    if (summary.error().code() != GprErrorCode::CholeskyFailed)
+                    {
+                        return std::unexpected(std::move(summary).error());
+                    }
+                    last_chol_err = GprError::cholesky_failed(j, n, CholeskyStage::Fit);
+                }
+                else
+                {
+                    if (precond_res.error().code() != GprErrorCode::CholeskyFailed)
+                    {
+                        return precond_res;
+                    }
+                    auto fb = sys.fallback(out_alpha);
+                    if (fb.has_value())
+                    {
+                        auto mll = compute_mll_from_factor_and_alpha(buffers.core.k_ref(), y_f64, out_alpha);
+                        if (!mll.has_value())
+                        {
+                            return std::unexpected(std::move(mll).error());
+                        }
+                        buffers.core.factor_jitter = j;
+                        in_out_mll = *mll;
+                        out_summary = RefinementSummary{
+                            .status = RefinementStatus::MaxCorrectionsReached,
+                            .iterations = 0U,
+                            .final_relative_residual = 0.0,
+                            .preconditioner_shift = 0.0,
+                            .used_krylov = false,
+                        };
+                        return {};
+                    }
+                    if (fb.error().code() != GprErrorCode::CholeskyFailed)
+                    {
+                        return fb;
+                    }
+                    last_chol_err = GprError::cholesky_failed(j, n, CholeskyStage::Fit);
+                }
+            }
+
+            return std::unexpected(std::move(last_chol_err));
         }
 
         /// @brief Copies a strided column-major double or float MatrixRef into a dense double vector while checking
@@ -963,6 +1337,8 @@ namespace cxxgpr::detail
         const std::size_t nk = compiled->num_params();
         optimizer::OptimizerResult opt_res;
         double final_mll = 0.0;
+        bool has_unshifted_opt_factor = false;
+        constexpr bool is_mixed_reeval = std::same_as<P, MixedPrecision<ReevaluateKernel>>;
         {
             GprObjective<P> obj(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, use_leaf_cache);
 
@@ -977,7 +1353,8 @@ namespace cxxgpr::detail
                 return std::unexpected(std::move(lp).error());
             }
 
-            // Run hyperparameter optimization or perform a single objective evaluation when factor-only.
+            // Run hyperparameter optimization or perform a single objective evaluation (deferring ReevaluateKernel
+            // factor solves to the shifted-preconditioner / FGMRES-IR path below).
             if (cfg.optimize)
             {
                 auto r = optimize_cb(optimize_ctx, obj, init_params);
@@ -986,6 +1363,44 @@ namespace cxxgpr::detail
                     return std::unexpected(std::move(r).error());
                 }
                 opt_res = std::move(*r);
+
+                if (obj.matches_last_factor(opt_res.params))
+                {
+                    final_mll = obj.last_factored_mll();
+                    has_unshifted_opt_factor = (buffers->core.factor_jitter == 0.0);
+                }
+                else
+                {
+                    if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk));
+                        !sp.has_value())
+                    {
+                        return std::unexpected(std::move(sp).error());
+                    }
+                    if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
+                        !lp.has_value())
+                    {
+                        return std::unexpected(std::move(lp).error());
+                    }
+                    if constexpr (!is_mixed_reeval)
+                    {
+                        auto mll_res =
+                            factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
+                        if (!mll_res.has_value())
+                        {
+                            return std::unexpected(std::move(mll_res).error());
+                        }
+                        final_mll = *mll_res;
+                    }
+                }
+            }
+            else if constexpr (is_mixed_reeval)
+            {
+                opt_res = optimizer::OptimizerResult{
+                    .params = init_params,
+                    .value = 0.0,
+                    .iterations = 0U,
+                    .converged = true,
+                };
             }
             else
             {
@@ -1000,31 +1415,7 @@ namespace cxxgpr::detail
                     .iterations = 0U,
                     .converged = true,
                 };
-            }
-
-            // Reuse the live factor L, alpha, and MLL when the last objective call already evaluated opt_res.params.
-            if (obj.matches_last_factor(opt_res.params))
-            {
-                final_mll = obj.last_factored_mll();
-            }
-            else
-            {
-                // Ensure kernel, likelihood, L, alpha, and MLL match opt_res.params exactly.
-                if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
-                {
-                    return std::unexpected(std::move(sp).error());
-                }
-                if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
-                    !lp.has_value())
-                {
-                    return std::unexpected(std::move(lp).error());
-                }
-                auto mll_res = factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
-                if (!mll_res.has_value())
-                {
-                    return std::unexpected(std::move(mll_res).error());
-                }
-                final_mll = *mll_res;
+                final_mll = *v;
             }
         }
 
@@ -1038,7 +1429,23 @@ namespace cxxgpr::detail
         std::optional<RefinementSummary> ref_summary;
 
         // Refine weights alpha in double precision under MixedPrecision policies, or cast directly otherwise.
-        if constexpr (P::refines_in_f64)
+        if constexpr (is_mixed_reeval)
+        {
+            const MatrixRef<double> x_f64_ref(x_f64.data(), n, d, n);
+            if (auto ref_res = solve_mixed_reevaluate_payload<P>(
+                    updated_spec, cfg.kernel_exp, *compiled, likelihood, cfg.jitter, x_f64_ref, x_train_ref, y_f64,
+                    *buffers, cfg.optimize && has_unshifted_opt_factor, alpha_out, ref_summary, final_mll
+                );
+                !ref_res.has_value())
+            {
+                return std::unexpected(std::move(ref_res).error());
+            }
+            if (!cfg.optimize)
+            {
+                opt_res.value = final_mll;
+            }
+        }
+        else if constexpr (P::refines_in_f64)
         {
             const double diag_offset = likelihood.noise_variance() + buffers->core.factor_jitter;
             const MatrixRef<double> x_f64_ref(x_f64.data(), n, d, n);
@@ -1066,15 +1473,27 @@ namespace cxxgpr::detail
             }
         }
 
+        std::shared_ptr<const CompiledKernel<double>> compiled64;
+        std::vector<double> x_train_f64_out;
+        if constexpr (is_mixed_reeval)
+        {
+            auto ck64 = std::make_shared<CompiledKernel<double>>(CompiledKernel<double>::from_spec(updated_spec));
+            ck64->set_kernel_exp(cfg.kernel_exp);
+            compiled64 = std::move(ck64);
+            x_train_f64_out = std::move(x_f64);
+        }
+
         return FittedPayload<P>{
             .kernel_spec = std::move(updated_spec),
             .likelihood = likelihood,
             .compiled_kernel = std::move(compiled),
+            .compiled_kernel_f64 = std::move(compiled64),
             .input_transform = std::move(*fitted_in),
             .target_transform = std::move(*fitted_tgt),
             .x_raw = std::move(x_raw),
             .y_raw = std::move(y_raw),
             .x_train = std::move(x_storage),
+            .x_train_f64 = std::move(x_train_f64_out),
             .y_transformed = std::move(y_refine),
             .l_factor = std::move(buffers->core.k_matrix),
             .alpha = std::move(alpha_out),
@@ -1234,6 +1653,96 @@ namespace cxxgpr::detail
 
     }  // namespace
 
+    /// @brief Computes double-precision posterior mean contributions mu = K_*^T * alpha in width-32 blocks.
+    /// @details Evaluates cross-covariance K(X_train_f64, X_query_f64) in double-precision column blocks of
+    /// width at most refinement_column_block (32) using pre-sized workspace buffers and deterministic
+    /// ascending-row dot products.
+    /// @param[in] kernel_f64 Double-precision compiled kernel evaluator.
+    /// @param[in] x_train_f64 Double-precision transformed training features (n x d, column-major).
+    /// @param[in] x_query_f64 Double-precision transformed query features (m x d, column-major).
+    /// @param[in] alpha Double-precision weights vector of length n.
+    /// @param[in,out] ws Reusable query workspace holding double column-block scratch.
+    /// @param[out] out_mean Destination transformed-scale posterior mean vector of length m.
+    /// @return Empty expected on success, or GprError on empty, mismatched, or failing kernel evaluation.
+    std::expected<void, GprError> compute_reeval_cross_mean_f64(
+        const CompiledKernel<double>& kernel_f64,
+        MatrixRef<double> x_train_f64,
+        MatrixRef<double> x_query_f64,
+        std::span<const double> alpha,
+        QueryWorkspace<MixedPrecision<ReevaluateKernel>>& ws,
+        std::span<double> out_mean
+    )
+    {
+        const std::size_t n = x_train_f64.rows();
+        const std::size_t d = x_train_f64.cols();
+        const std::size_t m = x_query_f64.rows();
+        if (n == 0U || m == 0U || d == 0U)
+        {
+            return std::unexpected(GprError::empty_input());
+        }
+        if (x_query_f64.cols() != d)
+        {
+            return std::unexpected(GprError::dimension_mismatch(x_query_f64.cols(), d));
+        }
+        if (alpha.size() != n || out_mean.size() != m)
+        {
+            return std::unexpected(GprError::length_mismatch("alpha or mean size mismatch in f64 cross evaluation"));
+        }
+
+        const std::size_t block_cols = std::min(m, refinement_column_block);
+        if (ws.query_x_block_f64.size() < block_cols * d)
+        {
+            ws.query_x_block_f64.resize(block_cols * d);
+        }
+        if (ws.query_k_block_f64.size() < n * block_cols)
+        {
+            ws.query_k_block_f64.resize(n * block_cols);
+        }
+        if (ws.query_scratch_block_f64.size() < n * block_cols)
+        {
+            ws.query_scratch_block_f64.resize(n * block_cols);
+        }
+        if (ws.query_nested_f64.depth() < kernel_f64.nested_depth() || ws.query_nested_f64.rows() < n
+            || ws.query_nested_f64.cols() < block_cols)
+        {
+            ws.query_nested_f64.resize(
+                std::max(ws.query_nested_f64.depth(), kernel_f64.nested_depth()),
+                std::max(ws.query_nested_f64.rows(), n), std::max(ws.query_nested_f64.cols(), block_cols)
+            );
+        }
+
+        for (std::size_t col_begin = 0U; col_begin < m; col_begin += block_cols)
+        {
+            const std::size_t cols_cur = std::min(block_cols, m - col_begin);
+            for (std::size_t feat = 0U; feat < d; ++feat)
+            {
+                for (std::size_t c = 0U; c < cols_cur; ++c)
+                {
+                    ws.query_x_block_f64[(feat * cols_cur) + c] = x_query_f64(col_begin + c, feat);
+                }
+            }
+            const MatrixRef<double> xqb_ref(ws.query_x_block_f64.data(), cols_cur, d, cols_cur);
+            const MatrixMut<double> kb_mut(ws.query_k_block_f64.data(), n, cols_cur, n);
+            const MatrixMut<double> sb_mut(ws.query_scratch_block_f64.data(), n, cols_cur, n);
+            if (auto ap = kernel_f64.apply_cross_points(x_train_f64, xqb_ref, kb_mut, sb_mut, ws.query_nested_f64);
+                !ap.has_value())
+            {
+                return ap;
+            }
+            const auto cols_cur_s = static_cast<std::ptrdiff_t>(cols_cur);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n * cols_cur) >= 65536U)
+#endif
+            for (std::ptrdiff_t c_s = 0; c_s < cols_cur_s; ++c_s)
+            {
+                const auto c = static_cast<std::size_t>(c_s);
+                const double* col_ptr = ws.query_k_block_f64.data() + (c * n);
+                out_mean[col_begin + c] = dot_f64(std::span<const double>(col_ptr, n), alpha);
+            }
+        }
+        return {};
+    }
+
     /// @brief Evaluates posterior prediction into out and applies inverse target transforms.
     /// @tparam P Precision policy matching payload.
     /// @param[in] payload Fitted model payload.
@@ -1274,6 +1783,24 @@ namespace cxxgpr::detail
         {
             return res;
         }
+        if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+        {
+            const std::size_t m = xq_ref->rows();
+            if (payload.compiled_kernel_f64 && payload.x_train_f64.size() == payload.n_train * payload.n_features)
+            {
+                const MatrixRef<double> x_train_f64_ref(
+                    payload.x_train_f64.data(), payload.n_train, payload.n_features, payload.n_train
+                );
+                const MatrixRef<double> xq_f64_ref(workspace.query_xs.data(), m, payload.n_features, m);
+                if (auto mr = compute_reeval_cross_mean_f64(
+                        *payload.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, payload.alpha, workspace, out.mean
+                    );
+                    !mr.has_value())
+                {
+                    return mr;
+                }
+            }
+        }
         return apply_target_inverse_prediction(*payload.target_transform, out, workspace.query_xs);
     }
 
@@ -1307,6 +1834,24 @@ namespace cxxgpr::detail
         if (!cov.has_value())
         {
             return cov;
+        }
+        if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+        {
+            const std::size_t m = xq_ref->rows();
+            if (payload.compiled_kernel_f64 && payload.x_train_f64.size() == payload.n_train * payload.n_features)
+            {
+                const MatrixRef<double> x_train_f64_ref(
+                    payload.x_train_f64.data(), payload.n_train, payload.n_features, payload.n_train
+                );
+                const MatrixRef<double> xq_f64_ref(workspace.query_xs.data(), m, payload.n_features, m);
+                if (auto mr = compute_reeval_cross_mean_f64(
+                        *payload.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, payload.alpha, workspace, cov->mean
+                    );
+                    !mr.has_value())
+                {
+                    return std::unexpected(std::move(mr).error());
+                }
+            }
         }
 
         // Apply inverse target scaling to mean and covariance in double precision before returning.
@@ -1382,10 +1927,49 @@ namespace cxxgpr::detail
             payload.x_train.data(), payload.n_train, payload.n_features, payload.n_train
         );
         const MatrixRef<Storage> l_ref(payload.l_factor.data(), payload.n_train, payload.n_train, payload.n_train);
-        auto samples = sample<P>(
-            *payload.compiled_kernel, payload.likelihood, x_train_ref, l_ref, payload.alpha, *xq_ref, n_draws, seed,
-            options, workspace, jitter
-        );
+        std::expected<std::vector<Refine>, GprError> samples = std::unexpected(GprError::empty_input());
+        if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+        {
+            if (payload.compiled_kernel_f64 && payload.x_train_f64.size() == payload.n_train * payload.n_features)
+            {
+                auto cov = predict_covariance<P>(
+                    *payload.compiled_kernel, payload.likelihood, x_train_ref, l_ref, payload.alpha, *xq_ref, options,
+                    workspace
+                );
+                if (!cov.has_value())
+                {
+                    return std::unexpected(std::move(cov).error());
+                }
+                const std::size_t m_pts = xq_ref->rows();
+                const MatrixRef<double> x_train_f64_ref(
+                    payload.x_train_f64.data(), payload.n_train, payload.n_features, payload.n_train
+                );
+                const MatrixRef<double> xq_f64_ref(workspace.query_xs.data(), m_pts, payload.n_features, m_pts);
+                if (auto mr = compute_reeval_cross_mean_f64(
+                        *payload.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, payload.alpha, workspace, cov->mean
+                    );
+                    !mr.has_value())
+                {
+                    return std::unexpected(std::move(mr).error());
+                }
+                const JitterPolicy jit = jitter.has_value() ? *jitter : default_sample_jitter();
+                samples = draw_samples_from_covariance<double>(std::move(*cov), n_draws, seed, jit);
+            }
+            else
+            {
+                samples = sample<P>(
+                    *payload.compiled_kernel, payload.likelihood, x_train_ref, l_ref, payload.alpha, *xq_ref, n_draws,
+                    seed, options, workspace, jitter
+                );
+            }
+        }
+        else
+        {
+            samples = sample<P>(
+                *payload.compiled_kernel, payload.likelihood, x_train_ref, l_ref, payload.alpha, *xq_ref, n_draws, seed,
+                options, workspace, jitter
+            );
+        }
         if (!samples.has_value())
         {
             return samples;

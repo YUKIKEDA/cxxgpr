@@ -56,6 +56,18 @@ namespace cxxgpr
     /// @retval GprErrorCode::InvalidInterval When noise_variance lies outside Interval::default_positive().
     std::expected<GaussianLikelihood, GprError> GaussianLikelihood::create(double noise_variance)
     {
+        return create(noise_variance, Interval::default_positive());
+    }
+
+    /// @brief Builds a likelihood from a positive finite observation noise variance inside custom bounds.
+    /// @details Enforces finiteness and positivity checks before testing @p bounds.
+    /// @param[in] noise_variance Candidate observation noise variance sigma_n^2.
+    /// @param[in] bounds Open bounding interval for sigma_n^2.
+    /// @return Validated GaussianLikelihood, or GprError on invalid input or interval violation.
+    /// @retval GprErrorCode::InvalidNoiseVariance When noise_variance is non-finite or <= 0.
+    /// @retval GprErrorCode::InvalidInterval When noise_variance lies outside bounds.
+    std::expected<GaussianLikelihood, GprError> GaussianLikelihood::create(double noise_variance, Interval bounds)
+    {
         // Report InvalidNoiseVariance for non-finite or non-positive inputs prior to interval bounds checking.
         if (!std::isfinite(noise_variance))
         {
@@ -65,7 +77,7 @@ namespace cxxgpr
         {
             return std::unexpected(GprError::invalid_noise_variance("noise variance must be positive"));
         }
-        auto bounded = BoundedParam::default_positive(noise_variance);
+        auto bounded = BoundedParam::create(noise_variance, bounds);
         if (!bounded)
         {
             return std::unexpected(std::move(bounded.error()));

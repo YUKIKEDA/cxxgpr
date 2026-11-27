@@ -368,6 +368,7 @@ The standard deviation includes the observation noise (`VarianceKind::Observatio
 | `query_nested` | `NestedBuffers` for the cross-covariance tree |
 | `query_kss`, `query_diag_scratch` | Prior variances $k(x_*,x_*)$ and the diagonal-evaluation scratch |
 | `train_n`, `query_m`, `dims` | The capacities last requested |
+| `query_x_block_f64`, `query_k_block_f64`, `query_scratch_block_f64`, `query_nested_f64` | Double-precision column-block buffers (up to `refinement_column_block` columns) used by `MixedPrecision<ReevaluateKernel>` for predictive means |
 
 ## Drive the mixed-precision refinement yourself
 
@@ -451,9 +452,11 @@ refine(): ||r||_inf = 1.521e-14, ||A||_inf = 2.459e+01, tolerance met: 1, error 
 | `refinement_stagnation_ratio` | 0.9 | A step with $\lVert r_k\rVert_\infty / \lVert r_{k-1}\rVert_\infty$ above this counts as stagnating |
 | `refinement_stagnation_steps` | 2 | Consecutive stagnating steps that trigger the fallback |
 | `refinement_column_block` | 32 | Column block width the library uses when it re-evaluates a kernel in double precision |
+| `max_krylov_iterations` | 100 | Maximum matrix-vector products in restarted double-precision FGMRES-IR before fallback |
+| `krylov_restart_dim` | 25 | Restart subspace dimension $m$ of FGMRES-IR |
 | `refinement_tolerance(dim)` | $10\,\text{dim}\,\varepsilon_{64}$ | Stopping tolerance on the relative residual |
 
-The convergence test is $\lVert r\rVert_\infty / (\lVert B\rVert_\infty \lVert w\rVert_\infty + \lVert b\rVert_\infty) < \text{tol}$, evaluated by `meets_relative_residual(b_inf, w, b, residual, tol)`. It rejects non-finite operands, a non-positive tolerance and a zero denominator. `RefinementSummary` reports `status` (a `RefinementStatus`), `iterations` (corrections applied before stopping), `final_relative_residual`, and `used_fallback()`, which is true for every status except `Converged`. `RefinementSummary` has a defaulted `operator==`.
+The convergence test is $\lVert r\rVert_\infty / (\lVert B\rVert_\infty \lVert w\rVert_\infty + \lVert b\rVert_\infty) < \text{tol}$, evaluated by `meets_relative_residual(b_inf, w, b, residual, tol)`. It rejects non-finite operands, a non-positive tolerance and a zero denominator. `RefinementSummary` reports `status` (a `RefinementStatus`), `iterations` (corrections applied before stopping), `final_relative_residual`, `preconditioner_shift` (relative diagonal shift added only to the `float` preconditioner, `0.0` when unshifted), `used_krylov` (whether restarted FGMRES-IR ran), and `used_fallback()`, which is true for every status except `Converged`. `RefinementSummary` has a defaulted `operator==`.
 
 | `RefinementStatus` | Meaning |
 |---|---|
@@ -488,4 +491,4 @@ The tables above list every function with its role. As a checklist of the header
 | `workspace/mll.hpp` | `factor_and_mll`, `mll_and_gradient_into`, `hessian_into`, `value_gradient_hessian_into` |
 | `workspace/inference.hpp` | `predict_into`, `predict`, `predict_covariance_into`, `predict_covariance`, `sample`, `loo_predict_into`, `loo_predict` |
 | `workspace/leaf_cache.hpp` | `OptimizerHasChangeIndicesConcept`, `OptimizerTraits`, `optimizer_uses_change_indices_v`, `require_change_indices`, `LeafCache` |
-| `precision/refine.hpp` | `max_refinement_corrections`, `refinement_stagnation_ratio`, `refinement_stagnation_steps`, `refinement_column_block`, `refinement_tolerance`, `inf_norm`, `symmetrize_lower`, `meets_relative_residual`, `promoted_residual_into`, `promoted_residual`, `RefinementStatus`, `RefinementSummary`, `RefineSystem`, `refine_in_place`, `refine` |
+| `precision/refine.hpp` | `max_refinement_corrections`, `refinement_stagnation_ratio`, `refinement_stagnation_steps`, `refinement_column_block`, `max_krylov_iterations`, `krylov_restart_dim`, `refinement_tolerance`, `inf_norm`, `symmetrize_lower`, `meets_relative_residual`, `promoted_residual_into`, `promoted_residual`, `RefinementStatus`, `RefinementSummary`, `RefineSystem`, `refine_in_place`, `refine` |

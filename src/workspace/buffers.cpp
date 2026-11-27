@@ -461,6 +461,26 @@ namespace cxxgpr
             return std::unexpected(std::move(diag_scratch_len).error());
         }
 
+        constexpr bool needs_reeval_f64 = std::same_as<P, MixedPrecision<ReevaluateKernel>>;
+        const std::size_t block_cols = std::min(m, std::size_t{32});
+        std::size_t block_xd_len = 0U;
+        std::size_t block_nm_len = 0U;
+        if constexpr (needs_reeval_f64)
+        {
+            auto bxd = checked_mul(block_cols, d);
+            if (!bxd.has_value())
+            {
+                return std::unexpected(std::move(bxd).error());
+            }
+            auto bnm = checked_mul(n, block_cols);
+            if (!bnm.has_value())
+            {
+                return std::unexpected(std::move(bnm).error());
+            }
+            block_xd_len = *bxd;
+            block_nm_len = *bnm;
+        }
+
         // Grow monotonically so subsequent queries of equal or smaller size avoid heap allocations.
         if (query_xs.size() < *md)
         {
@@ -489,6 +509,29 @@ namespace cxxgpr
         if (query_nested.depth() < nested_depth || query_nested.rows() < n || query_nested.cols() < m)
         {
             query_nested.resize(nested_depth, n, m);
+        }
+        if constexpr (needs_reeval_f64)
+        {
+            if (query_x_block_f64.size() < block_xd_len)
+            {
+                query_x_block_f64.resize(block_xd_len);
+            }
+            if (query_k_block_f64.size() < block_nm_len)
+            {
+                query_k_block_f64.resize(block_nm_len);
+            }
+            if (query_scratch_block_f64.size() < block_nm_len)
+            {
+                query_scratch_block_f64.resize(block_nm_len);
+            }
+            if (query_nested_f64.depth() < nested_depth || query_nested_f64.rows() < n
+                || query_nested_f64.cols() < block_cols)
+            {
+                query_nested_f64.resize(
+                    std::max(query_nested_f64.depth(), nested_depth), std::max(query_nested_f64.rows(), n),
+                    std::max(query_nested_f64.cols(), block_cols)
+                );
+            }
         }
         train_n = n;
         query_m = m;

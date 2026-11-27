@@ -2530,4 +2530,85 @@ namespace
         EXPECT_EQ(bad_samp.error().code(), cxxgpr::GprErrorCode::LengthMismatch);
     }
 
+    /// @brief Verifies small-noise MixedPrecision<ReevaluateKernel> persistence roundtrip preserves double mean and
+    /// zero-alloc predict_into.
+    /// @details Confirms save_with_factor() and save() restore small-noise Krylov-refined models matching
+    /// DoublePrecision predictions within 1e-10 while maintaining bit identity and post-warmup zero heap allocation on
+    /// LoadedGpr.
+    TEST(PersistModelsTest, MixedPrecisionReevaluateSmallNoiseRoundTripPreservesDoubleMeanAndZeroAllocPredict)
+    {
+        // Spec: FMT-05, DES-05, DES-16
+        constexpr std::size_t n = 128U;
+        constexpr std::size_t d = 1U;
+        constexpr std::size_t m = 40U;
+        std::vector<double> x_train(n);
+        std::vector<double> y_train(n);
+        for (std::size_t i = 0U; i < n; ++i)
+        {
+            const double xi = static_cast<double>(i) / static_cast<double>(n - 1U);
+            x_train[i] = xi;
+            y_train[i] = std::sin(6.283185307179586 * xi) + (0.3 * std::cos(12.566370614359172 * xi));
+        }
+        std::vector<double> xq(m);
+        for (std::size_t j = 0U; j < m; ++j)
+        {
+            xq[j] = (static_cast<double>(j) + 0.35) / static_cast<double>(m);
+        }
+        const cxxgpr::MatrixRef<double> x_ref(x_train.data(), n, d, n);
+        const cxxgpr::MatrixRef<double> xq_ref(xq.data(), m, d, m);
+
+        auto lik = cxxgpr::GaussianLikelihood::create(1e-4)
+                       .value()
+                       .with_bounds(cxxgpr::Interval::create(1e-20, 1e5).value())
+                       .value();
+        ASSERT_TRUE(lik.set_params(std::array<double, 1>{std::log(1e-10)}).has_value());
+        const auto spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.25).value());
+
+        const auto ref_f64 =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>(spec).with_likelihood(lik).factor(
+                x_ref, y_train
+            );
+        const auto mp = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(spec)
+                            .with_likelihood(lik)
+                            .factor(x_ref, y_train);
+        ASSERT_TRUE(ref_f64.has_value()) << ref_f64.error().message();
+        ASSERT_TRUE(mp.has_value()) << mp.error().message();
+        ASSERT_TRUE(mp->refinement_summary().has_value());
+        EXPECT_GT(mp->refinement_summary()->preconditioner_shift, 0.0);
+        EXPECT_TRUE(mp->refinement_summary()->used_krylov);
+
+        const auto ref_pred = ref_f64->predict(xq_ref);
+        const auto orig_pred = mp->predict(xq_ref);
+        ASSERT_TRUE(ref_pred.has_value());
+        ASSERT_TRUE(orig_pred.has_value());
+
+        const TempDirGuard dir_wf("mp_small_noise_wf");
+        const TempDirGuard dir_nf("mp_small_noise_nf");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*mp, dir_wf.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save(*mp, dir_nf.path).has_value());
+
+        const auto loaded_wf = cxxgpr::persist::LoadedGpr::load(dir_wf.path);
+        const auto loaded_nf = cxxgpr::persist::LoadedGpr::load(dir_nf.path);
+        ASSERT_TRUE(loaded_wf.has_value()) << loaded_wf.error().message();
+        ASSERT_TRUE(loaded_nf.has_value()) << loaded_nf.error().message();
+
+        cxxgpr::Prediction<double> out_wf;
+        ASSERT_TRUE(loaded_wf->predict_into(xq_ref, out_wf).has_value());
+        {
+            const cxxgpr::test_support::NoAllocationScope no_alloc;
+            ASSERT_TRUE(loaded_wf->predict_into(xq_ref, out_wf).has_value());
+        }
+        EXPECT_EQ(out_wf, *orig_pred);
+
+        const auto out_nf = loaded_nf->predict(xq_ref);
+        ASSERT_TRUE(out_nf.has_value());
+        double max_nf_diff = 0.0;
+        for (std::size_t j = 0U; j < m; ++j)
+        {
+            max_nf_diff = std::max(max_nf_diff, std::abs(out_nf->mean[j] - ref_pred->mean[j]));
+        }
+        EXPECT_LT(max_nf_diff, 1e-10);
+        EXPECT_EQ(loaded_nf->factor_jitter(), 0.0);
+    }
+
 }  // namespace

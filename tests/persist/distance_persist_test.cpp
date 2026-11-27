@@ -1520,4 +1520,93 @@ namespace
         }
     }
 
+    /// @brief Verifies small-noise MixedPrecision<ReevaluateKernel> DistanceGpr persistence preserves double mean.
+    /// @details Confirms save_with_factor() and save() restore small-noise Krylov-refined DistanceOnly models with
+    /// bit-identical checkpoint predictions on save_with_factor() and 1e-10 parity vs DoublePrecision on save().
+    TEST(DistancePersistTest, MixedPrecisionReevaluateSmallNoiseRoundTripPreservesDoubleMean)
+    {
+        // Spec: FMT-07, DES-05, DES-21
+        constexpr std::size_t n = 128U;
+        constexpr std::size_t m = 40U;
+        std::vector<double> x(n);
+        std::vector<double> y(n);
+        for (std::size_t i = 0U; i < n; ++i)
+        {
+            // Power-of-two grid (n = 128 = 2^7) keeps d^2 exactly representable in F32 after save() (FMT-07).
+            const double xi = static_cast<double>(i) / static_cast<double>(n);
+            x[i] = xi;
+            y[i] = std::sin(6.283185307179586 * xi) + (0.3 * std::cos(12.566370614359172 * xi));
+        }
+        std::vector<double> q(m);
+        for (std::size_t j = 0U; j < m; ++j)
+        {
+            q[j] = (static_cast<double>(j) + 0.35) / static_cast<double>(m);
+        }
+        const std::vector<double> d2_train = make_table(x, n, x, n, 1U, 1U);
+        const std::vector<double> d2_cross = make_table(x, n, q, m, 1U, 1U);
+
+        const cxxgpr::ScalarDistance slot;
+        const auto dk = slot.rbf(cxxgpr::RbfKernel::create(0.25).value());
+        cxxgpr::DistanceSource train_src;
+        train_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_train.data(), n, n)).assume_valid(true);
+        cxxgpr::DistanceSource cross_src;
+        cross_src.bind_scalar(slot.slot(), cxxgpr::MatrixRef<double>(d2_cross.data(), n, m)).assume_valid(true);
+
+        auto lik = cxxgpr::GaussianLikelihood::create(1e-4)
+                       .value()
+                       .with_bounds(cxxgpr::Interval::create(1e-20, 1e5).value())
+                       .value();
+        ASSERT_TRUE(lik.set_params(std::array<double, 1>{std::log(1e-10)}).has_value());
+
+        const auto ref_f64 =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>(dk).with_likelihood(lik).factor(
+                train_src, y
+            );
+        const auto mp =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(dk)
+                .with_likelihood(lik)
+                .factor(train_src, y);
+        ASSERT_TRUE(ref_f64.has_value()) << ref_f64.error().message();
+        ASSERT_TRUE(mp.has_value()) << mp.error().message();
+        ASSERT_TRUE(mp->refinement_summary().has_value());
+        EXPECT_GT(mp->refinement_summary()->preconditioner_shift, 0.0);
+        EXPECT_TRUE(mp->refinement_summary()->used_krylov);
+
+        const auto ref_pred = ref_f64->predict(cross_src);
+        const auto orig_pred = mp->predict(cross_src);
+        ASSERT_TRUE(ref_pred.has_value());
+        ASSERT_TRUE(orig_pred.has_value());
+
+        const TempDir dir_wf("dist_mp_small_noise_wf");
+        const TempDir dir_nf("dist_mp_small_noise_nf");
+        ASSERT_TRUE(cxxgpr::persist::save_with_factor(*mp, dir_wf.path).has_value());
+        ASSERT_TRUE(cxxgpr::persist::save(*mp, dir_nf.path).has_value());
+
+        const auto loaded_wf = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(dir_wf.path);
+        const auto loaded_nf = cxxgpr::persist::LoadedDistanceGpr<cxxgpr::DistanceOnly>::load(dir_nf.path);
+        ASSERT_TRUE(loaded_wf.has_value()) << loaded_wf.error().message();
+        ASSERT_TRUE(loaded_nf.has_value()) << loaded_nf.error().message();
+
+        cxxgpr::DistanceSource cross_wf;
+        cross_wf.bind_scalar(loaded_wf->kernel().slots()[0].id, cxxgpr::MatrixRef<double>(d2_cross.data(), n, m))
+            .assume_valid(true);
+        cxxgpr::DistanceSource cross_nf;
+        cross_nf.bind_scalar(loaded_nf->kernel().slots()[0].id, cxxgpr::MatrixRef<double>(d2_cross.data(), n, m))
+            .assume_valid(true);
+
+        const auto p_wf = loaded_wf->predict(cross_wf);
+        const auto p_nf = loaded_nf->predict(cross_nf);
+        ASSERT_TRUE(p_wf.has_value());
+        ASSERT_TRUE(p_nf.has_value());
+        EXPECT_TRUE(identical(p_wf->mean, orig_pred->mean));
+
+        double max_nf_diff = 0.0;
+        for (std::size_t j = 0U; j < m; ++j)
+        {
+            max_nf_diff = std::max(max_nf_diff, std::abs(p_nf->mean[j] - ref_pred->mean[j]));
+        }
+        EXPECT_LT(max_nf_diff, 1e-10);
+        EXPECT_EQ(loaded_nf->factor_jitter(), 0.0);
+    }
+
 }  // namespace

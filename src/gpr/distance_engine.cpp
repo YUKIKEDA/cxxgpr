@@ -22,6 +22,7 @@
 #include <variant>
 
 #include "core/finite_simd.hpp"
+#include "gpr/mixed_krylov.hpp"
 #include "gpr/refine_constants.hpp"
 #include "kernel/distance_store.hpp"
 #include "linalg/blas_backend.hpp"
@@ -1130,12 +1131,12 @@ namespace cxxgpr
         template <PrecisionPolicyConcept P> class DistanceRefineSystem final : public RefineSystem
         {
         public:
-            /// @brief Binds the exact double-precision system and the float factor.
+            /// @brief Binds the exact double-precision system and the mutable float factor.
             /// @param[in] kernel64 Kernel compiled in double precision.
             /// @param[in] store64 Validated training tables in double precision.
             /// @param[in] x64 Optional transformed training coordinates in double precision.
             /// @param[in] y64 Transformed targets in double precision.
-            /// @param[in] l_f32 Float lower Cholesky factor of the stored system.
+            /// @param[in,out] l_f32 Mutable float lower Cholesky factor of the stored system.
             /// @param[in] a_f32 Float noisy system matrix, symmetrized (PromoteStorage only, otherwise empty).
             /// @param[in] diag_offset Noise variance plus accepted jitter.
             DistanceRefineSystem(
@@ -1143,7 +1144,7 @@ namespace cxxgpr
                 const CheckedDistanceStore<double>& store64,
                 std::optional<MatrixRef<double>> x64,
                 std::span<const double> y64,
-                MatrixRef<float> l_f32,
+                MatrixMut<float> l_f32,
                 MatrixRef<float> a_f32,
                 double diag_offset
             ) :
@@ -1182,6 +1183,88 @@ namespace cxxgpr
                 }
             }
 
+            /// @brief Computes exact blocked double-precision B_f64 * v and optionally ||B_f64||_inf.
+            /// @param[in] v Input double vector of length n.
+            /// @param[out] out_bv Output matrix-vector product B_f64 * v of length n.
+            /// @param[in] compute_b_inf True to compute and return ||B_f64||_inf.
+            /// @return ||B_f64||_inf when requested, or 0.0 otherwise.
+            [[nodiscard]] std::expected<double, GprError> matvec_and_inf_norm(
+                std::span<const double> v, std::span<double> out_bv, bool compute_b_inf
+            )
+            {
+                const std::size_t n = y64_.size();
+                if (n == 0U)
+                {
+                    return std::unexpected(GprError::empty_input());
+                }
+                const std::size_t block_cols = std::min(refinement_column_block, n);
+                if (k_block_.size() < n * block_cols)
+                {
+                    k_block_.resize(n * block_cols);
+                }
+                if (scratch_block_.size() < n * block_cols)
+                {
+                    scratch_block_.resize(n * block_cols);
+                }
+                const std::size_t need_depth = kernel64_.nested_depth();
+                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < block_cols)
+                {
+                    nested64_.resize(need_depth, n, block_cols);
+                }
+
+                std::ranges::fill(out_bv, 0.0);
+                if (compute_b_inf)
+                {
+                    std::ranges::fill(row_abs_, 0.0);
+                }
+                for (std::size_t col_begin = 0U; col_begin < n; col_begin += block_cols)
+                {
+                    const std::size_t cols_cur = std::min(block_cols, n - col_begin);
+                    MatrixMut<double> kb_mut(k_block_.data(), n, cols_cur, n);
+                    MatrixMut<double> sb_mut(scratch_block_.data(), n, cols_cur, n);
+                    if (auto res = detail::distance_apply_square_col_block(
+                            kernel64_, store64_, x64_, col_begin, col_begin + cols_cur, kb_mut, sb_mut, nested64_,
+                            dist_block_, x_block_
+                        );
+                        !res.has_value())
+                    {
+                        return std::unexpected(std::move(res).error());
+                    }
+                    // Accumulate B_f64 * v and row l1 sums in ascending column order for deterministic totals.
+                    for (std::size_t c = 0U; c < cols_cur; ++c)
+                    {
+                        const std::size_t global_col = col_begin + c;
+                        const double v_col = v[global_col];
+                        const double* const col_ptr = k_block_.data() + (c * n);
+                        for (std::size_t row = 0U; row < n; ++row)
+                        {
+                            double entry = col_ptr[row];
+                            if (row == global_col)
+                            {
+                                entry += diag_offset_;
+                            }
+                            out_bv[row] += entry * v_col;
+                            if (compute_b_inf)
+                            {
+                                row_abs_[row] += std::abs(entry);
+                            }
+                        }
+                    }
+                }
+                return compute_b_inf ? inf_norm(row_abs_) : 0.0;
+            }
+
+            /// @brief Applies scaled float Cholesky preconditioning z = (L_f32 L_f32^T)^{-1} r.
+            /// @param[in] r Input residual or Krylov vector of length n.
+            /// @param[out] z Output preconditioned double vector of length n.
+            /// @return Empty expected on success, or GprError on solve failure or non-finite values.
+            [[nodiscard]] std::expected<void, GprError> apply_preconditioner(
+                std::span<const double> r, std::span<double> z
+            )
+            {
+                return detail::apply_scaled_f32_preconditioner(l_f32_.as_ref(), r, std::span<float>(r_f32_), z);
+            }
+
             /// @brief Adds the float-solved correction L L^T d = r to the iterate.
             /// @param[in] r Double residual.
             /// @param[in,out] w Iterate updated in place.
@@ -1193,7 +1276,8 @@ namespace cxxgpr
                 {
                     r_f32_[i] = static_cast<float>(r[i]);
                 }
-                if (auto solve = linalg::solve_llt_in_place(l_f32_, std::span<float>(r_f32_)); !solve.has_value())
+                if (auto solve = linalg::solve_llt_in_place(l_f32_.as_ref(), std::span<float>(r_f32_));
+                    !solve.has_value())
                 {
                     return solve;
                 }
@@ -1229,6 +1313,8 @@ namespace cxxgpr
             }
 
             /// @brief Solves the exact double-precision system with a fresh Cholesky factorization.
+            /// @details Releases blocked scratch buffers prior to full-matrix double allocation and updates
+            /// l_f32_ lower triangle from the true double Cholesky factor upon success.
             /// @param[out] w Solution overwritten with the double-precision weights.
             /// @return Empty expected on success, or GprError.
             [[nodiscard]] std::expected<void, GprError> fallback(std::span<double> w) override
@@ -1238,6 +1324,9 @@ namespace cxxgpr
                 std::vector<double>{}.swap(dist_block_);
                 std::vector<double>{}.swap(x_block_);
                 nested64_ = NestedBuffers<double>{};
+                std::vector<float>{}.swap(r_f32_);
+                std::vector<double>{}.swap(row_abs_);
+                std::vector<double>{}.swap(sum_);
 
                 const std::size_t n = y64_.size();
                 std::vector<double> gram(n * n);
@@ -1259,8 +1348,29 @@ namespace cxxgpr
                     return ch;
                 }
                 std::ranges::copy(y64_, w.begin());
-                return linalg::solve_llt_in_place(gram_mut.as_ref(), w);
+                if (auto sv = linalg::solve_llt_in_place(gram_mut.as_ref(), w); !sv.has_value())
+                {
+                    return sv;
+                }
+
+                // Refresh l_f32_ lower triangle from the true double Cholesky factor for consistency.
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    const auto diag = static_cast<float>(gram_mut(col, col));
+                    l_f32_(col, col) = (std::isfinite(diag) && diag > 0.0F) ? diag : std::numeric_limits<float>::min();
+                    for (std::size_t row = col + 1U; row < n; ++row)
+                    {
+                        const auto val = static_cast<float>(gram_mut(row, col));
+                        l_f32_(row, col) = std::isfinite(val) ? val : 0.0F;
+                    }
+                }
+                used_f64_fallback_ = true;
+                return {};
             }
+
+            /// @brief Returns true when fallback() completed a full double-precision solve.
+            /// @return True iff fallback() ran and succeeded.
+            [[nodiscard]] bool used_f64_fallback() const noexcept { return used_f64_fallback_; }
 
         private:
             /// @brief Residual against the exact double Gram matrix plus the diagonal offset, evaluated in column
@@ -1270,64 +1380,16 @@ namespace cxxgpr
             /// @return Largest absolute row sum of the exact matrix, or GprError when a block cannot be evaluated.
             [[nodiscard]] std::expected<double, GprError> exact_residual(std::span<const double> w, std::span<double> r)
             {
-                const std::size_t n = y64_.size();
-                if (n == 0U)
+                auto b_inf = matvec_and_inf_norm(w, sum_, true);
+                if (!b_inf.has_value())
                 {
-                    return std::unexpected(GprError::empty_input());
+                    return b_inf;
                 }
-                const std::size_t block_cols = std::min(refinement_column_block, n);
-                if (k_block_.size() < n * block_cols)
-                {
-                    k_block_.resize(n * block_cols);
-                }
-                if (scratch_block_.size() < n * block_cols)
-                {
-                    scratch_block_.resize(n * block_cols);
-                }
-                const std::size_t need_depth = kernel64_.nested_depth();
-                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < block_cols)
-                {
-                    nested64_.resize(need_depth, n, block_cols);
-                }
-
-                std::ranges::fill(row_abs_, 0.0);
-                std::ranges::fill(sum_, 0.0);
-                for (std::size_t col_begin = 0U; col_begin < n; col_begin += block_cols)
-                {
-                    const std::size_t cols_cur = std::min(block_cols, n - col_begin);
-                    MatrixMut<double> kb_mut(k_block_.data(), n, cols_cur, n);
-                    MatrixMut<double> sb_mut(scratch_block_.data(), n, cols_cur, n);
-                    if (auto res = detail::distance_apply_square_col_block(
-                            kernel64_, store64_, x64_, col_begin, col_begin + cols_cur, kb_mut, sb_mut, nested64_,
-                            dist_block_, x_block_
-                        );
-                        !res.has_value())
-                    {
-                        return std::unexpected(std::move(res).error());
-                    }
-                    // Accumulate B_f64 * w and row l1 sums in ascending column order for deterministic totals.
-                    for (std::size_t c = 0U; c < cols_cur; ++c)
-                    {
-                        const std::size_t global_col = col_begin + c;
-                        const double w_col = w[global_col];
-                        const double* const col_ptr = k_block_.data() + (c * n);
-                        for (std::size_t row = 0U; row < n; ++row)
-                        {
-                            double entry = col_ptr[row];
-                            if (row == global_col)
-                            {
-                                entry += diag_offset_;
-                            }
-                            sum_[row] += entry * w_col;
-                            row_abs_[row] += std::abs(entry);
-                        }
-                    }
-                }
-                for (std::size_t row = 0U; row < n; ++row)
+                for (std::size_t row = 0U; row < y64_.size(); ++row)
                 {
                     r[row] = y64_[row] - sum_[row];
                 }
-                return inf_norm(row_abs_);
+                return *b_inf;
             }
 
             /// @brief Double-precision kernel.
@@ -1338,8 +1400,8 @@ namespace cxxgpr
             std::optional<MatrixRef<double>> x64_;
             /// @brief Double-precision targets.
             std::span<const double> y64_;
-            /// @brief Single-precision Cholesky factor.
-            MatrixRef<float> l_f32_;
+            /// @brief Mutable single-precision Cholesky factor.
+            MatrixMut<float> l_f32_;
             /// @brief Single-precision system matrix.
             MatrixRef<float> a_f32_;
             /// @brief Diagonal offset (noise variance plus jitter).
@@ -1360,7 +1422,33 @@ namespace cxxgpr
             std::vector<double> x_block_;
             /// @brief Cached nested buffers sized `n x block_cols` for block residual checks.
             NestedBuffers<double> nested64_;
+            /// @brief Set true once fallback() overwrote w and l_f32_ from double Cholesky.
+            bool used_f64_fallback_{false};
         };
+
+        /// @brief Computes negative log marginal likelihood from float factor L and double weights alpha.
+        /// @param[in] l_ref Lower-triangular Cholesky factor view of shape n x n.
+        /// @param[in] y64 Double-precision transformed targets.
+        /// @param[in] alpha Double-precision solved weights.
+        /// @return Negative marginal log-likelihood scalar, or GprError if non-finite.
+        [[nodiscard]] std::expected<double, GprError> compute_distance_mll_from_factor(
+            MatrixRef<float> l_ref, std::span<const double> y64, std::span<const double> alpha
+        )
+        {
+            auto logdet = linalg::log_det_from_l(l_ref);
+            if (!logdet.has_value())
+            {
+                return std::unexpected(std::move(logdet).error());
+            }
+            const double quad = detail::dot_f64(y64, alpha);
+            const double mll =
+                0.5 * (quad + *logdet + (static_cast<double>(y64.size()) * std::log(2.0 * std::numbers::pi)));
+            if (!std::isfinite(mll))
+            {
+                return std::unexpected(GprError::non_finite_kernel_value());
+            }
+            return mll;
+        }
 
     }  // namespace
 
@@ -1501,12 +1589,14 @@ namespace cxxgpr
             .kernel = cfg.kernel,
             .likelihood = cfg.likelihood,
             .compiled = nullptr,
+            .compiled64 = nullptr,
             .store = nullptr,
             .input_transform = nullptr,
             .target_transform = nullptr,
             .x_raw = {},
             .y_raw = std::move(y_raw_f64),
             .x_train = {},
+            .x_train_f64 = {},
             .y_transformed = {},
             .l_factor = {},
             .alpha = {},
@@ -1570,8 +1660,10 @@ namespace cxxgpr
         }
         GaussianLikelihood likelihood = cfg.likelihood;
         const std::size_t nk = compiled->num_params();
+        constexpr bool is_mixed_reeval = std::same_as<P, MixedPrecision<ReevaluateKernel>>;
         optimizer::OptimizerResult opt_res;
         double final_mll = 0.0;
+        bool has_unshifted_opt_factor = false;
         {
             DistanceObjective<P> obj(
                 *compiled, likelihood, *active_store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
@@ -1595,6 +1687,40 @@ namespace cxxgpr
                     return std::unexpected(std::move(r).error());
                 }
                 opt_res = std::move(*r);
+
+                if (obj.matches_last_factor(opt_res.params))
+                {
+                    final_mll = obj.last_mll();
+                    has_unshifted_opt_factor = (buffers->core.factor_jitter == 0.0);
+                }
+                else if constexpr (is_mixed_reeval)
+                {
+                    if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk));
+                        !sp.has_value())
+                    {
+                        return std::unexpected(std::move(sp).error());
+                    }
+                    if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
+                        !lp.has_value())
+                    {
+                        return std::unexpected(std::move(lp).error());
+                    }
+                }
+                else
+                {
+                    auto v = obj.value(opt_res.params);
+                    if (!v.has_value())
+                    {
+                        return std::unexpected(std::move(v).error());
+                    }
+                    final_mll = *v;
+                }
+            }
+            else if constexpr (is_mixed_reeval)
+            {
+                opt_res = optimizer::OptimizerResult{
+                    .params = init_params, .value = 0.0, .iterations = 0U, .converged = true
+                };
             }
             else
             {
@@ -1605,20 +1731,6 @@ namespace cxxgpr
                 }
                 opt_res =
                     optimizer::OptimizerResult{.params = init_params, .value = *v, .iterations = 0U, .converged = true};
-            }
-
-            // Reuse the live factor when the last evaluation was at the returned parameters; otherwise factor there.
-            if (obj.matches_last_factor(opt_res.params))
-            {
-                final_mll = obj.last_mll();
-            }
-            else
-            {
-                auto v = obj.value(opt_res.params);
-                if (!v.has_value())
-                {
-                    return std::unexpected(std::move(v).error());
-                }
                 final_mll = *v;
             }
         }
@@ -1633,12 +1745,311 @@ namespace cxxgpr
         }
 
         payload.alpha.resize(n);
-        for (std::size_t i = 0; i < n; ++i)
+        if constexpr (is_mixed_reeval)
         {
-            payload.alpha[i] = static_cast<Refine>(buffers->core.rhs[i]);
+            // Release training-only buffers before building the double refinement store and running refinement.
+            std::vector<Storage>{}.swap(buffers->w_matrix);
+            buffers->core.weighted = NestedBuffers<Storage>{};
+            std::vector<Storage>{}.swap(buffers->core.ard_s2_storage);
+            std::vector<std::uint8_t>{}.swap(buffers->core.ard_s2_ready);
+            buffers->core.hessian = HessianScratch<Storage>{};
+            std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
+            std::vector<Storage>{}.swap(y_storage);
+
+            auto compiled64 = std::make_shared<CompiledDistanceKernel<double>>(cfg.kernel.template compile<double>());
+            compiled64->set_kernel_exp(cfg.kernel_exp);
+            if (auto sp = compiled64->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
+            {
+                return std::unexpected(std::move(sp).error());
+            }
+            std::optional<MatrixRef<double>> x64;
+            if constexpr (with_points)
+            {
+                x64 = MatrixRef<double>(x_f64.data(), n, d, n);
+            }
+
+            std::optional<CheckedDistanceStore<double>> store64;
+            auto ensure_store64 = [&]() -> std::expected<const CheckedDistanceStore<double>*, GprError>
+            {
+                if (store64.has_value())
+                {
+                    return &*store64;
+                }
+                std::expected<CheckedDistanceStore<double>, GprError> built = std::unexpected(GprError::empty_input());
+                if (const auto* src_ptr = std::get_if<const DistanceSource*>(&train))
+                {
+                    built = make_distance_store(*compiled64, **src_ptr, *shape, true, true);
+                }
+                else
+                {
+                    built =
+                        promote_store_to_double(*compiled64, *std::get<const CheckedDistanceStore<Storage>*>(train));
+                }
+                if (!built.has_value())
+                {
+                    return std::unexpected(std::move(built).error());
+                }
+                store64 = std::move(*built);
+                return &*store64;
+            };
+
+            std::vector<double> alpha64(n, 0.0);
+            bool solved = false;
+            GprError last_chol_err = GprError::cholesky_failed(0.0, n, CholeskyStage::Fit);
+
+            if (cfg.optimize && has_unshifted_opt_factor)
+            {
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    alpha64[i] = static_cast<double>(buffers->core.rhs[i]);
+                }
+                std::vector<Storage>{}.swap(buffers->core.rhs);
+                std::vector<Storage>{}.swap(buffers->core.exp_buf);
+                buffers->core.nested = NestedBuffers<Storage>{};
+                if (!cfg.retain_distances && std::holds_alternative<const DistanceSource*>(train))
+                {
+                    local_store.reset();
+                    active_store = nullptr;
+                }
+
+                auto s64 = ensure_store64();
+                if (!s64.has_value())
+                {
+                    return std::unexpected(std::move(s64).error());
+                }
+                const double diag_offset = payload.likelihood.noise_variance();
+                DistanceRefineSystem<P> sys(
+                    *compiled64, **s64, x64, std::span<const double>(y_f64), buffers->core.k_mut(), MatrixRef<float>{},
+                    diag_offset
+                );
+                auto summary = detail::refine_reevaluate_with_krylov(sys, alpha64, 0.0);
+                if (summary.has_value())
+                {
+                    if (sys.used_f64_fallback())
+                    {
+                        auto mll = compute_distance_mll_from_factor(buffers->core.k_ref(), y_f64, alpha64);
+                        if (!mll.has_value())
+                        {
+                            return std::unexpected(std::move(mll).error());
+                        }
+                        final_mll = *mll;
+                    }
+                    buffers->core.factor_jitter = 0.0;
+                    payload.refinement_summary = *summary;
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        payload.alpha[i] = alpha64[i];
+                    }
+                    solved = true;
+                }
+                else if (summary.error().code() != GprErrorCode::CholeskyFailed)
+                {
+                    return std::unexpected(std::move(summary).error());
+                }
+            }
+            else
+            {
+                std::vector<Storage>{}.swap(buffers->core.rhs);
+            }
+
+            if (!solved)
+            {
+                std::vector<double> jitter_candidates{0.0};
+                JitterSchedule retry_sched = cfg.jitter.retry_schedule();
+                while (auto next_j = retry_sched.next())
+                {
+                    jitter_candidates.push_back(*next_j);
+                }
+                std::vector<float> init_tmp_f32(n, 0.0F);
+
+                for (const double j : jitter_candidates)
+                {
+                    if (active_store == nullptr)
+                    {
+                        const auto* src_ptr = std::get_if<const DistanceSource*>(&train);
+                        auto rebuilt = make_distance_store(*compiled, **src_ptr, *shape, true, true);
+                        if (!rebuilt.has_value())
+                        {
+                            return std::unexpected(std::move(rebuilt).error());
+                        }
+                        local_store = std::move(*rebuilt);
+                        active_store = &*local_store;
+                    }
+                    if (buffers->core.exp_buf.size() < n * n)
+                    {
+                        buffers->core.exp_buf.assign(n * n, 0.0F);
+                    }
+                    if (buffers->core.nested.depth() < compiled->nested_depth() || buffers->core.nested.rows() < n
+                        || buffers->core.nested.cols() < n)
+                    {
+                        buffers->core.nested.resize(compiled->nested_depth(), n, n);
+                    }
+                    if (auto ap = compiled->apply(
+                            *active_store, x_ref, buffers->core.k_mut(), Triangle::Lower, buffers->core.exp_mut(),
+                            buffers->core.nested
+                        );
+                        !ap.has_value())
+                    {
+                        return std::unexpected(std::move(ap).error());
+                    }
+                    const double diag_offset = payload.likelihood.noise_variance() + j;
+                    if (auto dg = linalg::add_to_diag(buffers->core.k_mut(), static_cast<float>(diag_offset));
+                        !dg.has_value())
+                    {
+                        return std::unexpected(std::move(dg).error());
+                    }
+
+                    double precond_shift = 0.0;
+                    auto precond_res = detail::factor_float_with_preconditioner_shift(
+                        buffers->core.k_mut(), buffers->core.exp_mut(), precond_shift
+                    );
+
+                    // Release float evaluation scratch and unretained local table before building/using double store.
+                    std::vector<Storage>{}.swap(buffers->core.exp_buf);
+                    buffers->core.nested = NestedBuffers<Storage>{};
+                    if (!cfg.retain_distances && std::holds_alternative<const DistanceSource*>(train))
+                    {
+                        local_store.reset();
+                        active_store = nullptr;
+                    }
+
+                    auto s64 = ensure_store64();
+                    if (!s64.has_value())
+                    {
+                        return std::unexpected(std::move(s64).error());
+                    }
+
+                    DistanceRefineSystem<P> sys(
+                        *compiled64, **s64, x64, std::span<const double>(y_f64), buffers->core.k_mut(),
+                        MatrixRef<float>{}, diag_offset
+                    );
+
+                    if (precond_res.has_value())
+                    {
+                        std::optional<double> float_solve_mll;
+                        if (precond_shift == 0.0)
+                        {
+                            std::vector<float> y_f32(n);
+                            for (std::size_t i = 0; i < n; ++i)
+                            {
+                                y_f32[i] = static_cast<float>(y_f64[i]);
+                                init_tmp_f32[i] = y_f32[i];
+                            }
+                            if (auto sv =
+                                    linalg::solve_llt_in_place(buffers->core.k_ref(), std::span<float>(init_tmp_f32));
+                                sv.has_value())
+                            {
+                                auto logdet_f32 = linalg::log_det_from_l(buffers->core.k_ref());
+                                auto y_alpha_f32 =
+                                    linalg::dot(std::span<const float>(y_f32), std::span<const float>(init_tmp_f32));
+                                if (logdet_f32.has_value() && y_alpha_f32.has_value())
+                                {
+                                    const double val = 0.5
+                                        * (*y_alpha_f32 + *logdet_f32
+                                            + (static_cast<double>(n) * std::log(2.0 * std::numbers::pi)));
+                                    if (std::isfinite(val))
+                                    {
+                                        float_solve_mll = val;
+                                    }
+                                }
+                            }
+                        }
+                        if (auto init_sv = detail::apply_scaled_f32_preconditioner(
+                                buffers->core.k_ref(), y_f64, std::span<float>(init_tmp_f32), alpha64
+                            );
+                            !init_sv.has_value())
+                        {
+                            std::ranges::fill(alpha64, 0.0);
+                        }
+                        auto summary = detail::refine_reevaluate_with_krylov(sys, alpha64, precond_shift);
+                        if (summary.has_value())
+                        {
+                            if (!sys.used_f64_fallback() && float_solve_mll.has_value())
+                            {
+                                final_mll = *float_solve_mll;
+                            }
+                            else
+                            {
+                                auto mll = compute_distance_mll_from_factor(buffers->core.k_ref(), y_f64, alpha64);
+                                if (!mll.has_value())
+                                {
+                                    return std::unexpected(std::move(mll).error());
+                                }
+                                final_mll = *mll;
+                            }
+                            buffers->core.factor_jitter = j;
+                            payload.refinement_summary = *summary;
+                            for (std::size_t i = 0; i < n; ++i)
+                            {
+                                payload.alpha[i] = alpha64[i];
+                            }
+                            solved = true;
+                            break;
+                        }
+                        if (summary.error().code() != GprErrorCode::CholeskyFailed)
+                        {
+                            return std::unexpected(std::move(summary).error());
+                        }
+                        last_chol_err = GprError::cholesky_failed(j, n, CholeskyStage::Fit);
+                    }
+                    else
+                    {
+                        if (precond_res.error().code() != GprErrorCode::CholeskyFailed)
+                        {
+                            return std::unexpected(std::move(precond_res).error());
+                        }
+                        auto fb = sys.fallback(alpha64);
+                        if (fb.has_value())
+                        {
+                            auto mll = compute_distance_mll_from_factor(buffers->core.k_ref(), y_f64, alpha64);
+                            if (!mll.has_value())
+                            {
+                                return std::unexpected(std::move(mll).error());
+                            }
+                            buffers->core.factor_jitter = j;
+                            final_mll = *mll;
+                            payload.refinement_summary = RefinementSummary{
+                                .status = RefinementStatus::MaxCorrectionsReached,
+                                .iterations = 0U,
+                                .final_relative_residual = 0.0,
+                                .preconditioner_shift = 0.0,
+                                .used_krylov = false,
+                            };
+                            for (std::size_t i = 0; i < n; ++i)
+                            {
+                                payload.alpha[i] = alpha64[i];
+                            }
+                            solved = true;
+                            break;
+                        }
+                        if (fb.error().code() != GprErrorCode::CholeskyFailed)
+                        {
+                            return std::unexpected(std::move(fb).error());
+                        }
+                        last_chol_err = GprError::cholesky_failed(j, n, CholeskyStage::Fit);
+                    }
+                }
+                if (!solved)
+                {
+                    return std::unexpected(std::move(last_chol_err));
+                }
+            }
+            if (!cfg.optimize)
+            {
+                opt_res.value = final_mll;
+            }
+            payload.compiled64 = std::move(compiled64);
+            if constexpr (with_points)
+            {
+                payload.x_train_f64 = std::move(x_f64);
+            }
         }
-        if constexpr (P::refines_in_f64)
+        else if constexpr (P::refines_in_f64)
         {
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                payload.alpha[i] = static_cast<Refine>(buffers->core.rhs[i]);
+            }
             std::vector<double> alpha64(n);
             for (std::size_t i = 0; i < n; ++i)
             {
@@ -1655,41 +2066,31 @@ namespace cxxgpr
             std::vector<Storage>{}.swap(y_storage);
 
             const double diag_offset = payload.likelihood.noise_variance() + buffers->core.factor_jitter;
-            MatrixRef<float> a_f32_ref{};
-            if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
+            if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
             {
-                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
-                {
-                    return std::unexpected(std::move(ks).error());
-                }
-                // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
-                MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
-                if (auto ap = compiled->apply(
-                        *active_store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
-                        buffers->core.nested
-                    );
-                    !ap.has_value())
-                {
-                    return std::unexpected(std::move(ap).error());
-                }
-                if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
-                {
-                    return std::unexpected(std::move(dg).error());
-                }
-                if (auto sy = linalg::symmetrize_lower(a_f32_mut); !sy.has_value())
-                {
-                    return std::unexpected(std::move(sy).error());
-                }
-                a_f32_ref = a_f32_mut.as_ref();
-                std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
-                buffers->core.nested = NestedBuffers<Storage>{};
+                return std::unexpected(std::move(ks).error());
             }
-            else
+            // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
+            MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
+            if (auto ap = compiled->apply(
+                    *active_store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
+                    buffers->core.nested
+                );
+                !ap.has_value())
             {
-                std::vector<Storage>{}.swap(buffers->core.exp_buf);
-                std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
-                buffers->core.nested = NestedBuffers<Storage>{};
+                return std::unexpected(std::move(ap).error());
             }
+            if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
+            {
+                return std::unexpected(std::move(dg).error());
+            }
+            if (auto sy = linalg::symmetrize_lower(a_f32_mut); !sy.has_value())
+            {
+                return std::unexpected(std::move(sy).error());
+            }
+            const MatrixRef<float> a_f32_ref = a_f32_mut.as_ref();
+            std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
+            buffers->core.nested = NestedBuffers<Storage>{};
             if (!cfg.retain_distances && std::holds_alternative<const DistanceSource*>(train))
             {
                 local_store.reset();
@@ -1722,7 +2123,7 @@ namespace cxxgpr
                 x64 = MatrixRef<double>(x_f64.data(), n, d, n);
             }
             DistanceRefineSystem<P> sys(
-                compiled64, *store64, x64, std::span<const double>(y_f64), buffers->core.k_ref(), a_f32_ref, diag_offset
+                compiled64, *store64, x64, std::span<const double>(y_f64), buffers->core.k_mut(), a_f32_ref, diag_offset
             );
             std::vector<double> residual_scratch(n);
             auto summary = refine_in_place(sys, alpha64, residual_scratch);
@@ -1734,6 +2135,13 @@ namespace cxxgpr
             for (std::size_t i = 0; i < n; ++i)
             {
                 payload.alpha[i] = alpha64[i];
+            }
+        }
+        else
+        {
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                payload.alpha[i] = static_cast<Refine>(buffers->core.rhs[i]);
             }
         }
         payload.factor_jitter = buffers->core.factor_jitter;
@@ -2026,16 +2434,132 @@ namespace cxxgpr
                 return std::unexpected(std::move(ap).error());
             }
 
-            // Mean on the transformed scale: K*^T alpha with double accumulation in column order.
+            // Mean on the transformed scale: K*^T alpha in double precision (width-32 blocked K* for ReevaluateKernel).
             mean_t.resize(m);
-            const auto m_signed = static_cast<std::ptrdiff_t>(m);
+            if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+            {
+                if (payload.compiled64)
+                {
+                    const CheckedDistanceStore<double>* active_cross64 = nullptr;
+                    if (const auto* src_ptr = std::get_if<const DistanceSource*>(&cross))
+                    {
+                        auto cs64 = detail::fill_distance_store(
+                            *payload.compiled64, **src_ptr, cross_shape, false, scratch.cross_store64, true
+                        );
+                        if (!cs64.has_value())
+                        {
+                            return std::unexpected(std::move(cs64).error());
+                        }
+                        active_cross64 = *cs64;
+                    }
+                    else
+                    {
+                        auto cs64 = detail::promote_cross_store_into_double(
+                            *payload.compiled64, *std::get<const CheckedDistanceStore<Storage>*>(cross),
+                            scratch.cross_store64
+                        );
+                        if (!cs64.has_value())
+                        {
+                            return std::unexpected(std::move(cs64).error());
+                        }
+                        active_cross64 = *cs64;
+                    }
+
+                    std::optional<MatrixRef<double>> x_train64;
+                    const std::size_t d_feat = payload.n_features;
+                    if constexpr (std::same_as<C, WithPoints>)
+                    {
+                        x_train64 = MatrixRef<double>(payload.x_train_f64.data(), n, d_feat, n);
+                    }
+                    const std::size_t block_cols = std::min(m, refinement_column_block);
+                    if (scratch.k_block64.size() < n * block_cols)
+                    {
+                        scratch.k_block64.resize(n * block_cols);
+                    }
+                    if (scratch.scratch_block64.size() < n * block_cols)
+                    {
+                        scratch.scratch_block64.resize(n * block_cols);
+                    }
+                    const std::size_t need_depth64 = payload.compiled64->nested_depth();
+                    if (scratch.nested64.depth() < need_depth64 || scratch.nested64.rows() < n
+                        || scratch.nested64.cols() < block_cols)
+                    {
+                        scratch.nested64.resize(
+                            std::max(scratch.nested64.depth(), need_depth64), std::max(scratch.nested64.rows(), n),
+                            std::max(scratch.nested64.cols(), block_cols)
+                        );
+                    }
+                    if constexpr (std::same_as<C, WithPoints>)
+                    {
+                        if (scratch.xq_block64.size() < block_cols * d_feat)
+                        {
+                            scratch.xq_block64.resize(block_cols * d_feat);
+                        }
+                    }
+
+                    for (std::size_t col_begin = 0U; col_begin < m; col_begin += block_cols)
+                    {
+                        const std::size_t cols_cur = std::min(block_cols, m - col_begin);
+                        std::optional<MatrixRef<double>> xq_block_f64;
+                        if constexpr (std::same_as<C, WithPoints>)
+                        {
+                            for (std::size_t feat = 0U; feat < d_feat; ++feat)
+                            {
+                                for (std::size_t c = 0U; c < cols_cur; ++c)
+                                {
+                                    scratch.xq_block64[(feat * cols_cur) + c] =
+                                        scratch.xq_double[(feat * m) + col_begin + c];
+                                }
+                            }
+                            xq_block_f64 = MatrixRef<double>(scratch.xq_block64.data(), cols_cur, d_feat, cols_cur);
+                        }
+                        MatrixMut<double> kb64(scratch.k_block64.data(), n, cols_cur, n);
+                        MatrixMut<double> sb64(scratch.scratch_block64.data(), n, cols_cur, n);
+                        if (auto ap64 = detail::distance_apply_cross_col_block<double>(
+                                *payload.compiled64, *active_cross64, x_train64, xq_block_f64, col_begin,
+                                col_begin + cols_cur, kb64, sb64, scratch.nested64
+                            );
+                            !ap64.has_value())
+                        {
+                            return std::unexpected(std::move(ap64).error());
+                        }
+                        const auto cols_cur_s = static_cast<std::ptrdiff_t>(cols_cur);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n * cols_cur) >= 65536U)
+#endif
+                        for (std::ptrdiff_t c_s = 0; c_s < cols_cur_s; ++c_s)
+                        {
+                            const auto c = static_cast<std::size_t>(c_s);
+                            const double* k_col = scratch.k_block64.data() + (c * n);
+                            mean_t[col_begin + c] = detail::dot_accum<double>(k_col, payload.alpha.data(), n);
+                        }
+                    }
+                }
+                else
+                {
+                    const auto m_signed = static_cast<std::ptrdiff_t>(m);
 #ifdef _OPENMP
 #    pragma omp parallel for schedule(static) if ((n * m) >= 65536U)
 #endif
-            for (std::ptrdiff_t col = 0; col < m_signed; ++col)
+                    for (std::ptrdiff_t col = 0; col < m_signed; ++col)
+                    {
+                        const Storage* k_col = scratch.k_star.data() + (static_cast<std::size_t>(col) * n);
+                        mean_t[static_cast<std::size_t>(col)] =
+                            detail::dot_accum<Refine>(k_col, payload.alpha.data(), n);
+                    }
+                }
+            }
+            else
             {
-                const Storage* k_col = scratch.k_star.data() + (static_cast<std::size_t>(col) * n);
-                mean_t[static_cast<std::size_t>(col)] = detail::dot_accum<Refine>(k_col, payload.alpha.data(), n);
+                const auto m_signed = static_cast<std::ptrdiff_t>(m);
+#ifdef _OPENMP
+#    pragma omp parallel for schedule(static) if ((n * m) >= 65536U)
+#endif
+                for (std::ptrdiff_t col = 0; col < m_signed; ++col)
+                {
+                    const Storage* k_col = scratch.k_star.data() + (static_cast<std::size_t>(col) * n);
+                    mean_t[static_cast<std::size_t>(col)] = detail::dot_accum<Refine>(k_col, payload.alpha.data(), n);
+                }
             }
 
             const MatrixRef<Storage> l_ref(payload.l_factor.data(), n, n, n);
@@ -2523,12 +3047,14 @@ namespace cxxgpr
             .kernel = kernel,
             .likelihood = likelihood,
             .compiled = nullptr,
+            .compiled64 = nullptr,
             .store = nullptr,
             .input_transform = nullptr,
             .target_transform = target_transform,
             .x_raw = {},
             .y_raw = std::vector<double>(y_raw.begin(), y_raw.end()),
             .x_train = {},
+            .x_train_f64 = {},
             .y_transformed = {},
             .l_factor = {},
             .alpha = std::vector<Refine>(alpha.begin(), alpha.end()),
@@ -2570,7 +3096,17 @@ namespace cxxgpr
                 }
                 payload.x_train[i] = static_cast<Storage>(x_t[i]);
             }
+            if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+            {
+                payload.x_train_f64 = std::move(x_t);
+            }
             payload.input_transform = input_transform;
+        }
+        if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+        {
+            auto ck64 = std::make_shared<CompiledDistanceKernel<double>>(kernel.template compile<double>());
+            ck64->set_kernel_exp(kernel_exp);
+            payload.compiled64 = std::move(ck64);
         }
         std::vector<double> y_t(y_raw.begin(), y_raw.end());
         if (auto tf = payload.target_transform->transform(y_t); !tf.has_value())

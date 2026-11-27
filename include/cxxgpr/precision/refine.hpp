@@ -22,8 +22,14 @@
 namespace cxxgpr
 {
 
-    /// @brief Maximum number of correction steps attempted before falling back to a full double solve.
+    /// @brief Maximum number of correction steps attempted before escalating or falling back.
     inline constexpr std::size_t max_refinement_corrections = 10;
+
+    /// @brief Maximum matrix-vector products allowed in restarted flexible GMRES iterative refinement.
+    inline constexpr std::size_t max_krylov_iterations = 100;
+
+    /// @brief Maximum subspace dimension per restart cycle in flexible GMRES iterative refinement.
+    inline constexpr std::size_t krylov_restart_dim = 25;
 
     /// @brief Residual norm ratio threshold above which a step counts toward refinement stagnation.
     inline constexpr double refinement_stagnation_ratio = 0.9;
@@ -134,15 +140,21 @@ namespace cxxgpr
     };
 
     /// @brief Diagnostic summary produced by iterative refinement.
-    /// @details Records termination status, completed correction count, and last relative residual.
+    /// @details Records termination status, completed correction count, last relative residual,
+    /// preconditioner shift, and Krylov escalation usage.
     struct RefinementSummary
     {
         /// @brief Final termination reason reported by the refinement loop.
         RefinementStatus status = RefinementStatus::MaxCorrectionsReached;
-        /// @brief Number of correction steps executed before termination.
+        /// @brief Number of correction and Krylov steps executed before termination.
         std::size_t iterations = 0;
         /// @brief Last evaluated relative infinity-norm residual prior to termination or fallback.
         double final_relative_residual = 0.0;
+        /// @brief Preconditioner-only diagonal shift applied to stabilize the float Cholesky factor (0.0 when
+        /// unshifted).
+        double preconditioner_shift = 0.0;
+        /// @brief True when refinement escalated to restarted double-precision FGMRES-IR.
+        bool used_krylov = false;
 
         /// @brief Returns true when refinement deferred to the double-precision fallback solve.
         /// @details Equivalent to status != RefinementStatus::Converged.
@@ -150,7 +162,7 @@ namespace cxxgpr
         [[nodiscard]] constexpr bool used_fallback() const noexcept { return status != RefinementStatus::Converged; }
 
         /// @brief Checks value equality between refinement summaries.
-        /// @details Compares status, iterations, and final_relative_residual.
+        /// @details Compares status, iterations, final_relative_residual, preconditioner_shift, and used_krylov.
         /// @param[in] lhs Left-hand refinement summary.
         /// @param[in] rhs Right-hand refinement summary.
         /// @return True if all fields compare equal.

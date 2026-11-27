@@ -242,4 +242,34 @@ namespace
         EXPECT_NEAR(grad[0], 0.3, 1e-12);
     }
 
+    /// @brief Verifies two-argument GaussianLikelihood::create constructs inside bounds disjoint from default.
+    /// @details Ensures noise variances outside Interval::default_positive() construct directly inside custom
+    /// positive bounds, and validates out-of-range vs non-positive/non-finite error discrimination.
+    TEST(GaussianLikelihoodTest, ConstructWithinCustomBoundsDisjointFromDefault)
+    {
+        // Spec: DES-01, FMT-03
+        const auto disjoint = cxxgpr::Interval::create(1e-20, 1e-8);
+        ASSERT_TRUE(disjoint.has_value());
+
+        const auto lik = cxxgpr::GaussianLikelihood::create(1e-10, *disjoint);
+        ASSERT_TRUE(lik.has_value()) << lik.error().message();
+        EXPECT_DOUBLE_EQ(lik->noise_variance(), 1e-10);
+        EXPECT_EQ(lik->bounds(), *disjoint);
+
+        for (const double bad_range : {1e-20, 1e-8, 1e-5})
+        {
+            const auto out = cxxgpr::GaussianLikelihood::create(bad_range, *disjoint);
+            ASSERT_FALSE(out.has_value());
+            EXPECT_EQ(out.error().code(), cxxgpr::GprErrorCode::InvalidInterval);
+        }
+
+        for (const double bad_val :
+            {0.0, -1e-10, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()})
+        {
+            const auto bad = cxxgpr::GaussianLikelihood::create(bad_val, *disjoint);
+            ASSERT_FALSE(bad.has_value());
+            EXPECT_EQ(bad.error().code(), cxxgpr::GprErrorCode::InvalidNoiseVariance);
+        }
+    }
+
 }  // namespace

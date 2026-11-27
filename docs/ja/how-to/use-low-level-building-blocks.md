@@ -368,6 +368,7 @@ covariance is 5 x 5, 20 sample values, same seed gives identical draws: 1
 | `query_nested` | 交差共分散の木のための `NestedBuffers` |
 | `query_kss`、`query_diag_scratch` | 事前分散 $k(x_*,x_*)$ と、対角評価のスクラッチ |
 | `train_n`、`query_m`、`dims` | 直近に要求された容量 |
+| `query_x_block_f64`、`query_k_block_f64`、`query_scratch_block_f64`、`query_nested_f64` | `MixedPrecision<ReevaluateKernel>` が予測平均を倍精度で計算するための列ブロック用バッファ（最大 `refinement_column_block` 列） |
 
 ## 混合精度の反復改良を自分で動かす
 
@@ -451,9 +452,11 @@ refine(): ||r||_inf = 1.521e-14, ||A||_inf = 2.459e+01, tolerance met: 1, error 
 | `refinement_stagnation_ratio` | 0.9 | $\lVert r_k\rVert_\infty / \lVert r_{k-1}\rVert_\infty$ がこの値を超えるステップは、停滞とみなす |
 | `refinement_stagnation_steps` | 2 | フォールバックを引き起こす、停滞ステップの連続回数 |
 | `refinement_column_block` | 32 | ライブラリがカーネルを倍精度で再評価するときの列ブロック幅 |
+| `max_krylov_iterations` | 100 | 再始動つき倍精度 FGMRES-IR でフォールバックするまでの行列ベクトル積の上限回数 |
+| `krylov_restart_dim` | 25 | FGMRES-IR の再始動部分空間の次元 $m$ |
 | `refinement_tolerance(dim)` | $10\,\text{dim}\,\varepsilon_{64}$ | 相対残差の停止許容値 |
 
-収束判定は $\lVert r\rVert_\infty / (\lVert B\rVert_\infty \lVert w\rVert_\infty + \lVert b\rVert_\infty) < \text{tol}$ で、`meets_relative_residual(b_inf, w, b, residual, tol)` が評価する。非有限のオペランド、非正の許容値、分母が 0 の場合は、すべて不合格にする。`RefinementSummary` は、`status`（`RefinementStatus`）、`iterations`（停止までに適用した補正の回数）、`final_relative_residual`、`used_fallback()` を持つ。`used_fallback()` は、`Converged` 以外のすべての状態で真になる。`RefinementSummary` の `operator==` は、3 つのフィールドをそのまま比較する。
+収束判定は $\lVert r\rVert_\infty / (\lVert B\rVert_\infty \lVert w\rVert_\infty + \lVert b\rVert_\infty) < \text{tol}$ で、`meets_relative_residual(b_inf, w, b, residual, tol)` が評価する。非有限のオペランド、非正の許容値、分母が 0 の場合は、すべて不合格にする。`RefinementSummary` は、`status`（`RefinementStatus`）、`iterations`（停止までに適用した補正の回数）、`final_relative_residual`、`preconditioner_shift`（`float` 前処理のみに加えた相対対角シフト。無シフト時は `0.0`）、`used_krylov`（再始動つき FGMRES-IR を実行したか）、`used_fallback()` を持つ。`used_fallback()` は、`Converged` 以外のすべての状態で真になる。`RefinementSummary` の `operator==` は、全フィールドをそのまま比較する。
 
 | `RefinementStatus` | 意味 |
 |---|---|
@@ -488,4 +491,4 @@ refine(): ||r||_inf = 1.521e-14, ||A||_inf = 2.459e+01, tolerance met: 1, error 
 | `workspace/mll.hpp` | `factor_and_mll`、`mll_and_gradient_into`、`hessian_into`、`value_gradient_hessian_into` |
 | `workspace/inference.hpp` | `predict_into`、`predict`、`predict_covariance_into`、`predict_covariance`、`sample`、`loo_predict_into`、`loo_predict` |
 | `workspace/leaf_cache.hpp` | `OptimizerHasChangeIndicesConcept`、`OptimizerTraits`、`optimizer_uses_change_indices_v`、`require_change_indices`、`LeafCache` |
-| `precision/refine.hpp` | `max_refinement_corrections`、`refinement_stagnation_ratio`、`refinement_stagnation_steps`、`refinement_column_block`、`refinement_tolerance`、`inf_norm`、`symmetrize_lower`、`meets_relative_residual`、`promoted_residual_into`、`promoted_residual`、`RefinementStatus`、`RefinementSummary`、`RefineSystem`、`refine_in_place`、`refine` |
+| `precision/refine.hpp` | `max_refinement_corrections`、`refinement_stagnation_ratio`、`refinement_stagnation_steps`、`refinement_column_block`、`max_krylov_iterations`、`krylov_restart_dim`、`refinement_tolerance`、`inf_norm`、`symmetrize_lower`、`meets_relative_residual`、`promoted_residual_into`、`promoted_residual`、`RefinementStatus`、`RefinementSummary`、`RefineSystem`、`refine_in_place`、`refine` |

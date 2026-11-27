@@ -131,6 +131,18 @@ namespace cxxgpr::detail
         const CompiledDistanceKernel<double>& kernel64, const CheckedDistanceStore<float>& store32
     );
 
+    /// @brief Widens a pre-validated rectangular @c float cross store into a reusable @c double store.
+    /// @details Reuses @p dst's existing capacity without heap allocations once sized at least as large as @p store32.
+    /// @param[in] kernel64 Double-precision compiled kernel matching @p store32's slots.
+    /// @param[in] store32 Validated single-precision rectangular cross store.
+    /// @param[in,out] dst Reusable optional double store populated in place.
+    /// @return Pointer to the populated double store, or GprError on empty, mismatched, or square input.
+    [[nodiscard]] std::expected<const CheckedDistanceStore<double>*, GprError> promote_cross_store_into_double(
+        const CompiledDistanceKernel<double>& kernel64,
+        const CheckedDistanceStore<float>& store32,
+        std::optional<CheckedDistanceStore<double>>& dst
+    );
+
     /// @brief Creates a shared handle referencing @p store's immutable validated state without copying tables.
     /// @tparam T Storage scalar type.
     /// @param[in] store Pre-validated store to share internally.
@@ -337,6 +349,33 @@ namespace cxxgpr::detail
         NestedBuffers<T>& nested,
         std::vector<T>& dist_block,
         std::vector<T>& x_block
+    );
+
+    /// @brief Evaluates columns `[col_begin, col_end)` of a rectangular cross Gram matrix into @p out.
+    /// @details Slices supplied cross distance tables cleanly across `[col_begin, col_end)` while taking
+    /// the already-sliced query coordinates @p x2_block of shape `(col_end - col_begin) x d` when points exist.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled distance kernel.
+    /// @param[in] store Pre-validated rectangular cross supplied-distance store (`!is_square()`).
+    /// @param[in] x1 Optional training coordinates `n x d` for `WithPoints` trees.
+    /// @param[in] x2_block Optional query coordinate slice `(col_end - col_begin) x d` for `WithPoints` trees.
+    /// @param[in] col_begin Inclusive starting column index in `[0, store.cols())`.
+    /// @param[in] col_end Exclusive ending column index in `(col_begin, store.cols()]`.
+    /// @param[out] out Destination `n x (col_end - col_begin)` cross-covariance block view.
+    /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool for composite/custom nodes.
+    /// @return Empty expected on success, or `GprError` on validation or evaluation failure.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<void, GprError> distance_apply_cross_col_block(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x1,
+        std::optional<MatrixRef<T>> x2_block,
+        std::size_t col_begin,
+        std::size_t col_end,
+        MatrixMut<T> out,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested
     );
 
     /// @brief Reconstructs the composite Gram matrix from precomputed per-leaf Gram matrices.

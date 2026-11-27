@@ -31,6 +31,7 @@
 #include "persist/save_id.hpp"
 #include "safetensors.hpp"
 #include "workspace/predict_diagonal.hpp"
+#include "workspace/sample_draws.hpp"
 
 namespace cxxgpr::persist
 {
@@ -135,8 +136,12 @@ namespace cxxgpr::persist
 
             /// @brief Compiled kernel evaluator configured with restored kernel_spec and kernel_exp.
             std::shared_ptr<const CompiledKernel<Storage>> compiled_kernel;
+            /// @brief Double-precision compiled kernel used by MixedPrecision<ReevaluateKernel> prediction.
+            std::shared_ptr<const CompiledKernel<double>> compiled_kernel_f64;
             /// @brief Transformed column-major training features cast to Storage precision (n * d).
             std::vector<Storage> x_train;
+            /// @brief Double-precision transformed training features (MixedPrecision<ReevaluateKernel> only).
+            std::vector<double> x_train_f64;
             /// @brief Transformed training targets cast to Refine precision (n).
             std::vector<Refine> y_transformed;
             /// @brief Owned Cholesky factor L storage (empty when zero-copy mmap backs l_view).
@@ -307,25 +312,19 @@ namespace cxxgpr::persist
                 }
                 const double log_2pi = std::log(2.0 * std::numbers::pi);
                 state.neg_log_marginal_likelihood = (0.5 * quad) + log_det + (0.5 * static_cast<double>(n) * log_2pi);
+                if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+                {
+                    auto ck64 =
+                        std::make_shared<CompiledKernel<double>>(CompiledKernel<double>::from_spec(*cfg.kernel_spec));
+                    ck64->set_kernel_exp(cfg.kernel_exp);
+                    state.compiled_kernel_f64 = std::move(ck64);
+                    state.x_train_f64 = std::move(x_trans);
+                }
                 return state;
             }
 
             // Reconstruct L and alpha from raw data and saved configuration (has_factor == false).
             out_is_mmap = false;
-            auto buffers = FitBuffers<P>::create(
-                n, FitPolicy{.distance_cache = cfg.distance_cache, .cholesky_buffer = CholeskyBuffer::Retain}
-            );
-            if (!buffers.has_value())
-            {
-                return std::unexpected(std::move(buffers).error());
-            }
-            std::vector<Storage> y_storage(n);
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                y_storage[i] = static_cast<Storage>(y_trans[i]);
-            }
-            const MatrixRef<Storage> x_ref(state.x_train.data(), n, d, n);
-            // Replay exact recorded factor_jitter when positive so reconstructed L matches original save state.
             auto jitter_to_use = cfg.jitter;
             if (cfg.factor_jitter > 0.0)
             {
@@ -335,30 +334,87 @@ namespace cxxgpr::persist
                     jitter_to_use = *fj;
                 }
             }
-            auto mll =
-                factor_and_mll(*state.compiled_kernel, *cfg.likelihood, x_ref, y_storage, jitter_to_use, *buffers, 0U);
-            if (!mll.has_value())
+            if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
             {
-                return std::unexpected(std::move(mll).error());
-            }
-            state.neg_log_marginal_likelihood = *mll;
-            state.l_owned.resize(n * n);
-            for (std::size_t col = 0; col < n; ++col)
-            {
-                for (std::size_t row = 0; row < n; ++row)
+                if (!cfg.x_unfitted || !cfg.y_unfitted)
                 {
-                    state.l_owned[(col * n) + row] = buffers->core.k_ref()(row, col);
+                    return std::unexpected(
+                        GprError::persist_failed(PersistErrorKind::Config, "missing transform prototype for load")
+                    );
                 }
+                const cxxgpr::detail::TrainConfig<P> train_cfg{
+                    .kernel_spec = *cfg.kernel_spec,
+                    .likelihood = *cfg.likelihood,
+                    .jitter = jitter_to_use,
+                    .input_transform = *cfg.x_unfitted,
+                    .target_transform = *cfg.y_unfitted,
+                    .kernel_exp = cfg.kernel_exp,
+                    .fit_policy = FitPolicy::prefer_memory(),
+                    .optimize = false,
+                    .use_change_indices = false,
+                    .value_only = true,
+                };
+                auto payload = cxxgpr::detail::train_or_factor_payload<P>(
+                    train_cfg, cxxgpr::detail::PointMatrixRef(MatrixRef<double>(x_raw.data(), n, d, n)),
+                    cxxgpr::detail::TargetSpanRef(y_raw), nullptr, nullptr
+                );
+                if (!payload.has_value())
+                {
+                    return std::unexpected(std::move(payload).error());
+                }
+                state.compiled_kernel = std::move(payload->compiled_kernel);
+                state.compiled_kernel_f64 = std::move(payload->compiled_kernel_f64);
+                state.x_train = std::move(payload->x_train);
+                state.x_train_f64 = std::move(payload->x_train_f64);
+                state.y_transformed = std::move(payload->y_transformed);
+                state.l_owned = std::move(payload->l_factor);
+                state.l_view = state.l_owned;
+                state.alpha_owned = std::move(payload->alpha);
+                state.alpha_view = state.alpha_owned;
+                state.neg_log_marginal_likelihood = payload->neg_log_marginal_likelihood;
+                return state;
             }
-            state.l_view = state.l_owned;
-
-            state.alpha_owned.resize(n);
-            for (std::size_t i = 0; i < n; ++i)
+            else
             {
-                state.alpha_owned[i] = static_cast<Refine>(buffers->core.rhs[i]);
+                auto buffers = FitBuffers<P>::create(
+                    n, FitPolicy{.distance_cache = cfg.distance_cache, .cholesky_buffer = CholeskyBuffer::Retain}
+                );
+                if (!buffers.has_value())
+                {
+                    return std::unexpected(std::move(buffers).error());
+                }
+                std::vector<Storage> y_storage(n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    y_storage[i] = static_cast<Storage>(y_trans[i]);
+                }
+                const MatrixRef<Storage> x_ref(state.x_train.data(), n, d, n);
+                auto mll = factor_and_mll(
+                    *state.compiled_kernel, *cfg.likelihood, x_ref, y_storage, jitter_to_use, *buffers, 0U
+                );
+                if (!mll.has_value())
+                {
+                    return std::unexpected(std::move(mll).error());
+                }
+                state.neg_log_marginal_likelihood = *mll;
+                state.l_owned.resize(n * n);
+                for (std::size_t col = 0; col < n; ++col)
+                {
+                    for (std::size_t row = 0; row < n; ++row)
+                    {
+                        state.l_owned[(col * n) + row] = buffers->core.k_ref()(row, col);
+                    }
+                }
+                state.l_view = state.l_owned;
+
+                state.alpha_owned.resize(n);
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    state.alpha_owned[i] = static_cast<Refine>(buffers->core.rhs[i]);
+                }
+                state.alpha_view = state.alpha_owned;
+                return state;
             }
-            state.alpha_view = state.alpha_owned;
-            return state;
         }
 
         /// @brief Validates, stages, transforms, and casts a query matrix into a loaded state's query workspace.
@@ -487,6 +543,22 @@ namespace cxxgpr::persist
                 {
                     return pr;
                 }
+                if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+                {
+                    if (st.compiled_kernel_f64 && st.x_train_f64.size() == n * d)
+                    {
+                        const MatrixRef<double> x_train_f64_ref(st.x_train_f64.data(), n, d, n);
+                        const MatrixRef<double> xq_f64_ref(st.query_ws.query_xs.data(), m, d, m);
+                        if (auto mr = cxxgpr::detail::compute_reeval_cross_mean_f64(
+                                *st.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, st.alpha_view, st.query_ws,
+                                out.mean
+                            );
+                            !mr.has_value())
+                        {
+                            return mr;
+                        }
+                    }
+                }
             }
             else
             {
@@ -560,6 +632,21 @@ namespace cxxgpr::persist
                 .n_points = m,
                 .variance_kind = cov_res->variance_kind,
             };
+            if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
+            {
+                if (st.compiled_kernel_f64 && st.x_train_f64.size() == n * d)
+                {
+                    const MatrixRef<double> x_train_f64_ref(st.x_train_f64.data(), n, d, n);
+                    const MatrixRef<double> xq_f64_ref(st.query_ws.query_xs.data(), m, d, m);
+                    if (auto mr = cxxgpr::detail::compute_reeval_cross_mean_f64(
+                            *st.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, st.alpha_view, st.query_ws, out.mean
+                        );
+                        !mr.has_value())
+                    {
+                        return std::unexpected(std::move(mr).error());
+                    }
+                }
+            }
             if (auto im = tgt_tf.inverse_transform_mean(out.mean); !im.has_value())
             {
                 return std::unexpected(std::move(im).error());
@@ -610,15 +697,62 @@ namespace cxxgpr::persist
             const std::size_t m = xq_ref.rows();
             const MatrixRef<Storage> x_train_ref(st.x_train.data(), n, d, n);
             const MatrixRef<Storage> l_ref(st.l_view.data(), n, n, n);
-            auto raw_draws = cxxgpr::sample<P>(
-                *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed, options,
-                st.query_ws, jitter
-            );
-            if (!raw_draws.has_value())
+            std::vector<double> out;
+            if constexpr (std::same_as<P, MixedPrecision<ReevaluateKernel>>)
             {
-                return std::unexpected(std::move(raw_draws).error());
+                if (st.compiled_kernel_f64 && st.x_train_f64.size() == n * d)
+                {
+                    auto cov_res = cxxgpr::predict_covariance<P>(
+                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, options, st.query_ws
+                    );
+                    if (!cov_res.has_value())
+                    {
+                        return std::unexpected(std::move(cov_res).error());
+                    }
+                    const MatrixRef<double> x_train_f64_ref(st.x_train_f64.data(), n, d, n);
+                    const MatrixRef<double> xq_f64_ref(st.query_ws.query_xs.data(), m, d, m);
+                    if (auto mr = cxxgpr::detail::compute_reeval_cross_mean_f64(
+                            *st.compiled_kernel_f64, x_train_f64_ref, xq_f64_ref, st.alpha_view, st.query_ws,
+                            cov_res->mean
+                        );
+                        !mr.has_value())
+                    {
+                        return std::unexpected(std::move(mr).error());
+                    }
+                    const JitterPolicy jit = jitter.has_value() ? *jitter : cxxgpr::detail::default_sample_jitter();
+                    auto raw_draws =
+                        cxxgpr::detail::draw_samples_from_covariance<double>(std::move(*cov_res), n_draws, seed, jit);
+                    if (!raw_draws.has_value())
+                    {
+                        return std::unexpected(std::move(raw_draws).error());
+                    }
+                    out = std::move(*raw_draws);
+                }
+                else
+                {
+                    auto raw_draws = cxxgpr::sample<P>(
+                        *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed, options,
+                        st.query_ws, jitter
+                    );
+                    if (!raw_draws.has_value())
+                    {
+                        return std::unexpected(std::move(raw_draws).error());
+                    }
+                    out.assign(raw_draws->begin(), raw_draws->end());
+                }
             }
-            std::vector<double> out(raw_draws->begin(), raw_draws->end());
+            else
+            {
+                auto raw_draws = cxxgpr::sample<P>(
+                    *st.compiled_kernel, lik, x_train_ref, l_ref, st.alpha_view, xq_ref, n_draws, seed, options,
+                    st.query_ws, jitter
+                );
+                if (!raw_draws.has_value())
+                {
+                    return std::unexpected(std::move(raw_draws).error());
+                }
+                out.assign(raw_draws->begin(), raw_draws->end());
+            }
             for (std::size_t draw = 0; draw < n_draws; ++draw)
             {
                 const std::span<double> slice(out.data() + (draw * m), m);
@@ -1300,11 +1434,13 @@ namespace cxxgpr::persist
             .kernel_spec = impl_->kernel_spec,
             .likelihood = impl_->likelihood,
             .compiled_kernel = st.compiled_kernel,
+            .compiled_kernel_f64 = st.compiled_kernel_f64,
             .input_transform = impl_->x_transform->clone(),
             .target_transform = impl_->y_transform->clone(),
             .x_raw = impl_->x_raw,
             .y_raw = impl_->y_raw,
             .x_train = st.x_train,
+            .x_train_f64 = st.x_train_f64,
             .y_transformed = st.y_transformed,
             .l_factor = std::vector<typename P::Storage>(st.l_view.begin(), st.l_view.end()),
             .alpha = std::vector<typename P::Refine>(st.alpha_view.begin(), st.alpha_view.end()),
