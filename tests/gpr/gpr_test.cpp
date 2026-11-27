@@ -1600,6 +1600,156 @@ namespace
         }
     };
 
+    /// @brief Scaled RBF custom kernel leaf for platform-independent IR-to-Krylov escalation tests.
+    /// @details Evaluates scale * exp(-d^2 / 0.125) so float (scale = 0.5) and double (scale = 2.0) yield
+    /// positive-definite matrices whose preconditioned operator forces stationary IR stagnation into FGMRES-IR.
+    /// @tparam T Evaluation scalar type (double or float).
+    template <typename T> class ScaledRbfControlKernelTerm final : public cxxgpr::KernelTerm<T>
+    {
+    public:
+        /// @brief Constructs the scaled RBF leaf with a fixed output amplitude.
+        /// @param[in] scale Output variance multiplier applied to exp(-d^2 / 0.125).
+        explicit ScaledRbfControlKernelTerm(double scale) noexcept : scale_(static_cast<T>(scale)) {}
+
+        /// @brief Clones this custom kernel leaf.
+        /// @return Independent copy of this scaled RBF kernel leaf.
+        [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override
+        {
+            return std::make_unique<ScaledRbfControlKernelTerm<T>>(static_cast<double>(scale_));
+        }
+
+        /// @brief Returns zero kernel parameters.
+        /// @return Always returns 0.
+        [[nodiscard]] std::size_t num_params() const noexcept override { return 0U; }
+
+        /// @brief Writes zero parameters when @p out is empty.
+        /// @param[out] out Destination span (must be empty).
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
+        {
+            if (!out.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 params"));
+            }
+            return {};
+        }
+
+        /// @brief Accepts an empty parameter span.
+        /// @param[in] params Input span (must be empty).
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
+        {
+            if (!params.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 params"));
+            }
+            return {};
+        }
+
+        /// @brief Writes zero bounds when @p out is empty.
+        /// @param[out] out Destination span (must be empty).
+        /// @return Empty expected on success, or LengthMismatch.
+        std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
+        {
+            if (!out.empty())
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("expected 0 bounds"));
+            }
+            return {};
+        }
+
+        /// @brief Evaluates scale * exp(-dist / 0.125) on the requested triangle or full matrix.
+        /// @param[in] dist Square matrix of squared distances.
+        /// @param[out] out Destination matrix populated on @p uplo.
+        /// @param[in] uplo Triangle or full region to populate.
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> apply(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
+        ) const override
+        {
+            const std::size_t n = dist.rows();
+            constexpr T inv_denom = static_cast<T>(8.0);
+            for (std::size_t col = 0U; col < n; ++col)
+            {
+                const std::size_t r_begin = (uplo == cxxgpr::Triangle::Lower) ? col : 0U;
+                const std::size_t r_end = (uplo == cxxgpr::Triangle::Upper) ? (col + 1U) : n;
+                for (std::size_t row = r_begin; row < r_end; ++row)
+                {
+                    out(row, col) = scale_ * std::exp(-dist(row, col) * inv_denom);
+                }
+            }
+            return {};
+        }
+
+        /// @brief Evaluates scale * exp(-dist / 0.125) on a rectangular cross distance matrix.
+        /// @param[in] dist Rectangular squared-distance matrix (n x m).
+        /// @param[out] out Destination cross-kernel matrix (n x m).
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> apply_cross(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
+        ) const override
+        {
+            constexpr T inv_denom = static_cast<T>(8.0);
+            for (std::size_t col = 0U; col < dist.cols(); ++col)
+            {
+                for (std::size_t row = 0U; row < dist.rows(); ++row)
+                {
+                    out(row, col) = scale_ * std::exp(-dist(row, col) * inv_denom);
+                }
+            }
+            return {};
+        }
+
+        /// @brief Writes constant diagonal variance scale into @p out.
+        /// @param[out] out Destination diagonal span.
+        /// @return Empty expected on success.
+        std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
+        {
+            std::ranges::fill(out, scale_);
+            return {};
+        }
+
+        /// @brief Rejects gradient calls (no parameters).
+        /// @param[in] dist Unused.
+        /// @param[out] d_k Unused.
+        /// @param[in] param_idx Parameter index.
+        /// @param[in] uplo Unused.
+        /// @return IndexOutOfRange error.
+        std::expected<void, cxxgpr::GprError> grad(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
+        ) const override
+        {
+            (void)dist;
+            (void)d_k;
+            (void)param_idx;
+            (void)uplo;
+            return std::unexpected(cxxgpr::GprError::index_out_of_range("no parameters"));
+        }
+
+        /// @brief Rejects Hessian calls (no parameters).
+        /// @param[in] dist Unused.
+        /// @param[out] d2_k Unused.
+        /// @param[in] i First parameter index.
+        /// @param[in] j Second parameter index.
+        /// @param[in] uplo Unused.
+        /// @return IndexOutOfRange error.
+        std::expected<void, cxxgpr::GprError> hess(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
+        ) const override
+        {
+            (void)dist;
+            (void)d2_k;
+            (void)i;
+            (void)j;
+            (void)uplo;
+            return std::unexpected(cxxgpr::GprError::index_out_of_range("no parameters"));
+        }
+
+    private:
+        /// @brief Scalar amplitude applied to the RBF evaluation.
+        T scale_{T{1}};
+    };
+
     /// @brief Verifies shifted float preconditioning, Krylov refinement, jitter priority, and double mean accuracy.
     /// @details Confirms SinglePrecision fails at noise = 1e-10 while MixedPrecision<ReevaluateKernel> converges
     /// without equation jitter, stays under 8 * n * n bytes per allocation, matches DoublePrecision alpha and mean
@@ -1789,9 +1939,10 @@ namespace
             EXPECT_LT(max_mean_diff, 1e-10);
         }
 
-        // Moderate-small noise where unshifted float Cholesky succeeds (shift == 0) but IR escalates to Krylov.
+        // Well-conditioned unshifted float Cholesky (shift == 0) where stationary IR stagnates and escalates to
+        // FGMRES-IR deterministically across platforms.
         {
-            constexpr std::size_t n_esc = 256U;
+            constexpr std::size_t n_esc = 16U;
             std::vector<double> x_esc(n_esc);
             std::vector<double> y_esc(n_esc);
             for (std::size_t i = 0U; i < n_esc; ++i)
@@ -1801,12 +1952,24 @@ namespace
                 y_esc[i] = std::sin(6.283185307179586 * xi) + (0.3 * std::cos(12.566370614359172 * xi));
             }
             const cxxgpr::MatrixRef<double> x_esc_ref(x_esc.data(), n_esc, d, n_esc);
-            const auto esc_lik = make_small_noise_likelihood(8e-6);
+            auto esc_custom = cxxgpr::CustomKernel::create(
+                std::make_unique<ScaledRbfControlKernelTerm<double>>(2.0),
+                std::make_unique<ScaledRbfControlKernelTerm<float>>(0.5)
+            );
+            ASSERT_TRUE(esc_custom.has_value());
+            const cxxgpr::KernelSpec esc_spec(*esc_custom);
+            const auto esc_lik = make_small_noise_likelihood(0.1);
+
+            const auto esc_ref = cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision>(esc_spec)
+                                     .with_likelihood(esc_lik)
+                                     .with_jitter(zero_jitter)
+                                     .factor(x_esc_ref, y_esc);
             const auto esc_fit =
-                cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(spec)
+                cxxgpr::Gpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(esc_spec)
                     .with_likelihood(esc_lik)
                     .with_jitter(zero_jitter)
                     .factor(x_esc_ref, y_esc);
+            ASSERT_TRUE(esc_ref.has_value()) << esc_ref.error().message();
             ASSERT_TRUE(esc_fit.has_value()) << esc_fit.error().message();
             EXPECT_EQ(esc_fit->factor_jitter(), 0.0);
             const auto esc_summary = esc_fit->refinement_summary();
@@ -1815,6 +1978,17 @@ namespace
             EXPECT_FALSE(esc_summary->used_fallback());
             EXPECT_EQ(esc_summary->preconditioner_shift, 0.0);
             EXPECT_TRUE(esc_summary->used_krylov);
+
+            const auto esc_ref_pred = esc_ref->predict(xq_small_ref);
+            const auto esc_mp_pred = esc_fit->predict(xq_small_ref);
+            ASSERT_TRUE(esc_ref_pred.has_value());
+            ASSERT_TRUE(esc_mp_pred.has_value());
+            double max_esc_diff = 0.0;
+            for (std::size_t j = 0U; j < m_small; ++j)
+            {
+                max_esc_diff = std::max(max_esc_diff, std::abs(esc_mp_pred->mean[j] - esc_ref_pred->mean[j]));
+            }
+            EXPECT_LT(max_esc_diff, 1e-10);
         }
 
         // Negative control: genuinely indefinite system fails Fixed(0) and recovers only via Adaptive JitterPolicy.
