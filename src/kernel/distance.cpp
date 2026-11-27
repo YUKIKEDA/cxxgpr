@@ -4915,6 +4915,373 @@ namespace cxxgpr
             return {};
         }
 
+        /// @brief Evaluates a supplied-ARD leaf on square columns `[col_begin, col_end)` into @p out.
+        /// @details Reads only the lower triangle of @p store symmetrically and transforms each column in-place.
+        /// @param[in] ref Compiled supplied-ARD leaf reference.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] col_begin Inclusive starting column index.
+        /// @param[in] cols_cur Number of columns in `[col_begin, col_end)`.
+        /// @param[out] out Destination `n x cols_cur` block view.
+        void eval_supplied_ard_square_block(
+            const SuppliedArdRef& ref,
+            const CheckedDistanceStore<T>& store,
+            std::size_t col_begin,
+            std::size_t cols_cur,
+            MatrixMut<T> out
+        ) const
+        {
+            const std::size_t n = store.rows();
+            if (n == 0U || cols_cur == 0U)
+            {
+                return;
+            }
+            const ArdSquareView ard = make_ard_square_view(store, ref.slot_at);
+            const std::span<const double> ls(cached_ls[ref.leaf_idx]);
+            const auto& leaf = leaves[ref.leaf_idx];
+            auto run_block = [&](ArdWeightView<T> weights, auto&& slice_fn)
+            {
+                for (std::size_t c = 0U; c < cols_cur; ++c)
+                {
+                    const std::size_t j = col_begin + c;
+                    T* col_ptr = &out(0U, c);
+                    for (std::size_t row = 0U; row < j; ++row)
+                    {
+                        T acc{0};
+                        for (std::size_t m = 0U; m < weights.size(); ++m)
+                        {
+                            acc += weights[m] * ard.at(m, j, row);
+                        }
+                        col_ptr[row] = acc;
+                    }
+                    const std::size_t len = n - j;
+                    detail::scale_set_slice(col_ptr + j, ard.lower_col_ptr(0U, j, j), weights[0U], len);
+                    for (std::size_t m = 1U; m < weights.size(); ++m)
+                    {
+                        detail::axpy_slice(col_ptr + j, ard.lower_col_ptr(m, j, j), weights[m], len);
+                    }
+                    col_ptr[j] = T{0};
+                    slice_fn(col_ptr, n);
+                }
+            };
+            if (std::holds_alternative<RbfArdKernel>(leaf))
+            {
+                with_ard_inv_ell2<T>(
+                    ls, T{1}, [&](ArdWeightView<T> weights)
+                {
+                    run_block(weights, [this](T* col_ptr, std::size_t len) noexcept {
+                        detail::exp_scaled_nonpos_in_place(col_ptr, len, T{-0.5}, exp_mode);
+                    });
+                }
+                );
+                return;
+            }
+            if (const auto* mat = std::get_if<MaternArdKernel>(&leaf))
+            {
+                const T c = static_cast<T>(matern_scale_sq_d(mat->nu()));
+                const MaternNu nu = mat->nu();
+                with_ard_inv_ell2<T>(
+                    ls, T{1}, [&](ArdWeightView<T> weights)
+                {
+                    run_block(weights, [this, c, nu](T* col_ptr, std::size_t len) noexcept {
+                        detail::matern_s2_in_place(col_ptr, len, c, nu, exp_mode);
+                    });
+                }
+                );
+                return;
+            }
+            const auto& rq = std::get<RationalQuadraticArdKernel>(leaf);
+            const T alpha = static_cast<T>(rq.alpha());
+            const T rq_scale = T{1} / (T{2} * alpha);
+            with_ard_inv_ell2<T>(
+                ls, rq_scale, [&](ArdWeightView<T> weights)
+            {
+                run_block(weights, [this, alpha](T* col_ptr, std::size_t len) noexcept {
+                    transform_rq_slice_in_place(col_ptr, len, alpha, exp_mode);
+                });
+            }
+            );
+        }
+
+        /// @brief Invariant context for `eval_term_square_block_rec` to keep recursive stack frames minimal.
+        struct SquareBlockEvalCtx
+        {
+            /// @brief Pre-validated square supplied-distance store.
+            const CheckedDistanceStore<T>& store;
+            /// @brief Optional full training coordinate matrix `(n, d)`.
+            std::optional<MatrixRef<T>> x;
+            /// @brief Optional packed coordinate block `(cols_cur, d)` for columns `[col_begin, col_end)`.
+            std::optional<MatrixRef<T>> x_block;
+            /// @brief Inclusive starting global column index.
+            std::size_t col_begin;
+            /// @brief Number of columns in the active block.
+            std::size_t cols_cur;
+            /// @brief Multi-level workspace for nested composite and custom nodes.
+            NestedBuffers<T>& nested;
+            /// @brief Grow-only scratch vector for contiguous squared-distance blocks.
+            std::vector<T>& dist_block;
+            /// @brief Out-of-line error slot.
+            std::optional<GprError>& err;
+        };
+
+        /// @brief Evaluates one square column-block leaf term out-of-line so recursive frames stay minimal.
+        /// @param[in] term Leaf AST node.
+        /// @param[out] out Destination `n x cols_cur` block view.
+        /// @param[in] level_idx Current recursion depth into `ctx.nested`.
+        /// @param[in] ctx Invariant square column-block evaluation context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] CXXGPR_NOINLINE bool eval_square_block_leaf_step(
+            const Term& term, MatrixMut<T> out, std::size_t level_idx, const SquareBlockEvalCtx& ctx
+        ) const
+        {
+            const std::size_t n = ctx.store.rows();
+            const std::size_t cols_cur = ctx.cols_cur;
+            if (const auto* s = std::get_if<SuppliedScalarRef>(&term))
+            {
+                const std::size_t block_elems = n * cols_cur;
+                if (ctx.dist_block.size() < block_elems)
+                {
+                    ctx.dist_block.resize(block_elems);
+                }
+                const auto [dense, packed] = scalar_square_view(s->slot_at, ctx.store);
+                for (std::size_t c = 0U; c < cols_cur; ++c)
+                {
+                    const std::size_t j = ctx.col_begin + c;
+                    T* dst_col = ctx.dist_block.data() + (c * n);
+                    if (!packed.empty())
+                    {
+                        for (std::size_t row = 0U; row < j; ++row)
+                        {
+                            dst_col[row] = packed[packed_lower_index(n, j, row)];
+                        }
+                        const std::size_t diag_p = packed_lower_index(n, j, j);
+                        std::copy_n(packed.data() + diag_p, n - j, dst_col + j);
+                    }
+                    else
+                    {
+                        for (std::size_t row = 0U; row < j; ++row)
+                        {
+                            dst_col[row] = dense(j, row);
+                        }
+                        std::copy_n(&dense(j, j), n - j, dst_col + j);
+                    }
+                }
+                const MatrixRef<T> dist_ref(ctx.dist_block.data(), n, cols_cur, n);
+                return capture_expected(
+                    detail::leaf_apply_cross_dist(leaves[s->leaf_idx], dist_ref, out, exp_mode, false), ctx.err
+                );
+            }
+            if (const auto* a = std::get_if<SuppliedArdRef>(&term))
+            {
+                eval_supplied_ard_square_block(*a, ctx.store, ctx.col_begin, cols_cur, out);
+                return true;
+            }
+            const auto& c = std::get<CoordLeafRef>(term);
+            const KernelLeaf& kl = leaves[c.leaf_idx];
+            if (const auto* ck = std::get_if<ConstantKernel>(&kl))
+            {
+                fill_region(out, static_cast<T>(ck->constant()), Triangle::Full);
+                return true;
+            }
+            if (const auto* wk = std::get_if<WhiteKernel>(&kl))
+            {
+                fill_region(out, T{0}, Triangle::Full);
+                const T var = static_cast<T>(wk->variance());
+                for (std::size_t col = 0U; col < cols_cur; ++col)
+                {
+                    out(ctx.col_begin + col, col) = var;
+                }
+                return true;
+            }
+            if (ctx.x.has_value() && ctx.x_block.has_value())
+            {
+                if (const auto* custom = std::get_if<CustomKernel>(&kl))
+                {
+                    if (!ensure_nested_ok(ctx.nested, level_idx, n, cols_cur, ctx.err))
+                    {
+                        return false;
+                    }
+                    auto dist_buf = ctx.nested.level(level_idx, n, cols_cur);
+                    fill_cross_sq_dist(*ctx.x, *ctx.x_block, dist_buf);
+                    return capture_expected(custom->template term<T>().apply_cross(dist_buf.as_ref(), out), ctx.err);
+                }
+                return capture_expected(
+                    detail::leaf_apply_cross_points(kl, *ctx.x, *ctx.x_block, out, exp_mode, cached_ls[c.leaf_idx]),
+                    ctx.err
+                );
+            }
+            fill_region(out, T{0}, Triangle::Full);
+            return true;
+        }
+
+        /// @brief Recursive body of `eval_term_square_block` with minimal per-level stack frame size.
+        /// @param[in] term Compiled AST node to evaluate.
+        /// @param[out] out Destination `n x cols_cur` block view.
+        /// @param[in,out] scratch Leaf scratch view of shape `n x cols_cur`.
+        /// @param[in] level_idx Current recursion depth into `ctx.nested`.
+        /// @param[in] ctx Invariant square column-block evaluation context.
+        /// @return True on success, false after writing `ctx.err`.
+        [[nodiscard]] bool eval_term_square_block_rec(
+            const Term& term,
+            const MatrixMut<T>& out,
+            const MatrixMut<T>& scratch,
+            std::size_t level_idx,
+            const SquareBlockEvalCtx& ctx
+        ) const
+        {
+            if (is_leaf_term(term))
+            {
+                return eval_square_block_leaf_step(term, out, level_idx, ctx);
+            }
+            const bool is_sum = std::holds_alternative<SumTerm>(term);
+            const auto& terms = is_sum ? std::get<SumTerm>(term).terms : std::get<ProductTerm>(term).terms;
+            if (terms.empty())
+            {
+                return fail_empty_composite(ctx.err);
+            }
+            if (!is_sum)
+            {
+                const T scale = constant_scale(terms);
+                bool has_varying = false;
+                for (const Term& child : terms)
+                {
+                    if (is_constant_term(child))
+                    {
+                        continue;
+                    }
+                    if (!has_varying)
+                    {
+                        if (!eval_term_square_block_rec(child, out, scratch, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        has_varying = true;
+                        continue;
+                    }
+                    if (is_leaf_term(child))
+                    {
+                        if (!eval_term_square_block_rec(child, scratch, out, level_idx, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, scratch.as_ref(), Triangle::Full);
+                    }
+                    else
+                    {
+                        if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                        {
+                            return false;
+                        }
+                        const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                        if (!eval_term_square_block_rec(child, buf, scratch, level_idx + 1U, ctx))
+                        {
+                            return false;
+                        }
+                        mul_into(out, buf.as_ref(), Triangle::Full);
+                    }
+                }
+                if (!has_varying)
+                {
+                    fill_region(out, scale, Triangle::Full);
+                    return true;
+                }
+                scale_region(out, scale, Triangle::Full);
+                return true;
+            }
+            if (!eval_term_square_block_rec(terms[0], out, scratch, level_idx, ctx))
+            {
+                return false;
+            }
+            for (std::size_t k = 1; k < terms.size(); ++k)
+            {
+                if (is_leaf_term(terms[k]))
+                {
+                    if (!eval_term_square_block_rec(terms[k], scratch, out, level_idx, ctx))
+                    {
+                        return false;
+                    }
+                    add_into(out, scratch.as_ref(), Triangle::Full);
+                }
+                else
+                {
+                    if (!ensure_nested_ok(ctx.nested, level_idx, out.rows(), out.cols(), ctx.err))
+                    {
+                        return false;
+                    }
+                    const auto buf = ctx.nested.level(level_idx, out.rows(), out.cols());
+                    if (!eval_term_square_block_rec(terms[k], buf, scratch, level_idx + 1U, ctx))
+                    {
+                        return false;
+                    }
+                    add_into(out, buf.as_ref(), Triangle::Full);
+                }
+            }
+            return true;
+        }
+
+        /// @brief Evaluates columns `[col_begin, col_end)` of the square Gram matrix into `out`.
+        /// @param[in] term Compiled root AST node.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional coordinate matrix `(n, d)`.
+        /// @param[in] col_begin Inclusive starting column index.
+        /// @param[in] col_end Exclusive ending column index.
+        /// @param[out] out Destination `n x (col_end - col_begin)` matrix view.
+        /// @param[in,out] scratch Non-aliasing scratch view of matching shape.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in,out] dist_block Grow-only squared-distance block scratch vector.
+        /// @param[in,out] x_block_vec Grow-only coordinate block scratch vector.
+        /// @return Empty expected on success, or `GprError` on failure.
+        [[nodiscard]] std::expected<void, GprError> eval_term_square_block(
+            const Term& term,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            std::size_t col_begin,
+            std::size_t col_end,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::vector<T>& dist_block,
+            std::vector<T>& x_block_vec
+        ) const
+        {
+            const std::size_t cols_cur = col_end - col_begin;
+            std::optional<MatrixRef<T>> x_block_ref;
+            if (x.has_value())
+            {
+                const std::size_t d = x->cols();
+                if (x_block_vec.size() < cols_cur * d)
+                {
+                    x_block_vec.resize(cols_cur * d);
+                }
+                for (std::size_t feat = 0U; feat < d; ++feat)
+                {
+                    for (std::size_t c = 0U; c < cols_cur; ++c)
+                    {
+                        x_block_vec[(feat * cols_cur) + c] = (*x)(col_begin + c, feat);
+                    }
+                }
+                x_block_ref = MatrixRef<T>(x_block_vec.data(), cols_cur, d, cols_cur);
+            }
+            std::optional<GprError> err;
+            const SquareBlockEvalCtx ctx{
+                .store = store,
+                .x = x,
+                .x_block = x_block_ref,
+                .col_begin = col_begin,
+                .cols_cur = cols_cur,
+                .nested = nested,
+                .dist_block = dist_block,
+                .err = err,
+            };
+            if (!eval_term_square_block_rec(term, out, scratch, 0U, ctx))
+            {
+                return std::unexpected(
+                    err.has_value() ? std::move(*err)
+                                    : GprError::unsupported_kernel_operation("kernel evaluation failed")
+                );
+            }
+            return {};
+        }
+
         /// @brief Evaluates one distance-kernel diagonal leaf out-of-line so recursive frames stay minimal.
         /// @param[in] term Leaf AST node.
         /// @param[in] x Optional coordinate matrix.
@@ -7361,6 +7728,81 @@ namespace cxxgpr
             }
             return {};
         }
+
+        /// @brief Evaluates square training Gram columns `[col_begin, col_end)` into @p out.
+        /// @tparam T Storage floating-point scalar type.
+        /// @param[in] kernel Compiled distance kernel tree.
+        /// @param[in] store Pre-validated square supplied-distance store.
+        /// @param[in] x Optional training coordinates for `WithPoints` leaves.
+        /// @param[in] col_begin Inclusive starting column index in `[0, store.rows())`.
+        /// @param[in] col_end Exclusive ending column index in `(col_begin, store.rows()]`.
+        /// @param[out] out Destination `n x (col_end - col_begin)` block view.
+        /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+        /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+        /// @param[in,out] dist_block Grow-only squared-distance block scratch vector.
+        /// @param[in,out] x_block Grow-only coordinate block scratch vector.
+        /// @return Empty expected on success, or validation/workspace/evaluation error.
+        template <KernelScalarConcept T>
+        [[nodiscard]] static std::expected<void, GprError> apply_square_col_block(
+            const CompiledDistanceKernel<T>& kernel,
+            const CheckedDistanceStore<T>& store,
+            std::optional<MatrixRef<T>> x,
+            std::size_t col_begin,
+            std::size_t col_end,
+            MatrixMut<T> out,
+            MatrixMut<T> scratch,
+            NestedBuffers<T>& nested,
+            std::vector<T>& dist_block,
+            std::vector<T>& x_block
+        )
+        {
+            if (!store.impl_ || store.rows() == 0U || store.cols() == 0U)
+            {
+                return std::unexpected(GprError::empty_input());
+            }
+            if (store.impl_->kernel_slots != kernel.impl_->slots)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("distance store does not match this kernel's slots")
+                );
+            }
+            if (!store.impl_->square)
+            {
+                return std::unexpected(
+                    GprError::unsupported_kernel_operation("expected square training distance store")
+                );
+            }
+            for (std::size_t at = 0U; at < kernel.impl_->scalar_slot_needs_dense.size(); ++at)
+            {
+                if (kernel.impl_->scalar_slot_needs_dense[at] != 0U && at < store.impl_->scalar_is_packed.size()
+                    && store.impl_->scalar_is_packed[at] != 0U)
+                {
+                    return std::unexpected(
+                        GprError::unsupported_kernel_operation("packed distance store cannot serve a CustomKernel slot")
+                    );
+                }
+            }
+            if (col_begin >= col_end || col_end > store.rows())
+            {
+                return std::unexpected(GprError::index_out_of_range("square column block range out of bounds"));
+            }
+            const std::size_t cols_cur = col_end - col_begin;
+            if (out.rows() != store.rows() || out.cols() != cols_cur)
+            {
+                return std::unexpected(GprError::length_mismatch("output block shape mismatch"));
+            }
+            if (auto sc = require_scratch(out.as_ref(), scratch); !sc.has_value())
+            {
+                return sc;
+            }
+            if (auto vp = kernel.impl_->validate_optional_points(x, store.rows()); !vp.has_value())
+            {
+                return vp;
+            }
+            return kernel.impl_->eval_term_square_block(
+                kernel.impl_->root, store, x, col_begin, col_end, out, scratch, nested, dist_block, x_block
+            );
+        }
     };
 
     // --- CompiledDistanceKernel<T> ---
@@ -8685,6 +9127,38 @@ namespace cxxgpr
         return DistanceStoreBuilder::combine_from_leaf_grams(kernel, leaf_grams, out, uplo, scratch, nested);
     }
 
+    /// @brief Evaluates square Gram columns `[col_begin, col_end)`; see distance_store.hpp.
+    /// @tparam T Storage floating-point scalar type.
+    /// @param[in] kernel Compiled distance kernel tree.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional training coordinates for `WithPoints` leaves.
+    /// @param[in] col_begin Inclusive starting column index in `[0, store.rows())`.
+    /// @param[in] col_end Exclusive ending column index in `(col_begin, store.rows()]`.
+    /// @param[out] out Destination `n x (col_end - col_begin)` block view.
+    /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool.
+    /// @param[in,out] dist_block Grow-only squared-distance block scratch vector.
+    /// @param[in,out] x_block Grow-only coordinate block scratch vector.
+    /// @return Empty expected on success, or validation/workspace/evaluation error.
+    template <KernelScalarConcept T>
+    std::expected<void, GprError> detail::distance_apply_square_col_block(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        std::size_t col_begin,
+        std::size_t col_end,
+        MatrixMut<T> out,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested,
+        std::vector<T>& dist_block,
+        std::vector<T>& x_block
+    )
+    {
+        return DistanceStoreBuilder::apply_square_col_block(
+            kernel, store, x, col_begin, col_end, out, scratch, nested, dist_block, x_block
+        );
+    }
+
     template class DistanceKernel<DistanceOnly>;
     template class DistanceKernel<WithPoints>;
     template CompiledDistanceKernel<double> DistanceKernel<DistanceOnly>::compile<double>() const;
@@ -8908,6 +9382,30 @@ namespace cxxgpr
         Triangle,
         MatrixMut<float>,
         NestedBuffers<float>&
+    );
+    template std::expected<void, GprError> detail::distance_apply_square_col_block<double>(
+        const CompiledDistanceKernel<double>&,
+        const CheckedDistanceStore<double>&,
+        std::optional<MatrixRef<double>>,
+        std::size_t,
+        std::size_t,
+        MatrixMut<double>,
+        MatrixMut<double>,
+        NestedBuffers<double>&,
+        std::vector<double>&,
+        std::vector<double>&
+    );
+    template std::expected<void, GprError> detail::distance_apply_square_col_block<float>(
+        const CompiledDistanceKernel<float>&,
+        const CheckedDistanceStore<float>&,
+        std::optional<MatrixRef<float>>,
+        std::size_t,
+        std::size_t,
+        MatrixMut<float>,
+        MatrixMut<float>,
+        NestedBuffers<float>&,
+        std::vector<float>&,
+        std::vector<float>&
     );
 
 }  // namespace cxxgpr

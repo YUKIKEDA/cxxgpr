@@ -309,6 +309,36 @@ namespace cxxgpr::detail
         std::size_t& inc_steps
     );
 
+    /// @brief Evaluates columns `[col_begin, col_end)` of the square training Gram matrix into @p out.
+    /// @details Reads only the lower triangle of @p store for symmetry, writes zero everywhere except
+    /// `(col_begin + c, c)` for `WhiteKernel` diagonals, and uses @p dist_block / @p x_block scratch
+    /// buffers so repeated block evaluations perform zero extra allocations once sized.
+    /// @tparam T Storage scalar type.
+    /// @param[in] kernel Compiled distance kernel.
+    /// @param[in] store Pre-validated square supplied-distance store.
+    /// @param[in] x Optional training coordinates for `WithPoints` trees.
+    /// @param[in] col_begin Inclusive starting column index in `[0, store.rows())`.
+    /// @param[in] col_end Exclusive ending column index in `(col_begin, store.rows()]`.
+    /// @param[out] out Destination `n x (col_end - col_begin)` block view.
+    /// @param[in,out] scratch Non-aliasing `n x (col_end - col_begin)` scratch view.
+    /// @param[in,out] nested Pre-allocated intermediate buffer pool for composite/custom nodes.
+    /// @param[in,out] dist_block Grow-only scratch vector for contiguous squared-distance blocks.
+    /// @param[in,out] x_block Grow-only scratch vector for packed coordinate column blocks.
+    /// @return Empty expected on success, or `GprError` on validation or evaluation failure.
+    template <KernelScalarConcept T>
+    [[nodiscard]] std::expected<void, GprError> distance_apply_square_col_block(
+        const CompiledDistanceKernel<T>& kernel,
+        const CheckedDistanceStore<T>& store,
+        std::optional<MatrixRef<T>> x,
+        std::size_t col_begin,
+        std::size_t col_end,
+        MatrixMut<T> out,
+        MatrixMut<T> scratch,
+        NestedBuffers<T>& nested,
+        std::vector<T>& dist_block,
+        std::vector<T>& x_block
+    );
+
     /// @brief Reconstructs the composite Gram matrix from precomputed per-leaf Gram matrices.
     /// @tparam T Storage scalar type.
     /// @param[in] kernel Compiled distance kernel.

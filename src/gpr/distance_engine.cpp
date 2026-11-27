@@ -1233,6 +1233,12 @@ namespace cxxgpr
             /// @return Empty expected on success, or GprError.
             [[nodiscard]] std::expected<void, GprError> fallback(std::span<double> w) override
             {
+                std::vector<double>{}.swap(k_block_);
+                std::vector<double>{}.swap(scratch_block_);
+                std::vector<double>{}.swap(dist_block_);
+                std::vector<double>{}.swap(x_block_);
+                nested64_ = NestedBuffers<double>{};
+
                 const std::size_t n = y64_.size();
                 std::vector<double> gram(n * n);
                 std::vector<double> scratch(n * n);
@@ -1257,47 +1263,64 @@ namespace cxxgpr
             }
 
         private:
-            /// @brief Residual against the exact double Gram matrix plus the diagonal offset.
+            /// @brief Residual against the exact double Gram matrix plus the diagonal offset, evaluated in column
+            /// blocks.
             /// @param[in] w Current solution vector.
             /// @param[out] r Residual of the exact system at w.
-            /// @return Largest absolute row sum of the exact matrix, or GprError when the Gram matrix cannot be built.
+            /// @return Largest absolute row sum of the exact matrix, or GprError when a block cannot be evaluated.
             [[nodiscard]] std::expected<double, GprError> exact_residual(std::span<const double> w, std::span<double> r)
             {
                 const std::size_t n = y64_.size();
-                if (gram64_.size() < n * n)
+                if (n == 0U)
                 {
-                    gram64_.resize(n * n);
-                    gram_scratch_.resize(n * n);
+                    return std::unexpected(GprError::empty_input());
+                }
+                const std::size_t block_cols = std::min(refinement_column_block, n);
+                if (k_block_.size() < n * block_cols)
+                {
+                    k_block_.resize(n * block_cols);
+                }
+                if (scratch_block_.size() < n * block_cols)
+                {
+                    scratch_block_.resize(n * block_cols);
                 }
                 const std::size_t need_depth = kernel64_.nested_depth();
-                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < n)
+                if (nested64_.depth() < need_depth || nested64_.rows() < n || nested64_.cols() < block_cols)
                 {
-                    nested64_.resize(need_depth, n, n);
+                    nested64_.resize(need_depth, n, block_cols);
                 }
-                MatrixMut<double> gram_mut(gram64_.data(), n, n, n);
-                MatrixMut<double> scratch_mut(gram_scratch_.data(), n, n, n);
-                if (auto ap = kernel64_.apply(store64_, x64_, gram_mut, Triangle::Lower, scratch_mut, nested64_);
-                    !ap.has_value())
-                {
-                    return std::unexpected(std::move(ap).error());
-                }
+
                 std::ranges::fill(row_abs_, 0.0);
                 std::ranges::fill(sum_, 0.0);
-                for (std::size_t col = 0U; col < n; ++col)
+                for (std::size_t col_begin = 0U; col_begin < n; col_begin += block_cols)
                 {
-                    const double* g_col = gram64_.data() + (col * n);
-                    const double w_col = w[col];
-                    const double diag = g_col[col] + diag_offset_;
-                    sum_[col] += diag * w_col;
-                    row_abs_[col] += std::abs(diag);
-                    for (std::size_t row = col + 1U; row < n; ++row)
+                    const std::size_t cols_cur = std::min(block_cols, n - col_begin);
+                    MatrixMut<double> kb_mut(k_block_.data(), n, cols_cur, n);
+                    MatrixMut<double> sb_mut(scratch_block_.data(), n, cols_cur, n);
+                    if (auto res = detail::distance_apply_square_col_block(
+                            kernel64_, store64_, x64_, col_begin, col_begin + cols_cur, kb_mut, sb_mut, nested64_,
+                            dist_block_, x_block_
+                        );
+                        !res.has_value())
                     {
-                        const double entry = g_col[row];
-                        const double abs_entry = std::abs(entry);
-                        sum_[row] += entry * w_col;
-                        sum_[col] += entry * w[row];
-                        row_abs_[row] += abs_entry;
-                        row_abs_[col] += abs_entry;
+                        return std::unexpected(std::move(res).error());
+                    }
+                    // Accumulate B_f64 * w and row l1 sums in ascending column order for deterministic totals.
+                    for (std::size_t c = 0U; c < cols_cur; ++c)
+                    {
+                        const std::size_t global_col = col_begin + c;
+                        const double w_col = w[global_col];
+                        const double* const col_ptr = k_block_.data() + (c * n);
+                        for (std::size_t row = 0U; row < n; ++row)
+                        {
+                            double entry = col_ptr[row];
+                            if (row == global_col)
+                            {
+                                entry += diag_offset_;
+                            }
+                            sum_[row] += entry * w_col;
+                            row_abs_[row] += std::abs(entry);
+                        }
                     }
                 }
                 for (std::size_t row = 0U; row < n; ++row)
@@ -1327,11 +1350,15 @@ namespace cxxgpr
             std::vector<double> row_abs_;
             /// @brief Accumulator of the exact matrix-vector product.
             std::vector<double> sum_;
-            /// @brief Exact double Gram matrix storage.
-            std::vector<double> gram64_;
-            /// @brief Scratch matrix for building the Gram matrix.
-            std::vector<double> gram_scratch_;
-            /// @brief Cached nested buffers reused across residual checks.
+            /// @brief Reusable `n x block_cols` double Gram block buffer.
+            std::vector<double> k_block_;
+            /// @brief Reusable `n x block_cols` double kernel scratch buffer.
+            std::vector<double> scratch_block_;
+            /// @brief Reusable `n x block_cols` double squared-distance block scratch.
+            std::vector<double> dist_block_;
+            /// @brief Reusable `block_cols x d` double coordinate block scratch.
+            std::vector<double> x_block_;
+            /// @brief Cached nested buffers sized `n x block_cols` for block residual checks.
             NestedBuffers<double> nested64_;
         };
 
@@ -1542,56 +1569,58 @@ namespace cxxgpr
             x_ref = MatrixRef<Storage>(payload.x_train.data(), n, d, n);
         }
         GaussianLikelihood likelihood = cfg.likelihood;
-        DistanceObjective<P> obj(
-            *compiled, likelihood, *active_store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
-        );
-
         const std::size_t nk = compiled->num_params();
-        std::vector<double> init_params(obj.dim());
-        if (auto gp = compiled->get_params(std::span<double>(init_params.data(), nk)); !gp.has_value())
-        {
-            return std::unexpected(std::move(gp).error());
-        }
-        if (auto lp = likelihood.get_params(std::span<double>(init_params.data() + nk, 1U)); !lp.has_value())
-        {
-            return std::unexpected(std::move(lp).error());
-        }
-
         optimizer::OptimizerResult opt_res;
-        if (cfg.optimize)
-        {
-            auto r = optimize_cb(optimize_ctx, obj, init_params);
-            if (!r.has_value())
-            {
-                return std::unexpected(std::move(r).error());
-            }
-            opt_res = std::move(*r);
-        }
-        else
-        {
-            auto v = obj.value(init_params);
-            if (!v.has_value())
-            {
-                return std::unexpected(std::move(v).error());
-            }
-            opt_res =
-                optimizer::OptimizerResult{.params = init_params, .value = *v, .iterations = 0U, .converged = true};
-        }
-
-        // Reuse the live factor when the last evaluation was at the returned parameters; otherwise factor there.
         double final_mll = 0.0;
-        if (obj.matches_last_factor(opt_res.params))
         {
-            final_mll = obj.last_mll();
-        }
-        else
-        {
-            auto v = obj.value(opt_res.params);
-            if (!v.has_value())
+            DistanceObjective<P> obj(
+                *compiled, likelihood, *active_store, x_ref, y_storage, cfg.jitter, *buffers, cfg.use_change_indices
+            );
+
+            std::vector<double> init_params(obj.dim());
+            if (auto gp = compiled->get_params(std::span<double>(init_params.data(), nk)); !gp.has_value())
             {
-                return std::unexpected(std::move(v).error());
+                return std::unexpected(std::move(gp).error());
             }
-            final_mll = *v;
+            if (auto lp = likelihood.get_params(std::span<double>(init_params.data() + nk, 1U)); !lp.has_value())
+            {
+                return std::unexpected(std::move(lp).error());
+            }
+
+            if (cfg.optimize)
+            {
+                auto r = optimize_cb(optimize_ctx, obj, init_params);
+                if (!r.has_value())
+                {
+                    return std::unexpected(std::move(r).error());
+                }
+                opt_res = std::move(*r);
+            }
+            else
+            {
+                auto v = obj.value(init_params);
+                if (!v.has_value())
+                {
+                    return std::unexpected(std::move(v).error());
+                }
+                opt_res =
+                    optimizer::OptimizerResult{.params = init_params, .value = *v, .iterations = 0U, .converged = true};
+            }
+
+            // Reuse the live factor when the last evaluation was at the returned parameters; otherwise factor there.
+            if (obj.matches_last_factor(opt_res.params))
+            {
+                final_mll = obj.last_mll();
+            }
+            else
+            {
+                auto v = obj.value(opt_res.params);
+                if (!v.has_value())
+                {
+                    return std::unexpected(std::move(v).error());
+                }
+                final_mll = *v;
+            }
         }
         if (auto sp = payload.kernel.set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
         {
@@ -1610,6 +1639,63 @@ namespace cxxgpr
         }
         if constexpr (P::refines_in_f64)
         {
+            std::vector<double> alpha64(n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                alpha64[i] = static_cast<double>(buffers->core.rhs[i]);
+            }
+
+            // Release training-only buffers before building the double refinement store and running refinement.
+            std::vector<Storage>{}.swap(buffers->w_matrix);
+            buffers->core.weighted = NestedBuffers<Storage>{};
+            std::vector<Storage>{}.swap(buffers->core.ard_s2_storage);
+            std::vector<std::uint8_t>{}.swap(buffers->core.ard_s2_ready);
+            buffers->core.hessian = HessianScratch<Storage>{};
+            std::vector<Storage>{}.swap(buffers->core.rhs);
+            std::vector<Storage>{}.swap(y_storage);
+
+            const double diag_offset = payload.likelihood.noise_variance() + buffers->core.factor_jitter;
+            MatrixRef<float> a_f32_ref{};
+            if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
+            {
+                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
+                {
+                    return std::unexpected(std::move(ks).error());
+                }
+                // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
+                MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
+                if (auto ap = compiled->apply(
+                        *active_store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
+                        buffers->core.nested
+                    );
+                    !ap.has_value())
+                {
+                    return std::unexpected(std::move(ap).error());
+                }
+                if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
+                {
+                    return std::unexpected(std::move(dg).error());
+                }
+                if (auto sy = linalg::symmetrize_lower(a_f32_mut); !sy.has_value())
+                {
+                    return std::unexpected(std::move(sy).error());
+                }
+                a_f32_ref = a_f32_mut.as_ref();
+                std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
+                buffers->core.nested = NestedBuffers<Storage>{};
+            }
+            else
+            {
+                std::vector<Storage>{}.swap(buffers->core.exp_buf);
+                std::vector<Storage>{}.swap(buffers->core.kernel_scratch);
+                buffers->core.nested = NestedBuffers<Storage>{};
+            }
+            if (!cfg.retain_distances && std::holds_alternative<const DistanceSource*>(train))
+            {
+                local_store.reset();
+                active_store = nullptr;
+            }
+
             // Refine the weights against the exact double-precision system built from the double tables.
             auto compiled64 = cfg.kernel.template compile<double>();
             compiled64.set_kernel_exp(cfg.kernel_exp);
@@ -1635,40 +1721,8 @@ namespace cxxgpr
             {
                 x64 = MatrixRef<double>(x_f64.data(), n, d, n);
             }
-            const double diag_offset = payload.likelihood.noise_variance() + buffers->core.factor_jitter;
-            MatrixMut<float> a_f32_mut = buffers->core.exp_mut();
-            if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
-            {
-                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
-                {
-                    return std::unexpected(std::move(ks).error());
-                }
-                // Reassemble A = K + (noise + jitter) I in float for the promoted residual.
-                if (auto ap = compiled->apply(
-                        *active_store, x_ref, a_f32_mut, Triangle::Lower, buffers->core.kernel_scratch_mut(),
-                        buffers->core.nested
-                    );
-                    !ap.has_value())
-                {
-                    return std::unexpected(std::move(ap).error());
-                }
-                if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
-                {
-                    return std::unexpected(std::move(dg).error());
-                }
-                if (auto sy = linalg::symmetrize_lower(a_f32_mut); !sy.has_value())
-                {
-                    return std::unexpected(std::move(sy).error());
-                }
-            }
-            std::vector<double> alpha64(n);
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                alpha64[i] = static_cast<double>(buffers->core.rhs[i]);
-            }
             DistanceRefineSystem<P> sys(
-                compiled64, *store64, x64, std::span<const double>(y_f64), buffers->core.k_ref(), a_f32_mut.as_ref(),
-                diag_offset
+                compiled64, *store64, x64, std::span<const double>(y_f64), buffers->core.k_ref(), a_f32_ref, diag_offset
             );
             std::vector<double> residual_scratch(n);
             auto summary = refine_in_place(sys, alpha64, residual_scratch);
