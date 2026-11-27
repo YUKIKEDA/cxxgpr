@@ -99,4 +99,45 @@ namespace cxxgpr::test_support
         std::source_location loc_;
     };
 
+    /// @brief RAII scope tracking cumulative allocated bytes and peak single allocation size on the current thread.
+    /// @details Snapshots cumulative allocation bytes and isolates the thread-local single-allocation peak across
+    /// its lifetime, restoring outer scope maxima on destruction.
+    class AllocationBytesScope final
+    {
+    public:
+        /// @brief Begins tracking cumulative and peak single-allocation byte counts on the calling thread.
+        AllocationBytesScope() noexcept;
+
+        /// @brief Restores the enclosing scope's single-allocation peak on destruction.
+        ~AllocationBytesScope() noexcept;
+
+        /// @brief Deleted copy constructor because an RAII byte scope owns a scoped peak transition.
+        AllocationBytesScope(const AllocationBytesScope&) = delete;
+
+        /// @brief Deleted copy assignment operator to preserve single-scope lifetime semantics.
+        /// @return Reference to *this (deleted).
+        AllocationBytesScope& operator=(const AllocationBytesScope&) = delete;
+
+        /// @brief Deleted move constructor because an RAII byte scope cannot transfer scoped ownership.
+        AllocationBytesScope(AllocationBytesScope&&) = delete;
+
+        /// @brief Deleted move assignment operator to preserve single-scope lifetime semantics.
+        /// @return Reference to *this (deleted).
+        AllocationBytesScope& operator=(AllocationBytesScope&&) = delete;
+
+        /// @brief Returns cumulative bytes requested via C++ heap allocations since entering this scope.
+        /// @return Total allocated byte count on the calling thread during this scope.
+        [[nodiscard]] std::size_t delta_bytes() const noexcept;
+
+        /// @brief Returns the largest single C++ heap allocation requested while this scope is active.
+        /// @return Peak single allocation size in bytes on the calling thread during this scope.
+        [[nodiscard]] std::size_t max_single_allocation_bytes() const noexcept;
+
+    private:
+        /// @brief Cumulative allocated byte snapshot captured on scope entry.
+        std::size_t start_bytes_;
+        /// @brief Enclosing scope's peak single-allocation size restored on exit.
+        std::size_t prev_max_bytes_;
+    };
+
 }  // namespace cxxgpr::test_support

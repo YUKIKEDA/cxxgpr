@@ -1347,4 +1347,118 @@ namespace
         );
     }
 
+    /// @brief Verifies converged MixedPrecision refinement allocates no n x n double matrix and frees dead buffers.
+    TEST(GprModelsTest, MixedPrecisionConvergedRefinementAllocatesNoFullDoubleMatrix)
+    {
+        // Spec: DES-05, REQ-07, REQ-11
+        constexpr std::size_t n = 160;
+        constexpr std::size_t d = 3;
+        constexpr std::size_t full_double_matrix_bytes = n * n * sizeof(double);
+
+        std::vector<double> x(n * d);
+        std::vector<double> y(n);
+        cxxgpr::Xoshiro256PlusPlus rng(41);
+        for (double& v : x)
+        {
+            v = rng.unit();
+        }
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            y[i] = std::sin(2.5 * x[i]) + (0.4 * x[n + i]) + (0.05 * rng.unit_normal());
+        }
+
+        const auto spec = (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.1).value())
+                              * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value()))
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+        const auto single_leaf_spec = cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.7).value())
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+
+        const auto ref_factor =
+            cxxgpr::Gpr<cxxgpr::optimizer::Fixed>(spec).with_noise_variance(1e-2).value().factor(x, n, d, y);
+        ASSERT_TRUE(ref_factor.has_value());
+
+        const auto opt = cxxgpr::optimizer::Lbfgs{}.with_max_iterations(5U);
+        std::size_t ref_lbfgs_max_alloc = 0U;
+        std::size_t ref_lbfgs_total_bytes = 0U;
+        {
+            const cxxgpr::test_support::AllocationBytesScope ref_lbfgs_scope;
+            const auto ref_fit =
+                cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs>(spec, opt).with_noise_variance(1e-2).value().fit(x, n, d, y);
+            ASSERT_TRUE(ref_fit.has_value());
+            ref_lbfgs_max_alloc = ref_lbfgs_scope.max_single_allocation_bytes();
+            ref_lbfgs_total_bytes = ref_lbfgs_scope.delta_bytes();
+        }
+
+        auto verify_policy = [&]<typename P>(bool use_lbfgs, bool check_alpha_parity)
+        {
+            if (use_lbfgs)
+            {
+                {
+                    const cxxgpr::test_support::AllocationBytesScope scope;
+                    auto res =
+                        cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs, P>(spec, opt).with_noise_variance(1e-2).value().fit(
+                            x, n, d, y
+                        );
+                    ASSERT_TRUE(res.has_value()) << res.error().message();
+                    const auto summary = res->refinement_summary();
+                    if (!summary.has_value())
+                    {
+                        FAIL() << "mixed-precision refinement summary is missing";
+                    }
+                    EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+                    EXPECT_FALSE(summary->used_fallback());
+                    EXPECT_LT(scope.max_single_allocation_bytes(), ref_lbfgs_max_alloc);
+                    EXPECT_LT(scope.delta_bytes(), ref_lbfgs_total_bytes);
+                }
+
+                // Without multi-factor ProductTerms (weighted_buffers == 0), no single allocation reaches 8 * n * n.
+                const cxxgpr::test_support::AllocationBytesScope single_scope;
+                auto single_res = cxxgpr::Gpr<cxxgpr::optimizer::Lbfgs, P>(single_leaf_spec, opt)
+                                      .with_noise_variance(1e-2)
+                                      .value()
+                                      .fit(x, n, d, y);
+                ASSERT_TRUE(single_res.has_value()) << single_res.error().message();
+                const auto single_summary = single_res->refinement_summary();
+                if (!single_summary.has_value())
+                {
+                    FAIL() << "mixed-precision refinement summary is missing";
+                }
+                EXPECT_EQ(single_summary->status, cxxgpr::RefinementStatus::Converged);
+                EXPECT_FALSE(single_summary->used_fallback());
+                EXPECT_LT(single_scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+                return;
+            }
+
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            auto res =
+                cxxgpr::Gpr<cxxgpr::optimizer::Fixed, P>(spec).with_noise_variance(1e-2).value().factor(x, n, d, y);
+            ASSERT_TRUE(res.has_value()) << res.error().message();
+            const auto summary = res->refinement_summary();
+            if (!summary.has_value())
+            {
+                FAIL() << "mixed-precision refinement summary is missing";
+            }
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+
+            if (check_alpha_parity)
+            {
+                double max_ref = 1.0;
+                double max_diff = 0.0;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    max_ref = std::max(max_ref, std::abs(ref_factor->alpha()[i]));
+                    max_diff = std::max(max_diff, std::abs(ref_factor->alpha()[i] - res->alpha()[i]));
+                }
+                EXPECT_LT(max_diff / max_ref, 1e-5);
+            }
+        };
+
+        verify_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(false, false);
+        verify_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(true, false);
+        verify_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(false, true);
+        verify_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(true, false);
+    }
+
 }  // namespace

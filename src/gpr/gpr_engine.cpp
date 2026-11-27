@@ -469,6 +469,14 @@ namespace cxxgpr::detail
             const std::size_t d = x_f64.cols();
             const std::size_t block_cols = std::min(refinement_column_block, n);
 
+            // Evaluate diagonal entries explicitly so diagonal-only leaves such as WhiteKernel are included.
+            std::vector<double> diag_k(n);
+            std::vector<double> diag_scratch((kernel_f64.nested_depth() + 1U) * n);
+            if (auto dg = kernel_f64.fill_diag(x_f64, diag_k, diag_scratch); !dg.has_value())
+            {
+                return std::unexpected(std::move(dg).error());
+            }
+
             // Allocate O(n * block_cols) scratch buffers instead of O(n^2) double storage.
             std::vector<double> x_block(block_cols * d);
             std::vector<double> k_block(n * block_cols);
@@ -502,11 +510,7 @@ namespace cxxgpr::detail
                     const double w_col = w[global_col];
                     for (std::size_t row = 0; row < n; ++row)
                     {
-                        double entry = k_block[(c * n) + row];
-                        if (row == global_col)
-                        {
-                            entry += diag_offset;
-                        }
+                        const double entry = (row == global_col) ? (diag_k[row] + diag_offset) : k_block[(c * n) + row];
                         matvec[row] += entry * w_col;
                         row_abs_sum[row] += std::abs(entry);
                     }
@@ -735,16 +739,29 @@ namespace cxxgpr::detail
                 out_alpha[i] = static_cast<double>(buffers.core.rhs[i]);
             }
 
-            MatrixMut<float> a_f32_mut = buffers.core.exp_mut();
+            // Release optimization-only buffers before refinement and any double-precision fallback.
+            std::vector<float>{}.swap(buffers.w_matrix);
+            buffers.dist.reset();
+            buffers.core.weighted = NestedBuffers<float>{};
+            std::vector<float>{}.swap(buffers.core.ard_s2_storage);
+            std::vector<std::uint8_t>{}.swap(buffers.core.ard_s2_ready);
+            buffers.core.hessian = HessianScratch<float>{};
+            std::vector<float>{}.swap(buffers.core.rhs);
+
+            MatrixRef<float> a_f32_ref{};
             if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
             {
+                if (auto ks = buffers.core.ensure_kernel_scratch(); !ks.has_value())
+                {
+                    return std::unexpected(std::move(ks).error());
+                }
+                MatrixMut<float> a_f32_mut = buffers.core.exp_mut();
                 // Reconstruct full symmetric A_f32 = K_f32 + (sigma_n^2 + j) I into exp_buf.
                 if (auto ap = kernel_f32.apply_points(
                         x_f32, a_f32_mut, Triangle::Lower, buffers.core.kernel_scratch_mut(), buffers.core.nested
                     );
                     !ap.has_value())
                 {
-                    // Note: kernel_scratch might be empty if ensure_kernel_scratch was not called yet.
                     return ap;
                 }
                 if (auto dg = linalg::add_to_diag(a_f32_mut, static_cast<float>(diag_offset)); !dg.has_value())
@@ -752,11 +769,18 @@ namespace cxxgpr::detail
                     return dg;
                 }
                 symmetrize_lower(a_f32_mut);
+                a_f32_ref = a_f32_mut.as_ref();
+                std::vector<float>{}.swap(buffers.core.kernel_scratch);
+                buffers.core.nested = NestedBuffers<float>{};
+            }
+            else
+            {
+                std::vector<float>{}.swap(buffers.core.exp_buf);
+                std::vector<float>{}.swap(buffers.core.kernel_scratch);
+                buffers.core.nested = NestedBuffers<float>{};
             }
 
-            GprRefineSystem<P> sys(
-                spec, kernel_exp, x_f64, y_f64, buffers.core.k_ref(), a_f32_mut.as_ref(), diag_offset
-            );
+            GprRefineSystem<P> sys(spec, kernel_exp, x_f64, y_f64, buffers.core.k_ref(), a_f32_ref, diag_offset);
             std::vector<double> res_scratch(n);
             auto summary = refine_in_place(sys, out_alpha, res_scratch);
             if (!summary.has_value())
@@ -933,84 +957,75 @@ namespace cxxgpr::detail
         {
             return std::unexpected(std::move(buffers).error());
         }
-        if constexpr (P::refines_in_f64)
-        {
-            // PromoteStorage refinement needs kernel_scratch to assemble A_f32 after factorization.
-            if constexpr (std::same_as<typename P::Residual, PromoteStorage>)
-            {
-                if (auto ks = buffers->core.ensure_kernel_scratch(); !ks.has_value())
-                {
-                    return std::unexpected(std::move(ks).error());
-                }
-            }
-        }
 
         const MatrixRef<Storage> x_train_ref(x_storage.data(), n, d, n);
         GaussianLikelihood likelihood = cfg.likelihood;
-        GprObjective<P> obj(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, use_leaf_cache);
-
-        const std::size_t total_params = obj.dim();
-        std::vector<double> init_params(total_params);
         const std::size_t nk = compiled->num_params();
-        if (auto gp = compiled->get_params(std::span<double>(init_params.data(), nk)); !gp.has_value())
-        {
-            return std::unexpected(std::move(gp).error());
-        }
-        if (auto lp = likelihood.get_params(std::span<double>(init_params.data() + nk, 1U)); !lp.has_value())
-        {
-            return std::unexpected(std::move(lp).error());
-        }
-
-        // Run hyperparameter optimization or perform a single objective evaluation when factor-only.
         optimizer::OptimizerResult opt_res;
-        if (cfg.optimize)
-        {
-            auto r = optimize_cb(optimize_ctx, obj, init_params);
-            if (!r.has_value())
-            {
-                return std::unexpected(std::move(r).error());
-            }
-            opt_res = std::move(*r);
-        }
-        else
-        {
-            auto v = obj.value(init_params);
-            if (!v.has_value())
-            {
-                return std::unexpected(std::move(v).error());
-            }
-            opt_res = optimizer::OptimizerResult{
-                .params = init_params,
-                .value = *v,
-                .iterations = 0U,
-                .converged = true,
-            };
-        }
-
-        // Reuse the live factor L, alpha, and MLL when the last objective call already evaluated opt_res.params.
         double final_mll = 0.0;
-        if (obj.matches_last_factor(opt_res.params))
         {
-            final_mll = obj.last_factored_mll();
-        }
-        else
-        {
-            // Ensure kernel, likelihood, L, alpha, and MLL match opt_res.params exactly.
-            if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
+            GprObjective<P> obj(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, use_leaf_cache);
+
+            const std::size_t total_params = obj.dim();
+            std::vector<double> init_params(total_params);
+            if (auto gp = compiled->get_params(std::span<double>(init_params.data(), nk)); !gp.has_value())
             {
-                return std::unexpected(std::move(sp).error());
+                return std::unexpected(std::move(gp).error());
             }
-            if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
-                !lp.has_value())
+            if (auto lp = likelihood.get_params(std::span<double>(init_params.data() + nk, 1U)); !lp.has_value())
             {
                 return std::unexpected(std::move(lp).error());
             }
-            auto mll_res = factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
-            if (!mll_res.has_value())
+
+            // Run hyperparameter optimization or perform a single objective evaluation when factor-only.
+            if (cfg.optimize)
             {
-                return std::unexpected(std::move(mll_res).error());
+                auto r = optimize_cb(optimize_ctx, obj, init_params);
+                if (!r.has_value())
+                {
+                    return std::unexpected(std::move(r).error());
+                }
+                opt_res = std::move(*r);
             }
-            final_mll = *mll_res;
+            else
+            {
+                auto v = obj.value(init_params);
+                if (!v.has_value())
+                {
+                    return std::unexpected(std::move(v).error());
+                }
+                opt_res = optimizer::OptimizerResult{
+                    .params = init_params,
+                    .value = *v,
+                    .iterations = 0U,
+                    .converged = true,
+                };
+            }
+
+            // Reuse the live factor L, alpha, and MLL when the last objective call already evaluated opt_res.params.
+            if (obj.matches_last_factor(opt_res.params))
+            {
+                final_mll = obj.last_factored_mll();
+            }
+            else
+            {
+                // Ensure kernel, likelihood, L, alpha, and MLL match opt_res.params exactly.
+                if (auto sp = compiled->set_params(std::span<const double>(opt_res.params.data(), nk)); !sp.has_value())
+                {
+                    return std::unexpected(std::move(sp).error());
+                }
+                if (auto lp = likelihood.set_params(std::span<const double>(opt_res.params.data() + nk, 1U));
+                    !lp.has_value())
+                {
+                    return std::unexpected(std::move(lp).error());
+                }
+                auto mll_res = factor_and_mll(*compiled, likelihood, x_train_ref, y_storage, cfg.jitter, *buffers, 0U);
+                if (!mll_res.has_value())
+                {
+                    return std::unexpected(std::move(mll_res).error());
+                }
+                final_mll = *mll_res;
+            }
         }
 
         KernelSpec updated_spec = cfg.kernel_spec;

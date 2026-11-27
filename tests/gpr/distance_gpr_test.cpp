@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -2685,6 +2686,448 @@ namespace
         const auto fit_f = trainer.fit(train_src, overflow_x_f, data.y);
         ASSERT_FALSE(fit_f.has_value());
         EXPECT_EQ(fit_f.error().code(), cxxgpr::GprErrorCode::SizeOverflow);
+    }
+
+    /// @brief Minimal CustomKernel term used to verify blocked square evaluation under MixedPrecision.
+    /// @tparam T Storage scalar type (`double` or `float`).
+    template <cxxgpr::KernelScalarConcept T> class BlockedAuditExpTerm final : public cxxgpr::KernelTerm<T>
+    {
+    public:
+        /// @brief Constructs the custom term with positive output scale @p scale.
+        /// @param[in] scale Positive output scale.
+        explicit BlockedAuditExpTerm(double scale = 1.4) : scale_(scale) {}
+
+        /// @brief Clones this custom term.
+        /// @return Owning copy.
+        [[nodiscard]] std::unique_ptr<cxxgpr::KernelTerm<T>> clone() const override
+        {
+            return std::make_unique<BlockedAuditExpTerm<T>>(scale_);
+        }
+
+        /// @brief Returns parameter count (1).
+        /// @return Hyperparameter count.
+        [[nodiscard]] std::size_t num_params() const noexcept override { return 1U; }
+
+        /// @brief Writes log(scale) into @p out.
+        /// @param[out] out Output parameter span.
+        /// @return Empty expected on success, or LengthMismatch.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> get_params(std::span<double> out) const override
+        {
+            if (out.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("out"));
+            }
+            out[0] = std::log(scale_);
+            return {};
+        }
+
+        /// @brief Sets log(scale) from @p params.
+        /// @param[in] params Log-space parameter span.
+        /// @return Empty expected on success, or validation error.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> set_params(std::span<const double> params) override
+        {
+            if (params.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("params"));
+            }
+            if (!std::isfinite(params[0]))
+            {
+                return std::unexpected(cxxgpr::GprError::non_finite_input());
+            }
+            const double next = std::exp(params[0]);
+            if (!std::isfinite(next) || next < 1e-4 || next > 1e4)
+            {
+                return std::unexpected(cxxgpr::GprError::invalid_config("scale out of bounds"));
+            }
+            scale_ = next;
+            return {};
+        }
+
+        /// @brief Writes [1e-4, 1e4] bounds into @p out.
+        /// @param[out] out Interval span.
+        /// @return Empty expected on success, or LengthMismatch.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> bounds_into(std::span<cxxgpr::Interval> out) const override
+        {
+            if (out.size() != 1U)
+            {
+                return std::unexpected(cxxgpr::GprError::length_mismatch("out"));
+            }
+            auto b = cxxgpr::Interval::create(1e-4, 1e4);
+            if (!b.has_value())
+            {
+                return std::unexpected(std::move(b).error());
+            }
+            out[0] = *b;
+            return {};
+        }
+
+        /// @brief Evaluates scale * exp(-d2) across @p uplo.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] out Output kernel matrix.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> apply(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out, cxxgpr::Triangle uplo
+        ) const override
+        {
+            for (std::size_t col = 0; col < dist.cols(); ++col)
+            {
+                for (std::size_t row = 0; row < dist.rows(); ++row)
+                {
+                    if ((uplo == cxxgpr::Triangle::Lower && row < col)
+                        || (uplo == cxxgpr::Triangle::Upper && row > col))
+                    {
+                        continue;
+                    }
+                    const T d2 = dist(row, col) < T{0} ? T{0} : dist(row, col);
+                    out(row, col) = static_cast<T>(scale_) * std::exp(-d2);
+                }
+            }
+            return {};
+        }
+
+        /// @brief Evaluates rectangular cross-covariance.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] out Output kernel matrix.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> apply_cross(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> out
+        ) const override
+        {
+            return apply(dist, out, cxxgpr::Triangle::Full);
+        }
+
+        /// @brief Fills diagonal entries with scale.
+        /// @param[out] out Destination span.
+        /// @return Empty expected on success.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> fill_diag(std::span<T> out) const override
+        {
+            std::fill(out.begin(), out.end(), static_cast<T>(scale_));
+            return {};
+        }
+
+        /// @brief Computes d/d(log scale) = k.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] d_k Gradient output matrix.
+        /// @param[in] param_idx Parameter index.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success, or IndexOutOfRange.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> grad(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d_k, std::size_t param_idx, cxxgpr::Triangle uplo
+        ) const override
+        {
+            if (param_idx != 0U)
+            {
+                return std::unexpected(cxxgpr::GprError::index_out_of_range("param_idx"));
+            }
+            return apply(dist, d_k, uplo);
+        }
+
+        /// @brief Computes d2/d(log scale)^2 = k.
+        /// @param[in] dist Pairwise squared distance view.
+        /// @param[out] d2_k Hessian output matrix.
+        /// @param[in] i First parameter index.
+        /// @param[in] j Second parameter index.
+        /// @param[in] uplo Triangle mask.
+        /// @return Empty expected on success, or IndexOutOfRange.
+        [[nodiscard]] std::expected<void, cxxgpr::GprError> hess(
+            cxxgpr::MatrixRef<T> dist, cxxgpr::MatrixMut<T> d2_k, std::size_t i, std::size_t j, cxxgpr::Triangle uplo
+        ) const override
+        {
+            if (i != 0U || j != 0U)
+            {
+                return std::unexpected(cxxgpr::GprError::index_out_of_range("param_idx"));
+            }
+            return apply(dist, d2_k, uplo);
+        }
+
+    private:
+        /// @brief Linear output scale.
+        double scale_;
+    };
+
+    /// @brief Verifies DistanceGpr mixed-precision refinement evaluates double residuals in column blocks without
+    /// allocating any n x n double matrix, honors assume_valid lower-only reads, matches DoublePrecision, and
+    /// recovers via fallback when refinement is rejected.
+    TEST(DistanceGprTest, MixedPrecisionRefinementUsesBlockedDoubleBuffersWithoutFullDoubleGram)
+    {
+        // Spec: DES-05, DES-21, REQ-07, REQ-11
+        constexpr std::size_t n = 160;
+        constexpr std::size_t d = 2;
+        constexpr std::size_t full_double_matrix_bytes = n * n * sizeof(double);
+
+        const Data data = make_data(n, 4U, d);
+        Tables t = euclid_tables(data);
+        // Poison the strictly upper triangle to confirm assume_valid(true) never reads above the diagonal.
+        std::vector<double> poisoned_train = t.train;
+        for (std::size_t col = 1U; col < n; ++col)
+        {
+            for (std::size_t row = 0U; row < col; ++row)
+            {
+                poisoned_train[(col * n) + row] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+
+        const cxxgpr::ScalarDistance scalar_slot;
+        const auto scalar_dk =
+            (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.2).value())
+                * scalar_slot.rbf(cxxgpr::RbfKernel::create(0.7).value()))
+            + cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::WhiteKernel::create(0.01).value());
+
+        cxxgpr::DistanceSource scalar_src;
+        scalar_src.bind_scalar(scalar_slot.slot(), cxxgpr::MatrixRef<double>(poisoned_train.data(), n, n))
+            .assume_valid(true);
+
+        const auto ref_scalar = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(scalar_dk)
+                                    .with_noise_variance(1e-2)
+                                    .value()
+                                    .with_retain_distances(false)
+                                    .factor(scalar_src, data.y);
+        ASSERT_TRUE(ref_scalar.has_value()) << ref_scalar.error().message();
+
+        auto verify_scalar_policy = [&]<typename P>(bool use_lbfgs, bool check_alpha_parity)
+        {
+            if (use_lbfgs)
+            {
+                const auto opt = cxxgpr::optimizer::Lbfgs{}.with_max_iterations(5U);
+                const cxxgpr::test_support::AllocationBytesScope scope;
+                auto res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, P>(scalar_dk, opt)
+                               .with_noise_variance(1e-2)
+                               .value()
+                               .with_retain_distances(false)
+                               .fit(scalar_src, data.y);
+                ASSERT_TRUE(res.has_value()) << res.error().message();
+                const auto summary = res->refinement_summary();
+                if (!summary.has_value())
+                {
+                    FAIL() << "mixed-precision refinement summary is missing";
+                }
+                EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+                EXPECT_FALSE(summary->used_fallback());
+                EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+                return;
+            }
+
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            auto res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, P>(scalar_dk)
+                           .with_noise_variance(1e-2)
+                           .value()
+                           .with_retain_distances(false)
+                           .factor(scalar_src, data.y);
+            ASSERT_TRUE(res.has_value()) << res.error().message();
+            const auto summary = res->refinement_summary();
+            if (!summary.has_value())
+            {
+                FAIL() << "mixed-precision refinement summary is missing";
+            }
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+            if (check_alpha_parity)
+            {
+                EXPECT_LT(rel_diff(res->alpha(), ref_scalar->alpha()), 1e-5);
+            }
+        };
+
+        verify_scalar_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(false, false);
+        verify_scalar_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(true, false);
+        verify_scalar_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(false, true);
+        verify_scalar_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(true, false);
+
+        // ARD composite kernel covering RbfArd + MaternArd(3/2) + RationalQuadraticArd with poisoned upper triangle.
+        const auto ard_slot = cxxgpr::ArdDistance::create(d).value();
+        std::vector<std::vector<double>> ard_tables(d);
+        std::array<cxxgpr::MatrixRef<double>, d> ard_views;
+        for (std::size_t dim = 0U; dim < d; ++dim)
+        {
+            ard_tables[dim] = table(data.x, n, data.x, n, d, dim);
+            for (std::size_t col = 1U; col < n; ++col)
+            {
+                for (std::size_t row = 0U; row < col; ++row)
+                {
+                    ard_tables[dim][(col * n) + row] = std::numeric_limits<double>::quiet_NaN();
+                }
+            }
+            ard_views[dim] = cxxgpr::MatrixRef<double>(ard_tables[dim].data(), n, n);
+        }
+        const std::array<double, d> ls{0.8, 1.3};
+        const auto ard_dk = cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.0).value())
+            * (ard_slot.rbf_ard(cxxgpr::RbfArdKernel::create(ls).value()).value()
+                + ard_slot.matern_ard(cxxgpr::MaternArdKernel::create(ls, cxxgpr::MaternNu::ThreeHalves).value())
+                    .value()
+                + ard_slot.rational_quadratic_ard(cxxgpr::RationalQuadraticArdKernel::create(ls, 1.5).value()).value());
+        cxxgpr::DistanceSource ard_src;
+        ard_src.bind_ard(ard_slot.slot(), ard_views).assume_valid(true);
+
+        const auto ref_ard = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(ard_dk)
+                                 .with_noise_variance(1e-2)
+                                 .value()
+                                 .with_retain_distances(false)
+                                 .factor(ard_src, data.y);
+        ASSERT_TRUE(ref_ard.has_value()) << ref_ard.error().message();
+
+        auto verify_ard_policy = [&]<typename P>(bool use_lbfgs, bool check_alpha_parity)
+        {
+            if (use_lbfgs)
+            {
+                const auto opt = cxxgpr::optimizer::Lbfgs{}.with_max_iterations(4U);
+                const cxxgpr::test_support::AllocationBytesScope scope;
+                auto res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Lbfgs, P>(ard_dk, opt)
+                               .with_noise_variance(1e-2)
+                               .value()
+                               .with_retain_distances(false)
+                               .fit(ard_src, data.y);
+                ASSERT_TRUE(res.has_value()) << res.error().message();
+                const auto summary = res->refinement_summary();
+                if (!summary.has_value())
+                {
+                    FAIL() << "mixed-precision refinement summary is missing";
+                }
+                EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+                EXPECT_FALSE(summary->used_fallback());
+                EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+                return;
+            }
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            auto res = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, P>(ard_dk)
+                           .with_noise_variance(1e-2)
+                           .value()
+                           .with_retain_distances(false)
+                           .factor(ard_src, data.y);
+            ASSERT_TRUE(res.has_value()) << res.error().message();
+            const auto summary = res->refinement_summary();
+            if (!summary.has_value())
+            {
+                FAIL() << "mixed-precision refinement summary is missing";
+            }
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+            if (check_alpha_parity)
+            {
+                EXPECT_LT(rel_diff(res->alpha(), ref_ard->alpha()), 1e-5);
+            }
+        };
+
+        verify_ard_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(false, false);
+        verify_ard_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>>(true, false);
+        verify_ard_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(false, true);
+        verify_ard_policy.template operator()<cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(true, false);
+
+        // WithPoints kernel (ScalarDistance + coordinate Linear + White).
+        const cxxgpr::DistanceKernel<cxxgpr::WithPoints> wp_dk =
+            (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(1.1).value())
+                * scalar_slot.rbf(cxxgpr::RbfKernel::create(0.8).value()))
+                .with_points()
+            + cxxgpr::KernelSpec(cxxgpr::LinearKernel::create(0.4).value())
+            + cxxgpr::KernelSpec(cxxgpr::WhiteKernel::create(0.01).value());
+        const cxxgpr::MatrixRef<double> x_ref(data.x.data(), n, d, n);
+        const auto ref_wp =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(wp_dk)
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false)
+                .factor(scalar_src, x_ref, data.y);
+        ASSERT_TRUE(ref_wp.has_value()) << ref_wp.error().message();
+        {
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            const auto res_wp = cxxgpr::DistanceGpr<
+                cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>, cxxgpr::WithPoints>(wp_dk)
+                                    .with_noise_variance(1e-2)
+                                    .value()
+                                    .with_retain_distances(false)
+                                    .factor(scalar_src, x_ref, data.y);
+            ASSERT_TRUE(res_wp.has_value()) << res_wp.error().message();
+            const auto summary = res_wp->refinement_summary();
+            if (!summary.has_value())
+            {
+                FAIL() << "mixed-precision refinement summary is missing";
+            }
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+            EXPECT_LT(rel_diff(res_wp->alpha(), ref_wp->alpha()), 1e-5);
+        }
+
+        // CustomKernel on ScalarDistance.
+        auto ck = cxxgpr::CustomKernel::create(
+            std::make_unique<BlockedAuditExpTerm<double>>(1.4), std::make_unique<BlockedAuditExpTerm<float>>(1.4F)
+        );
+        ASSERT_TRUE(ck.has_value());
+        const auto custom_dk = scalar_slot.custom(*ck);
+        const auto ref_custom = cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed>(custom_dk)
+                                    .with_noise_variance(1e-2)
+                                    .value()
+                                    .with_retain_distances(false)
+                                    .factor(scalar_src, data.y);
+        ASSERT_TRUE(ref_custom.has_value()) << ref_custom.error().message();
+        {
+            const cxxgpr::test_support::AllocationBytesScope scope;
+            const auto res_custom =
+                cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::ReevaluateKernel>>(
+                    custom_dk
+                )
+                    .with_noise_variance(1e-2)
+                    .value()
+                    .with_retain_distances(false)
+                    .factor(scalar_src, data.y);
+            ASSERT_TRUE(res_custom.has_value()) << res_custom.error().message();
+            const auto summary = res_custom->refinement_summary();
+            if (!summary.has_value())
+            {
+                FAIL() << "mixed-precision refinement summary is missing";
+            }
+            EXPECT_EQ(summary->status, cxxgpr::RefinementStatus::Converged);
+            EXPECT_FALSE(summary->used_fallback());
+            EXPECT_LT(scope.max_single_allocation_bytes(), full_double_matrix_bytes);
+            EXPECT_LT(rel_diff(res_custom->alpha(), ref_custom->alpha()), 1e-5);
+        }
+
+        // Negative control: WithPoints coordinates far from the origin lose precision when rounded to float,
+        // causing the exact kernel residual to exceed the PromoteStorage acceptance bound and trigger fallback.
+        std::vector<double> far_x(n * d);
+        std::vector<double> far_y(n);
+        cxxgpr::Xoshiro256PlusPlus far_rng(23);
+        for (double& v : far_x)
+        {
+            v = 1000.0 + far_rng.unit();
+        }
+        for (std::size_t i = 0U; i < n; ++i)
+        {
+            far_y[i] = std::sin(3.0 * (far_x[i] - 1000.0)) + (far_x[n + i] - 1000.0) + (0.05 * far_rng.unit_normal());
+        }
+        const cxxgpr::DistanceKernel<cxxgpr::WithPoints> far_dk =
+            (cxxgpr::DistanceKernel<cxxgpr::DistanceOnly>(cxxgpr::ConstantKernel::create(0.01).value())
+                * scalar_slot.rbf(cxxgpr::RbfKernel::create(1.0).value()))
+                .with_points()
+            + (cxxgpr::KernelSpec(cxxgpr::ConstantKernel::create(1.0).value())
+                * cxxgpr::KernelSpec(cxxgpr::RbfKernel::create(0.05).value()));
+        const std::vector<double> far_train = table(far_x, n, far_x, n, d, d);
+        cxxgpr::DistanceSource far_src;
+        far_src.bind_scalar(scalar_slot.slot(), cxxgpr::MatrixRef<double>(far_train.data(), n, n)).assume_valid(true);
+        const cxxgpr::MatrixRef<double> far_x_ref(far_x.data(), n, d, n);
+        const auto ref_far =
+            cxxgpr::DistanceGpr<cxxgpr::optimizer::Fixed, cxxgpr::DoublePrecision, cxxgpr::WithPoints>(far_dk)
+                .with_noise_variance(1e-2)
+                .value()
+                .with_retain_distances(false)
+                .factor(far_src, far_x_ref, far_y);
+        const auto promote_far = cxxgpr::DistanceGpr<
+            cxxgpr::optimizer::Fixed, cxxgpr::MixedPrecision<cxxgpr::PromoteStorage>, cxxgpr::WithPoints>(far_dk)
+                                     .with_noise_variance(1e-2)
+                                     .value()
+                                     .with_retain_distances(false)
+                                     .factor(far_src, far_x_ref, far_y);
+        ASSERT_TRUE(ref_far.has_value()) << ref_far.error().message();
+        ASSERT_TRUE(promote_far.has_value()) << promote_far.error().message();
+        const auto far_summary = promote_far->refinement_summary();
+        if (!far_summary.has_value())
+        {
+            FAIL() << "PromoteStorage refinement summary is missing";
+        }
+        EXPECT_EQ(far_summary->status, cxxgpr::RefinementStatus::RejectedByAccept);
+        EXPECT_TRUE(far_summary->used_fallback());
+        EXPECT_LT(rel_diff(promote_far->alpha(), ref_far->alpha()), 1e-10);
     }
 
 }  // namespace

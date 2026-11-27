@@ -9,6 +9,7 @@
 #include <Eigen/Core>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <new>
@@ -19,10 +20,17 @@ namespace
     /// @brief Thread-local counter incremented on each tracked global operator new call.
     thread_local std::size_t g_thread_alloc_count = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
+    /// @brief Thread-local cumulative byte counter updated on each tracked operator new call.
+    thread_local std::size_t g_thread_alloc_bytes = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+    /// @brief Thread-local maximum single-allocation byte count observed in the active AllocationBytesScope.
+    thread_local std::size_t g_thread_max_alloc_bytes =
+        0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
     /// @brief Volatile pointer sink written by touch_for_test() to defeat dead-store elimination.
     volatile const void* g_escape_sink = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
-    /// @brief Allocates unaligned storage via std::malloc and increments the thread allocation counter.
+    /// @brief Allocates unaligned storage via std::malloc and increments the thread allocation counters.
     /// @details Requests at least 1 byte when size is zero to satisfy C++ unique-pointer allocation rules.
     /// @param[in] size Requested allocation size in bytes.
     /// @return Pointer to allocated storage, or nullptr on allocation failure.
@@ -30,11 +38,13 @@ namespace
     {
         // Increment before malloc so even failed allocations are visible to audit counters.
         ++g_thread_alloc_count;
+        g_thread_alloc_bytes += size;
+        g_thread_max_alloc_bytes = std::max(g_thread_max_alloc_bytes, size);
         // Clamp zero-byte allocations to 1 byte for portable non-null returns across libc implementations.
         return std::malloc(size == 0 ? 1 : size);
     }
 
-    /// @brief Allocates over-aligned storage via platform aligned malloc and increments the thread counter.
+    /// @brief Allocates over-aligned storage via platform aligned malloc and increments the thread counters.
     /// @details Enforces a minimum alignment of sizeof(void*) as required by posix_memalign and _aligned_malloc.
     /// @param[in] size Requested allocation size in bytes.
     /// @param[in] alignment Requested alignment in bytes.
@@ -42,6 +52,8 @@ namespace
     void* alloc_aligned(std::size_t size, std::size_t alignment) noexcept
     {
         ++g_thread_alloc_count;
+        g_thread_alloc_bytes += size;
+        g_thread_max_alloc_bytes = std::max(g_thread_max_alloc_bytes, size);
         // Ensure alignment satisfies platform minimums (>= sizeof(void*)).
         const std::size_t effective_align = alignment < sizeof(void*) ? sizeof(void*) : alignment;
         const std::size_t effective_size = size == 0 ? effective_align : size;
@@ -318,6 +330,34 @@ namespace cxxgpr::test_support
     std::size_t NoAllocationScope::delta_allocations() const noexcept
     {
         return g_thread_alloc_count - start_count_;
+    }
+
+    /// @brief Snapshots cumulative bytes and resets the thread-local single-allocation maximum.
+    AllocationBytesScope::AllocationBytesScope() noexcept :
+        start_bytes_(g_thread_alloc_bytes),
+        prev_max_bytes_(g_thread_max_alloc_bytes)
+    {
+        g_thread_max_alloc_bytes = 0U;
+    }
+
+    /// @brief Restores the outer scope's peak single-allocation byte count on destruction.
+    AllocationBytesScope::~AllocationBytesScope() noexcept
+    {
+        g_thread_max_alloc_bytes = std::max(prev_max_bytes_, g_thread_max_alloc_bytes);
+    }
+
+    /// @brief Returns cumulative bytes requested via C++ heap allocations since scope construction.
+    /// @return Total allocated bytes on the calling thread since construction.
+    std::size_t AllocationBytesScope::delta_bytes() const noexcept
+    {
+        return g_thread_alloc_bytes - start_bytes_;
+    }
+
+    /// @brief Returns the largest single C++ heap allocation requested during this scope.
+    /// @return Peak single allocation size in bytes on the calling thread.
+    std::size_t AllocationBytesScope::max_single_allocation_bytes() const noexcept
+    {
+        return g_thread_max_alloc_bytes;
     }
 
 }  // namespace cxxgpr::test_support
